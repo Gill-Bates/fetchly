@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+
+# App data
+data/
+*.db
+
+# Env
+.env
+.env.*
+
+# Editor
+.vscode/
+.idea/
+
+# Docker
+*.log
+BUILD_INFO

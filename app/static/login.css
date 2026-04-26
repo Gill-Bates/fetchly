@@ -1,0 +1,70 @@
+:root {
+    --login-bg: radial-gradient(circle at 20% 20%, #20384f 0%, #0f172a 50%, #0b1222 100%);
+    --login-card-bg: #ffffff;
+    --login-text: #0f172a;
+    --login-muted: #64748b;
+}
+
+* {
+    box-sizing: border-box;
+}
+
+body {
+    margin: 0;
+    min-height: 100vh;
+    font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+    background: var(--login-bg);
+}
+
+.login-shell {
+    min-height: 100vh;
+    display: grid;
+    place-items: center;
+    padding: 1.25rem;
+}
+
+.login-card {
+    width: 100%;
+    max-width: 440px;
+    background: var(--login-card-bg);
+    border-radius: 18px;
+    box-shadow: 0 25px 60px rgba(2, 8, 23, 0.35);
+    padding: 2rem;
+}
+
+.login-card h1 {
+    margin: 0;
+    color: var(--login-text);
+    font-size: 2rem;
+    font-weight: 800;
+    letter-spacing: 0.01em;
+}
+
+.subtitle {
+    margin: 0.4rem 0 1.2rem;
+    color: var(--login-muted);
+}
+
+.form-label {
+    color: #334155;
+    font-weight: 600;
+}
+
+.form-control {
+    border-radius: 12px;
+}
+
+.btn-primary {
+    border-radius: 12px;
+    font-weight: 600;
+}
+
+@media (max-width: 480px) {
+    .login-card {
+        padding: 1.4rem;
+    }
+
+    .login-card h1 {
+        font-size: 1.7rem;
+    }
+}

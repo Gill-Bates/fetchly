@@ -1,0 +1,26 @@
+{% set status = job[4] %}
+{% set color = "danger" if status == "error" else ("success" if status == "done" else "primary") %}
+{% set size = job[9] if job[9] else None %}
+<div class="status-inline">
+    <span class="status-pill status-pill-{{ color }}">
+        <span class="material-symbols-outlined icon-inline">
+            {% if status == "done" %}check_circle{% elif status == "error" %}error{% else %}schedule{% endif %}
+        </span>
+        {{ status }}
+    </span>
+    <span class="status-size" title="Dateigroesse">
+        {% if size %}
+            {% if size >= 1073741824 %}
+                {{ "%.2f"|format(size / 1073741824) }} GB
+            {% elif size >= 1048576 %}
+                {{ "%.1f"|format(size / 1048576) }} MB
+            {% elif size >= 1024 %}
+                {{ "%.1f"|format(size / 1024) }} KB
+            {% else %}
+                {{ size }} B
+            {% endif %}
+        {% else %}
+            -
+        {% endif %}
+    </span>
+</div>

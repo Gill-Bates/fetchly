@@ -1,0 +1,630 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>tubeyou</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined" rel="stylesheet">
+    <link href="/static/style.css" rel="stylesheet">
+</head>
+<body>
+<nav class="navbar navbar-expand-lg navbar-dark top-navbar fixed-top">
+    <div class="container">
+        <a class="navbar-brand fw-bold" href="/">tubeyou</a>
+        <div class="ms-auto d-flex align-items-center gap-2">
+            <a href="/settings" class="btn btn-sm btn-outline-light" title="Settings">
+                <span class="material-symbols-outlined" style="font-size: 18px;">settings</span>
+            </a>
+            <button id="logoutBtn" class="btn btn-sm btn-outline-light" type="button">Logout</button>
+        </div>
+    </div>
+</nav>
+
+<div class="container py-5">
+
+    <!-- KPI Stats -->
+    <div class="row g-3 mb-4 stats-row">
+        <div class="col-12 col-md-4">
+            <div class="card stat-card">
+                <div class="stat-value">{{ stats.total_jobs }}</div>
+                <div class="stat-label">Videos processed</div>
+            </div>
+        </div>
+        <div class="col-12 col-md-4">
+            <div class="card stat-card">
+                <div class="stat-value">{{ stats.total_minutes }}</div>
+                <div class="stat-label">Minutes processed</div>
+            </div>
+        </div>
+        <div class="col-12 col-md-4">
+            <div class="card stat-card">
+                <div class="stat-value">{{ (stats.total_bytes / 1048576) | round(1) }} MB</div>
+                <div class="stat-label">Download traffic</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Formular -->
+    <div class="card shadow-lg mb-4">
+        <div class="card-body p-4">
+            <form id="submitForm">
+                <div class="row g-3 align-items-end">
+                    <div class="col-12">
+                        <label class="form-label fw-medium">YouTube URL</label>
+                        <input class="form-control form-control-lg" id="urlInput" name="url" 
+                               placeholder="https://www.youtube.com/watch?v=..." required>
+                        
+                        <div class="video-preview-grid">
+                            <div id="thumbnailPreview" class="video-thumb"></div>
+                            
+                            <div class="video-meta" id="videoMeta">
+                                <div class="meta-row">
+                                    <span class="meta-label">Titel</span>
+                                    <span class="meta-value" id="metaTitle">–</span>
+                                </div>
+                                
+                                <div class="meta-row">
+                                    <span class="meta-label">Kanal</span>
+                                    <span class="meta-value" id="metaChannel">–</span>
+                                </div>
+                                
+                                <div class="meta-row">
+                                    <span class="meta-label">Uploader</span>
+                                    <span class="meta-value" id="metaUploader">–</span>
+                                </div>
+                                
+                                <div class="meta-row">
+                                    <span class="meta-label">Dauer</span>
+                                    <span class="meta-value" id="metaDuration">–</span>
+                                </div>
+                                
+                                <div class="meta-row">
+                                    <span class="meta-label">Views</span>
+                                    <span class="meta-value" id="metaViews">–</span>
+                                </div>
+                                
+                                <div class="meta-row">
+                                    <span class="meta-label">Qualitäten</span>
+                                    <span class="meta-value" id="metaFormats">–</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-6 col-md-3">
+                        <label class="form-label">Format</label>
+                        <select class="form-select" name="type" id="typeSelect">
+                            <option value="video">🎬 Video</option>
+                            <option value="audio">🎵 MP3</option>
+                        </select>
+                    </div>
+                    <div class="col-6 col-md-3">
+                        <label class="form-label">Quality</label>
+                        <select class="form-select" name="quality" id="qualitySelect">
+                            <option value="max">Max</option>
+                            <option value="medium">720p</option>
+                            <option value="small">480p</option>
+                        </select>
+                    </div>
+                    <div class="col-12 col-md-3">
+                        <button class="btn btn-success" type="submit" id="submitBtn">
+                            <span id="btnText"><span class="material-symbols-outlined icon-inline">download</span>Start</span>
+                        </button>
+                    </div>
+                </div>
+                <div id="formError" class="alert alert-danger mt-3 d-none"></div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Jobs -->
+    <div class="card" id="jobsCard">
+        <div class="card-header d-flex align-items-center justify-content-between">
+            <span class="fw-semibold">Jobs</span>
+            <span id="wsIndicator" class="ws-indicator badge bg-secondary">● connecting...</span>
+        </div>
+        <div class="card-body p-0">
+            <div class="table-responsive">
+                <table class="table table-hover mb-0" id="jobsTable">
+                    <thead>
+                        <tr>
+                            <th>URL</th>
+                            <th>Format</th>
+                            <th>Quality</th>
+                            <th style="min-width:120px">Status</th>
+                            <th>Created</th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody id="jobsTbody">
+                        {% for job in jobs %}
+                        <tr data-job-id="{{ job[0] }}" data-status="{{ job[4] }}" data-size-bytes="{{ job[9] or '' }}" class="{% if job[4] == 'done' %}row-done{% elif job[4] == 'error' %}row-error{% endif %}">
+                            <td data-label="URL" class="text-truncate" style="max-width:220px" title="{{ job[1] }}">{{ job[1] }}</td>
+                            <td data-label="Format">{{ job[2] }}</td>
+                            <td data-label="Quality">{{ job[3] }}</td>
+                            <td data-label="Status">{% include "_status_badge.html" %}</td>
+                            <td data-label="Created" class="text-nowrap">{{ job[6] | localtime }}</td>
+                            <td>{% include "_action_btn.html" %}</td>
+                        </tr>
+                        {% else %}
+                        <tr id="emptyRow">
+                            <td colspan="6">
+                                <div class="empty-state">
+                                    <div class="icon">📥</div>
+                                    <p>No downloads yet. Add a URL above!</p>
+                                </div>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Detail-Modal -->
+<div class="modal fade" id="detailModal" tabindex="-1">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Job Details</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <p><strong>ID:</strong> <code id="mId"></code></p>
+                <p><strong>URL:</strong> <span id="mUrl" class="text-break"></span></p>
+                <p><strong>Format:</strong> <span id="mType"></span></p>
+                <p><strong>Quality:</strong> <span id="mQuality"></span></p>
+                <p><strong>Status:</strong> <span id="mStatus"></span></p>
+                <p><strong>Message:</strong> <span id="mMessage" class="text-muted">–</span></p>
+            </div>
+            <div class="modal-footer">
+                <a id="mDownloadBtn" class="btn btn-download d-none" href="#">⬇ Download</a>
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+// ── Status Progress ──────────────────────────────────────────────────────────
+
+function humanSize(bytes) {
+    const value = Number(bytes);
+    if (!Number.isFinite(value) || value <= 0) return "-";
+    if (value >= 1073741824) return `${(value / 1073741824).toFixed(2)} GB`;
+    if (value >= 1048576) return `${(value / 1048576).toFixed(1)} MB`;
+    if (value >= 1024) return `${(value / 1024).toFixed(1)} KB`;
+    return `${Math.round(value)} B`;
+}
+
+function statusProgress(status, sizeBytes) {
+    const color = status === "error" ? "danger" : status === "done" ? "success" : "primary";
+
+    return `
+    <div class="status-inline">
+        <span class="status-pill status-pill-${color}">${escHtml(status || "queued")}</span>
+        <span class="status-size" title="Dateigroesse">${escHtml(humanSize(sizeBytes))}</span>
+    </div>`;
+}
+
+function actionBtn(jobId, status) {
+    if (status === "done") {
+        return `<a class="btn btn-download btn-sm" href="/download/${jobId}" title="Download" aria-label="Download"><span class="material-symbols-outlined icon-inline">download</span></a>`;
+    }
+    return `<button class="btn btn-details btn-sm btn-outline-secondary" onclick="openDetail('${jobId}')" title="Details" aria-label="Details"><span class="material-symbols-outlined icon-inline">info</span></button>`;
+}
+
+function normalizeExistingRows() {
+    const rows = document.querySelectorAll("#jobsTbody tr[data-job-id]");
+    rows.forEach((row) => {
+        const cells = row.querySelectorAll("td");
+        if (cells.length < 6) return;
+
+        const jobId = row.dataset.jobId || "";
+        const statusCell = cells[3];
+        const actionCell = cells[5];
+
+        const statusText =
+            row.dataset.status ||
+            statusCell.querySelector(".status-pill")?.textContent?.trim() ||
+            statusCell.textContent?.trim() ||
+            "queued";
+
+        const sizeBytes = row.dataset.sizeBytes || "";
+        row.dataset.status = statusText;
+        statusCell.innerHTML = statusProgress(statusText, sizeBytes);
+        actionCell.innerHTML = actionBtn(jobId, statusText);
+
+        row.classList.remove("row-done", "row-error");
+        if (statusText === "done") row.classList.add("row-done");
+        if (statusText === "error") row.classList.add("row-error");
+    });
+}
+
+function buildRow(job) {
+    const tr = document.createElement("tr");
+    tr.dataset.jobId = job.id;
+    tr.dataset.status = job.status;
+    tr.dataset.sizeBytes = job.filesize_bytes ?? "";
+    if (job.status === "done") tr.classList.add("row-done");
+    if (job.status === "error") tr.classList.add("row-error");
+    tr.innerHTML = `
+        <td data-label="URL" class="text-truncate" style="max-width:220px" title="${escHtml(job.url)}">${escHtml(job.url)}</td>
+        <td data-label="Format">${escHtml(job.type)}</td>
+        <td data-label="Quality">${escHtml(job.quality)}</td>
+        <td data-label="Status">${statusProgress(job.status, job.filesize_bytes)}</td>
+        <td data-label="Created" class="text-nowrap">${escHtml(job.created_at || "")}</td>
+        <td data-label="Action">${actionBtn(job.id, job.status)}</td>
+    `;
+    return tr;
+}
+
+function escHtml(s) {
+    return String(s)
+        .replace(/&/g, "&amp;").replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+function getCookie(name) {
+    const prefix = `${name}=`;
+    const found = document.cookie
+        .split(";")
+        .map((v) => v.trim())
+        .find((v) => v.startsWith(prefix));
+    return found ? decodeURIComponent(found.slice(prefix.length)) : "";
+}
+
+const MAX_ROWS = 120;
+const PAGE_SIZE = 50;
+let jobsOffset = document.querySelectorAll("#jobsTbody tr[data-job-id]").length;
+let jobsLoading = false;
+let jobsAllLoaded = false;
+
+function trimTable() {
+    const tbody = document.getElementById("jobsTbody");
+    const rows = tbody.querySelectorAll("tr[data-job-id]");
+    if (rows.length <= MAX_ROWS) {
+        return;
+    }
+    for (let i = MAX_ROWS; i < rows.length; i++) {
+        rows[i].remove();
+    }
+}
+
+function prependJobRow(job) {
+    const tbody = document.getElementById("jobsTbody");
+    const existing = tbody.querySelector(`tr[data-job-id="${job.id}"]`);
+    if (existing) {
+        existing.remove();
+    }
+    tbody.prepend(buildRow(job));
+    trimTable();
+}
+
+async function loadMoreJobs() {
+    if (jobsLoading || jobsAllLoaded) {
+        return;
+    }
+    jobsLoading = true;
+
+    try {
+        const res = await fetch(`/api/jobs?offset=${jobsOffset}&limit=${PAGE_SIZE}`);
+        if (!res.ok) {
+            return;
+        }
+
+        const jobs = await res.json();
+        if (!Array.isArray(jobs) || jobs.length === 0) {
+            jobsAllLoaded = true;
+            return;
+        }
+
+        const tbody = document.getElementById("jobsTbody");
+        jobs.forEach((job) => {
+            if (!tbody.querySelector(`tr[data-job-id="${job.id}"]`)) {
+                tbody.appendChild(buildRow(job));
+            }
+        });
+
+        jobsOffset += jobs.length;
+        if (jobs.length < PAGE_SIZE) {
+            jobsAllLoaded = true;
+        }
+    } catch (_err) {
+        // Best-effort paging to keep UI responsive on network errors.
+    } finally {
+        jobsLoading = false;
+    }
+}
+
+// ── Helper: Format Duration ─────────────────────────────────────────────────
+
+function formatDuration(sec) {
+    if (!sec) return "–";
+    const m = Math.floor(sec / 60);
+    const s = sec % 60;
+    return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
+// ── Thumbnail Preview + Metadata ────────────────────────────────────────────
+
+document.getElementById("urlInput").addEventListener("blur", async (e) => {
+    const url = e.target.value;
+    const preview = document.getElementById("thumbnailPreview");
+    preview.innerHTML = "";
+    
+    // Reset metadata
+    document.getElementById("metaTitle").textContent = "–";
+    document.getElementById("metaChannel").textContent = "–";
+    document.getElementById("metaUploader").textContent = "–";
+    document.getElementById("metaDuration").textContent = "–";
+    document.getElementById("metaViews").textContent = "–";
+    document.getElementById("metaFormats").textContent = "–";
+    
+    if (!url.includes("youtube.com") && !url.includes("youtu.be")) return;
+    
+    let videoId = null;
+    try {
+        const parsed = new URL(url);
+        videoId = parsed.searchParams.get("v") || parsed.pathname.split("/").pop();
+    } catch { return; }
+    
+    if (!videoId || videoId.length < 10) return;
+    
+    // Show thumbnail
+    const img = document.createElement("img");
+    img.src = `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`;
+    img.className = "";
+    img.alt = "Video Thumbnail";
+    img.onerror = () => img.remove();
+    preview.appendChild(img);
+    
+    // Fetch metadata
+    try {
+        const res = await fetch(`/api/info?url=${encodeURIComponent(url)}`);
+        if (!res.ok) return;
+        
+        const data = await res.json();
+        
+        document.getElementById("metaTitle").textContent = data.title || "–";
+        document.getElementById("metaChannel").textContent = data.channel || "–";
+        document.getElementById("metaUploader").textContent = data.uploader || "–";
+        document.getElementById("metaDuration").textContent = formatDuration(data.duration);
+        document.getElementById("metaViews").textContent = data.view_count?.toLocaleString() || "–";
+        document.getElementById("metaFormats").textContent = 
+            (data.formats || []).slice(0, 5).join(", ") || "–";
+        
+        // Update quality dropdown with available formats
+        const qualitySelect = document.getElementById("qualitySelect");
+        qualitySelect.innerHTML = "";
+        
+        if (data.formats && data.formats.length > 0) {
+            data.formats.forEach(fmt => {
+                const opt = document.createElement("option");
+                opt.value = fmt.toLowerCase().replace(/[^\w]/g, "");
+                opt.textContent = fmt;
+                qualitySelect.appendChild(opt);
+            });
+            
+            // For audio format, auto-select best quality (first option)
+            if (document.getElementById("typeSelect").value === "audio") {
+                qualitySelect.selectedIndex = 0;
+            }
+        }
+        
+    } catch {
+        // Ignore metadata errors - thumbnail is enough
+    }
+});
+
+// ── Format selector: auto-select best quality for MP3 ───────────────────────
+
+document.getElementById("typeSelect").addEventListener("change", (e) => {
+    const qualitySelect = document.getElementById("qualitySelect");
+    if (e.target.value === "audio" && qualitySelect.options.length > 0) {
+        // Auto-select best quality (first option) for MP3
+        qualitySelect.selectedIndex = 0;
+    }
+});
+
+// ── Modal ────────────────────────────────────────────────────────────────────
+
+const detailModal = new bootstrap.Modal(document.getElementById("detailModal"));
+const detailModalEl = document.getElementById("detailModal");
+const activeDetail = { id: null };
+let lastFocusedBeforeModal = null;
+
+if (detailModalEl) {
+    detailModalEl.addEventListener("show.bs.modal", () => {
+        lastFocusedBeforeModal = document.activeElement instanceof HTMLElement
+            ? document.activeElement
+            : null;
+    });
+
+    detailModalEl.addEventListener("hide.bs.modal", () => {
+        const focused = document.activeElement;
+        if (focused instanceof HTMLElement && detailModalEl.contains(focused)) {
+            focused.blur();
+        }
+    });
+
+    detailModalEl.addEventListener("hidden.bs.modal", () => {
+        if (lastFocusedBeforeModal && document.body.contains(lastFocusedBeforeModal)) {
+            lastFocusedBeforeModal.focus();
+            return;
+        }
+        document.getElementById("urlInput")?.focus();
+    });
+}
+
+function openDetail(jobId) {
+    const row = document.querySelector(`tr[data-job-id="${jobId}"]`);
+    if (!row) return;
+    const cells = row.querySelectorAll("td");
+    activeDetail.id = jobId;
+    document.getElementById("mId").textContent = jobId;
+    document.getElementById("mUrl").textContent = cells[0].title || cells[0].textContent;
+    document.getElementById("mType").textContent = cells[1].textContent;
+    document.getElementById("mQuality").textContent = cells[2].textContent;
+    
+    const statusEl = cells[3].querySelector(".status-pill");
+    document.getElementById("mStatus").textContent = statusEl ? statusEl.textContent : "–";
+    document.getElementById("mMessage").textContent = "–";
+    
+    const dlBtn = document.getElementById("mDownloadBtn");
+    const status = statusEl ? statusEl.textContent.trim() : "";
+    dlBtn.href = `/download/${jobId}`;
+    dlBtn.classList.toggle("d-none", status !== "done");
+    detailModal.show();
+}
+
+// ── YouTube URL Validation ───────────────────────────────────────────────────
+
+const YOUTUBE_URL_REGEX = /^https?:\/\/(?:www\.|m\.)?(?:youtube\.com\/(?:watch\?.*v=|embed\/|v\/|shorts\/)|youtu\.be\/)[\w-]{11}(?:[?&].*)?$/i;
+
+function isValidYouTubeUrl(url) {
+    if (!url || typeof url !== 'string') return false;
+    url = url.trim();
+    if (url.length > 2048) return false;
+    return YOUTUBE_URL_REGEX.test(url);
+}
+
+// ── Formular ─────────────────────────────────────────────────────────────────
+
+document.getElementById("submitForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const btn = document.getElementById("submitBtn");
+    const btnText = document.getElementById("btnText");
+    const errBox = document.getElementById("formError");
+    errBox.classList.add("d-none");
+    
+    // Validate YouTube URL before submit
+    const urlInput = document.getElementById("urlInput").value.trim();
+    if (!isValidYouTubeUrl(urlInput)) {
+        errBox.textContent = "Invalid YouTube URL. Please enter a valid youtube.com or youtu.be link.";
+        errBox.classList.remove("d-none");
+        return;
+    }
+    
+    btn.disabled = true;
+    btnText.innerHTML = `<span class="spinner-border spinner-border-sm me-2"></span>Processing...`;
+
+    try {
+        const fd = new FormData(e.target);
+        const csrf = getCookie("tubeyou_csrf");
+        const res = await fetch("/api/submit", {
+            method: "POST",
+            credentials: "same-origin",
+            headers: {
+                "X-CSRF-Token": csrf,
+            },
+            body: fd,
+        });
+        if (!res.ok) {
+            const data = await res.json().catch(() => ({}));
+            throw new Error(data.detail || `HTTP ${res.status}`);
+        }
+        const job = await res.json();
+        
+        // Remove empty state row if present
+        const emptyRow = document.getElementById("emptyRow");
+        if (emptyRow) emptyRow.remove();
+        
+        prependJobRow(job);
+        e.target.reset();
+        document.getElementById("thumbnailPreview").innerHTML = "";
+        document.getElementById("urlInput").focus();
+    } catch (err) {
+        errBox.textContent = "Error: " + err.message;
+        errBox.classList.remove("d-none");
+    } finally {
+        btn.disabled = false;
+        btnText.innerHTML = `<span class="material-symbols-outlined icon-inline">download</span>Start`;
+    }
+});
+
+// ── WebSocket ────────────────────────────────────────────────────────────────
+
+const wsIndicator = document.getElementById("wsIndicator");
+
+function connectWS() {
+    const proto = location.protocol === "https:" ? "wss" : "ws";
+    const ws = new WebSocket(`${proto}://${location.host}/ws`);
+
+    ws.onopen = () => {
+        wsIndicator.innerHTML = "● LIVE";
+        wsIndicator.className = "ws-indicator badge bg-success live";
+        ws.send("subscribe");
+    };
+
+    ws.onclose = () => {
+        wsIndicator.innerHTML = "● offline";
+        wsIndicator.className = "ws-indicator badge bg-danger";
+        setTimeout(connectWS, 3000);
+    };
+
+    ws.onerror = () => ws.close();
+
+    ws.onmessage = (event) => {
+        const payload = JSON.parse(event.data);
+        const row = document.querySelector(`tr[data-job-id="${payload.id}"]`);
+        if (!row) return;
+
+        // Status aktualisieren
+        const statusCell = row.querySelectorAll("td")[3];
+        row.dataset.status = payload.status;
+        if (payload.filesize_bytes != null) {
+            row.dataset.sizeBytes = String(payload.filesize_bytes);
+        }
+        statusCell.innerHTML = statusProgress(payload.status, row.dataset.sizeBytes || "");
+
+        // Zeilen-Highlighting
+        row.classList.remove("row-done", "row-error");
+        if (payload.status === "done") row.classList.add("row-done");
+        if (payload.status === "error") row.classList.add("row-error");
+
+        // Action-Button aktualisieren
+        const actionCell = row.querySelectorAll("td")[5];
+        actionCell.innerHTML = actionBtn(payload.id, payload.status);
+
+        // Modal aktualisieren falls geöffnet
+        if (activeDetail.id === payload.id) {
+            document.getElementById("mStatus").textContent = payload.status;
+            document.getElementById("mMessage").textContent = payload.message || "–";
+            const dlBtn = document.getElementById("mDownloadBtn");
+            dlBtn.classList.toggle("d-none", payload.status !== "done");
+        }
+    };
+}
+
+connectWS();
+normalizeExistingRows();
+trimTable();
+
+window.addEventListener("scroll", () => {
+    if (window.innerHeight + window.scrollY >= document.body.offsetHeight - 250) {
+        loadMoreJobs();
+    }
+}, { passive: true });
+
+document.getElementById("logoutBtn")?.addEventListener("click", async () => {
+    try {
+        const csrf = getCookie("tubeyou_csrf");
+        await fetch("/logout", {
+            method: "POST",
+            credentials: "same-origin",
+            headers: {
+                "X-CSRF-Token": csrf,
+            },
+        });
+    } catch (_err) {
+        // Ignore and continue redirecting to login.
+    }
+    window.location.assign("/login");
+});
+</script>
+</body>
+</html>

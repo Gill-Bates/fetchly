@@ -1,0 +1,5 @@
+{% if job[4] == "done" %}
+<a class="btn btn-download btn-sm" href="/download/{{ job[0] }}" title="Download" aria-label="Download"><span class="material-symbols-outlined icon-inline">download</span></a>
+{% else %}
+<button class="btn btn-details btn-sm btn-outline-secondary" onclick="openDetail('{{ job[0] }}')" title="Details" aria-label="Details"><span class="material-symbols-outlined icon-inline">info</span></button>
+{% endif %}

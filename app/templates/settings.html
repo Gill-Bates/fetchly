@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="csrf-token" content="{{ csrf_token | e }}">
+    <title>tubeyou Settings</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined" rel="stylesheet">
+    <link href="/static/style.css" rel="stylesheet">
+</head>
+<body>
+<nav class="navbar navbar-expand-lg navbar-dark top-navbar fixed-top">
+    <div class="container">
+        <a class="navbar-brand fw-bold" href="/">tubeyou</a>
+        <div class="ms-auto d-flex align-items-center gap-2">
+            <a href="/" class="btn btn-sm btn-outline-light" title="Back to Dashboard">
+                <span class="material-symbols-outlined" style="font-size: 18px;">arrow_back</span>
+            </a>
+        </div>
+    </div>
+</nav>
+
+<div class="container py-5">
+    <div class="row justify-content-center">
+        <div class="col-12 col-md-8 col-lg-6">
+            <div class="card">
+                <div class="card-header">
+                    <span class="fw-semibold">
+                        <span class="material-symbols-outlined icon-inline">settings</span>
+                        Settings
+                    </span>
+                </div>
+                <div class="card-body">
+                    <!-- Alert Messages -->
+                    <div id="settingsAlert" class="alert d-none" role="alert"></div>
+
+                    <form id="settingsForm">
+                        <!-- Retention Days -->
+                        <div class="mb-4">
+                            <label for="retentionDays" class="form-label">Max. Job retention (days)</label>
+                            <input type="number" class="form-control" id="retentionDays" name="retention_days" min="1" max="365" value="{{ settings.retention_days | default(7) }}">
+                            <small class="text-muted">Completed jobs will be deleted after this period (default: 7 days)</small>
+                        </div>
+
+                        <!-- Login Required -->
+                        <div class="mb-4">
+                            <div class="form-check form-switch">
+                                <input class="form-check-input" type="checkbox" id="loginRequired" name="login_required" {% if settings.login_required %}checked{% endif %}>
+                                <label class="form-check-label" for="loginRequired">Login required</label>
+                            </div>
+                            <small class="text-muted">Force authentication to access dashboard</small>
+                        </div>
+
+                        <!-- Lalala.ai API Key -->
+                        <div class="mb-4">
+                            <label for="lalalaapiKey" class="form-label">Lalala.ai API Key</label>
+                            <input type="password" class="form-control" id="lalalaapiKey" name="lalalaai_api_key" value="{{ settings.lalalaai_api_key | default('') }}" placeholder="Leave blank to disable">
+                            <small class="text-muted">Used for advanced audio features</small>
+                        </div>
+
+                        <!-- Admin Password Info -->
+                        <div class="mb-4">
+                            <label class="form-label">Admin Password</label>
+                            <input type="text" class="form-control" value="••••••••" disabled>
+                            <small class="text-muted">To change: update TUBEYOU_ADMIN_PASSWORD env var and restart</small>
+                        </div>
+
+                        <!-- Submit Buttons -->
+                        <div class="d-flex gap-2">
+                            <button type="submit" class="btn btn-primary" id="settingsSaveBtn">
+                                <span class="material-symbols-outlined icon-inline">save</span>
+                                Save Changes
+                            </button>
+                            <a href="/" class="btn btn-secondary">Cancel</a>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+function getCookie(name) {
+    const prefix = `${name}=`;
+    const found = document.cookie
+        .split(";")
+        .map((v) => v.trim())
+        .find((v) => v.startsWith(prefix));
+    return found ? decodeURIComponent(found.slice(prefix.length)) : "";
+}
+
+document.getElementById("settingsForm").addEventListener("submit", async (e) => {
+    e.preventDefault();
+    
+    const form = new FormData(e.target);
+    const alert = document.getElementById("settingsAlert");
+    const btn = document.getElementById("settingsSaveBtn");
+    
+    btn.disabled = true;
+    alert.classList.add("d-none");
+    
+    const data = {
+        retention_days: parseInt(form.get("retention_days")) || 30,
+        login_required: document.getElementById("loginRequired").checked,
+        lalalaai_api_key: form.get("lalalaai_api_key") || ""
+    };
+
+    try {
+        const csrf = getCookie("tubeyou_csrf");
+        const res = await fetch("/api/settings", {
+            method: "POST",
+            headers: { 
+                "Content-Type": "application/json",
+                "X-CSRF-Token": csrf
+            },
+            body: JSON.stringify(data)
+        });
+
+        if (!res.ok) {
+            const err = await res.json();
+            throw new Error(err.detail || "Save failed");
+        }
+
+        alert.textContent = "Settings saved successfully!";
+        alert.className = "alert alert-success";
+        alert.classList.remove("d-none");
+        
+        setTimeout(() => {
+            window.location.href = "/";
+        }, 1500);
+    } catch (err) {
+        alert.textContent = "Error: " + err.message;
+        alert.className = "alert alert-danger";
+        alert.classList.remove("d-none");
+    } finally {
+        btn.disabled = false;
+    }
+});
+</script>
+</body>
+</html>
