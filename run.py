@@ -9,6 +9,8 @@ import os
 import re
 import uvicorn
 
+from app.utils.banner import print_banner_once
+
 
 class SensitiveDataFilter(logging.Filter):
     """Filter to redact sensitive data from log messages."""
@@ -52,6 +54,8 @@ class SensitiveDataFilter(logging.Filter):
 
 
 if __name__ == "__main__":
+    print_banner_once()
+
     log_level = os.environ.get("LOG_LEVEL", "info").lower()
     dev_mode = log_level == "debug"
 

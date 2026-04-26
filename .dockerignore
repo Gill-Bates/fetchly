@@ -19,3 +19,4 @@ data/
 *.log
 BUILD_INFO
 setup.conf
+cookies.txt

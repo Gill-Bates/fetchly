@@ -29,19 +29,19 @@
         {% if not job %}
             <div class="alert alert-warning">Job not found.</div>
         {% else %}
-            <p><strong>ID:</strong> {{ job[0] }}</p>
-            <p><strong>URL:</strong> <a href="{{ job[1] }}" target="_blank" rel="noopener">{{ job[1] }}</a></p>
-            <p><strong>Format:</strong> {{ job[2] }}</p>
-            <p><strong>Quality:</strong> {{ job[3] }}</p>
-            <p><strong>Status:</strong> <span id="status">{{ job[4] }}</span></p>
-            <p><strong>Created:</strong> {{ job[6] | localtime }}</p>
-            {% if job[7] %}<p><strong>Completed:</strong> {{ job[7] | localtime }}</p>{% endif %}
-            <p><strong>Message:</strong> <span id="message">{{ job[10] or '–' }}</span></p>
+            <p><strong>ID:</strong> {{ job["id"] }}</p>
+            <p><strong>URL:</strong> <a href="{{ job["url"] }}" target="_blank" rel="noopener">{{ job["url"] }}</a></p>
+            <p><strong>Format:</strong> {{ job["type"] }}</p>
+            <p><strong>Quality:</strong> {{ job["quality"] }}</p>
+            <p><strong>Status:</strong> <span id="status">{{ job["status"] }}</span></p>
+            <p><strong>Created:</strong> {{ job["created_at"] | localtime }}</p>
+            {% if job["finished_at"] %}<p><strong>Completed:</strong> {{ job["finished_at"] | localtime }}</p>{% endif %}
+            <p><strong>Message:</strong> <span id="message">{{ job["message"] or '–' }}</span></p>
 
-            <a id="downloadLink" class="btn btn-success {% if job[4] != 'done' %}d-none{% endif %}" href="/download/{{ job[0] }}">Download</a>
+            <a id="downloadLink" class="btn btn-success {% if job["status"] != 'done' %}d-none{% endif %}" href="/download/{{ job["id"] }}">Download</a>
 
             <script>
-                const jobId = "{{ job[0] }}";
+                const jobId = "{{ job["id"] }}";
                 const statusEl = document.getElementById("status");
                 const messageEl = document.getElementById("message");
                 const linkEl = document.getElementById("downloadLink");

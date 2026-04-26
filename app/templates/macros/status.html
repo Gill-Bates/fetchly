@@ -1,0 +1,14 @@
+{% macro status_badge(job) %}
+    {% set status = job["status"] %}
+    {% set size = job["filesize_bytes"] %}
+
+    <div class="status-inline">
+        <span class="status-pill status-pill-{{ status|status_class }}">
+            <span class="material-symbols-outlined icon-inline" aria-hidden="true">{{ status|status_icon }}</span>
+            {{ status }}
+        </span>
+        {% if size %}
+        <span class="status-size" title="Dateigroesse">{{ size|filesize }}</span>
+        {% endif %}
+    </div>
+{% endmacro %}

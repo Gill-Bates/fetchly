@@ -3,8 +3,10 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="csrf-token" content="{{ csrf_token | e }}">
     <title>tubeyou Settings</title>
+    <link rel="preconnect" href="https://cdn.jsdelivr.net">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined" rel="stylesheet">
     <link href="/static/style.css" rel="stylesheet">
@@ -15,126 +17,163 @@
         <a class="navbar-brand fw-bold" href="/">tubeyou</a>
         <div class="ms-auto d-flex align-items-center gap-2">
             <a href="/" class="btn btn-sm btn-outline-light" title="Back to Dashboard">
-                <span class="material-symbols-outlined" style="font-size: 18px;">arrow_back</span>
+                <span class="material-symbols-outlined" style="font-size: 18px;" aria-hidden="true">arrow_back</span>
             </a>
         </div>
     </div>
 </nav>
 
 <div class="container py-5">
-    <div class="row justify-content-center">
-        <div class="col-12 col-md-8 col-lg-6">
-            <div class="card">
-                <div class="card-header">
-                    <span class="fw-semibold">
-                        <span class="material-symbols-outlined icon-inline">settings</span>
-                        Settings
-                    </span>
+    <div class="card shadow-lg mb-4 settings-card">
+        <div class="card-header">
+            <span class="fw-semibold">
+                <span class="material-symbols-outlined icon-inline" aria-hidden="true">settings</span>
+                Settings
+            </span>
+        </div>
+        <div class="card-body p-4">
+            <div id="settingsAlert" class="alert d-none" role="alert"></div>
+
+            <form id="settingsForm">
+                <div class="settings-section">
+                    <h6 class="settings-section-title">Storage</h6>
+
+                    <div class="mb-4">
+                        <label for="retentionDays" class="form-label">Max. Job retention (days)</label>
+                        <input type="number" class="form-control" id="retentionDays" name="retention_days" min="1" max="365" value="{{ settings.retention_days | default(7) }}">
+                        <small class="setting-hint">Completed jobs will be deleted after this period (default: 7 days)</small>
+                    </div>
                 </div>
-                <div class="card-body">
-                    <!-- Alert Messages -->
-                    <div id="settingsAlert" class="alert d-none" role="alert"></div>
 
-                    <form id="settingsForm">
-                        <!-- Retention Days -->
-                        <div class="mb-4">
-                            <label for="retentionDays" class="form-label">Max. Job retention (days)</label>
-                            <input type="number" class="form-control" id="retentionDays" name="retention_days" min="1" max="365" value="{{ settings.retention_days | default(7) }}">
-                            <small class="text-muted">Completed jobs will be deleted after this period (default: 7 days)</small>
-                        </div>
+                <div class="settings-section">
+                    <h6 class="settings-section-title">Security</h6>
 
-                        <!-- Login Required -->
-                        <div class="mb-4">
-                            <div class="form-check form-switch">
-                                <input class="form-check-input" type="checkbox" id="loginRequired" name="login_required" {% if settings.login_required %}checked{% endif %}>
-                                <label class="form-check-label" for="loginRequired">Login required</label>
-                            </div>
-                            <small class="text-muted">Force authentication to access dashboard</small>
+                    <div class="mb-4">
+                        <div class="form-check form-switch">
+                            <input class="form-check-input" type="checkbox" id="loginRequired" name="login_required" {% if settings.login_required %}checked{% endif %}>
+                            <label class="form-check-label" for="loginRequired">Require login to access dashboard</label>
                         </div>
+                        <small class="setting-hint">Force authentication to access dashboard</small>
+                    </div>
 
-                        <!-- Lalala.ai API Key -->
-                        <div class="mb-4">
-                            <label for="lalalaapiKey" class="form-label">Lalala.ai API Key</label>
-                            <input type="password" class="form-control" id="lalalaapiKey" name="lalalaai_api_key" value="{{ settings.lalalaai_api_key | default('') }}" placeholder="Leave blank to disable">
-                            <small class="text-muted">Used for advanced audio features</small>
-                        </div>
-
-                        <!-- Admin Password Info -->
-                        <div class="mb-4">
-                            <label class="form-label">Admin Password</label>
-                            <input type="text" class="form-control" value="••••••••" disabled>
-                            <small class="text-muted">To change: update TUBEYOU_ADMIN_PASSWORD env var and restart</small>
-                        </div>
-
-                        <!-- Submit Buttons -->
-                        <div class="d-flex gap-2">
-                            <button type="submit" class="btn btn-primary" id="settingsSaveBtn">
-                                <span class="material-symbols-outlined icon-inline">save</span>
-                                Save Changes
-                            </button>
-                            <a href="/" class="btn btn-secondary">Cancel</a>
-                        </div>
-                    </form>
+                    <div class="mb-4">
+                        <label class="form-label">Admin Password</label>
+                        <p class="form-control-plaintext settings-plaintext mb-0">••••••••</p>
+                        <small class="setting-hint">To change: update TUBEYOU_ADMIN_PASSWORD env var and restart</small>
+                    </div>
                 </div>
-            </div>
+
+                <div class="settings-section">
+                    <h6 class="settings-section-title">Integrations</h6>
+
+                    <div class="mb-4">
+                        <label for="lalalaaiApiKey" class="form-label">Lalala.ai API Key</label>
+                        <input type="password" class="form-control" id="lalalaaiApiKey" name="lalalaai_api_key" value="" placeholder="Leave blank to keep existing" autocomplete="off">
+                        <small class="setting-hint">Stored securely. Only enter to update.</small>
+                    </div>
+                </div>
+
+                <div class="d-flex gap-2">
+                    <button type="submit" class="btn btn-primary" id="settingsSaveBtn">
+                        <span class="material-symbols-outlined icon-inline" aria-hidden="true">save</span>
+                        Save Changes
+                    </button>
+                    <a href="/" class="btn btn-secondary">Cancel</a>
+                </div>
+            </form>
         </div>
     </div>
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 <script>
-function getCookie(name) {
-    const prefix = `${name}=`;
-    const found = document.cookie
+function getCsrfToken() {
+    const prefix = "tubeyou_csrf=";
+    const cookie = document.cookie
         .split(";")
-        .map((v) => v.trim())
-        .find((v) => v.startsWith(prefix));
-    return found ? decodeURIComponent(found.slice(prefix.length)) : "";
+        .map(v => v.trim())
+        .find(v => v.startsWith(prefix));
+    return cookie ? decodeURIComponent(cookie.slice(prefix.length)) : "";
 }
 
-document.getElementById("settingsForm").addEventListener("submit", async (e) => {
+function setAlert(el, type, msg) {
+    el.classList.remove("d-none", "alert-success", "alert-danger");
+    el.classList.add("alert", `alert-${type}`);
+    el.textContent = msg;
+}
+
+function clearAlert(el) {
+    el.classList.add("d-none");
+    el.textContent = "";
+}
+
+const formEl = document.getElementById("settingsForm");
+const alertEl = document.getElementById("settingsAlert");
+const btn = document.getElementById("settingsSaveBtn");
+
+formEl.addEventListener("submit", async (e) => {
     e.preventDefault();
-    
-    const form = new FormData(e.target);
-    const alert = document.getElementById("settingsAlert");
-    const btn = document.getElementById("settingsSaveBtn");
-    
+
+    if (btn.disabled) return;
+
+    const form = new FormData(formEl);
+    const originalBtnText = btn.innerHTML;
+
     btn.disabled = true;
-    alert.classList.add("d-none");
-    
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2" aria-hidden="true"></span>Saving...';
+    clearAlert(alertEl);
+
+    const retention = parseInt(form.get("retention_days"), 10);
+    if (!Number.isFinite(retention) || retention < 1 || retention > 365) {
+        setAlert(alertEl, "danger", "Retention must be between 1 and 365 days");
+        btn.disabled = false;
+        btn.innerHTML = originalBtnText;
+        return;
+    }
+
     const data = {
-        retention_days: parseInt(form.get("retention_days")) || 30,
+        retention_days: retention,
         login_required: document.getElementById("loginRequired").checked,
         lalalaai_api_key: form.get("lalalaai_api_key") || ""
     };
 
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000);
+
     try {
-        const csrf = getCookie("tubeyou_csrf");
         const res = await fetch("/api/settings", {
             method: "POST",
-            headers: { 
+            headers: {
                 "Content-Type": "application/json",
-                "X-CSRF-Token": csrf
+                "X-CSRF-Token": getCsrfToken()
             },
-            body: JSON.stringify(data)
+            body: JSON.stringify(data),
+            signal: controller.signal,
         });
+        clearTimeout(timeoutId);
 
-        if (!res.ok) {
-            const err = await res.json();
-            throw new Error(err.detail || "Save failed");
+        let payload = {};
+        const contentType = res.headers.get("content-type") || "";
+        if (contentType.includes("application/json")) {
+            payload = await res.json();
         }
 
-        alert.textContent = "Settings saved successfully!";
-        alert.className = "alert alert-success";
-        alert.classList.remove("d-none");
-        
+        if (!res.ok) {
+            throw new Error(payload.detail || `HTTP ${res.status}`);
+        }
+
+        setAlert(alertEl, "success", "Settings saved");
+        btn.innerHTML = '<span class="material-symbols-outlined icon-inline">check</span>Saved';
         setTimeout(() => {
-            window.location.href = "/";
-        }, 1500);
+            btn.innerHTML = originalBtnText;
+        }, 1200);
     } catch (err) {
-        alert.textContent = "Error: " + err.message;
-        alert.className = "alert alert-danger";
-        alert.classList.remove("d-none");
+        clearTimeout(timeoutId);
+        if (err.name === "AbortError") {
+            setAlert(alertEl, "danger", "Request timed out. Please retry.");
+        } else {
+            setAlert(alertEl, "danger", "Error: " + err.message);
+        }
     } finally {
         btn.disabled = false;
     }

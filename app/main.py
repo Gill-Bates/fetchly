@@ -6,19 +6,25 @@
 
 import asyncio
 import base64
+import logging
 import hmac
+import json
 import os
 import secrets
 import re
-import signal
+import shutil
+import subprocess
+import sys
 import uuid
 from hashlib import pbkdf2_hmac, sha256
+from contextlib import asynccontextmanager
 from pathlib import Path
 from time import time
 from datetime import datetime, UTC
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from typing import Any
 
-from fastapi import FastAPI, Request, Form, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, Form, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, FileResponse, RedirectResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -55,7 +61,7 @@ app.state.limiter = limiter
 
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
 
-# Jinja2-Filter: UTC-String → lokale Zeit gemäß TZ-Env
+# Jinja2 filter: Convert UTC string to local time according to TZ-Env
 _tz_name = os.environ.get("TZ", "UTC")
 try:
     _LOCAL_TZ = ZoneInfo(_tz_name)
@@ -73,7 +79,39 @@ def _localtime(value: str | None) -> str:
         return value
 
 
+def _filesize(value: int | None) -> str:
+    """Jinja filter: human-readable filesize."""
+    if not value:
+        return "-"
+    for unit, divisor in (("GB", 1_073_741_824), ("MB", 1_048_576), ("KB", 1_024)):
+        if value >= divisor:
+            precision = 2 if unit == "GB" else 1
+            return f"{value / divisor:.{precision}f} {unit}"
+    return f"{value} B"
+
+
+def _status_class(status: str | None) -> str:
+    if status == "error":
+        return "danger"
+    if status == "done":
+        return "success"
+    return "primary"
+
+
+def _status_icon(status: str | None) -> str:
+    if status == "done":
+        return "check_circle"
+    if status == "error":
+        return "error"
+    return "schedule"
+
+
 templates.env.filters["localtime"] = _localtime
+templates.env.filters["filesize"] = _filesize
+templates.env.filters["status_class"] = _status_class
+templates.env.filters["status_icon"] = _status_icon
+
+logger = logging.getLogger(__name__)
 
 
 def _derive_salt(username: str) -> bytes:
@@ -141,6 +179,65 @@ def _validate_youtube_url(url: str) -> tuple[bool, str]:
     return True, ""
 
 
+def _load_video_info(url: str) -> dict[str, Any] | None:
+    info: dict[str, Any] | None = None
+    try:
+        import yt_dlp
+
+        with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True}) as ydl:
+            extracted = ydl.extract_info(url, download=False)
+        if isinstance(extracted, dict):
+            info = extracted
+    except Exception:
+        info = None
+
+    if info is None:
+        try:
+            result = subprocess.run(
+                ["yt-dlp", "--no-playlist", "--skip-download", "--dump-single-json", url],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            parsed = json.loads(result.stdout or "{}")
+            if isinstance(parsed, dict):
+                info = parsed
+        except Exception:
+            return None
+
+    return info
+
+
+def _extract_video_meta(url: str) -> dict[str, object]:
+    """Best-effort metadata extraction for title + hover details."""
+    info = _load_video_info(url)
+    if info is None:
+        return {"video_title": None, "video_meta_hover": None}
+
+    title = str(info.get("title") or "").strip()
+    channel = str(info.get("channel") or "").strip()
+    uploader = str(info.get("uploader") or "").strip()
+    duration = info.get("duration")
+    views = info.get("view_count")
+
+    lines: list[str] = []
+    if channel:
+        lines.append(f"Kanal: {channel}")
+    if uploader:
+        lines.append(f"Uploader: {uploader}")
+    if isinstance(duration, int) and duration > 0:
+        mins, secs = divmod(duration, 60)
+        lines.append(f"Dauer: {mins}:{secs:02d}")
+    if isinstance(views, int) and views >= 0:
+        lines.append(f"Views: {views:,}")
+
+    return {
+        "video_title": title or None,
+        "video_meta_hover": " | ".join(lines) if lines else None,
+    }
+
+
 def _verify_login(username: str, password: str) -> bool:
     if username != _DEFAULT_USER:
         return False
@@ -175,19 +272,62 @@ def _read_session(token: str | None) -> str | None:
         return None
 
 
-def _current_user(request: Request) -> str | None:
-    return _read_session(request.cookies.get(_SESSION_COOKIE))
+def _login_required_enabled() -> bool:
+    try:
+        return bool(get_settings().get("login_required", True))
+    except Exception:
+        return True
 
-connections = set()
-event_queue = asyncio.Queue()
-_broadcaster_started = False
+
+def _authenticated_user(token: str | None) -> str | None:
+    user = _read_session(token)
+    if user:
+        return user
+    if not _login_required_enabled():
+        return "anonymous"
+    return None
+
+
+def _current_user(request: Request) -> str | None:
+    return _authenticated_user(request.cookies.get(_SESSION_COOKIE))
+
+
+def require_user(request: Request) -> str:
+    user = _current_user(request)
+    if not user:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    return user
+
+
+def require_session(request: Request) -> str:
+    user = _read_session(request.cookies.get(_SESSION_COOKIE))
+    if not user:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    return user
+
+
+def _job_to_dict(job: Any) -> dict[str, object]:
+    return {
+        "id": job["id"],
+        "url": job["url"],
+        "video_title": job["video_title"],
+        "video_meta_hover": job["video_meta_hover"],
+        "type": job["type"],
+        "quality": job["quality"],
+        "status": job["status"],
+        "created_at": job["created_at"],
+        "filesize_bytes": job["filesize_bytes"],
+        "codec": job["codec"],
+        "bitrate_kbps": job["bitrate_kbps"],
+    }
+
+connections: set[WebSocket] = set()
+event_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
 
 _HOUSEKEEPING_INTERVAL: int = 3600  # Every hour
 
 
 async def _housekeeping_daemon() -> None:
-    import logging
-    import shutil
     log = logging.getLogger("tubeyou.housekeeping")
     while True:
         await asyncio.sleep(_HOUSEKEEPING_INTERVAL)
@@ -205,7 +345,7 @@ async def _housekeeping_daemon() -> None:
                     job_dir = DATA_DIR / job_id
                     if job_dir.exists() and job_dir.is_dir():
                         try:
-                            shutil.rmtree(job_dir)
+                            await asyncio.to_thread(shutil.rmtree, job_dir)
                             log.debug("Deleted job directory: %s", job_dir)
                         except Exception as e:
                             log.warning("Failed to delete directory %s: %s", job_dir, e)
@@ -215,58 +355,68 @@ async def _housekeeping_daemon() -> None:
             log.warning("Housekeeping failed: %s", exc)
 
 
-@app.on_event("startup")
-async def startup():
-    global _broadcaster_started
+def _check_dependencies() -> None:
+    """
+    Check that required external tools are available.
+    Raises RuntimeError if any dependency is missing.
+    """
+    missing = []
+    for cmd in ("yt-dlp", "ffmpeg"):
+        if shutil.which(cmd) is None:
+            missing.append(cmd)
+    
+    if missing:
+        msg = f"Missing required dependencies: {', '.join(missing)}"
+        print(f"\n\033[91mFATAL: {msg}\033[0m", file=sys.stderr)
+        print("\nInstall them with:", file=sys.stderr)
+        print("  sudo apt-get install ffmpeg", file=sys.stderr)
+        print("  pip install yt-dlp", file=sys.stderr)
+        print("  # or: sudo curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp && sudo chmod +x /usr/local/bin/yt-dlp\n", file=sys.stderr)
+        raise RuntimeError(msg)
 
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    _check_dependencies()
     init_db()
 
     loop = asyncio.get_running_loop()
 
-    # Set shutdown event on SIGINT/SIGTERM for graceful worker shutdown
-    def _signal_handler():
-        _shutdown_event.set()
-
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, _signal_handler)
-
-    def _thread_status_callback(payload):
+    def _thread_status_callback(payload: dict[str, Any]) -> None:
         loop.call_soon_threadsafe(event_queue.put_nowait, payload)
 
     set_status_callback(_thread_status_callback)
     start_workers(2)
 
-    if not _broadcaster_started:
-        _broadcaster_started = True
-        asyncio.create_task(_event_broadcaster())
-        asyncio.create_task(_housekeeping_daemon())
+    broadcaster_task = asyncio.create_task(_event_broadcaster())
+    housekeeping_task = asyncio.create_task(_housekeeping_daemon())
+
+    try:
+        yield
+    finally:
+        _shutdown_event.set()
+        for task in (broadcaster_task, housekeeping_task):
+            task.cancel()
+        for task in (broadcaster_task, housekeeping_task):
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                logger.debug("Background task exited during shutdown: %s", exc)
+
+        for ws in list(connections):
+            try:
+                await ws.close()
+            except Exception:
+                pass
+        connections.clear()
+
+        stop_workers(timeout=2.0)
+        close_db()
 
 
-@app.on_event("shutdown")
-async def shutdown() -> None:
-    # Remove signal handlers
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        try:
-            loop.remove_signal_handler(sig)
-        except Exception:
-            pass
-
-    # Ensure shutdown event is set
-    _shutdown_event.set()
-
-    # Alle offenen WebSocket-Verbindungen sauber schließen
-    for ws in list(connections):
-        try:
-            await ws.close()
-        except Exception:
-            pass
-    connections.clear()
-
-    stop_workers(timeout=2.0)
-
-    # WAL-Checkpoint: alle uncommitted Writes in Hauptdatei schreiben
-    close_db()
+app.router.lifespan_context = lifespan
 
 
 async def _event_broadcaster():
@@ -276,13 +426,15 @@ async def _event_broadcaster():
             continue
 
         sockets = list(connections)
-        results = await asyncio.gather(
-            *(ws.send_json(payload) for ws in sockets),
-            return_exceptions=True,
-        )
-        for ws, result in zip(sockets, results):
-            if isinstance(result, Exception):
-                connections.discard(ws)
+        for ws in sockets:
+            asyncio.create_task(_send_safe(ws, payload))
+
+
+async def _send_safe(ws: WebSocket, payload: dict[str, Any]) -> None:
+    try:
+        await asyncio.wait_for(ws.send_json(payload), timeout=5.0)
+    except Exception:
+        connections.discard(ws)
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -295,37 +447,54 @@ def index(request: Request):
 
 
 @app.get("/api/jobs")
-def api_jobs(request: Request, offset: int = 0, limit: int = 50):
-    if not _current_user(request):
-        return JSONResponse(status_code=401, content={"detail": "Authentication required"})
+def api_jobs(user: str = Depends(require_user), offset: int = 0, limit: int = 50):
+    _ = user
 
-    safe_offset = max(0, int(offset))
-    safe_limit = min(max(1, int(limit)), 100)
+    safe_offset = max(0, offset)
+    safe_limit = min(max(1, limit), 100)
 
     jobs = paginate_jobs(limit=safe_limit, offset=safe_offset)
-    return [
-        {
-            "id": job["id"],
-            "url": job["url"],
-            "type": job["type"],
-            "quality": job["quality"],
-            "status": job["status"],
-            "created_at": job["created_at"],
-            "filesize_bytes": job["filesize_bytes"],
-        }
-        for job in jobs
-    ]
+    return [_job_to_dict(job) for job in jobs]
 
 
 @app.get("/api/info")
-def api_info(url: str):
+@limiter.limit("10/minute")
+async def api_info(request: Request, url: str, user: str = Depends(require_user)):
     """Extract video metadata using yt-dlp."""
+    _ = (request, user)
+    is_valid, error_msg = _validate_youtube_url(url)
+    if not is_valid:
+        return JSONResponse(status_code=400, content={"detail": error_msg})
+
+    def _empty_info_payload() -> dict[str, object]:
+        return {
+            "title": None,
+            "channel": None,
+            "uploader": None,
+            "duration": None,
+            "view_count": None,
+            "formats": [],
+            "unavailable": True,
+        }
+
     try:
-        import yt_dlp
-        
-        with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True}) as ydl:
-            info = ydl.extract_info(url, download=False)
-        
+        info: dict[str, Any] | None = None
+        for attempt in range(2):
+            try:
+                info = await asyncio.wait_for(asyncio.to_thread(_load_video_info, url.strip()), timeout=30.0)
+                if info:
+                    break
+            except asyncio.TimeoutError:
+                if attempt == 1:
+                    raise
+            except Exception:
+                if attempt == 1:
+                    raise
+            await asyncio.sleep(0.75)
+
+        if not info:
+            return _empty_info_payload()
+
         # Extract format qualitites
         formats = set()
         for fmt in info.get("formats", []):
@@ -341,28 +510,24 @@ def api_info(url: str):
             "view_count": info.get("view_count"),
             "formats": sorted(list(formats))[:5],
         }
-    except Exception as e:
-        return JSONResponse(
-            status_code=400,
-            content={"detail": f"Failed to fetch info: {str(e)}"}
-        )
+    except asyncio.TimeoutError:
+        return _empty_info_payload()
+    except Exception:
+        return _empty_info_payload()
 
 
 @app.get("/api/settings")
-def api_get_settings(request: Request):
+def api_get_settings(user: str = Depends(require_session)):
     """Get all settings."""
-    if not _current_user(request):
-        return JSONResponse(status_code=401, content={"detail": "Authentication required"})
-    
+    _ = user
     settings = get_settings()
     return settings
 
 
 @app.post("/api/settings")
-async def api_set_settings(request: Request):
+async def api_set_settings(request: Request, user: str = Depends(require_session)):
     """Update settings (admin only - user is already admin via login)."""
-    if not _current_user(request):
-        return JSONResponse(status_code=401, content={"detail": "Authentication required"})
+    _ = user
     
     try:
         payload = await request.json()
@@ -379,11 +544,6 @@ async def api_set_settings(request: Request):
             return JSONResponse(status_code=400, content={"detail": str(e)})
     
     if "admin_password" in payload and payload["admin_password"]:
-        # Validate password length (but don't store it - requires app restart)
-        new_pass = str(payload["admin_password"]).strip()
-        if len(new_pass) < 8:
-            return JSONResponse(status_code=400, content={"detail": "Password must be at least 8 characters"})
-        # Note: To change admin password, update TUBEYOU_ADMIN_PASSWORD env var and restart app
         return JSONResponse(status_code=400, content={"detail": "Admin password cannot be changed via settings. Update TUBEYOU_ADMIN_PASSWORD environment variable and restart the app."})
     
     # Update settings
@@ -394,7 +554,9 @@ async def api_set_settings(request: Request):
         if "login_required" in payload:
             settings_to_update["login_required"] = payload["login_required"]
         if "lalalaai_api_key" in payload:
-            settings_to_update["lalalaai_api_key"] = payload["lalalaai_api_key"]
+            lalalaai_api_key = str(payload["lalalaai_api_key"]).strip()
+            if lalalaai_api_key:
+                settings_to_update["lalalaai_api_key"] = lalalaai_api_key
         
         if settings_to_update:
             set_settings(settings_to_update)
@@ -407,7 +569,7 @@ async def api_set_settings(request: Request):
 @app.get("/settings", response_class=HTMLResponse)
 def settings_page(request: Request):
     """Settings page."""
-    if not _current_user(request):
+    if not _read_session(request.cookies.get(_SESSION_COOKIE)):
         return RedirectResponse(url="/login", status_code=303)
     
     settings = get_settings()
@@ -459,7 +621,13 @@ async def login(request: Request):
 @app.post("/logout")
 def logout(request: Request):
     resp = JSONResponse(content={"ok": True})
-    resp.delete_cookie(_SESSION_COOKIE)
+    resp.delete_cookie(
+        _SESSION_COOKIE,
+        path="/",
+        secure=request.url.scheme == "https",
+        httponly=True,
+        samesite="lax",
+    )
     return resp
 
 
@@ -470,28 +638,30 @@ async def api_submit(
     url: str = Form(...),
     type: str = Form(...),
     quality: str = Form(...),
+    user: str = Depends(require_user),
 ):
-    if not _current_user(request):
-        return JSONResponse(status_code=401, content={"detail": "Authentication required"})
+    _ = (request, user)
     
     # Validate YouTube URL
     is_valid, error_msg = _validate_youtube_url(url)
     if not is_valid:
         return JSONResponse(status_code=400, content={"detail": error_msg})
+
+    meta = await asyncio.to_thread(_extract_video_meta, url.strip())
     
     job_id = str(uuid.uuid4())
-    insert_job(job_id, url.strip(), type, quality, "queued")
+    insert_job(
+        job_id,
+        url.strip(),
+        type,
+        quality,
+        "queued",
+        video_title=meta["video_title"] if isinstance(meta, dict) else None,
+        video_meta_hover=meta["video_meta_hover"] if isinstance(meta, dict) else None,
+    )
     await asyncio.to_thread(job_queue.put, (job_id, url.strip(), type, quality))
     job = get_job(job_id)
-    return {
-        "id": job["id"],
-        "url": job["url"],
-        "type": job["type"],
-        "quality": job["quality"],
-        "status": job["status"],
-        "created_at": job["created_at"],
-        "filesize_bytes": job["filesize_bytes"],
-    }
+    return _job_to_dict(job)
 
 
 @app.get("/job/{job_id}", response_class=HTMLResponse)
@@ -563,7 +733,7 @@ def thumbnail(request: Request, job_id: str):
 
 @app.websocket("/ws")
 async def ws_status(websocket: WebSocket):
-    if not _read_session(websocket.cookies.get(_SESSION_COOKIE)):
+    if not _authenticated_user(websocket.cookies.get(_SESSION_COOKIE)):
         await websocket.close(code=1008)
         return
     await websocket.accept()

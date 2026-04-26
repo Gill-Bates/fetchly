@@ -185,6 +185,42 @@ body {
     border-color: #4c5198;
 }
 
+/* ── Settings Page ──────────────────────────────────────────────────────── */
+
+.settings-card .settings-section {
+    padding: 0 0 0.5rem;
+}
+
+.settings-card .settings-section + .settings-section {
+    margin-top: 1.25rem;
+    padding-top: 1.1rem;
+    border-top: 1px solid var(--border);
+}
+
+.settings-card .settings-section-title {
+    margin: 0 0 0.9rem;
+    font-size: 0.82rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--text-muted);
+}
+
+.settings-card .form-check-label {
+    color: var(--text);
+}
+
+.settings-card .setting-hint {
+    display: block;
+    margin-top: 0.35rem;
+    color: #cbd5e1;
+    font-size: 0.86rem;
+}
+
+.settings-card .settings-plaintext {
+    color: var(--text);
+}
+
 /* ── Video Preview Grid ──────────────────────────────────────────────────── */
 
 .video-preview-grid {
@@ -295,6 +331,28 @@ body {
 
 .table tbody tr.row-error {
     background: color-mix(in srgb, var(--danger) 8%, transparent);
+}
+
+/* ── Jobs Card Bounds ───────────────────────────────────────────────────── */
+
+#jobsCard {
+    display: flex;
+    flex-direction: column;
+}
+
+#jobsCard .card-body {
+    min-height: 0;
+}
+
+#jobsCard .table-responsive {
+    max-height: min(62vh, 720px);
+    overflow-y: auto;
+}
+
+#jobsCard .table thead th {
+    position: sticky;
+    top: 0;
+    z-index: 2;
 }
 
 /* ── Status ──────────────────────────────────────────────────────────────── */
@@ -488,6 +546,10 @@ body {
 
     .video-preview-grid {
         grid-template-columns: 1fr;
+    }
+
+    #jobsCard .table-responsive {
+        max-height: min(56vh, 560px);
     }
 
     .meta-row {

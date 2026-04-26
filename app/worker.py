@@ -11,6 +11,8 @@ import os
 import queue
 import subprocess
 import threading
+import json
+import re
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -33,6 +35,14 @@ _worker_threads: list[threading.Thread] = []
 
 _TIMEOUT_DOWNLOAD = int(os.environ.get("WORKER_TIMEOUT_DL", "3600"))
 _TIMEOUT_TRANSCODE = int(os.environ.get("WORKER_TIMEOUT_TC", "7200"))
+
+
+_QUALITY_LABELS = {
+    "max": "maxQuality",
+    "medium": "mediumQuality",
+    "small": "smallQuality",
+    "best": "bestQuality",
+}
 
 
 def _now_iso() -> str:
@@ -82,11 +92,57 @@ def _run_cmd(cmd: list[str], *, timeout: int) -> None:
         raise RuntimeError(f"Command failed: {exc.returncode}") from exc
 
 
+def _run_cmd_capture(cmd: list[str], *, timeout: int) -> str:
+    logger.debug("Executing command (capture): %s", " ".join(cmd))
+    try:
+        result = subprocess.run(
+            cmd,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as exc:
+        logger.error("Command timed out after %ss: %s", timeout, " ".join(cmd))
+        raise RuntimeError(f"Command timed out after {timeout}s") from exc
+    except subprocess.CalledProcessError as exc:
+        stderr = (exc.stderr or "").strip()
+        if stderr:
+            logger.error("Command failed (rc=%s): %s | stderr: %s", exc.returncode, " ".join(cmd), stderr)
+        else:
+            logger.error("Command failed (rc=%s): %s", exc.returncode, " ".join(cmd))
+        raise RuntimeError(f"Command failed: {exc.returncode}") from exc
+    return result.stdout
+
+
+def _sanitize_filename(name: str, max_len: int = 120) -> str:
+    cleaned = re.sub(r"[\\/:*?\"<>|]", "_", (name or "").strip())
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" .")
+    if not cleaned:
+        cleaned = "video"
+    return cleaned[:max_len].rstrip(" .") or "video"
+
+
+def _quality_label(quality: str) -> str:
+    return _QUALITY_LABELS.get((quality or "").lower(), f"{quality}Quality" if quality else "defaultQuality")
+
+
+def _build_output_stem(url: str, quality: str) -> str:
+    try:
+        title_raw = _run_cmd_capture(["yt-dlp", "--no-playlist", "--get-title", url], timeout=120).strip()
+    except Exception as exc:
+        logger.warning("Could not fetch video title, using fallback filename: %s", exc)
+        title_raw = "video"
+    title = _sanitize_filename(title_raw)
+    return f"{title} ({_quality_label(quality)})"
+
+
 def _download_audio(job_id: str, url: str) -> Path:
     job_dir = BASE_DIR / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
-    
-    out = job_dir / "audio.mp3"
+
+    stem = _build_output_stem(url, "best")
+    out = job_dir / f"{stem}.mp3"
     cmd = [
         "yt-dlp",
         "-f",
@@ -100,7 +156,7 @@ def _download_audio(job_id: str, url: str) -> Path:
         "--convert-thumbnails",
         "jpg",
         "-o",
-        str(job_dir / "audio.%(ext)s"),
+        str(job_dir / f"{stem}.%(ext)s"),
         url,
     ]
     _run_cmd(cmd, timeout=_TIMEOUT_DOWNLOAD)
@@ -117,8 +173,9 @@ def _download_audio(job_id: str, url: str) -> Path:
 def _download_best(job_id: str, url: str) -> Path:
     job_dir = BASE_DIR / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
-    
-    out = job_dir / "video.mp4"
+
+    stem = _build_output_stem(url, "max")
+    out = job_dir / f"{stem}.mp4"
     cmd = [
         "yt-dlp",
         "-f",
@@ -129,7 +186,7 @@ def _download_best(job_id: str, url: str) -> Path:
         "--convert-thumbnails",
         "jpg",
         "-o",
-        str(job_dir / "video.%(ext)s"),
+        str(job_dir / f"{stem}.%(ext)s"),
         url,
     ]
     _run_cmd(cmd, timeout=_TIMEOUT_DOWNLOAD)
@@ -146,9 +203,10 @@ def _download_best(job_id: str, url: str) -> Path:
 def _download_and_transcode(job_id: str, url: str, quality: str) -> Path:
     job_dir = BASE_DIR / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
-    
-    temp = job_dir / "source.mp4"
-    out = job_dir / "video.mp4"
+
+    stem = _build_output_stem(url, quality)
+    temp = job_dir / f"{stem}.source.mp4"
+    out = job_dir / f"{stem}.mp4"
 
     _emit(job_id, "downloading", "Downloading source for transcoding")
     _run_cmd(
@@ -162,7 +220,7 @@ def _download_and_transcode(job_id: str, url: str, quality: str) -> Path:
             "--convert-thumbnails",
             "jpg",
             "-o",
-            str(job_dir / "source.%(ext)s"),
+            str(job_dir / f"{stem}.source.%(ext)s"),
             url,
         ],
         timeout=_TIMEOUT_DOWNLOAD,
@@ -214,6 +272,68 @@ def _get_filesize(path: Path) -> int | None:
         return None
 
 
+def _title_from_output_name(path: Path) -> str | None:
+    stem = path.stem
+    title = re.sub(r"\s\((?:max|medium|small|best|default|\w+)Quality\)$", "", stem)
+    title = title.replace(".source", "").strip()
+    return title or None
+
+
+def _probe_media(path: Path, media_type: str) -> tuple[str | None, int | None, int | None]:
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-show_entries",
+        "stream=codec_type,codec_name,bit_rate:format=bit_rate,duration",
+        "-of",
+        "json",
+        str(path),
+    ]
+    try:
+        result = subprocess.run(
+            cmd,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        data = json.loads(result.stdout or "{}")
+    except Exception as exc:
+        logger.warning("ffprobe failed for %s: %s", path, exc)
+        return None, None, None
+
+    streams = data.get("streams", [])
+    target_kind = "audio" if media_type == "audio" else "video"
+    selected_stream = next(
+        (s for s in streams if s.get("codec_type") == target_kind),
+        None,
+    )
+
+    codec = (selected_stream or {}).get("codec_name")
+
+    bitrate_raw = (selected_stream or {}).get("bit_rate")
+    if not bitrate_raw:
+        bitrate_raw = (data.get("format") or {}).get("bit_rate")
+
+    bitrate_kbps: int | None = None
+    try:
+        if bitrate_raw is not None:
+            bitrate_kbps = max(1, int(int(bitrate_raw) / 1000))
+    except (TypeError, ValueError):
+        bitrate_kbps = None
+
+    duration_seconds: int | None = None
+    try:
+        duration_raw = (data.get("format") or {}).get("duration")
+        if duration_raw is not None:
+            duration_seconds = max(1, int(float(duration_raw)))
+    except (TypeError, ValueError):
+        duration_seconds = None
+
+    return codec, bitrate_kbps, duration_seconds
+
+
 def process_job(job: tuple[str, str, str, str]) -> None:
     job_id, url, type_, quality = job
 
@@ -228,6 +348,8 @@ def process_job(job: tuple[str, str, str, str]) -> None:
             out_path = _download_and_transcode(job_id, url, quality)
 
         filesize_bytes = _get_filesize(out_path)
+        codec, bitrate_kbps, duration_seconds = _probe_media(out_path, type_)
+        video_title = _title_from_output_name(out_path)
 
         update_job(
             job_id,
@@ -235,8 +357,21 @@ def process_job(job: tuple[str, str, str, str]) -> None:
             filename=str(out_path),
             finished_at=_now_iso(),
             filesize_bytes=filesize_bytes,
+            codec=codec,
+            bitrate_kbps=bitrate_kbps,
+            duration_seconds=duration_seconds,
+            video_title=video_title,
         )
-        _emit(job_id, "done", "Finished", filesize_bytes=filesize_bytes)
+        _emit(
+            job_id,
+            "done",
+            "Finished",
+            filesize_bytes=filesize_bytes,
+            codec=codec,
+            bitrate_kbps=bitrate_kbps,
+            duration_seconds=duration_seconds,
+            video_title=video_title,
+        )
 
     except InterruptedError:
         # Graceful shutdown - don't mark as error, just abort silently
