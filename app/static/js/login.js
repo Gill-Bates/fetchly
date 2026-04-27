@@ -20,8 +20,11 @@
         return;
     }
 
+    /** @type {HTMLMetaElement | null} */
+    const csrfMeta = document.querySelector('meta[name="csrf-token"]');
+
     function csrfToken() {
-        return document.querySelector('meta[name="csrf-token"]')?.content ?? "";
+        return csrfMeta?.content ?? "";
     }
 
     function setError(msg) {
@@ -35,6 +38,15 @@
             alertEl.classList.add("d-none");
             alertEl.textContent = "";
         }
+    }
+
+    /**
+     * Prevent open redirects to external hosts or javascript: schemes.
+     * @param {unknown} url
+     * @returns {boolean}
+     */
+    function isLocalRedirect(url) {
+        return typeof url === "string" && url.startsWith("/") && !url.startsWith("//");
     }
 
     async function submitLogin(event) {
@@ -76,24 +88,23 @@
                 signal: controller.signal,
             });
 
-            clearTimeout(timeoutId);
-
             let data = {};
             const contentType = response.headers.get("content-type") || "";
             if (contentType.includes("application/json")) {
                 data = await response.json();
             }
 
-            if (!response.ok || !data.ok) {
+            // Fail on HTTP error OR explicitly marked failure only.
+            if (!response.ok || data.ok === false) {
                 setError(data.detail || "Login failed.");
                 passwordIn?.focus();
                 return;
             }
 
             success = true;
-            window.location.assign(data.redirect || "/");
+            const redirect = isLocalRedirect(data.redirect) ? data.redirect : "/";
+            window.location.assign(redirect);
         } catch (err) {
-            clearTimeout(timeoutId);
             if (err?.name === "AbortError") {
                 setError("Timeout. Server not responding.");
             } else {
@@ -101,9 +112,13 @@
             }
             console.error("Login error:", err);
         } finally {
+            clearTimeout(timeoutId);
             if (!success) {
                 submitBtn.disabled = false;
                 submitBtn.textContent = originalText;
+                if (passwordIn) {
+                    passwordIn.value = "";
+                }
             }
         }
     }

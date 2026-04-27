@@ -1,5 +1,16 @@
 {% if job["status"] == "done" %}
-<a class="btn btn-download btn-sm" href="/download/{{ job["id"] }}" title="Download" aria-label="Download"><span class="material-symbols-outlined icon-inline">download</span></a>
+<div class="d-flex gap-1 align-items-center">
+    <a class="btn btn-download btn-sm" href="/download/{{ job["id"] }}" title="Download" aria-label="Download"><span class="material-symbols-outlined icon-inline">download</span></a>
+    {% if job["type"] == "audio" and lalal_enabled %}
+    <button class="btn btn-sm btn-outline-info btn-lalal" type="button" data-action="lalal-split" data-job-id="{{ job["id"] }}" data-stem="instrumental" title="Download Instrumental"><span class="material-symbols-outlined icon-inline">music_off</span></button>
+    <button class="btn btn-sm btn-outline-warning btn-lalal" type="button" data-action="lalal-split" data-job-id="{{ job["id"] }}" data-stem="vocals" title="Download A Cappella"><span class="material-symbols-outlined icon-inline">mic</span></button>
+    {% endif %}
+</div>
+{% elif job["status"] in ("queued", "processing", "downloading", "transcoding") %}
+<div class="d-flex gap-1 align-items-center">
+    <button class="btn btn-cancel btn-sm btn-outline-danger" type="button" data-action="cancel-job" data-job-id="{{ job["id"] }}" title="Cancel" aria-label="Cancel"><span class="material-symbols-outlined icon-inline">cancel</span></button>
+    <button class="btn btn-details btn-sm btn-outline-secondary" type="button" data-action="open-detail" data-job-id="{{ job["id"] }}" title="Details" aria-label="Details"><span class="material-symbols-outlined icon-inline">info</span></button>
+</div>
 {% else %}
 <button class="btn btn-details btn-sm btn-outline-secondary" type="button" data-action="open-detail" data-job-id="{{ job["id"] }}" title="Details" aria-label="Details"><span class="material-symbols-outlined icon-inline">info</span></button>
 {% endif %}

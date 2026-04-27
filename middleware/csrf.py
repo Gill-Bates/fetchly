@@ -8,111 +8,149 @@
 
 from __future__ import annotations
 
-import hmac
+import re
 import secrets
 from collections.abc import Awaitable, Callable
-from hashlib import sha256
 
-from fastapi import Request, Response
+from fastapi import Request
 from fastapi.responses import JSONResponse
 from starlette.datastructures import MutableHeaders
 from starlette.types import ASGIApp
 
-SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
+SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+# Characters that must not appear in a cookie name per RFC 6265.
+_BAD_COOKIE_NAME_CHARS = re.compile(r'[;=\s]')
 
 
-def generate_csrf_token(secret_key: str, session_nonce: str) -> str:
-    """Generate deterministic CSRF token bound to secret key and session nonce."""
-    key_bytes = secret_key.encode("utf-8")
-    msg_bytes = f"csrf:{session_nonce}".encode("utf-8")
-    return hmac.new(key_bytes, msg_bytes, sha256).hexdigest()
+def generate_csrf_token() -> str:
+    """Return a random token suitable for double-submit cookie CSRF protection."""
+    return secrets.token_urlsafe(32)
 
 
 class CSRFMiddleware:
-    """Double-submit CSRF middleware for selected state-changing routes."""
+    """Double-submit cookie CSRF middleware for selected state-changing routes."""
+
+    _COOKIE_MAX_AGE = 3600
+    _COOKIE_SAMESITE = "lax"
+    _COOKIE_PATH = "/"
 
     def __init__(
         self,
         app: ASGIApp,
-        secret_key: str,
         *,
         csrf_cookie_name: str = "tubeyou_csrf",
         protected_paths: tuple[str, ...] = ("/login", "/logout", "/api/submit"),
     ) -> None:
         self.app = app
-        self._secret_key = secret_key
         self._csrf_cookie_name = csrf_cookie_name
         self._protected_paths = protected_paths
+
+        if _BAD_COOKIE_NAME_CHARS.search(csrf_cookie_name):
+            raise ValueError("csrf_cookie_name contains illegal characters")
+
+        for p in protected_paths:
+            if not p.startswith("/"):
+                raise ValueError(f"protected_paths must start with '/': {p}")
 
     def _path_protected(self, path: str) -> bool:
         return any(path == p or path.startswith(p + "/") for p in self._protected_paths)
 
-    async def __call__(self, scope: dict, receive: Callable[[], Awaitable[dict]], send: Callable[[dict], Awaitable[None]]) -> None:
+    async def _reject(
+        self,
+        detail: str,
+        *,
+        scope: dict,
+        receive: Callable[[], Awaitable[dict]],
+        send: Callable[[dict], Awaitable[None]],
+        set_cookie_value: str | None = None,
+        secure: bool = False,
+    ) -> None:
+        """Return a 403 JSON response, optionally setting the CSRF cookie."""
+        response = JSONResponse(status_code=403, content={"detail": detail})
+        if set_cookie_value is not None:
+            response.set_cookie(
+                key=self._csrf_cookie_name,
+                value=set_cookie_value,
+                path=self._COOKIE_PATH,
+                max_age=self._COOKIE_MAX_AGE,
+                httponly=False,
+                secure=secure,
+                samesite=self._COOKIE_SAMESITE,  # type: ignore[arg-type]
+            )
+        await response(scope, receive, send)
+
+    def _cookie_header(self, value: str, *, secure: bool) -> str:
+        """Serialize the CSRF cookie for direct header injection."""
+        parts = [
+            f"{self._csrf_cookie_name}={value}",
+            f"Max-Age={self._COOKIE_MAX_AGE}",
+            f"Path={self._COOKIE_PATH}",
+            f"SameSite={self._COOKIE_SAMESITE.capitalize()}",
+        ]
+        if secure:
+            parts.append("Secure")
+        # Intentionally omit HttpOnly so JavaScript can read the token.
+        return "; ".join(parts)
+
+    async def __call__(
+        self,
+        scope: dict,
+        receive: Callable[[], Awaitable[dict]],
+        send: Callable[[dict], Awaitable[None]],
+    ) -> None:
         if scope.get("type") != "http":
             await self.app(scope, receive, send)
             return
 
         request = Request(scope, receive=receive)
         csrf_cookie = request.cookies.get(self._csrf_cookie_name)
-        new_cookie = False
+        is_new_cookie = False
 
         if not csrf_cookie:
-            nonce = secrets.token_urlsafe(24)
-            csrf_cookie = generate_csrf_token(self._secret_key, nonce)
-            new_cookie = True
+            csrf_cookie = generate_csrf_token()
+            is_new_cookie = True
 
+        # Expose the current token to downstream handlers (e.g., for HTML meta tags).
         scope.setdefault("state", {})["csrf_token"] = csrf_cookie
 
-        if request.method not in SAFE_METHODS and self._path_protected(request.url.path):
+        method = request.method
+        path = request.url.path
+        secure = request.url.scheme == "https"
+
+        if method not in SAFE_METHODS and self._path_protected(path):
             sent_token = request.headers.get("X-CSRF-Token")
             if not sent_token:
-                response = JSONResponse(
-                    status_code=403,
-                    content={"detail": "Missing CSRF token"},
+                await self._reject(
+                    "Missing CSRF token",
+                    scope=scope,
+                    receive=receive,
+                    send=send,
+                    set_cookie_value=csrf_cookie if is_new_cookie else None,
+                    secure=secure,
                 )
-                if new_cookie:
-                    response.set_cookie(
-                        key=self._csrf_cookie_name,
-                        value=csrf_cookie,
-                        httponly=False,
-                        secure=request.url.scheme == "https",
-                        samesite="lax",
-                        max_age=3600,
-                    )
-                await response(scope, receive, send)
                 return
+
             if not secrets.compare_digest(csrf_cookie, sent_token):
-                response = JSONResponse(
-                    status_code=403,
-                    content={"detail": "Invalid CSRF token"},
+                await self._reject(
+                    "Invalid CSRF token",
+                    scope=scope,
+                    receive=receive,
+                    send=send,
+                    set_cookie_value=csrf_cookie if is_new_cookie else None,
+                    secure=secure,
                 )
-                if new_cookie:
-                    response.set_cookie(
-                        key=self._csrf_cookie_name,
-                        value=csrf_cookie,
-                        httponly=False,
-                        secure=request.url.scheme == "https",
-                        samesite="lax",
-                        max_age=3600,
-                    )
-                await response(scope, receive, send)
                 return
 
         async def send_wrapper(message: dict) -> None:
-            if new_cookie and message.get("type") == "http.response.start":
-                headers = MutableHeaders(scope=message)
-                temp = Response()
-                temp.set_cookie(
-                    key=self._csrf_cookie_name,
-                    value=csrf_cookie,
-                    httponly=False,
-                    secure=request.url.scheme == "https",
-                    samesite="lax",
-                    max_age=3600,
-                )
-                for name, value in temp.raw_headers:
-                    if name == b"set-cookie":
-                        headers.append("set-cookie", value.decode("latin-1"))
+            if is_new_cookie and message.get("type") == "http.response.start":
+                status = message.get("status", 200)
+                if status not in (204, 304, 205):
+                    headers = MutableHeaders(scope=message)
+                    headers.append(
+                        "set-cookie",
+                        self._cookie_header(csrf_cookie, secure=secure),
+                    )
             await send(message)
 
         await self.app(scope, receive, send_wrapper)

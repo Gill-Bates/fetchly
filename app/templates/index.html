@@ -14,10 +14,10 @@
     <div class="container">
         <a class="navbar-brand fw-bold" href="/">tubeyou</a>
         <div class="ms-auto d-flex align-items-center gap-2">
-            <a href="/settings" class="btn btn-sm btn-outline-light" title="Settings">
+            <a id="settingsBtn" href="/settings" class="btn btn-sm btn-outline-light" title="Settings">
                 <span class="material-symbols-outlined" style="font-size: 18px;">settings</span>
             </a>
-            <button id="logoutBtn" class="btn btn-sm btn-outline-light" type="button">Logout</button>
+            <a id="logoutBtn" href="/logout" class="btn btn-sm btn-outline-light" role="button">Logout</a>
         </div>
     </div>
 </nav>
@@ -38,7 +38,7 @@
         </div>
         <div class="col-12 col-md-4">
             <div class="card stat-card">
-                <div class="stat-value">{{ (stats.total_bytes / 1048576) | round(1) }} MB</div>
+                <div class="stat-value">{{ stats.total_bytes | filesize }}</div>
                 <div class="stat-label">Download traffic</div>
             </div>
         </div>
@@ -131,10 +131,10 @@
                     </thead>
                     <tbody id="jobsTbody">
                         {% for job in jobs %}
-                        <tr data-job-id="{{ job["id"] }}" data-url="{{ job["url"] }}" data-status="{{ job["status"] }}" data-size-bytes="{{ job["filesize_bytes"] or '' }}" class="{% if job["status"] == 'done' %}row-done{% elif job["status"] == 'error' %}row-error{% endif %}">
+                        <tr data-job-id="{{ job["id"] }}" data-url="{{ job["url"] }}" data-status="{{ job["status"] }}" data-type="{{ job["type"] }}" data-size-bytes="{{ job["filesize_bytes"] or '' }}" class="{% if job["status"] == 'done' %}row-done{% elif job["status"] == 'error' %}row-error{% endif %}">
                             <td data-label="Titel" class="text-truncate" style="max-width:220px" title="{{ job["video_meta_hover"] or job["url"] }}">{{ job["video_title"] or job["url"] }}</td>
                             <td data-label="Format">{{ job["type"] }}</td>
-                            <td data-label="Quality">{{ job["quality"] }}</td>
+                            <td data-label="Quality">{% if job["type"] == "audio" %}MP3{% else %}{{ job["quality"] }}{% endif %}</td>
                             <td data-label="Codec">{{ job["codec"] or "-" }}</td>
                             <td data-label="Bitrate">{% if job["bitrate_kbps"] %}{{ job["bitrate_kbps"] }} kbps{% else %}-{% endif %}</td>
                             <td data-label="Status">{{ status.status_badge(job) }}</td>
@@ -182,6 +182,24 @@
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+    window.lalalEnabled = {{ lalal_enabled | tojson }};
+</script>
 <script type="module" src="/static/js/main.js"></script>
+<footer class="wb-footer">
+    <span class="wb-footer-content">
+        tubeyou v{{ VERSION }}
+        &middot;&nbsp;&copy;&nbsp;{{ now().year }}&nbsp;Gill-Bates
+        &middot;&nbsp;
+        <a href="https://github.com/Gill-Bates/tubeyou"
+           target="_blank" rel="noopener noreferrer"
+           class="wb-footer-link">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" class="wb-footer-link-icon" aria-hidden="true">
+                <path fill-rule="evenodd" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"></path>
+            </svg>
+            GitHub
+        </a>
+    </span>
+</footer>
 </body>
 </html>

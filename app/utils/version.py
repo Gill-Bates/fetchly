@@ -8,33 +8,56 @@
 
 from __future__ import annotations
 
+import logging
 from functools import lru_cache
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+logger = logging.getLogger(__name__)
+
+# Pure path arithmetic – no I/O occurs here.
+_PROJECT_ROOT = Path(__file__).absolute().parent.parent.parent
+
+
+def _read_file(name: str) -> str | None:
+    """Read *name* from the project root. Return None if missing or unreadable."""
+    try:
+        return (_PROJECT_ROOT / name).read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeDecodeError) as e:
+        logger.debug("Unable to read %s from %s: %s", name, _PROJECT_ROOT, e)
+        return None
 
 
 @lru_cache(maxsize=1)
 def get_version() -> str:
-    """Get application version from VERSION file. Falls back to 'dev'."""
-    try:
-        version_file = Path(__file__).resolve().parent.parent.parent / "VERSION"
-        if version_file.exists():
-            return version_file.read_text(encoding="utf-8").strip() or "dev"
-    except Exception:
-        pass
-    return "dev"
+    """Return application version from the VERSION file, or 'dev'."""
+    return _read_file("VERSION") or "dev"
 
 
 @lru_cache(maxsize=1)
 def get_build_info() -> str:
-    """Get build info (Git commit hash) from BUILD_INFO file. Falls back to 'dev'."""
-    try:
-        build_file = Path(__file__).resolve().parent.parent.parent / "BUILD_INFO"
-        if build_file.exists():
-            return build_file.read_text(encoding="utf-8").strip() or "dev"
-    except Exception:
-        pass
-    return "dev"
+    """Return build info from the BUILD_INFO file, or 'dev'."""
+    return _read_file("BUILD_INFO") or "dev"
 
 
-VERSION = get_version()
-BUILD_INFO = get_build_info()
+# --------------------------------------------------------------------------- #
+# Lazy module-level constants – I/O is deferred until first attribute access.
+# --------------------------------------------------------------------------- #
+def __getattr__(name: str) -> str:
+    """Lazy-load VERSION and BUILD_INFO on first access."""
+    if name == "VERSION":
+        return get_version()
+    if name == "BUILD_INFO":
+        return get_build_info()
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def __dir__() -> list[str]:
+    """Include lazy attributes in dir() output."""
+    return sorted({*globals(), "VERSION", "BUILD_INFO"})
+
+
+# Type-checker stubs so that `version.VERSION` is known to be `str`.
+if TYPE_CHECKING:
+    VERSION: str
+    BUILD_INFO: str

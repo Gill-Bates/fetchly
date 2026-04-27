@@ -4,10 +4,21 @@
 //
 
 import { CONFIG } from "./config.js";
-import { fetchJobs, submitJob, fetchVideoInfo } from "./api.js";
+import * as api from "./api.js";
 import { getCookie, isValidYouTubeUrl, extractYouTubeVideoId, formatDuration } from "./utils.js";
 import { prependJob, loadMore } from "./jobs.js";
 import { connectWS } from "./ws.js";
+
+const { fetchJobs, submitJob, fetchVideoInfo } = api;
+const toErrorMessage = typeof api.toErrorMessage === "function"
+    ? api.toErrorMessage
+    : (value) => {
+        if (value == null) return "";
+        if (typeof value === "string") return value;
+        if (typeof value?.detail === "string") return value.detail;
+        if (typeof value?.error === "string") return value.error;
+        return String(value);
+    };
 
 const submitForm = document.getElementById("submitForm");
 const urlInput = document.getElementById("urlInput");
@@ -26,8 +37,11 @@ const btnText = document.getElementById("btnText");
 const formError = document.getElementById("formError");
 const detailModalEl = document.getElementById("detailModal");
 const logoutBtn = document.getElementById("logoutBtn");
+const settingsBtn = document.getElementById("settingsBtn");
 
-const detailModal = detailModalEl ? bootstrap.Modal.getOrCreateInstance(detailModalEl) : null;
+const detailModal = (typeof bootstrap !== "undefined" && detailModalEl)
+    ? bootstrap.Modal.getOrCreateInstance(detailModalEl)
+    : null;
 const defaultQualityHtml = qualitySelect ? qualitySelect.innerHTML : "";
 
 let activeDetailId = null;
@@ -35,6 +49,7 @@ let lastFocusedBeforeModal = null;
 let ticking = false;
 let previewDebounceId = null;
 let previewRequestSeq = 0;
+let previewAbortController = null;
 
 function setError(message) {
     if (!formError) return;
@@ -104,25 +119,39 @@ function setSubmitBusy(isBusy) {
 function updateQualityOptions(formats) {
     if (!qualitySelect) return;
 
+    // For audio, keep default quality options (quality is ignored for audio anyway)
+    if (typeSelect?.value === "audio") {
+        resetQualityOptions();
+        return;
+    }
+
     qualitySelect.replaceChildren();
     if (!Array.isArray(formats) || formats.length === 0) {
         resetQualityOptions();
         return;
     }
 
-    for (const format of formats) {
-        const option = document.createElement("option");
-        option.value = format.toLowerCase().replace(/[^\w]/g, "");
-        option.textContent = format;
-        qualitySelect.appendChild(option);
-    }
+    // Map YouTube format notes to our quality values
+    const qualityMap = [
+        { label: "Max (best available)", value: "max" },
+        { label: "720p", value: "medium" },
+        { label: "480p", value: "small" },
+    ];
 
-    if (typeSelect?.value === "audio") {
-        qualitySelect.selectedIndex = 0;
+    const fragment = document.createDocumentFragment();
+    for (const q of qualityMap) {
+        const option = document.createElement("option");
+        option.value = q.value;
+        option.textContent = q.label;
+        fragment.appendChild(option);
     }
+    qualitySelect.appendChild(fragment);
 }
 
 async function updateVideoPreview() {
+    previewAbortController?.abort();
+    previewAbortController = new AbortController();
+
     const requestSeq = ++previewRequestSeq;
     const url = urlInput?.value.trim() || "";
     hideVideoPreview();
@@ -137,11 +166,11 @@ async function updateVideoPreview() {
     }
 
     const image = document.createElement("img");
-    image.src = `https://img.youtube.com/vi/${videoId}/hqdefault.jpg`;
+    image.src = `https://img.youtube.com/vi/${encodeURIComponent(videoId)}/hqdefault.jpg`;
     image.alt = "Video Thumbnail";
     image.addEventListener("error", () => {
         hideVideoPreview();
-    });
+    }, { once: true });
 
     thumbnailPreview?.replaceChildren(image);
     showVideoPreview();
@@ -149,7 +178,7 @@ async function updateVideoPreview() {
     if (metaFormats) metaFormats.textContent = "Loading...";
 
     try {
-        const info = await fetchVideoInfo(url);
+        const info = await fetchVideoInfo(url, { signal: previewAbortController.signal });
         if (requestSeq !== previewRequestSeq) {
             return;
         }
@@ -160,7 +189,10 @@ async function updateVideoPreview() {
         if (metaViews) metaViews.textContent = info.view_count?.toLocaleString() || "–";
         if (metaFormats) metaFormats.textContent = (info.formats || []).slice(0, 5).join(", ") || "–";
         updateQualityOptions(info.formats || []);
-    } catch {
+    } catch (error) {
+        if (error?.name === "AbortError") {
+            return;
+        }
         if (requestSeq !== previewRequestSeq) {
             return;
         }
@@ -183,7 +215,7 @@ function scheduleVideoPreviewUpdate() {
 function openDetail(jobId) {
     if (!detailModalEl || !detailModal) return;
 
-    const row = document.querySelector(`tr[data-job-id="${jobId}"]`);
+    const row = document.querySelector(`tr[data-job-id="${CSS.escape(jobId)}"]`);
     if (!row) return;
 
     const cells = row.querySelectorAll("td");
@@ -199,7 +231,7 @@ function openDetail(jobId) {
 
     const downloadBtn = document.getElementById("mDownloadBtn");
     if (downloadBtn) {
-        downloadBtn.href = `/download/${jobId}`;
+        downloadBtn.href = `/download/${encodeURIComponent(jobId)}`;
         downloadBtn.classList.toggle("d-none", statusValue !== "done");
     }
 
@@ -262,10 +294,17 @@ submitForm?.addEventListener("submit", async (event) => {
     setSubmitBusy(true);
 
     try {
-        const job = await submitJob(new FormData(submitForm), getCookie("tubeyou_csrf"));
+        const formData = new FormData(submitForm);
+        // Audio downloads ignore quality selection - always use max (best audio)
+        if (typeSelect?.value === "audio") {
+            formData.set("quality", "max");
+        }
+
+        const job = await submitJob(formData, getCookie("tubeyou_csrf"));
         document.getElementById("emptyRow")?.remove();
         prependJob(job);
         submitForm.reset();
+        typeSelect?.dispatchEvent(new Event("change"));
         hideVideoPreview();
         urlInput?.focus();
     } catch (error) {
@@ -277,16 +316,23 @@ submitForm?.addEventListener("submit", async (event) => {
 
 urlInput?.addEventListener("input", scheduleVideoPreviewUpdate);
 urlInput?.addEventListener("paste", scheduleVideoPreviewUpdate);
-urlInput?.addEventListener("change", () => {
-    void updateVideoPreview();
-});
-urlInput?.addEventListener("blur", () => {
-    void updateVideoPreview();
-});
+urlInput?.addEventListener("change", scheduleVideoPreviewUpdate);
 
 typeSelect?.addEventListener("change", () => {
-    if (typeSelect.value === "audio" && qualitySelect && qualitySelect.options.length > 0) {
-        qualitySelect.selectedIndex = 0;
+    if (typeSelect.value === "audio") {
+        // Set quality to "best" (first option) when audio format is selected.
+        if (qualitySelect && qualitySelect.options.length > 0) {
+            qualitySelect.selectedIndex = 0;
+        }
+        // Disable quality select for audio (always use best quality)
+        if (qualitySelect) {
+            qualitySelect.disabled = true;
+        }
+    } else {
+        // Enable quality select for video format
+        if (qualitySelect) {
+            qualitySelect.disabled = false;
+        }
     }
 });
 
@@ -311,11 +357,146 @@ logoutBtn?.addEventListener("click", async () => {
                 "X-CSRF-Token": getCookie("tubeyou_csrf"),
             },
         });
-    } catch {
-        // Continue to the login page even if logout fails.
+    } catch (err) {
+        console.warn("Logout request failed:", err);
     }
 
     window.location.assign("/login");
+});
+
+settingsBtn?.addEventListener("click", (event) => {
+    // Fallback for environments/extensions that interfere with normal anchor navigation.
+    event.preventDefault();
+    window.location.assign("/settings");
+});
+
+// Security helpers
+function isSafeRedirect(url) {
+    if (typeof url !== "string") return false;
+    try {
+        const parsed = new URL(url, window.location.href);
+        return parsed.origin === window.location.origin;
+    } catch {
+        return false;
+    }
+}
+
+async function handleActionPost(btn, url, options = {}) {
+    if (!btn || btn.dataset.loading === "1") {
+        throw new Error("Action already in progress");
+    }
+
+    const originalDisabled = btn.disabled;
+    btn.dataset.loading = "1";
+    btn.disabled = true;
+
+    const spinner = document.createElement("span");
+    spinner.className = "spinner-border spinner-border-sm me-1";
+    spinner.setAttribute("aria-hidden", "true");
+    spinner.dataset.actionSpinner = "1";
+    btn.prepend(spinner);
+
+    try {
+        const response = await fetch(url, {
+            method: "POST",
+            credentials: "same-origin",
+            headers: {
+                "X-CSRF-Token": getCookie("tubeyou_csrf"),
+                ...options.headers,
+            },
+            body: options.body,
+        });
+
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) {
+            throw new Error(toErrorMessage(data.error || data.detail) || `HTTP ${response.status}`);
+        }
+
+        const successIcon = document.createElement("span");
+        successIcon.className = "material-symbols-outlined icon-inline me-1";
+        successIcon.setAttribute("aria-hidden", "true");
+        successIcon.dataset.actionSuccess = "1";
+        successIcon.textContent = "check";
+
+        spinner.remove();
+        btn.prepend(successIcon);
+        setTimeout(() => {
+            successIcon.remove();
+            btn.disabled = originalDisabled;
+            delete btn.dataset.loading;
+        }, 2000);
+
+        return data;
+    } catch (err) {
+        console.error("Action error:", err);
+        setError(`Error: ${err.message}`);
+        spinner.remove();
+        btn.disabled = originalDisabled;
+        delete btn.dataset.loading;
+        throw err;
+    }
+}
+
+// Lalal.ai split handler (delegated event listener)
+document.addEventListener("click", async (e) => {
+    const btn = e.target.closest("[data-action='lalal-split']");
+    if (!btn) return;
+
+    const jobId = btn.dataset.jobId;
+    const stem = btn.dataset.stem;
+
+    if (!jobId || !stem) return;
+
+    // Listen for progress updates during this request
+    let progressText = null;
+    const progressHandler = (event) => {
+        const detail = event.detail;
+        if (detail.job_id === jobId && detail.stem === stem) {
+            if (!progressText) {
+                progressText = document.createElement("span");
+                progressText.className = "ms-1 small";
+                progressText.dataset.lalalProgress = "1";
+                btn.appendChild(progressText);
+            }
+            const stage = detail.stage === "upload" ? "↑" : "⚙";
+            progressText.textContent = `${stage} ${detail.progress}%`;
+        }
+    };
+    document.addEventListener("tubeyou:lalal-progress", progressHandler);
+
+    try {
+        const data = await handleActionPost(
+            btn,
+            `/api/lalal/${encodeURIComponent(jobId)}?stem=${encodeURIComponent(stem)}`,
+        );
+        if (data.download_url && isSafeRedirect(data.download_url)) {
+            window.location.href = data.download_url;
+        }
+    } catch {
+        // Error already surfaced by handleActionPost.
+    } finally {
+        document.removeEventListener("tubeyou:lalal-progress", progressHandler);
+        progressText?.remove();
+    }
+});
+
+// Handle cancel job button clicks
+document.addEventListener("click", async (e) => {
+    const btn = e.target.closest("[data-action='cancel-job']");
+    if (!btn) return;
+
+    const jobId = btn.dataset.jobId;
+    if (!jobId) return;
+
+    if (!confirm("Are you sure you want to cancel this job?")) {
+        return;
+    }
+
+    try {
+        await handleActionPost(btn, `/api/jobs/${encodeURIComponent(jobId)}/cancel`);
+    } catch {
+        // Error already surfaced by handleActionPost.
+    }
 });
 
 connectWS();

@@ -20,6 +20,14 @@ function createCell(label, text) {
     return td;
 }
 
+function getQualityLabel(job) {
+    if (job?.type === "audio") {
+        return "MP3";
+    }
+
+    return job?.quality || "";
+}
+
 function trimRows() {
     if (!hasTable) return;
 
@@ -36,13 +44,14 @@ export function buildRow(job) {
     tr.dataset.jobId = job.id;
     tr.dataset.url = job.url || "";
     tr.dataset.status = job.status || "queued";
+    tr.dataset.type = job.type || "";
     tr.dataset.sizeBytes = job.filesize_bytes ?? "";
 
     if (job.status === "done") tr.classList.add("row-done");
     if (job.status === "error") tr.classList.add("row-error");
 
     const titleCell = document.createElement("td");
-    titleCell.dataset.label = "Titel";
+    titleCell.dataset.label = "Title";
     titleCell.className = "text-truncate";
     titleCell.style.maxWidth = "220px";
     titleCell.title = job.video_meta_hover || job.url || "";
@@ -50,7 +59,7 @@ export function buildRow(job) {
 
     tr.appendChild(titleCell);
     tr.appendChild(createCell("Format", job.type || ""));
-    tr.appendChild(createCell("Quality", job.quality || ""));
+    tr.appendChild(createCell("Quality", getQualityLabel(job)));
     tr.appendChild(createCell("Codec", job.codec || "-"));
     tr.appendChild(createCell("Bitrate", job.bitrate_kbps ? `${job.bitrate_kbps} kbps` : "-"));
 
@@ -67,7 +76,7 @@ export function buildRow(job) {
 
     const actionCell = document.createElement("td");
     actionCell.dataset.label = "Action";
-    actionCell.appendChild(createActionButton(job.id, job.status));
+    actionCell.appendChild(createActionButton(job.id, job.status, job.type));
     tr.appendChild(actionCell);
 
     return tr;
@@ -76,7 +85,7 @@ export function buildRow(job) {
 export function prependJob(job) {
     if (!hasTable) return;
 
-    const existing = tbody.querySelector(`tr[data-job-id="${job.id}"]`);
+    const existing = tbody.querySelector(`tr[data-job-id="${CSS.escape(job.id)}"]`);
     if (existing) {
         existing.remove();
     }
@@ -100,7 +109,7 @@ export async function loadMore(fetchFn) {
         }
 
         for (const job of jobs) {
-            if (!tbody.querySelector(`tr[data-job-id="${job.id}"]`)) {
+            if (!tbody.querySelector(`tr[data-job-id="${CSS.escape(job.id)}"]`)) {
                 tbody.appendChild(buildRow(job));
             }
         }

@@ -24,63 +24,217 @@
 </nav>
 
 <div class="container py-5">
-    <div class="card shadow-lg mb-4 settings-card">
-        <div class="card-header">
-            <span class="fw-semibold">
-                <span class="material-symbols-outlined icon-inline" aria-hidden="true">settings</span>
-                Settings
-            </span>
-        </div>
-        <div class="card-body p-4">
-            <div id="settingsAlert" class="alert d-none" role="alert"></div>
+    <h1 class="mb-2 d-flex align-items-center gap-2">
+        <span class="material-symbols-outlined" style="font-size: 32px;" aria-hidden="true">settings</span>
+        Settings
+    </h1>
+    <p class="text-muted mb-4">Manage storage, access and integrations from one place.</p>
 
-            <form id="settingsForm">
-                <div class="settings-section">
-                    <h6 class="settings-section-title">Storage</h6>
+    <form id="settingsForm" class="settings-form-layout">
+        <div id="settingsAlert" class="alert d-none" role="alert"></div>
 
-                    <div class="mb-4">
-                        <label for="retentionDays" class="form-label">Max. Job retention (days)</label>
-                        <input type="number" class="form-control" id="retentionDays" name="retention_days" min="1" max="365" value="{{ settings.retention_days | default(7) }}">
-                        <small class="setting-hint">Completed jobs will be deleted after this period (default: 7 days)</small>
-                    </div>
-                </div>
+        <div class="row g-4 mb-4">
+            <div class="col-lg-4">
+                <div class="card shadow-sm h-100 settings-panel">
+                    <div class="card-body p-4">
+                        <div class="settings-section">
+                            <h6 class="fw-semibold mb-1 d-flex align-items-center gap-1">
+                                <span class="material-symbols-outlined icon-inline" aria-hidden="true">database</span>
+                                Storage
+                            </h6>
+                            <small class="text-muted d-block mb-3">Retention and cleanup rules</small>
 
-                <div class="settings-section">
-                    <h6 class="settings-section-title">Security</h6>
-
-                    <div class="mb-4">
-                        <div class="form-check form-switch">
-                            <input class="form-check-input" type="checkbox" id="loginRequired" name="login_required" {% if settings.login_required %}checked{% endif %}>
-                            <label class="form-check-label" for="loginRequired">Require login to access dashboard</label>
+                            <div class="mb-3">
+                                <label for="retentionDays" class="form-label small text-muted">Max. Job retention (days)</label>
+                                <input type="number" class="form-control form-control-sm" id="retentionDays" name="retention_days" min="1" max="365" value="{{ settings.retention_days | default(7) }}">
+                                <small class="setting-hint">Completed jobs will be deleted after this period (default: 7 days)</small>
+                            </div>
                         </div>
-                        <small class="setting-hint">Force authentication to access dashboard</small>
-                    </div>
-
-                    <div class="mb-4">
-                        <label class="form-label">Admin Password</label>
-                        <p class="form-control-plaintext settings-plaintext mb-0">••••••••</p>
-                        <small class="setting-hint">To change: update TUBEYOU_ADMIN_PASSWORD env var and restart</small>
                     </div>
                 </div>
+            </div>
 
-                <div class="settings-section">
-                    <h6 class="settings-section-title">Integrations</h6>
+            <div class="col-lg-4">
+                <div class="card shadow-sm h-100 settings-panel settings-panel--primary">
+                    <div class="card-body p-4">
+                        <div class="settings-section">
+                            <h6 class="fw-semibold mb-1 d-flex align-items-center gap-1">
+                                <span class="material-symbols-outlined icon-inline" aria-hidden="true">security</span>
+                                Security
+                            </h6>
+                            <small class="text-muted d-block mb-3">Access and authentication</small>
 
-                    <div class="mb-4">
-                        <label for="lalalaaiApiKey" class="form-label">Lalala.ai API Key</label>
-                        <input type="password" class="form-control" id="lalalaaiApiKey" name="lalalaai_api_key" value="" placeholder="Leave blank to keep existing" autocomplete="off">
-                        <small class="setting-hint">Stored securely. Only enter to update.</small>
+                            <div class="mb-3">
+                                <div class="form-check form-switch">
+                                    <input class="form-check-input" type="checkbox" id="loginRequired" name="login_required" {% if settings.login_required %}checked{% endif %}>
+                                    <label class="form-check-label" for="loginRequired">Require login to access dashboard</label>
+                                </div>
+                                <small class="setting-hint">Force authentication to access dashboard</small>
+                            </div>
+                        </div>
+
+                        <div class="settings-section">
+                            <h6 class="settings-section-title">Credentials</h6>
+                            <div class="mb-3">
+                                <label for="adminPassword" class="form-label small text-muted">Admin password</label>
+                                <input type="password" class="form-control form-control-sm" id="adminPassword" name="admin_password" value="" placeholder="Leave blank to keep existing" autocomplete="off">
+                                <small class="setting-hint">Leave blank to keep the current password.</small>
+                            </div>
+                        </div>
+
+                        <div class="settings-section">
+                            <h6 class="settings-section-title">Session</h6>
+                            <div class="mb-3">
+                                <label for="sessionIdleMinutes" class="form-label small text-muted">Session idle timeout (minutes)</label>
+                                <input type="number" class="form-control form-control-sm" id="sessionIdleMinutes" name="session_idle_minutes" min="5" max="1440" value="{{ settings.session_idle_minutes | default(60) }}">
+                                <small class="setting-hint">Session expires after inactivity. Max 24h hard limit from login.</small>
+                            </div>
+                        </div>
                     </div>
                 </div>
+            </div>
 
-                <div class="d-flex gap-2">
-                    <button type="submit" class="btn btn-primary" id="settingsSaveBtn">
-                        <span class="material-symbols-outlined icon-inline" aria-hidden="true">save</span>
-                        Save Changes
-                    </button>
-                    <a href="/" class="btn btn-secondary">Cancel</a>
+            <div class="col-lg-4">
+                <div class="card shadow-sm h-100 settings-panel">
+                    <div class="card-body p-4">
+                        <div class="settings-section">
+                            <h6 class="fw-semibold mb-1 d-flex align-items-center gap-1">
+                                <span class="material-symbols-outlined icon-inline" aria-hidden="true">extension</span>
+                                Integrations
+                            </h6>
+                            <small class="text-muted d-block mb-3">Connected external services</small>
+
+                            <div class="d-flex justify-content-between align-items-center mb-2">
+                                <div>
+                                    <div class="fw-medium">Lalal.ai</div>
+                                    <small class="text-muted">Audio separation service</small>
+                                </div>
+                                <span id="lalalStatusBadge" class="badge bg-secondary">{{ lalal_status or 'Not configured' }}</span>
+                            </div>
+
+                            <button type="button" class="btn btn-outline-primary btn-sm mt-2" id="lalalAuthBtn" data-bs-toggle="modal" data-bs-target="#lalalAuthModal">
+                                <span class="material-symbols-outlined icon-inline" aria-hidden="true">key</span>
+                                Authenticate
+                            </button>
+                            <small class="setting-hint d-block mt-2" id="lalalStatusLine"></small>
+                        </div>
+                    </div>
                 </div>
-            </form>
+            </div>
+        </div>
+
+        <div class="settings-actions-bar d-flex justify-content-end gap-2">
+            <button type="submit" class="btn btn-primary" id="settingsSaveBtn">
+                <span class="material-symbols-outlined icon-inline" aria-hidden="true">save</span>
+                Save Changes
+            </button>
+            <a href="/" class="btn btn-outline-secondary">Cancel</a>
+        </div>
+    </form>
+</div>
+
+<!-- Lalal.ai Auth Modal -->
+<div class="modal fade" id="lalalAuthModal" tabindex="-1" aria-labelledby="lalalAuthModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="lalalAuthModalLabel">
+                    <span class="material-symbols-outlined icon-inline" aria-hidden="true">key</span>
+                    Lalal.ai Authentication
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <div id="lalalAuthAlert" class="alert d-none" role="alert"></div>
+                
+                <!-- Step 1: Email -->
+                <div id="lalalAuthStep1">
+                    <div class="auth-step-header mb-3">
+                        <span class="badge auth-step-badge">Step 1</span>
+                        <h6 class="mb-1 mt-2">Choose authentication method</h6>
+                        <p class="text-muted mb-0">Request OTP or use an existing activation key.</p>
+                    </div>
+
+                    <div class="auth-method-panel auth-method-panel--alt mb-3">
+                        <div class="auth-method-title mb-2">
+                            <span class="material-symbols-outlined icon-inline text-success" aria-hidden="true">verified</span>
+                            Recommended: Activation Key (captcha-free)
+                        </div>
+                        <p class="small text-muted mb-2">Get your activation key from your <a href="https://www.lalal.ai/api/" target="_blank" rel="noopener">Lalal.ai profile</a> (log in → scroll down → copy key).</p>
+                        <div class="mb-2">
+                            <label for="lalalAuthEmail" class="form-label">Email Address</label>
+                            <input type="email" class="form-control" id="lalalAuthEmail" placeholder="your@lalal.ai-email.com" autocomplete="email" required>
+                        </div>
+                        <div class="mb-2">
+                            <label for="lalalActivationKey" class="form-label">Activation Key</label>
+                            <input type="text" class="form-control" id="lalalActivationKey" placeholder="e.g. 650d12075f994b3a" autocomplete="off">
+                        </div>
+                        <button type="button" class="btn btn-primary w-100" id="lalalAuthUseKeyBtn">
+                            <span class="spinner-border spinner-border-sm d-none me-2" id="lalalAuthUseKeySpinner" aria-hidden="true"></span>
+                            Connect Account
+                        </button>
+                    </div>
+
+                    <details class="mt-3">
+                        <summary class="small text-muted" style="cursor: pointer;">Alternative: OTP via email (may require captcha)</summary>
+                        <div class="auth-method-panel mt-2">
+                            <p class="small text-warning mb-2">
+                                <span class="material-symbols-outlined icon-inline" aria-hidden="true">warning</span>
+                                Lalal.ai uses Cloudflare captcha. OTP emails may not be sent without solving it on their website.
+                            </p>
+                            <div class="mb-2">
+                                <label for="lalalOtpEmail" class="form-label">Email Address</label>
+                                <input type="email" class="form-control" id="lalalOtpEmail" placeholder="your@lalal.ai-email.com" autocomplete="email">
+                            </div>
+                            <button type="button" class="btn btn-outline-secondary w-100" id="lalalAuthRequestBtn">
+                                <span class="spinner-border spinner-border-sm d-none me-2" id="lalalAuthRequestSpinner" aria-hidden="true"></span>
+                                <span id="lalalAuthRequestLabel">Request OTP Code</span>
+                            </button>
+                            <small class="setting-hint d-block mt-2 text-center" id="lalalAuthCooldownText"></small>
+                        </div>
+                    </details>
+                </div>
+                
+                <!-- Step 2: Code -->
+                <div id="lalalAuthStep2" class="d-none">
+                    <div class="auth-step-header mb-3">
+                        <span class="badge auth-step-badge">Step 2</span>
+                        <h6 class="mb-1 mt-2">Enter verification code</h6>
+                        <p class="text-muted mb-0">Use the 6-digit code sent to <strong id="lalalAuthEmailDisplay"></strong>.</p>
+                    </div>
+
+                    <div class="auth-method-panel">
+                        <div class="mb-3">
+                            <label class="form-label">Authentication Code</label>
+                            <div id="lalalAuthCodeBlocks" class="d-flex justify-content-center gap-2">
+                                <input type="text" class="form-control text-center fs-4" data-auth-digit="0" maxlength="1" inputmode="numeric" pattern="[0-9]" autocomplete="one-time-code" style="width: 48px;">
+                                <input type="text" class="form-control text-center fs-4" data-auth-digit="1" maxlength="1" inputmode="numeric" pattern="[0-9]" autocomplete="one-time-code" style="width: 48px;">
+                                <input type="text" class="form-control text-center fs-4" data-auth-digit="2" maxlength="1" inputmode="numeric" pattern="[0-9]" autocomplete="one-time-code" style="width: 48px;">
+                                <input type="text" class="form-control text-center fs-4" data-auth-digit="3" maxlength="1" inputmode="numeric" pattern="[0-9]" autocomplete="one-time-code" style="width: 48px;">
+                                <input type="text" class="form-control text-center fs-4" data-auth-digit="4" maxlength="1" inputmode="numeric" pattern="[0-9]" autocomplete="one-time-code" style="width: 48px;">
+                                <input type="text" class="form-control text-center fs-4" data-auth-digit="5" maxlength="1" inputmode="numeric" pattern="[0-9]" autocomplete="one-time-code" style="width: 48px;">
+                            </div>
+                        </div>
+                        <button type="button" class="btn btn-primary w-100 mb-2" id="lalalAuthVerifyBtn">
+                            <span class="spinner-border spinner-border-sm d-none me-2" id="lalalAuthVerifySpinner" aria-hidden="true"></span>
+                            Verify Code
+                        </button>
+                        <button type="button" class="btn btn-link btn-sm w-100 text-muted" id="lalalAuthBackBtn">
+                            ← Use different email
+                        </button>
+                    </div>
+                </div>
+                
+                <!-- Step 3: Success -->
+                <div id="lalalAuthStep3" class="d-none text-center py-3 auth-success-panel">
+                    <span class="material-symbols-outlined text-success" style="font-size: 64px;" aria-hidden="true">check_circle</span>
+                    <h5 class="mt-3 mb-2">Authentication Successful!</h5>
+                    <p class="text-muted mb-0">Your Lalal.ai account is now connected.</p>
+                </div>
+            </div>
+            <div class="modal-footer" id="lalalAuthFooter">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+            </div>
         </div>
     </div>
 </div>
@@ -110,7 +264,407 @@ function clearAlert(el) {
 const formEl = document.getElementById("settingsForm");
 const alertEl = document.getElementById("settingsAlert");
 const btn = document.getElementById("settingsSaveBtn");
+const lalalStatusBadge = document.getElementById("lalalStatusBadge");
+const lalalStatusLine = document.getElementById("lalalStatusLine");
 
+// Auth modal elements
+const lalalAuthModal = document.getElementById("lalalAuthModal");
+const lalalAuthAlert = document.getElementById("lalalAuthAlert");
+const lalalAuthStep1 = document.getElementById("lalalAuthStep1");
+const lalalAuthStep2 = document.getElementById("lalalAuthStep2");
+const lalalAuthStep3 = document.getElementById("lalalAuthStep3");
+const lalalAuthEmail = document.getElementById("lalalAuthEmail");
+const lalalAuthEmailDisplay = document.getElementById("lalalAuthEmailDisplay");
+const lalalAuthCodeBlocks = Array.from(document.querySelectorAll("[data-auth-digit]"));
+const lalalAuthRequestBtn = document.getElementById("lalalAuthRequestBtn");
+const lalalAuthUseKeyBtn = document.getElementById("lalalAuthUseKeyBtn");
+const lalalAuthVerifyBtn = document.getElementById("lalalAuthVerifyBtn");
+const lalalAuthBackBtn = document.getElementById("lalalAuthBackBtn");
+const lalalAuthRequestSpinner = document.getElementById("lalalAuthRequestSpinner");
+const lalalAuthUseKeySpinner = document.getElementById("lalalAuthUseKeySpinner");
+const lalalAuthRequestLabel = document.getElementById("lalalAuthRequestLabel");
+const lalalAuthCooldownText = document.getElementById("lalalAuthCooldownText");
+const lalalAuthVerifySpinner = document.getElementById("lalalAuthVerifySpinner");
+const lalalActivationKey = document.getElementById("lalalActivationKey");
+let authCooldownInterval = null;
+let authCooldownRemaining = 0;
+let isAuthRequestBusy = false;
+let isAuthUseKeyBusy = false;
+let otpEmailForVerify = ""; // Store email used for OTP request
+
+function getAuthCodeFromBlocks() {
+    return lalalAuthCodeBlocks.map((input) => input.value.trim()).join("");
+}
+
+function clearAuthCodeBlocks() {
+    for (const input of lalalAuthCodeBlocks) {
+        input.value = "";
+    }
+}
+
+function stopAuthCooldownTimer() {
+    if (authCooldownInterval) {
+        clearInterval(authCooldownInterval);
+        authCooldownInterval = null;
+    }
+}
+
+function renderAuthRequestButton() {
+    if (!lalalAuthRequestBtn || !lalalAuthRequestLabel) return;
+
+    lalalAuthRequestBtn.disabled = isAuthRequestBusy || authCooldownRemaining > 0;
+    if (lalalAuthUseKeyBtn) {
+        lalalAuthUseKeyBtn.disabled = isAuthUseKeyBusy;
+    }
+    lalalAuthRequestLabel.textContent = "Continue";
+
+    if (lalalAuthCooldownText) {
+        if (authCooldownRemaining > 0) {
+            lalalAuthCooldownText.textContent = `Neuer Token in ${authCooldownRemaining} Sekunden anforderbar`;
+        } else {
+            lalalAuthCooldownText.textContent = "";
+        }
+    }
+
+    if (lalalAuthRequestSpinner) {
+        if (isAuthRequestBusy) {
+            lalalAuthRequestSpinner.classList.remove("d-none");
+        } else {
+            lalalAuthRequestSpinner.classList.add("d-none");
+        }
+    }
+}
+
+function renderAuthUseKeyButton() {
+    if (!lalalAuthUseKeyBtn || !lalalAuthUseKeySpinner) return;
+    lalalAuthUseKeyBtn.disabled = isAuthUseKeyBusy;
+    if (isAuthUseKeyBusy) {
+        lalalAuthUseKeySpinner.classList.remove("d-none");
+    } else {
+        lalalAuthUseKeySpinner.classList.add("d-none");
+    }
+}
+
+function startAuthCooldown(seconds) {
+    authCooldownRemaining = Math.max(0, Number(seconds) || 0);
+    stopAuthCooldownTimer();
+    renderAuthRequestButton();
+
+    if (authCooldownRemaining <= 0) {
+        return;
+    }
+
+    authCooldownInterval = setInterval(() => {
+        authCooldownRemaining = Math.max(0, authCooldownRemaining - 1);
+        renderAuthRequestButton();
+        if (authCooldownRemaining <= 0) {
+            stopAuthCooldownTimer();
+        }
+    }, 1000);
+}
+
+async function syncAuthCooldown() {
+    try {
+        const res = await fetch("/api/lalal/auth/cooldown", { credentials: "same-origin" });
+        const payload = await res.json().catch(() => ({}));
+        if (res.ok) {
+            startAuthCooldown(payload.remaining_seconds || 0);
+        }
+    } catch {
+        // Keep current button state if cooldown status is unavailable.
+    }
+}
+
+function setLalalStatus(text, type = "secondary") {
+    if (lalalStatusBadge) {
+        lalalStatusBadge.className = `badge bg-${type}`;
+        lalalStatusBadge.textContent = text;
+    }
+}
+
+function setLalalStatusLine(text) {
+    if (lalalStatusLine) {
+        lalalStatusLine.textContent = text;
+    }
+}
+
+function showAuthStep(step) {
+    lalalAuthStep1.classList.toggle("d-none", step !== 1);
+    lalalAuthStep2.classList.toggle("d-none", step !== 2);
+    lalalAuthStep3.classList.toggle("d-none", step !== 3);
+    clearAlert(lalalAuthAlert);
+}
+
+function setAuthAlert(type, msg) {
+    setAlert(lalalAuthAlert, type, msg);
+}
+
+async function loadLalalStatus() {
+    try {
+        const res = await fetch("/api/lalal/status?force_refresh=1", { credentials: "same-origin" });
+        const payload = await res.json().catch(() => ({}));
+
+        if (!res.ok) {
+            setLalalStatus("Error", "danger");
+            setLalalStatusLine(payload.detail || "Unable to check status");
+            return;
+        }
+
+        if (payload.configured && payload.token_valid === false) {
+            setLalalStatus("Token invalid", "danger");
+            setLalalStatusLine(payload.validation_error || "Stored Lalal token is invalid. Please authenticate again.");
+        } else if (payload.configured) {
+            setLalalStatus("Connected", "success");
+            setLalalStatusLine(payload.email ? `Logged in as ${payload.email}` : "Session active");
+        } else {
+            setLalalStatus("Not configured", "secondary");
+            setLalalStatusLine("Click 'Authenticate' to connect your Lalal.ai account");
+        }
+    } catch (err) {
+        setLalalStatus("Error", "danger");
+        setLalalStatusLine(err.message || "Unable to check status");
+    }
+}
+
+// Auth flow: Step 1 - Request code (OTP)
+lalalAuthRequestBtn?.addEventListener("click", async () => {
+    if (isAuthRequestBusy || authCooldownRemaining > 0) {
+        return;
+    }
+
+    const otpEmailInput = document.getElementById("lalalOtpEmail");
+    const email = otpEmailInput?.value.trim() || "";
+    if (!email || !email.includes("@")) {
+        setAuthAlert("danger", "Please enter a valid email address in the OTP section");
+        return;
+    }
+
+    const googleCid = `blocked_${Math.floor(Math.random() * 1_000_000_000)}.${Date.now()}`;
+
+    isAuthRequestBusy = true;
+    renderAuthRequestButton();
+    clearAlert(lalalAuthAlert);
+
+    try {
+        const res = await fetch("/api/lalal/auth/request", {
+            method: "POST",
+            credentials: "same-origin",
+            headers: {
+                "Content-Type": "application/json",
+                "X-CSRF-Token": getCsrfToken(),
+            },
+            body: JSON.stringify({
+                email,
+                google_cid: googleCid,
+            }),
+        });
+
+        const payload = await res.json().catch(() => ({}));
+
+        if (!res.ok) {
+            if (res.status === 429 && payload.retry_after_seconds != null) {
+                startAuthCooldown(payload.retry_after_seconds);
+            }
+            throw new Error(payload.detail || `HTTP ${res.status}`);
+        }
+
+        startAuthCooldown(30);
+
+        otpEmailForVerify = email; // Store for verification step
+        lalalAuthEmailDisplay.textContent = email;
+        showAuthStep(2);
+        clearAuthCodeBlocks();
+        lalalAuthCodeBlocks[0]?.focus();
+    } catch (err) {
+        setAuthAlert("danger", err.message || "Failed to continue to step 2");
+    } finally {
+        isAuthRequestBusy = false;
+        renderAuthRequestButton();
+    }
+});
+
+// Auth flow fallback: direct activation key (captcha-free)
+lalalAuthUseKeyBtn?.addEventListener("click", async () => {
+    if (isAuthUseKeyBusy) {
+        return;
+    }
+
+    const email = lalalAuthEmail.value.trim();
+    const activationKey = lalalActivationKey?.value.trim() || "";
+
+    if (!email || !email.includes("@")) {
+        setAuthAlert("danger", "Please enter a valid email address");
+        return;
+    }
+    if (!activationKey) {
+        setAuthAlert("danger", "Please enter a valid activation key");
+        return;
+    }
+
+    isAuthUseKeyBusy = true;
+    renderAuthUseKeyButton();
+    clearAlert(lalalAuthAlert);
+
+    try {
+        const res = await fetch("/api/lalal/auth/activation-key", {
+            method: "POST",
+            credentials: "same-origin",
+            headers: {
+                "Content-Type": "application/json",
+                "X-CSRF-Token": getCsrfToken(),
+            },
+            body: JSON.stringify({
+                email,
+                activation_key: activationKey,
+            }),
+        });
+
+        const payload = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            throw new Error(payload.detail || `HTTP ${res.status}`);
+        }
+
+        showAuthStep(3);
+        void loadLalalStatus();
+        setTimeout(() => {
+            bootstrap.Modal.getInstance(lalalAuthModal)?.hide();
+        }, 2000);
+    } catch (err) {
+        setAuthAlert("danger", err.message || "Invalid activation key");
+    } finally {
+        isAuthUseKeyBusy = false;
+        renderAuthUseKeyButton();
+    }
+});
+
+// Auth flow: Step 2 - Verify code
+lalalAuthVerifyBtn?.addEventListener("click", async () => {
+    const email = otpEmailForVerify; // Use stored OTP email
+    const code = getAuthCodeFromBlocks();
+
+    if (!email) {
+        setAuthAlert("danger", "Session expired. Please start over.");
+        showAuthStep(1);
+        return;
+    }
+
+    if (!code || code.length !== 6 || !/^\d{6}$/.test(code)) {
+        setAuthAlert("danger", "Please enter a valid 6-digit code");
+        lalalAuthCodeBlocks[0]?.focus();
+        return;
+    }
+
+    lalalAuthVerifyBtn.disabled = true;
+    lalalAuthVerifySpinner.classList.remove("d-none");
+    clearAlert(lalalAuthAlert);
+
+    try {
+        const res = await fetch("/api/lalal/auth/verify", {
+            method: "POST",
+            credentials: "same-origin",
+            headers: {
+                "Content-Type": "application/json",
+                "X-CSRF-Token": getCsrfToken(),
+            },
+            body: JSON.stringify({ email, code }),
+        });
+
+        const payload = await res.json().catch(() => ({}));
+
+        if (!res.ok) {
+            throw new Error(payload.detail || `HTTP ${res.status}`);
+        }
+
+        showAuthStep(3);
+        void loadLalalStatus();
+
+        // Auto-close modal after success
+        setTimeout(() => {
+            bootstrap.Modal.getInstance(lalalAuthModal)?.hide();
+        }, 2000);
+    } catch (err) {
+        setAuthAlert("danger", err.message || "Invalid authentication code");
+    } finally {
+        lalalAuthVerifyBtn.disabled = false;
+        lalalAuthVerifySpinner.classList.add("d-none");
+    }
+});
+
+// Auth flow: Back button
+lalalAuthBackBtn?.addEventListener("click", () => {
+    showAuthStep(1);
+    lalalAuthEmail.focus();
+});
+
+// Reset modal state when opened
+lalalAuthModal?.addEventListener("show.bs.modal", () => {
+    showAuthStep(1);
+    lalalAuthEmail.value = "";
+    if (lalalActivationKey) {
+        lalalActivationKey.value = "";
+    }
+    clearAuthCodeBlocks();
+    renderAuthRequestButton();
+    renderAuthUseKeyButton();
+    void syncAuthCooldown();
+});
+
+// Auto-format and navigation for code blocks
+lalalAuthCodeBlocks.forEach((input, index) => {
+    input.addEventListener("input", () => {
+        const digit = input.value.replace(/\D/g, "").slice(0, 1);
+        input.value = digit;
+        if (digit && index < lalalAuthCodeBlocks.length - 1) {
+            lalalAuthCodeBlocks[index + 1]?.focus();
+            lalalAuthCodeBlocks[index + 1]?.select();
+        }
+    });
+
+    input.addEventListener("keydown", (e) => {
+        if (e.key === "Backspace" && !input.value && index > 0) {
+            lalalAuthCodeBlocks[index - 1]?.focus();
+        }
+        if (e.key === "ArrowLeft" && index > 0) {
+            e.preventDefault();
+            lalalAuthCodeBlocks[index - 1]?.focus();
+        }
+        if (e.key === "ArrowRight" && index < lalalAuthCodeBlocks.length - 1) {
+            e.preventDefault();
+            lalalAuthCodeBlocks[index + 1]?.focus();
+        }
+    });
+
+    input.addEventListener("paste", (e) => {
+        e.preventDefault();
+        const pasted = (e.clipboardData?.getData("text") || "").replace(/\D/g, "").slice(0, 6);
+        if (!pasted) return;
+        for (let i = 0; i < lalalAuthCodeBlocks.length; i += 1) {
+            lalalAuthCodeBlocks[i].value = pasted[i] || "";
+        }
+        const focusIndex = Math.min(pasted.length, lalalAuthCodeBlocks.length - 1);
+        lalalAuthCodeBlocks[focusIndex]?.focus();
+    });
+});
+
+// Enter key handling
+lalalAuthEmail?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+        e.preventDefault();
+        lalalAuthRequestBtn?.click();
+    }
+});
+
+document.getElementById("lalalAuthCodeBlocks")?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+        e.preventDefault();
+        lalalAuthVerifyBtn?.click();
+    }
+});
+
+// Load initial status
+void loadLalalStatus();
+
+// Settings form submission
 formEl.addEventListener("submit", async (e) => {
     e.preventDefault();
 
@@ -131,11 +685,31 @@ formEl.addEventListener("submit", async (e) => {
         return;
     }
 
+    const sessionIdleMinutes = parseInt(form.get("session_idle_minutes"), 10);
+    if (!Number.isFinite(sessionIdleMinutes) || sessionIdleMinutes < 5 || sessionIdleMinutes > 1440) {
+        setAlert(alertEl, "danger", "Session timeout must be between 5 and 1440 minutes");
+        btn.disabled = false;
+        btn.innerHTML = originalBtnText;
+        return;
+    }
+
+    const adminPassword = form.get("admin_password") || "";
+    if (adminPassword && adminPassword.length < 6) {
+        setAlert(alertEl, "danger", "Password must be at least 6 characters");
+        btn.disabled = false;
+        btn.innerHTML = originalBtnText;
+        return;
+    }
+
     const data = {
         retention_days: retention,
+        session_idle_minutes: sessionIdleMinutes,
         login_required: document.getElementById("loginRequired").checked,
-        lalalaai_api_key: form.get("lalalaai_api_key") || ""
     };
+
+    if (adminPassword) {
+        data.admin_password = adminPassword;
+    }
 
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 10000);
@@ -162,6 +736,8 @@ formEl.addEventListener("submit", async (e) => {
             throw new Error(payload.detail || `HTTP ${res.status}`);
         }
 
+        document.getElementById("adminPassword").value = "";
+
         setAlert(alertEl, "success", "Settings saved");
         btn.innerHTML = '<span class="material-symbols-outlined icon-inline">check</span>Saved';
         setTimeout(() => {
@@ -179,5 +755,20 @@ formEl.addEventListener("submit", async (e) => {
     }
 });
 </script>
+<footer class="wb-footer">
+    <span class="wb-footer-content">
+        tubeyou v{{ VERSION }}
+        &middot;&nbsp;&copy;&nbsp;{{ now().year }}&nbsp;Gill-Bates
+        &middot;&nbsp;
+        <a href="https://github.com/Gill-Bates/tubeyou"
+           target="_blank" rel="noopener noreferrer"
+           class="wb-footer-link">
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" class="wb-footer-link-icon" aria-hidden="true">
+                <path fill-rule="evenodd" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"></path>
+            </svg>
+            GitHub
+        </a>
+    </span>
+</footer>
 </body>
 </html>

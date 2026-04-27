@@ -42,18 +42,30 @@ _UPDATEABLE_COLUMNS: frozenset[str] = frozenset(
 _SETTINGS_DEFAULTS: dict[str, str] = {
     "retention_days": "7",
     "login_required": "false",
-    "lalalaai_api_key": "",
+    "session_idle_minutes": "60",
+    "lalalaai_email": "",
+    "lalalaai_auth_key": "",
+    "lalalaai_auth_requested_at": "0",
+    "lalalaai_auth_checked_at": "0",
+    "lalalaai_auth_is_valid": "false",
+    "lalalaai_auth_last_error": "",
 }
 
 _SETTINGS_TYPES: dict[str, Callable[[str], Any]] = {
     "retention_days": lambda v: int(v) if v.isdigit() else 7,
     "login_required": lambda v: v.lower() in ("true", "1", "yes"),
-    "lalalaai_api_key": str,
+    "session_idle_minutes": lambda v: int(v) if str(v).isdigit() else 60,
+    "lalalaai_email": str,
+    "lalalaai_auth_key": str,
+    "lalalaai_auth_requested_at": lambda v: int(v) if str(v).isdigit() else 0,
+    "lalalaai_auth_checked_at": lambda v: int(v) if str(v).isdigit() else 0,
+    "lalalaai_auth_is_valid": lambda v: str(v).lower() in ("true", "1", "yes"),
+    "lalalaai_auth_last_error": str,
 }
 
 
 # --------------------------------------------------------------------------- #
-# Central connection manager
+# Connection management
 # --------------------------------------------------------------------------- #
 def _configure_connection(con: sqlite3.Connection) -> None:
     con.row_factory = sqlite3.Row
@@ -93,48 +105,57 @@ def close_db() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Schema
+# Schema (fresh install only - no migration guards)
 # --------------------------------------------------------------------------- #
 def init_db() -> None:
     with get_db() as con:
-        con.execute("""
-            CREATE TABLE IF NOT EXISTS jobs (
-                id TEXT PRIMARY KEY,
-                url TEXT NOT NULL,
-                type TEXT,
-                quality TEXT,
-                status TEXT,
-                filename TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                finished_at TIMESTAMP,
-                duration_seconds INTEGER,
-                filesize_bytes INTEGER,
-                message TEXT,
-                codec TEXT,
-                bitrate_kbps INTEGER,
-                video_title TEXT,
-                video_meta_hover TEXT
-            )
-        """)
-        con.execute("""
-            CREATE INDEX IF NOT EXISTS idx_jobs_created_at
-            ON jobs(created_at DESC)
-        """)
-        
-        # Settings table
-        con.execute("""
-            CREATE TABLE IF NOT EXISTS settings (
-                key TEXT PRIMARY KEY,
-                value TEXT
-            )
-        """)
+        tables = {
+            row["name"]
+            for row in con.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        indexes = {
+            row["name"]
+            for row in con.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index'"
+            ).fetchall()
+        }
 
-        for key, value in _SETTINGS_DEFAULTS.items():
-            con.execute(
-                "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)",
-                (key, value),
-            )
-        
+        if "jobs" not in tables:
+            con.execute("""
+                CREATE TABLE jobs (
+                    id TEXT PRIMARY KEY,
+                    url TEXT NOT NULL,
+                    type TEXT,
+                    quality TEXT,
+                    status TEXT,
+                    filename TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    finished_at TIMESTAMP,
+                    duration_seconds INTEGER,
+                    filesize_bytes INTEGER,
+                    message TEXT,
+                    codec TEXT,
+                    bitrate_kbps INTEGER,
+                    video_title TEXT,
+                    video_meta_hover TEXT
+                )
+            """)
+
+        if "idx_jobs_created_at" not in indexes:
+            con.execute("""
+                CREATE INDEX idx_jobs_created_at
+                ON jobs(created_at DESC)
+            """)
+
+        if "settings" not in tables:
+            con.execute("""
+                CREATE TABLE settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT
+                )
+            """)
         con.commit()
 
 
@@ -267,7 +288,8 @@ def get_settings() -> dict[str, Any]:
 
 def set_settings(data: dict[str, Any]) -> None:
     """Update settings. Unknown keys are ignored."""
-    allowed = set(_SETTINGS_DEFAULTS)
+    # Allow default settings and admin_password_hash (for GUI password changes)
+    allowed = set(_SETTINGS_DEFAULTS) | {"admin_password_hash"}
     filtered = {k: v for k, v in data.items() if k in allowed}
 
     with get_db() as con:
