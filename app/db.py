@@ -11,17 +11,17 @@ import sqlite3
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 logger = logging.getLogger(__name__)
 
 # --------------------------------------------------------------------------- #
 # Configuration
 # --------------------------------------------------------------------------- #
-DB_PATH: Path = Path(__file__).parent.parent / "data" / "jobs.db"
+DB_PATH: Final = Path(__file__).parent.parent / "data" / "jobs.db"
 
 # Whitelist of updatable columns to prevent SQL injection via column names.
-_UPDATEABLE_COLUMNS: frozenset[str] = frozenset(
+_UPDATEABLE_COLUMNS: Final[frozenset[str]] = frozenset(
     {
         "url",
         "type",
@@ -39,7 +39,7 @@ _UPDATEABLE_COLUMNS: frozenset[str] = frozenset(
     }
 )
 
-_SETTINGS_DEFAULTS: dict[str, str] = {
+_SETTINGS_DEFAULTS: Final[dict[str, str]] = {
     "retention_days": "7",
     "login_required": "false",
     "session_idle_minutes": "60",
@@ -51,14 +51,22 @@ _SETTINGS_DEFAULTS: dict[str, str] = {
     "lalalaai_auth_last_error": "",
 }
 
-_SETTINGS_TYPES: dict[str, Callable[[str], Any]] = {
-    "retention_days": lambda v: int(v) if v.isdigit() else 7,
+
+def _int_parser(default: int) -> Callable[[str], int]:
+    return lambda v: int(v) if str(v).isdigit() else default
+
+
+_INTERNAL_SETTINGS_KEYS: Final[frozenset[str]] = frozenset({"admin_password_hash"})
+_ALLOWED_SETTINGS_KEYS: Final[frozenset[str]] = frozenset(_SETTINGS_DEFAULTS) | _INTERNAL_SETTINGS_KEYS
+
+_SETTINGS_TYPES: Final[dict[str, Callable[[str], Any]]] = {
+    "retention_days": _int_parser(7),
     "login_required": lambda v: v.lower() in ("true", "1", "yes"),
-    "session_idle_minutes": lambda v: int(v) if str(v).isdigit() else 60,
+    "session_idle_minutes": _int_parser(60),
     "lalalaai_email": str,
     "lalalaai_auth_key": str,
-    "lalalaai_auth_requested_at": lambda v: int(v) if str(v).isdigit() else 0,
-    "lalalaai_auth_checked_at": lambda v: int(v) if str(v).isdigit() else 0,
+    "lalalaai_auth_requested_at": _int_parser(0),
+    "lalalaai_auth_checked_at": _int_parser(0),
     "lalalaai_auth_is_valid": lambda v: str(v).lower() in ("true", "1", "yes"),
     "lalalaai_auth_last_error": str,
 }
@@ -76,6 +84,11 @@ def _configure_connection(con: sqlite3.Connection) -> None:
 
 @contextmanager
 def get_db() -> Generator[sqlite3.Connection, None, None]:
+    """Yield a configured SQLite connection.
+
+    This function performs synchronous I/O. Callers running inside an
+    async event loop should wrap database access in asyncio.to_thread().
+    """
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     con = sqlite3.connect(DB_PATH)
     _configure_connection(con)
@@ -149,6 +162,24 @@ def init_db() -> None:
                 ON jobs(created_at DESC)
             """)
 
+        if "idx_jobs_status" not in indexes:
+            con.execute("""
+                CREATE INDEX idx_jobs_status
+                ON jobs(status)
+            """)
+
+        if "idx_jobs_finished_at" not in indexes:
+            con.execute("""
+                CREATE INDEX idx_jobs_finished_at
+                ON jobs(finished_at)
+            """)
+
+        if "idx_jobs_status_finished_at" not in indexes:
+            con.execute("""
+                CREATE INDEX idx_jobs_status_finished_at
+                ON jobs(status, finished_at)
+            """)
+
         if "settings" not in tables:
             con.execute("""
                 CREATE TABLE settings (
@@ -205,6 +236,15 @@ def get_job(job_id: str) -> sqlite3.Row | None:
         ).fetchone()
 
 
+def job_exists(job_id: str) -> bool:
+    """Check if a job exists in the database."""
+    with get_db() as con:
+        row = con.execute(
+            "SELECT 1 FROM jobs WHERE id=? LIMIT 1", (job_id,)
+        ).fetchone()
+        return row is not None
+
+
 def list_jobs(limit: int = 100) -> list[sqlite3.Row]:
     with get_db() as con:
         return con.execute(
@@ -233,10 +273,43 @@ def get_stats() -> dict[str, int]:
             FROM jobs
             WHERE status = 'done'
         """).fetchone()
+
+        # Only count Lalal minutes for completed audio jobs that have both stems generated.
+        lalal_rows = con.execute(
+            """
+            SELECT id, filename, duration_seconds
+            FROM jobs
+            WHERE status = 'done'
+              AND type = 'audio'
+              AND filename IS NOT NULL
+              AND duration_seconds IS NOT NULL
+            """
+        ).fetchall()
+
+    data_dir = DB_PATH.parent
+    total_lalal_minutes = 0
+    for r in lalal_rows:
+        job_id = str(r["id"] or "").strip()
+        raw_filename = str(r["filename"] or "").strip()
+        duration_seconds = int(r["duration_seconds"] or 0)
+        if not job_id or not raw_filename or duration_seconds <= 0:
+            continue
+
+        base_name = Path(raw_filename).stem
+        if not base_name:
+            continue
+
+        output_dir = data_dir / job_id
+        vocals_path = output_dir / f"{base_name}_vocals.mp3"
+        instrumental_path = output_dir / f"{base_name}_instrumental.mp3"
+        if vocals_path.is_file() and instrumental_path.is_file():
+            total_lalal_minutes += duration_seconds // 60
+
     return {
         "total_jobs": row["total_jobs"] or 0,
         "total_minutes": row["total_minutes"] or 0,
         "total_bytes": row["total_bytes"] or 0,
+        "total_lalal_minutes": total_lalal_minutes,
     }
 
 
@@ -288,9 +361,7 @@ def get_settings() -> dict[str, Any]:
 
 def set_settings(data: dict[str, Any]) -> None:
     """Update settings. Unknown keys are ignored."""
-    # Allow default settings and admin_password_hash (for GUI password changes)
-    allowed = set(_SETTINGS_DEFAULTS) | {"admin_password_hash"}
-    filtered = {k: v for k, v in data.items() if k in allowed}
+    filtered = {k: v for k, v in data.items() if k in _ALLOWED_SETTINGS_KEYS}
 
     with get_db() as con:
         for key, value in filtered.items():

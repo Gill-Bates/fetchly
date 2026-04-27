@@ -1,56 +1,46 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>tubeyou</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined" rel="stylesheet">
-    <link href="/static/style.css" rel="stylesheet">
-</head>
-<body>
+{% extends "base.html" %}
+
+{% block title %}tubeyou{% endblock %}
+
+{% block navbar %}
+{% from "macros/navbar.html" import navbar %}
+{{ navbar(show_back=False, show_settings=True) }}
+{% endblock %}
+
+{% block content %}
 {% import "macros/status.html" as status %}
-<nav class="navbar navbar-expand-lg navbar-dark top-navbar fixed-top">
-    <div class="container">
-        <a class="navbar-brand fw-bold" href="/">tubeyou</a>
-        <div class="ms-auto d-flex align-items-center gap-2">
-            <a id="settingsBtn" href="/settings" class="btn btn-sm btn-outline-light" title="Settings">
-                <span class="material-symbols-outlined" style="font-size: 18px;">settings</span>
-            </a>
-            <a id="logoutBtn" href="/logout" class="btn btn-sm btn-outline-light" role="button">Logout</a>
-        </div>
-    </div>
-</nav>
 
-<div class="container py-5">
+{% macro stat_card(value, label) %}
+<div class="col-6 col-md-3">
+    <div class="ui-card ui-card--stat stat-card" role="group">
+        <div class="stat-value">{{ value }}</div>
+        <div class="stat-label">{{ label }}</div>
+    </div>
+</div>
+{% endmacro %}
+
+<div>
     <div class="row g-3 mb-4 stats-row">
-        <div class="col-12 col-md-4">
-            <div class="card stat-card">
-                <div class="stat-value">{{ stats.total_jobs }}</div>
-                <div class="stat-label">Videos processed</div>
-            </div>
-        </div>
-        <div class="col-12 col-md-4">
-            <div class="card stat-card">
-                <div class="stat-value">{{ stats.total_minutes }}</div>
-                <div class="stat-label">Minutes processed</div>
-            </div>
-        </div>
-        <div class="col-12 col-md-4">
-            <div class="card stat-card">
-                <div class="stat-value">{{ stats.total_bytes | filesize }}</div>
-                <div class="stat-label">Download traffic</div>
-            </div>
-        </div>
+        {{ stat_card(stats.total_jobs, "Videos processed") }}
+        {{ stat_card(stats.total_minutes, "Minutes processed") }}
+        {{ stat_card(stats.total_bytes | filesize, "Download traffic") }}
+        {{ stat_card(stats.total_lalal_minutes or 0, "Lalal stems minutes") }}
     </div>
 
-    <div class="card shadow-lg mb-4">
-        <div class="card-body p-4">
+    <div class="ui-card mb-4">
+        <div>
             <form id="submitForm">
                 <div class="row g-3 align-items-end">
                     <div class="col-12">
-                        <label class="form-label fw-medium">YouTube URL</label>
-                        <input class="form-control form-control-lg" id="urlInput" name="url" placeholder="https://www.youtube.com/watch?v=..." required>
+                        <label class="form-label fw-medium" for="urlInput">YouTube URL</label>
+                        <input
+                            class="form-control form-control-lg ui-input"
+                            id="urlInput"
+                            name="url"
+                            placeholder="https://www.youtube.com/watch?v=..."
+                            required
+                            aria-describedby="formError"
+                        >
 
                         <div class="video-preview-grid d-none" id="videoPreviewGrid">
                             <div id="thumbnailPreview" class="video-thumb"></div>
@@ -84,59 +74,93 @@
                         </div>
                     </div>
                     <div class="col-6 col-md-3">
-                        <label class="form-label">Format</label>
-                        <select class="form-select" name="type" id="typeSelect">
+                        <label class="form-label" for="typeSelect">Format</label>
+                        <select class="form-select ui-input" name="type" id="typeSelect">
                             <option value="video">🎬 Video</option>
                             <option value="audio">🎵 MP3</option>
                         </select>
                     </div>
                     <div class="col-6 col-md-3">
-                        <label class="form-label">Quality</label>
-                        <select class="form-select" name="quality" id="qualitySelect">
+                        <label class="form-label" for="qualitySelect">Quality</label>
+                        <select class="form-select ui-input" name="quality" id="qualitySelect">
                             <option value="max">Max</option>
                             <option value="medium">720p</option>
                             <option value="small">480p</option>
                         </select>
                     </div>
-                    <div class="col-12 col-md-3">
-                        <button class="btn btn-success" type="submit" id="submitBtn">
-                            <span id="btnText"><span class="material-symbols-outlined icon-inline">download</span>Start</span>
+                    <div class="col-12 col-md-3 d-flex align-items-end">
+                        <button class="btn btn-primary btn-lg w-100" type="submit" id="submitBtn">
+                            <span id="btnText">
+                                <span class="material-symbols-outlined">download</span>
+                                Start
+                            </span>
                         </button>
                     </div>
                 </div>
-                <div id="formError" class="alert alert-danger mt-3 d-none"></div>
+                <div id="formError"
+                     class="alert alert-danger mt-3 d-none"
+                     role="alert"
+                     aria-live="assertive"
+                ></div>
             </form>
         </div>
     </div>
 
-    <div class="card" id="jobsCard">
-        <div class="card-header d-flex align-items-center justify-content-between">
-            <span class="fw-semibold">Jobs</span>
-            <span id="wsIndicator" class="ws-indicator badge bg-secondary">● connecting...</span>
+    <section class="ui-card ui-card--flush" id="jobsCard">
+        <div class="ui-card-header d-flex align-items-center jobs-card-header">
+            <span class="fw-semibold jobs-card-title">Jobs</span>
+            <span id="wsIndicator"
+                  class="ws-indicator badge bg-warning text-dark"
+                  role="status"
+                  aria-live="polite"
+                  aria-atomic="true"
+            >● connecting...</span>
+            <div class="jobs-card-controls">
+                <label for="jobsSearchInput" class="visually-hidden">Search jobs by title</label>
+                <div class="jobs-search-wrap">
+                    <span class="material-symbols-outlined" aria-hidden="true">search</span>
+                    <input
+                        id="jobsSearchInput"
+                        class="form-control form-control-sm jobs-search-input"
+                        type="search"
+                        placeholder="Search title..."
+                        autocomplete="off"
+                    >
+                </div>
+            </div>
         </div>
-        <div class="card-body p-0">
+        <div class="ui-card-body ui-card-body--flush">
             <div class="table-responsive">
-                <table class="table table-hover mb-0" id="jobsTable">
+                <table class="table table-hover align-middle mb-0" id="jobsTable">
+                    <caption class="visually-hidden">List of download jobs</caption>
                     <thead>
                         <tr>
-                            <th>Titel</th>
-                            <th>Format</th>
-                            <th>Quality</th>
-                            <th>Codec</th>
-                            <th>Bitrate</th>
-                            <th style="min-width:120px">Status</th>
-                            <th>Created</th>
-                            <th></th>
+                            <th scope="col">Title</th>
+                            <th scope="col" class="th-mono">Format</th>
+                            <th scope="col" class="th-mono">Quality</th>
+                            <th scope="col" class="th-mono">Codec</th>
+                            <th scope="col" class="th-mono">Bitrate</th>
+                            <th scope="col" class="th-mono status-column">Status</th>
+                            <th scope="col">Created</th>
+                            <th scope="col"></th>
                         </tr>
                     </thead>
                     <tbody id="jobsTbody">
                         {% for job in jobs %}
-                        <tr data-job-id="{{ job["id"] }}" data-url="{{ job["url"] }}" data-status="{{ job["status"] }}" data-type="{{ job["type"] }}" data-size-bytes="{{ job["filesize_bytes"] or '' }}" class="{% if job["status"] == 'done' %}row-done{% elif job["status"] == 'error' %}row-error{% endif %}">
-                            <td data-label="Titel" class="text-truncate" style="max-width:220px" title="{{ job["video_meta_hover"] or job["url"] }}">{{ job["video_title"] or job["url"] }}</td>
-                            <td data-label="Format">{{ job["type"] }}</td>
-                            <td data-label="Quality">{% if job["type"] == "audio" %}MP3{% else %}{{ job["quality"] }}{% endif %}</td>
-                            <td data-label="Codec">{{ job["codec"] or "-" }}</td>
-                            <td data-label="Bitrate">{% if job["bitrate_kbps"] %}{{ job["bitrate_kbps"] }} kbps{% else %}-{% endif %}</td>
+                        <tr data-job-id="{{ job["id"] }}"
+                            data-url="{{ job["url"] }}"
+                            data-status="{{ job["status"] }}"
+                            data-type="{{ job["type"] }}"
+                            data-size-bytes="{{ job['filesize_bytes'] if job['filesize_bytes'] is not none else '' }}"
+                            class="{% if job["status"] == 'done' %}row-done{% elif job["status"] == 'error' %}row-error{% endif %}">
+                            <td data-label="Title"
+                                class="text-truncate job-title-cell job-title-cell--wide"
+                                title="{{ (job['video_meta_hover'] or job['url'])[:120] }}{% if (job['video_meta_hover'] or job['url'])|length > 120 %}...{% endif %}"
+                            ><span class="job-title-text">{{ job["video_title"] or job["url"] }}</span></td>
+                            <td data-label="Format" class="td-mono job-meta-cell">{{ job["type"] }}</td>
+                            <td data-label="Quality" class="td-mono job-meta-cell">{% if job["type"] == "audio" %}MP3{% else %}{{ job["quality"] }}{% endif %}</td>
+                            <td data-label="Codec" class="td-mono job-meta-cell">{{ job["codec"] or "-" }}</td>
+                            <td data-label="Bitrate" class="td-mono job-meta-cell">{% if job["bitrate_kbps"] %}{{ job["bitrate_kbps"] }} kbps{% else %}-{% endif %}</td>
                             <td data-label="Status">{{ status.status_badge(job) }}</td>
                             <td data-label="Created" class="text-nowrap">{{ job["created_at"] | localtime }}</td>
                             <td data-label="Action">{% include "_action_btn.html" %}</td>
@@ -155,7 +179,7 @@
                 </table>
             </div>
         </div>
-    </div>
+    </section>
 </div>
 
 <div class="modal fade" id="detailModal" tabindex="-1">
@@ -174,32 +198,17 @@
                 <p><strong>Message:</strong> <span id="mMessage" class="text-muted">–</span></p>
             </div>
             <div class="modal-footer">
-                <a id="mDownloadBtn" class="btn btn-download d-none" href="#">⬇ Download</a>
-                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
+                <a id="mDownloadBtn" class="btn btn-primary d-none" href="#">
+                    <span class="material-symbols-outlined">download</span>
+                    Download
+                </a>
+                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Close</button>
             </div>
         </div>
     </div>
 </div>
+{% endblock %}
 
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-<script>
-    window.lalalEnabled = {{ lalal_enabled | tojson }};
-</script>
+{% block page_scripts %}
 <script type="module" src="/static/js/main.js"></script>
-<footer class="wb-footer">
-    <span class="wb-footer-content">
-        tubeyou v{{ VERSION }}
-        &middot;&nbsp;&copy;&nbsp;{{ now().year }}&nbsp;Gill-Bates
-        &middot;&nbsp;
-        <a href="https://github.com/Gill-Bates/tubeyou"
-           target="_blank" rel="noopener noreferrer"
-           class="wb-footer-link">
-            <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" class="wb-footer-link-icon" aria-hidden="true">
-                <path fill-rule="evenodd" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"></path>
-            </svg>
-            GitHub
-        </a>
-    </span>
-</footer>
-</body>
-</html>
+{% endblock %}

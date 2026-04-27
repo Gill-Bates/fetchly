@@ -1,50 +1,80 @@
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Status</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined" rel="stylesheet">
-    <link href="/static/style.css" rel="stylesheet">
-</head>
-<body>
-    <nav class="navbar navbar-expand-lg navbar-dark top-navbar fixed-top">
-        <div class="container">
-            <a class="navbar-brand fw-bold" href="/">tubeyou</a>
-            <div class="ms-auto d-flex align-items-center gap-2">
-                <span class="navbar-text small d-none d-md-inline">Job Details</span>
-                <button id="logoutBtn" class="btn btn-sm btn-outline-light" type="button">Logout</button>
+{% extends "base.html" %}
+
+{% block title %}Status{% endblock %}
+
+{% block navbar %}
+{% from "macros/navbar.html" import navbar %}
+{{ navbar(show_back=True, show_settings=False) }}
+{% endblock %}
+
+{% block content %}
+<div>
+    <h2 class="m-0 d-flex align-items-center gap-2 fw-semibold mb-4">
+        <span class="material-symbols-outlined" aria-hidden="true">monitoring</span>
+        Job Status
+    </h2>
+
+    {% if not job %}
+        <div class="alert alert-warning" role="alert">Job not found.</div>
+    {% else %}
+        <div class="ui-card">
+            <div class="ui-card-body">
+                <dl class="row mb-0">
+                    <dt class="col-sm-3">ID</dt>
+                    <dd class="col-sm-9 text-break font-monospace">{{ job["id"] }}</dd>
+
+                    <dt class="col-sm-3">URL</dt>
+                    <dd class="col-sm-9 text-break">
+                        <a href="{{ job["url"] }}" target="_blank" rel="noopener noreferrer">{{ job["url"] }}</a>
+                    </dd>
+
+                    <dt class="col-sm-3">Format</dt>
+                    <dd class="col-sm-9">{{ job["type"] }}</dd>
+
+                    <dt class="col-sm-3">Quality</dt>
+                    <dd class="col-sm-9">{% if job["type"] == "audio" %}MP3{% else %}{{ job["quality"] }}{% endif %}</dd>
+
+                    <dt class="col-sm-3">Status</dt>
+                    <dd class="col-sm-9">
+                        <span id="status" class="status-pill {% if job['status'] == 'done' %}status-pill-success{% elif job['status'] == 'error' %}status-pill-danger{% else %}status-pill-primary{% endif %}">
+                            {{ job["status"] }}
+                        </span>
+                    </dd>
+
+                    <dt class="col-sm-3">Created</dt>
+                    <dd class="col-sm-9">{{ job["created_at"] | localtime }}</dd>
+
+                    {% if job["finished_at"] %}
+                    <dt class="col-sm-3">Completed</dt>
+                    <dd class="col-sm-9">{{ job["finished_at"] | localtime }}</dd>
+                    {% endif %}
+
+                    <dt class="col-sm-3">Message</dt>
+                    <dd class="col-sm-9"><span id="message">{{ job["message"] or "–" }}</span></dd>
+                </dl>
+
+                <div class="mt-4">
+                    <a id="downloadLink"
+                       class="btn btn-primary btn-lg {% if job["status"] != 'done' %}d-none{% endif %}"
+                       href="/download/{{ job["id"] }}">
+                        <span class="material-symbols-outlined icon-inline" aria-hidden="true">download</span>
+                        Download
+                    </a>
+                </div>
             </div>
         </div>
-    </nav>
 
-    <main class="container py-5">
-        <div class="d-flex align-items-center justify-content-between mb-3">
-            <h2 class="m-0 d-flex align-items-center gap-2">
-                <span class="material-symbols-outlined">monitoring</span>
-                Job Status
-            </h2>
-            <a class="btn btn-outline-secondary" href="/">← Dashboard</a>
-        </div>
-
-        {% if not job %}
-            <div class="alert alert-warning">Job not found.</div>
-        {% else %}
-            <p><strong>ID:</strong> {{ job["id"] }}</p>
-            <p><strong>URL:</strong> <a href="{{ job["url"] }}" target="_blank" rel="noopener">{{ job["url"] }}</a></p>
-            <p><strong>Format:</strong> {{ job["type"] }}</p>
-            <p><strong>Quality:</strong> {% if job["type"] == "audio" %}MP3{% else %}{{ job["quality"] }}{% endif %}</p>
-            <p><strong>Status:</strong> <span id="status">{{ job["status"] }}</span></p>
-            <p><strong>Created:</strong> {{ job["created_at"] | localtime }}</p>
-            {% if job["finished_at"] %}<p><strong>Completed:</strong> {{ job["finished_at"] | localtime }}</p>{% endif %}
-            <p><strong>Message:</strong> <span id="message">{{ job["message"] or '–' }}</span></p>
-
-            <a id="downloadLink" class="btn btn-success {% if job["status"] != 'done' %}d-none{% endif %}" href="/download/{{ job["id"] }}">Download</a>
-
-            <script>
+        <script>
+            {
                 const jobId = "{{ job["id"] }}";
                 const statusEl = document.getElementById("status");
                 const messageEl = document.getElementById("message");
                 const linkEl = document.getElementById("downloadLink");
+
+                const STATUS_PILL = {
+                    done: "status-pill-success",
+                    error: "status-pill-danger",
+                };
 
                 const proto = location.protocol === "https:" ? "wss" : "ws";
                 const ws = new WebSocket(`${proto}://${location.host}/ws`);
@@ -54,61 +84,54 @@
                 };
 
                 ws.onmessage = (event) => {
-                    const payload = JSON.parse(event.data);
-                    if (payload.id !== jobId) {
-                        return;
-                    }
+                    let payload;
+                    try { payload = JSON.parse(event.data); } catch { return; }
+                    if (payload.id !== jobId) return;
+
                     statusEl.textContent = payload.status;
-                    messageEl.textContent = payload.message || "Updated";
+                    statusEl.className = `status-pill ${STATUS_PILL[payload.status] || "status-pill-primary"}`;
+                    messageEl.textContent = payload.message || "–";
 
                     if (payload.status === "done") {
                         linkEl.classList.remove("d-none");
                     }
                 };
-            </script>
-        {% endif %}
-    </main>
 
-    <script>
-        function getCookie(name) {
-            const prefix = `${name}=`;
-            const found = document.cookie
-                .split(";")
-                .map((v) => v.trim())
-                .find((v) => v.startsWith(prefix));
-            return found ? decodeURIComponent(found.slice(prefix.length)) : "";
-        }
-
-        document.getElementById("logoutBtn")?.addEventListener("click", async () => {
-            try {
-                const csrf = getCookie("tubeyou_csrf");
-                await fetch("/logout", {
-                    method: "POST",
-                    credentials: "same-origin",
-                    headers: {
-                        "X-CSRF-Token": csrf,
-                    },
+                window.addEventListener("pagehide", () => {
+                    try { ws.close(); } catch (_) {}
                 });
-            } catch (_err) {
-                // Ignore and continue redirecting to login.
             }
-            window.location.assign("/login");
-        });
-    </script>
-    <footer class="wb-footer">
-        <span class="wb-footer-content">
-            tubeyou v{{ VERSION }}
-            &middot;&nbsp;&copy;&nbsp;{{ now().year }}&nbsp;Gill-Bates
-            &middot;&nbsp;
-            <a href="https://github.com/Gill-Bates/tubeyou"
-               target="_blank" rel="noopener noreferrer"
-               class="wb-footer-link">
-                <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" class="wb-footer-link-icon" aria-hidden="true">
-                    <path fill-rule="evenodd" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"></path>
-                </svg>
-                GitHub
-            </a>
-        </span>
-    </footer>
-</body>
-</html>
+        </script>
+    {% endif %}
+</div>
+{% endblock %}
+
+{% block page_scripts %}
+<script>
+    function getCookie(name) {
+        const prefix = `${name}=`;
+        const found = document.cookie
+            .split(";")
+            .map((v) => v.trim())
+            .find((v) => v.startsWith(prefix));
+        return found ? decodeURIComponent(found.slice(prefix.length)) : "";
+    }
+
+    document.getElementById("logoutBtn")?.addEventListener("click", async (event) => {
+        event.preventDefault();
+        try {
+            const csrf = getCookie("tubeyou_csrf");
+            await fetch("/logout", {
+                method: "POST",
+                credentials: "same-origin",
+                headers: {
+                    "X-CSRF-Token": csrf,
+                },
+            });
+        } catch (_err) {
+            // Ignore and continue redirecting to login.
+        }
+        window.location.assign("/logout");
+    });
+</script>
+{% endblock %}

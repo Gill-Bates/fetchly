@@ -70,7 +70,6 @@ def print_banner_once() -> None:
     Uses a file lock so that only one worker prints the banner,
     even when running with multiple uvicorn workers.
     """
-    # Use parent PID to identify the process tree (all workers share same parent)
     ppid = str(os.getppid())
 
     try:
@@ -80,12 +79,13 @@ def print_banner_once() -> None:
 
             content = os.read(fd, 64).decode("utf-8", errors="ignore").strip()
 
-            # Parse stored "ppid:timestamp" (or legacy "ppid" format)
-            stored_ppid = content.split(":")[0] if content else ""
-            stored_ts = 0.0
+            # Parse stored "ppid:timestamp"
+            stored_ppid, stored_ts = "", 0.0
             if ":" in content:
+                parts = content.split(":")
+                stored_ppid = parts[0]
                 try:
-                    stored_ts = float(content.split(":")[1])
+                    stored_ts = float(parts[1])
                 except (ValueError, IndexError):
                     pass
 

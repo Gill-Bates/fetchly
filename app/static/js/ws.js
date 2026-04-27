@@ -2,6 +2,10 @@
 // app/static/js/ws.js
 // Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 //
+// WebSocket client for real-time job updates.
+// Requires the server-rendered jobs table to use English data-label values:
+// Title, Format, Quality, Codec, Bitrate, Status, Created, Action.
+//
 
 import { CONFIG } from "./config.js";
 import { createStatusElement, createActionButton } from "./ui.js";
@@ -35,6 +39,11 @@ const HEARTBEAT_TIMEOUT_MS = 50000;
 function setIndicator(indicator, online) {
     if (!indicator) return;
 
+    const nextState = online ? "live" : "offline";
+    if (indicator.dataset.wsState === nextState) {
+        return;
+    }
+
     if (online) {
         indicator.textContent = "● LIVE";
         indicator.className = "ws-indicator badge bg-success live";
@@ -42,6 +51,7 @@ function setIndicator(indicator, online) {
         indicator.textContent = "● offline";
         indicator.className = "ws-indicator badge bg-danger";
     }
+    indicator.dataset.wsState = nextState;
 }
 
 /**
@@ -229,7 +239,7 @@ function handleMessage(ws, data) {
 /**
  * Establish a WebSocket connection for real-time job updates.
  * Implements reconnection with exponential backoff and heartbeat monitoring.
- * @returns {WebSocket | null} The WebSocket instance or null if already connected
+ * @returns {WebSocket} The active or newly created WebSocket instance
  */
 export function connectWS() {
     const indicator = document.getElementById("wsIndicator");
@@ -247,8 +257,6 @@ export function connectWS() {
 
     const ws = new WebSocket(`${proto}://${location.host}/ws`);
     activeSocket = ws;
-
-    setIndicator(indicator, false);
 
     ws.onopen = () => {
         reconnectAttempt = 0;
@@ -302,4 +310,7 @@ function handleBeforeUnload() {
     }
 }
 
-window.addEventListener("beforeunload", handleBeforeUnload);
+if (!window.__tubeyouWsCleanupRegistered) {
+    window.addEventListener("beforeunload", handleBeforeUnload);
+    window.__tubeyouWsCleanupRegistered = true;
+}

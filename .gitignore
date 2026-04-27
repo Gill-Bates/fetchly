@@ -12,7 +12,10 @@ data/
 .env
 .env.*
 cookies.txt
+*.backup
 *.har
+.omx/
+.codex
 
 # Editor
 .vscode/
@@ -21,3 +24,8 @@ cookies.txt
 # Docker
 *.log
 BUILD_INFO
+
+# UI lint
+tools/ui-lint/node_modules/
+tools/ui-lint/output/
+tools/ui-lint/.cache/

@@ -3,6 +3,7 @@
 # app/session.py
 # Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 #
+
 # Sliding-window session management with idle timeout and hard expiry.
 #
 
@@ -10,12 +11,13 @@ from __future__ import annotations
 
 import base64
 import hmac
+import logging
 import os
 import secrets
+import threading
 from dataclasses import dataclass
-from hashlib import sha256
-from time import time
-from typing import TYPE_CHECKING
+from time import monotonic, time
+from typing import TYPE_CHECKING, Final, TypedDict
 
 if TYPE_CHECKING:
     from fastapi import Request, Response
@@ -25,15 +27,23 @@ from .db import get_settings
 # --------------------------------------------------------------------------- #
 # Configuration
 # --------------------------------------------------------------------------- #
-SESSION_COOKIE = "tubeyou_session"
+SESSION_COOKIE: Final = "tubeyou_session"
 
 # Hard session limit: 24 hours from login (non-configurable)
-SESSION_HARD_LIMIT_SECONDS = 24 * 60 * 60
+SESSION_HARD_LIMIT_SECONDS: Final = 24 * 60 * 60
 
 # Default idle timeout (overridden by setting session_idle_minutes)
-_DEFAULT_IDLE_MINUTES = 60
+_DEFAULT_IDLE_MINUTES: Final = 60
 
 _SECRET_KEY = os.environ.get("TUBEYOU_SECRET_KEY", "")
+if not _SECRET_KEY:
+    raise RuntimeError("TUBEYOU_SECRET_KEY is not set. Cannot start with an empty session signing key.")
+_SECRET_KEY_BYTES = _SECRET_KEY.encode("utf-8")
+_IDLE_TIMEOUT_CACHE_TTL: Final = 60.0
+_IDLE_TIMEOUT_CACHE: tuple[float, int] | None = None
+_IDLE_TIMEOUT_CACHE_LOCK = threading.Lock()
+
+logger = logging.getLogger(__name__)
 
 
 # --------------------------------------------------------------------------- #
@@ -48,18 +58,53 @@ class SessionData:
     nonce: str
 
 
+class SessionInfo(TypedDict):
+    username: str
+    issued_at: int
+    last_activity: int
+    hard_expires_at: int
+    idle_expires_at: int
+
+
+def _encode_token(payload: str, signature: str) -> str:
+    """Return a base64url-encoded payload:signature token without padding."""
+    raw = f"{payload}:{signature}".encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _is_session_expired(session: SessionData, now: int) -> bool:
+    """Return True if hard expiry or sliding idle timeout has been exceeded."""
+    if now - session.issued_at > SESSION_HARD_LIMIT_SECONDS:
+        return True
+    return now - session.last_activity > _get_idle_timeout_seconds()
+
+
 def _get_idle_timeout_seconds() -> int:
     """Get idle timeout from settings (in seconds)."""
+    global _IDLE_TIMEOUT_CACHE
+
+    now = monotonic()
+    with _IDLE_TIMEOUT_CACHE_LOCK:
+        if _IDLE_TIMEOUT_CACHE is not None:
+            cached_at, cached_value = _IDLE_TIMEOUT_CACHE
+            if now - cached_at < _IDLE_TIMEOUT_CACHE_TTL:
+                return cached_value
+
     try:
         minutes = int(get_settings().get("session_idle_minutes", _DEFAULT_IDLE_MINUTES))
-        return max(5, min(minutes, 1440)) * 60  # Clamp between 5 min and 24h
-    except Exception:
-        return _DEFAULT_IDLE_MINUTES * 60
+        result = max(5, min(minutes, 1440)) * 60
+    except Exception as exc:
+        logger.warning("Failed to read session_idle_minutes from settings: %s", exc)
+        result = _DEFAULT_IDLE_MINUTES * 60
+
+    with _IDLE_TIMEOUT_CACHE_LOCK:
+        _IDLE_TIMEOUT_CACHE = (now, result)
+    return result
 
 
 def _sign_payload(payload: str) -> str:
     """Create HMAC signature for payload."""
-    return hmac.new(_SECRET_KEY.encode("utf-8"), payload.encode("utf-8"), sha256).hexdigest()
+    return hmac.digest(_SECRET_KEY_BYTES, payload.encode("utf-8"), "sha256").hex()
 
 
 def create_session(username: str) -> str:
@@ -72,9 +117,7 @@ def create_session(username: str) -> str:
     now = int(time())
     nonce = secrets.token_urlsafe(12)
     payload = f"{username}:{now}:{now}:{nonce}"
-    sig = _sign_payload(payload)
-    raw = f"{payload}:{sig}".encode("utf-8")
-    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+    return _encode_token(payload, _sign_payload(payload))
 
 
 def parse_session(token: str | None) -> SessionData | None:
@@ -89,20 +132,13 @@ def parse_session(token: str | None) -> SessionData | None:
         padded = token + "=" * (-len(token) % 4)
         raw = base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8")
         parts = raw.split(":")
-        
-        # Support both old (4-part) and new (5-part) token formats
-        if len(parts) == 4:
-            # Old format: username:issued_at:nonce:sig
-            username, issued_at_str, nonce, sig = parts
-            payload = f"{username}:{issued_at_str}:{nonce}"
-            last_activity = int(issued_at_str)
-        elif len(parts) == 5:
-            # New format: username:issued_at:last_activity:nonce:sig
-            username, issued_at_str, last_activity_str, nonce, sig = parts
-            payload = f"{username}:{issued_at_str}:{last_activity_str}:{nonce}"
-            last_activity = int(last_activity_str)
-        else:
+
+        if len(parts) != 5:
             return None
+
+        username, issued_at_str, last_activity_str, nonce, sig = parts
+        payload = f"{username}:{issued_at_str}:{last_activity_str}:{nonce}"
+        last_activity = int(last_activity_str)
         
         expected = _sign_payload(payload)
         if not hmac.compare_digest(sig, expected):
@@ -131,18 +167,11 @@ def validate_session(token: str | None) -> str | None:
     session = parse_session(token)
     if not session:
         return None
-    
+
     now = int(time())
-    
-    # Hard limit: 24 hours from login
-    if now - session.issued_at > SESSION_HARD_LIMIT_SECONDS:
+    if _is_session_expired(session, now):
         return None
-    
-    # Sliding idle timeout
-    idle_timeout = _get_idle_timeout_seconds()
-    if now - session.last_activity > idle_timeout:
-        return None
-    
+
     return session.username
 
 
@@ -155,38 +184,29 @@ def renew_session(token: str | None) -> str | None:
     session = parse_session(token)
     if not session:
         return None
-    
+
     now = int(time())
-    
-    # Don't renew if hard limit exceeded
-    if now - session.issued_at > SESSION_HARD_LIMIT_SECONDS:
+    if _is_session_expired(session, now):
         return None
-    
-    # Don't renew if idle timeout exceeded
-    idle_timeout = _get_idle_timeout_seconds()
-    if now - session.last_activity > idle_timeout:
-        return None
-    
-    # Create renewed token with same issued_at but updated last_activity
+
     nonce = secrets.token_urlsafe(12)
     payload = f"{session.username}:{session.issued_at}:{now}:{nonce}"
-    sig = _sign_payload(payload)
-    raw = f"{payload}:{sig}".encode("utf-8")
-    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+    return _encode_token(payload, _sign_payload(payload))
 
 
-def get_session_info(token: str | None) -> dict[str, object] | None:
-    """Get detailed session information for debugging/display.
-    
-    Returns dict with username, issued_at, last_activity, expires_at, idle_expires_at
-    or None if token is invalid.
+def get_session_info(token: str | None) -> SessionInfo | None:
+    """Return detailed session metadata for display or debugging.
+
+    Returns None only if the token cannot be parsed or the signature is invalid.
+    This does not check expiry; callers must compare the returned timestamps
+    against the current time themselves.
     """
     session = parse_session(token)
     if not session:
         return None
-    
+
     idle_timeout = _get_idle_timeout_seconds()
-    
+
     return {
         "username": session.username,
         "issued_at": session.issued_at,
@@ -194,24 +214,9 @@ def get_session_info(token: str | None) -> dict[str, object] | None:
         "hard_expires_at": session.issued_at + SESSION_HARD_LIMIT_SECONDS,
         "idle_expires_at": session.last_activity + idle_timeout,
     }
-
-
-def login_required_enabled() -> bool:
-    """Check if login is required based on settings."""
-    try:
-        return bool(get_settings().get("login_required", True))
-    except Exception:
-        return True
-
-
 def authenticated_user(token: str | None) -> str | None:
-    """Get authenticated username from token, considering login_required setting."""
-    user = validate_session(token)
-    if user:
-        return user
-    if not login_required_enabled():
-        return "anonymous"
-    return None
+    """Get authenticated username from token."""
+    return validate_session(token)
 
 
 def set_session_cookie(response: Response, token: str, request: "Request") -> None:
@@ -222,7 +227,7 @@ def set_session_cookie(response: Response, token: str, request: "Request") -> No
         httponly=True,
         secure=request.url.scheme == "https",
         samesite="lax",
-        max_age=SESSION_HARD_LIMIT_SECONDS,
+        path="/",
     )
 
 

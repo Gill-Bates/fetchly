@@ -1,8 +1,10 @@
 :root {
-    --login-bg: radial-gradient(circle at 20% 20%, #20384f 0%, #0f172a 50%, #0b1222 100%);
-    --login-card-bg: #ffffff;
-    --login-text: #0f172a;
-    --login-muted: #64748b;
+    --login-bg: #0f172a;
+    --login-card-bg: rgba(17, 24, 39, 0.78);
+    --login-text: #f1f5f9;
+    --login-muted: #94a3b8;
+    --login-border: rgba(255, 255, 255, 0.07);
+    --login-shadow: 0 14px 36px rgba(2, 6, 23, 0.22);
 }
 
 * {
@@ -13,58 +15,93 @@ body {
     margin: 0;
     min-height: 100vh;
     font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
-    background: var(--login-bg);
+    background: #0f172a;
 }
 
 .login-shell {
     min-height: 100vh;
+    min-height: 100dvh;
     display: grid;
     place-items: center;
-    padding: 1.25rem;
+    padding-top: calc(1.5rem + env(safe-area-inset-top, 0px));
+    padding-right: calc(1.5rem + env(safe-area-inset-right, 0px));
+    padding-bottom: calc(1.5rem + env(safe-area-inset-bottom, 0px));
+    padding-left: calc(1.5rem + env(safe-area-inset-left, 0px));
 }
 
 .login-card {
     width: 100%;
-    max-width: 440px;
+    max-width: 532px;
     background: var(--login-card-bg);
-    border-radius: 18px;
-    box-shadow: 0 25px 60px rgba(2, 8, 23, 0.35);
-    padding: 2rem;
+    border-radius: 14px;
+    box-shadow: var(--login-shadow);
+    padding: 1.75rem;
+    border: 1px solid var(--login-border);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
 }
 
 .login-card h1 {
     margin: 0;
     color: var(--login-text);
-    font-size: 2rem;
-    font-weight: 800;
+    font-size: 1.85rem;
+    font-weight: 750;
     letter-spacing: 0.01em;
 }
 
 .subtitle {
-    margin: 0.4rem 0 1.2rem;
+    margin: 0.3rem 0 1rem;
     color: var(--login-muted);
+    font-size: 0.96rem;
 }
 
 .form-label {
-    color: #334155;
+    color: #cbd5e1;
     font-weight: 600;
+    margin-bottom: 0.4rem;
 }
 
 .form-control {
-    border-radius: 12px;
+    min-height: 46px;
+    border-radius: 10px;
+    background: rgba(15, 23, 42, 0.78);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    color: var(--login-text);
+    box-shadow: none;
+}
+
+.form-control:focus {
+    background: rgba(15, 23, 42, 0.9);
+    border-color: rgba(99, 102, 241, 0.55);
+    box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.12);
+    color: var(--login-text);
+}
+
+.form-control::placeholder {
+    color: rgba(148, 163, 184, 0.7);
 }
 
 .btn-primary {
-    border-radius: 12px;
+    min-height: 50px;
+    border-radius: 10px;
     font-weight: 600;
+    box-shadow: none;
 }
 
 @media (max-width: 480px) {
+    .login-shell {
+        padding-top: calc(1rem + env(safe-area-inset-top, 0px));
+        padding-right: calc(1rem + env(safe-area-inset-right, 0px));
+        padding-bottom: calc(1rem + env(safe-area-inset-bottom, 0px));
+        padding-left: calc(1rem + env(safe-area-inset-left, 0px));
+    }
+
     .login-card {
-        padding: 1.4rem;
+        max-width: 100%;
+        padding: 1.35rem;
     }
 
     .login-card h1 {
-        font-size: 1.7rem;
+        font-size: 1.65rem;
     }
 }

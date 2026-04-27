@@ -1,0 +1,14 @@
+{
+    "name": "tubeyou-ui-lint",
+    "private": true,
+    "type": "module",
+    "scripts": {
+        "audit": "node run-ui-lint.mjs",
+        "install:browsers": "playwright install chromium"
+    },
+    "dependencies": {
+        "pixelmatch": "^7.1.0",
+        "playwright": "^1.58.2",
+        "pngjs": "^7.0.0"
+    }
+}

@@ -28,11 +28,15 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.base import BaseHTTPMiddleware
 from slowapi import Limiter
+from slowapi.errors import RateLimitExceeded
+from slowapi.middleware import SlowAPIMiddleware
 from slowapi.util import get_remote_address
 
-from .worker import job_queue, start_workers, set_status_callback, stop_workers, _shutdown_event
+from .governor import governor
+from .worker import get_job_queue, start_workers, set_status_callback, stop_workers, _shutdown_event
 from .db import init_db, close_db, insert_job, get_job, list_jobs, paginate_jobs, purge_old_jobs, get_stats, get_settings, set_settings, update_job
 from .utils.version import BUILD_INFO, VERSION
+from .utils.housekeeping import cleanup_expired_jobs
 from .session import (
     SESSION_COOKIE,
     SESSION_HARD_LIMIT_SECONDS,
@@ -40,7 +44,6 @@ from .session import (
     validate_session,
     renew_session,
     authenticated_user,
-    login_required_enabled,
     set_session_cookie,
     delete_session_cookie,
 )
@@ -62,6 +65,16 @@ _LALAL_AUTH_VALIDATION_CACHE_SECONDS = 300
 _ALLOWED_MEDIA_TYPES = frozenset({"audio", "video"})
 _ALLOWED_QUALITIES = frozenset({"max", "medium", "small"})
 _WS_BROADCAST_CONCURRENCY = 50
+_SKIP_RENEW_PATHS = (
+    "/static",
+    "/favicon.ico",
+    "/health",
+    "/login",
+    "/logout",
+    "/thumbnail",
+    "/ws",
+    "/download",
+)
 
 limiter = Limiter(key_func=get_remote_address)
 
@@ -373,7 +386,7 @@ def require_user(request: Request) -> str:
 
 
 def require_session(request: Request) -> str:
-    """Dependency: require valid session (not anonymous)."""
+    """Dependency: require a valid authenticated session."""
     user = validate_session(request.cookies.get(_SESSION_COOKIE))
     if not user:
         raise HTTPException(status_code=401, detail="Authentication required")
@@ -418,21 +431,13 @@ async def _housekeeping_daemon() -> None:
             settings = await asyncio.to_thread(get_settings)
             keep_days = settings.get("retention_days", 7)
             
-            # Purge old jobs and get their IDs
-            deleted_ids = await asyncio.to_thread(purge_old_jobs, keep_days)
-            
-            if deleted_ids:
-                # Delete job directories
-                for job_id in deleted_ids:
-                    job_dir = DATA_DIR / job_id
-                    if job_dir.exists() and job_dir.is_dir():
-                        try:
-                            await asyncio.to_thread(shutil.rmtree, job_dir)
-                            log.debug("Deleted job directory: %s", job_dir)
-                        except Exception as e:
-                            log.warning("Failed to delete directory %s: %s", job_dir, e)
-                
-                log.info("Housekeeping: %d job(s) older than %d days removed.", len(deleted_ids), keep_days)
+            # Cleanup expired jobs (DB + filesystem)
+            await asyncio.to_thread(
+                cleanup_expired_jobs,
+                keep_days,
+                DATA_DIR,
+                purge_old_jobs,
+            )
         except Exception as exc:
             log.warning("Housekeeping failed: %s", exc)
 
@@ -462,6 +467,9 @@ def _check_dependencies() -> None:
 async def lifespan(app: FastAPI):
     _check_dependencies()
     init_db()
+    
+    # Configure Governor for auto-detection of resources (Docker cgroup-aware)
+    await asyncio.to_thread(governor.configure)
 
     loop = asyncio.get_running_loop()
 
@@ -469,7 +477,7 @@ async def lifespan(app: FastAPI):
         loop.call_soon_threadsafe(event_queue.put_nowait, payload)
 
     set_status_callback(_thread_status_callback)
-    start_workers(2)
+    start_workers()  # Auto-detect worker count via Governor
 
     broadcaster_task = asyncio.create_task(_event_broadcaster())
     housekeeping_task = asyncio.create_task(_housekeeping_daemon())
@@ -508,21 +516,20 @@ class SessionRenewalMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next):
         response = await call_next(request)
-        
-        # Only renew for successful responses (not errors/redirects to login)
-        if response.status_code < 400:
-            old_token = request.cookies.get(_SESSION_COOKIE)
-            if old_token:
-                new_token = renew_session(old_token)
-                if new_token and new_token != old_token:
-                    response.set_cookie(
-                        key=_SESSION_COOKIE,
-                        value=new_token,
-                        httponly=True,
-                        secure=request.url.scheme == "https",
-                        samesite="lax",
-                        max_age=SESSION_HARD_LIMIT_SECONDS,
-                    )
+
+        # Only renew for successful responses and non-static/resource paths.
+        if response.status_code >= 400:
+            return response
+
+        request_path = request.url.path
+        if any(request_path == prefix or request_path.startswith(f"{prefix}/") for prefix in _SKIP_RENEW_PATHS):
+            return response
+
+        old_token = request.cookies.get(_SESSION_COOKIE)
+        if old_token:
+            new_token = renew_session(old_token)
+            if new_token and new_token != old_token:
+                set_session_cookie(response, new_token, request)
         return response
 
 
@@ -532,6 +539,13 @@ app.add_middleware(
     csrf_cookie_name=_CSRF_COOKIE,
 )
 app.state.limiter = limiter
+app.add_middleware(SlowAPIMiddleware)
+
+
+@app.exception_handler(RateLimitExceeded)
+async def handle_rate_limit_exceeded(request: Request, exc: RateLimitExceeded) -> JSONResponse:
+    _ = (request, exc)
+    return JSONResponse(status_code=429, content={"detail": "Rate limit exceeded"})
 
 
 async def _broadcast_payload(payload: dict[str, Any], sockets: list[WebSocket]) -> None:
@@ -572,14 +586,19 @@ async def _send_safe(ws: WebSocket, payload: dict[str, Any]) -> None:
         connections.discard(ws)
 
 
+@app.get("/health")
+def health() -> dict[str, str]:
+    return {"status": "ok"}
+
+
 @app.get("/", response_class=HTMLResponse)
-def index(request: Request):
+async def index(request: Request):
     redirect = _require_html_auth(request)
     if redirect:
         return redirect
-    jobs = paginate_jobs(limit=50, offset=0)
-    stats = get_stats()
-    settings = get_settings()
+    jobs = await asyncio.to_thread(paginate_jobs, limit=50, offset=0)
+    stats = await asyncio.to_thread(get_stats)
+    settings = await asyncio.to_thread(get_settings)
     lalal_enabled = _is_lalal_configured(settings)
     return templates.TemplateResponse(request=request, name="index.html", context={
         "jobs": jobs,
@@ -589,13 +608,12 @@ def index(request: Request):
 
 
 @app.get("/api/jobs")
-def api_jobs(user: str = Depends(require_user), offset: int = 0, limit: int = 50):
-    _ = user
+async def api_jobs(_user: str = Depends(require_user), offset: int = 0, limit: int = 50):
 
     safe_offset = max(0, offset)
     safe_limit = min(max(1, limit), 100)
 
-    jobs = paginate_jobs(limit=safe_limit, offset=safe_offset)
+    jobs = await asyncio.to_thread(paginate_jobs, limit=safe_limit, offset=safe_offset)
     return [_job_to_dict(job) for job in jobs]
 
 
@@ -603,7 +621,7 @@ def api_jobs(user: str = Depends(require_user), offset: int = 0, limit: int = 50
 @limiter.limit("10/minute")
 async def api_info(request: Request, url: str, user: str = Depends(require_user)):
     """Extract video metadata using yt-dlp."""
-    _ = (request, user)
+    _ = request
     is_valid, error_msg = _validate_youtube_url(url)
     if not is_valid:
         return JSONResponse(status_code=400, content={"detail": error_msg})
@@ -662,19 +680,16 @@ async def api_info(request: Request, url: str, user: str = Depends(require_user)
 
 
 @app.get("/api/settings")
-def api_get_settings(user: str = Depends(require_user)):
+async def api_get_settings(_user: str = Depends(require_user)):
     """Get all settings."""
-    _ = user
-    settings = get_settings()
+    settings = await asyncio.to_thread(get_settings)
     return _public_settings(settings)
 
 
 @app.post("/api/settings")
 @limiter.limit("10/minute")
-async def api_set_settings(request: Request, user: str = Depends(require_session)):
+async def api_set_settings(request: Request, _user: str = Depends(require_session)):
     """Update application settings. Requires active session."""
-    _ = user
-
     payload = await _get_json(request)
     
     # Validate inputs
@@ -701,20 +716,23 @@ async def api_set_settings(request: Request, user: str = Depends(require_session
             settings_to_update["retention_days"] = payload["retention_days"]
         if "session_idle_minutes" in payload:
             settings_to_update["session_idle_minutes"] = payload["session_idle_minutes"]
-        if "login_required" in payload:
-            settings_to_update["login_required"] = payload["login_required"]
         if "admin_password" in payload and payload["admin_password"]:
             new_password = str(payload["admin_password"]).strip()
             if len(new_password) < 6:
                 return JSONResponse(status_code=400, content={"detail": "Password must be at least 6 characters"})
             current_password = str(payload.get("current_password", ""))
-            if not _verify_login(_DEFAULT_USER, current_password):
+            is_valid_current_password = await asyncio.to_thread(_verify_login, _DEFAULT_USER, current_password)
+            if not is_valid_current_password:
                 return JSONResponse(status_code=403, content={"detail": "Current password is required"})
             # Hash the new password
-            settings_to_update["admin_password_hash"] = _hash_password(_DEFAULT_USER, new_password)
+            settings_to_update["admin_password_hash"] = await asyncio.to_thread(
+                _hash_password,
+                _DEFAULT_USER,
+                new_password,
+            )
         
         if settings_to_update:
-            set_settings(settings_to_update)
+            await asyncio.to_thread(set_settings, settings_to_update)
         
         return {"ok": True, "message": "Settings updated"}
     except Exception as e:
@@ -722,10 +740,9 @@ async def api_set_settings(request: Request, user: str = Depends(require_session
 
 
 @app.get("/api/lalal/status")
-async def api_lalal_status(force_refresh: bool = False, user: str = Depends(require_user)):
+async def api_lalal_status(force_refresh: bool = False, _user: str = Depends(require_user)):
     """Return saved Lalal.ai auth status and validation state."""
-    _ = user
-    settings = get_settings()
+    settings = await asyncio.to_thread(get_settings)
     email = str(settings.get("lalalaai_email", "")).strip()
     auth_key = str(settings.get("lalalaai_auth_key", "")).strip()
 
@@ -766,11 +783,14 @@ async def api_lalal_status(force_refresh: bool = False, user: str = Depends(requ
             await client.close()
 
         checked_at = now_ts
-        set_settings({
-            "lalalaai_auth_checked_at": checked_at,
-            "lalalaai_auth_is_valid": token_valid,
-            "lalalaai_auth_last_error": validation_error,
-        })
+        await asyncio.to_thread(
+            set_settings,
+            {
+                "lalalaai_auth_checked_at": checked_at,
+                "lalalaai_auth_is_valid": token_valid,
+                "lalalaai_auth_last_error": validation_error,
+            },
+        )
 
     return {
         "ok": True,
@@ -784,9 +804,8 @@ async def api_lalal_status(force_refresh: bool = False, user: str = Depends(requ
 
 @app.post("/api/lalal/auth/request")
 @limiter.limit("5/minute")
-async def api_lalal_auth_request(request: Request, user: str = Depends(require_user)):
+async def api_lalal_auth_request(request: Request, _user: str = Depends(require_user)):
     """Request OTP email via Lalal website auth flow."""
-    _ = user
 
     payload = await _get_json(request)
 
@@ -796,7 +815,7 @@ async def api_lalal_auth_request(request: Request, user: str = Depends(require_u
     if not email or "@" not in email:
         return JSONResponse(status_code=400, content={"detail": "Valid email address is required"})
 
-    settings = get_settings()
+    settings = await asyncio.to_thread(get_settings)
     now_ts = int(time())
     last_requested_at = int(settings.get("lalalaai_auth_requested_at", 0) or 0)
     remaining_seconds = _LALAL_AUTH_REQUEST_COOLDOWN_SECONDS - (now_ts - last_requested_at)
@@ -821,16 +840,15 @@ async def api_lalal_auth_request(request: Request, user: str = Depends(require_u
     except Exception as exc:
         return JSONResponse(status_code=400, content={"detail": f"Failed to request email code: {exc}"})
 
-    set_settings({"lalalaai_auth_requested_at": now_ts})
+    await asyncio.to_thread(set_settings, {"lalalaai_auth_requested_at": now_ts})
 
     return {"ok": True, "message": "Verification email sent. Please enter your 6-digit code."}
 
 
 @app.get("/api/lalal/auth/cooldown")
-async def api_lalal_auth_cooldown(user: str = Depends(require_user)):
+async def api_lalal_auth_cooldown(_user: str = Depends(require_user)):
     """Return remaining cooldown seconds for token requests."""
-    _ = user
-    settings = get_settings()
+    settings = await asyncio.to_thread(get_settings)
     now_ts = int(time())
     last_requested_at = int(settings.get("lalalaai_auth_requested_at", 0) or 0)
     remaining_seconds = max(0, _LALAL_AUTH_REQUEST_COOLDOWN_SECONDS - (now_ts - last_requested_at))
@@ -844,9 +862,8 @@ async def api_lalal_auth_cooldown(user: str = Depends(require_user)):
 
 @app.post("/api/lalal/auth/verify")
 @limiter.limit("10/minute")
-async def api_lalal_auth_verify(request: Request, user: str = Depends(require_user)):
+async def api_lalal_auth_verify(request: Request, _user: str = Depends(require_user)):
     """Verify 6-digit OTP code and store Lalal activation key."""
-    _ = user
 
     payload = await _get_json(request)
 
@@ -873,22 +890,24 @@ async def api_lalal_auth_verify(request: Request, user: str = Depends(require_us
         return JSONResponse(status_code=400, content={"detail": f"Authentication failed: {exc}"})
 
     # Store auth credentials
-    set_settings({
-        "lalalaai_email": email,
-        "lalalaai_auth_key": activation_key,
-        "lalalaai_auth_checked_at": int(time()),
-        "lalalaai_auth_is_valid": True,
-        "lalalaai_auth_last_error": "",
-    })
+    await asyncio.to_thread(
+        set_settings,
+        {
+            "lalalaai_email": email,
+            "lalalaai_auth_key": activation_key,
+            "lalalaai_auth_checked_at": int(time()),
+            "lalalaai_auth_is_valid": True,
+            "lalalaai_auth_last_error": "",
+        },
+    )
 
     return {"ok": True, "message": "Authentication successful"}
 
 
 @app.post("/api/lalal/auth/activation-key")
 @limiter.limit("10/minute")
-async def api_lalal_auth_activation_key(request: Request, user: str = Depends(require_user)):
+async def api_lalal_auth_activation_key(request: Request, _user: str = Depends(require_user)):
     """Validate and store a manually provided Lalal activation key."""
-    _ = user
 
     payload = await _get_json(request)
 
@@ -910,41 +929,45 @@ async def api_lalal_auth_activation_key(request: Request, user: str = Depends(re
     finally:
         await client.close()
 
-    set_settings({
-        "lalalaai_email": email,
-        "lalalaai_auth_key": activation_key,
-        "lalalaai_auth_checked_at": int(time()),
-        "lalalaai_auth_is_valid": True,
-        "lalalaai_auth_last_error": "",
-    })
+    await asyncio.to_thread(
+        set_settings,
+        {
+            "lalalaai_email": email,
+            "lalalaai_auth_key": activation_key,
+            "lalalaai_auth_checked_at": int(time()),
+            "lalalaai_auth_is_valid": True,
+            "lalalaai_auth_last_error": "",
+        },
+    )
 
     return {"ok": True, "message": "Activation key saved"}
 
 
 @app.post("/api/lalal/auth/logout")
-async def api_lalal_auth_logout(user: str = Depends(require_user)):
+async def api_lalal_auth_logout(_user: str = Depends(require_user)):
     """Clear Lalal.ai auth credentials."""
-    _ = user
-
-    set_settings({
-        "lalalaai_email": "",
-        "lalalaai_auth_key": "",
-        "lalalaai_auth_checked_at": 0,
-        "lalalaai_auth_is_valid": False,
-        "lalalaai_auth_last_error": "",
-    })
+    await asyncio.to_thread(
+        set_settings,
+        {
+            "lalalaai_email": "",
+            "lalalaai_auth_key": "",
+            "lalalaai_auth_checked_at": 0,
+            "lalalaai_auth_is_valid": False,
+            "lalalaai_auth_last_error": "",
+        },
+    )
 
     return {"ok": True, "message": "Logged out"}
 
 
 @app.get("/settings", response_class=HTMLResponse)
-def settings_page(request: Request):
+async def settings_page(request: Request):
     """Settings page."""
     redirect = _require_html_auth(request)
     if redirect:
         return redirect
-    
-    settings = get_settings()
+
+    settings = await asyncio.to_thread(get_settings)
     lalal_configured = _is_lalal_configured(settings)
     lalal_email = str(settings.get("lalalaai_email", "")).strip()
     
@@ -954,14 +977,17 @@ def settings_page(request: Request):
         context={
             "settings": settings,
             "csrf_token": getattr(request.state, "csrf_token", ""),
-            "lalal_status": f"Connected ({lalal_email})" if lalal_configured and lalal_email else ("Connected" if lalal_configured else "Not configured"),
+            "lalal_status": "Connected" if lalal_configured else "Not configured",
+            "lalal_configured": lalal_configured,
+            "lalal_email": lalal_email,
         },
     )
 
 
 @app.get("/login", response_class=HTMLResponse)
 def login_page(request: Request):
-    if _current_user(request):
+    user = _current_user(request)
+    if user:
         return RedirectResponse(url="/", status_code=303)
     return templates.TemplateResponse(
         request=request,
@@ -977,7 +1003,7 @@ async def login(request: Request):
     username = str(payload.get("username", "")).strip()
     password = str(payload.get("password", ""))
 
-    if not _verify_login(username, password):
+    if not await asyncio.to_thread(_verify_login, username, password):
         return JSONResponse(status_code=401, content={"ok": False, "detail": "Invalid username or password"})
 
     resp = JSONResponse(content={"ok": True, "redirect": "/"})
@@ -1007,9 +1033,9 @@ async def api_submit(
     url: str = Form(...),
     type: str = Form(...),
     quality: str = Form(...),
-    user: str = Depends(require_user),
+    _user: str = Depends(require_user),
 ):
-    _ = (request, user)
+    _ = request
     media_type = str(type).strip().lower()
     quality_value = str(quality).strip().lower()
 
@@ -1041,27 +1067,27 @@ async def api_submit(
     
     job_id = str(uuid.uuid4())
     clean_url = url.strip()
-    insert_job(
+    await asyncio.to_thread(
+        insert_job,
         job_id,
         clean_url,
         media_type,
         quality_value,
         "queued",
-        video_title=meta["video_title"] if isinstance(meta, dict) else None,
-        video_meta_hover=meta["video_meta_hover"] if isinstance(meta, dict) else None,
+        video_title=meta["video_title"],
+        video_meta_hover=meta["video_meta_hover"],
     )
-    await asyncio.to_thread(job_queue.put, (job_id, clean_url, media_type, quality_value))
-    job = get_job(job_id)
+    await asyncio.to_thread(get_job_queue().put, (job_id, clean_url, media_type, quality_value))
+    job = await asyncio.to_thread(get_job, job_id)
     return _job_to_dict(job)
 
 
 @app.post("/api/jobs/{job_id}/cancel")
 @limiter.limit("20/minute")
-async def cancel_job(request: Request, job_id: str, user: str = Depends(require_user_json)):
+async def cancel_job(request: Request, job_id: str, _user: str = Depends(require_user_json)):
     """Cancel a running or queued job."""
-    _ = (request, user)
-    
-    job = get_job(job_id)
+
+    job = await asyncio.to_thread(get_job, job_id)
     if not job:
         return JSONResponse(status_code=404, content={"error": "Job not found"})
     
@@ -1075,36 +1101,48 @@ async def cancel_job(request: Request, job_id: str, user: str = Depends(require_
     
     # Update status to "cancelled" if currently queued, else let worker handle it
     if status == "queued":
-        update_job(job_id, status="cancelled", message="Cancelled by user", finished_at=datetime.now(UTC).isoformat())
+        await asyncio.to_thread(
+            update_job,
+            job_id,
+            status="cancelled",
+            message="Cancelled by user",
+            finished_at=datetime.now(UTC).isoformat(),
+        )
     
     logger.info("Cancellation requested for job %s (status: %s)", job_id, status)
     
-    job = get_job(job_id)
+    job = await asyncio.to_thread(get_job, job_id)
     return _job_to_dict(job)
 
 
 @app.get("/job/{job_id}", response_class=HTMLResponse)
-def job_page(request: Request, job_id: str):
+async def job_page(request: Request, job_id: str):
     redirect = _require_html_auth(request)
     if redirect:
         return redirect
-    job = get_job(job_id)
+    job = await asyncio.to_thread(get_job, job_id)
     if not job:
         return templates.TemplateResponse(
-            request=request, name="job.html", context={"job": None, "job_id": job_id}
+            request=request,
+            name="job.html",
+            context={"job": None, "job_id": job_id},
         )
 
-    return templates.TemplateResponse(request=request, name="job.html", context={"job": job})
+    return templates.TemplateResponse(
+        request=request,
+        name="job.html",
+        context={"job": job},
+    )
 
 
 @app.get("/download/{job_id}")
 @limiter.limit("60/minute")
-def download(request: Request, job_id: str):
+async def download(request: Request, job_id: str):
     if not _current_user(request):
         return RedirectResponse(url="/login", status_code=303)
-    job = get_job(job_id)
+    job = await asyncio.to_thread(get_job, job_id)
     if not job or job["status"] != "done":
-        return {"error": "not ready"}
+        return JSONResponse(status_code=404, content={"error": "not ready"})
 
     raw_filename = job["filename"]
     if not raw_filename:
@@ -1124,15 +1162,14 @@ def download(request: Request, job_id: str):
 
 @app.post("/api/lalal/{job_id}")
 @limiter.limit("5/minute")
-async def lalal_split(request: Request, job_id: str, stem: str = "vocals", user: str = Depends(require_user_json)):
+async def lalal_split(request: Request, job_id: str, stem: str = "vocals", _user: str = Depends(require_user_json)):
     """Split audio using Lalal.ai API."""
-    _ = (request, user)
 
     # Validate stem type
     if stem not in ("vocals", "instrumental"):
         return JSONResponse(status_code=400, content={"error": "Invalid stem type. Use 'vocals' or 'instrumental'"})
 
-    job = get_job(job_id)
+    job = await asyncio.to_thread(get_job, job_id)
     if not job:
         return JSONResponse(status_code=404, content={"error": "Job not found"})
 
@@ -1178,8 +1215,9 @@ async def lalal_split(request: Request, job_id: str, stem: str = "vocals", user:
     if not client:
         return JSONResponse(status_code=400, content={"error": "Lalal.ai API key not configured"})
 
-    # Progress callback to broadcast via WebSocket
-    async def broadcast_progress(stage: str, pct: int) -> None:
+    loop = asyncio.get_running_loop()
+
+    def sync_progress_callback(stage: str, pct: int) -> None:
         payload = {
             "type": "lalal_progress",
             "job_id": job_id,
@@ -1187,13 +1225,8 @@ async def lalal_split(request: Request, job_id: str, stem: str = "vocals", user:
             "stage": stage,
             "progress": pct,
         }
-        if connections:
-            await _broadcast_payload(payload, list(connections))
-
-    def sync_progress_callback(stage: str, pct: int) -> None:
-        # Schedule async broadcast from sync callback
         try:
-            asyncio.create_task(broadcast_progress(stage, pct))
+            loop.call_soon_threadsafe(event_queue.put_nowait, payload)
         except Exception:
             pass
 
@@ -1243,19 +1276,19 @@ async def lalal_split(request: Request, job_id: str, stem: str = "vocals", user:
 
 
 @app.get("/api/lalal/download/{job_id}")
-def lalal_download(
+async def lalal_download(
     request: Request,
     job_id: str,
     stem: str = "vocals",
-    user: str = Depends(require_user_json),
+    _user: str = Depends(require_user_json),
 ):
     """Download processed Lalal.ai stem file."""
-    _ = (request, user)
+    _ = request
 
     if stem not in ("vocals", "instrumental"):
         return JSONResponse(status_code=400, content={"error": "Invalid stem type"})
 
-    job = get_job(job_id)
+    job = await asyncio.to_thread(get_job, job_id)
     if not job:
         return JSONResponse(status_code=404, content={"error": "Job not found"})
 
@@ -1276,11 +1309,6 @@ def lalal_download(
 
     if not stem_path.is_file():
         return JSONResponse(status_code=404, content={"error": f"{stem.capitalize()} file not found. Please process with Lalal.ai first."})
-
-    try:
-        stem_path.relative_to(DATA_DIR)
-    except ValueError:
-        return JSONResponse(status_code=403, content={"error": "forbidden"})
 
     return FileResponse(path=stem_path, filename=stem_path.name)
 

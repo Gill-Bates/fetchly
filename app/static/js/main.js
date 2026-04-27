@@ -8,6 +8,10 @@ import * as api from "./api.js";
 import { getCookie, isValidYouTubeUrl, extractYouTubeVideoId, formatDuration } from "./utils.js";
 import { prependJob, loadMore } from "./jobs.js";
 import { connectWS } from "./ws.js";
+import { showToast, clearToasts, toast } from "./toast.js";
+
+// Expose toast globally for inline scripts
+window.TubeYou = { toast, showToast };
 
 const { fetchJobs, submitJob, fetchVideoInfo } = api;
 const toErrorMessage = typeof api.toErrorMessage === "function"
@@ -35,6 +39,8 @@ const metaFormats = document.getElementById("metaFormats");
 const submitBtn = document.getElementById("submitBtn");
 const btnText = document.getElementById("btnText");
 const formError = document.getElementById("formError");
+const jobsSearchInput = document.getElementById("jobsSearchInput");
+const jobsTbody = document.getElementById("jobsTbody");
 const detailModalEl = document.getElementById("detailModal");
 const logoutBtn = document.getElementById("logoutBtn");
 const settingsBtn = document.getElementById("settingsBtn");
@@ -50,6 +56,81 @@ let ticking = false;
 let previewDebounceId = null;
 let previewRequestSeq = 0;
 let previewAbortController = null;
+let filterRafId = null;
+
+/**
+ * Set element text content safely. Falls back to "–" when value is null/undefined.
+ * @param {Element | null | undefined} el
+ * @param {string | null | undefined} text
+ */
+function setText(el, text) {
+    if (el) el.textContent = text ?? "–";
+}
+
+function getOrCreateFilterEmptyRow() {
+    if (!jobsTbody) return null;
+
+    let row = document.getElementById("jobsFilterEmptyRow");
+    if (row) return row;
+
+    row = document.createElement("tr");
+    row.id = "jobsFilterEmptyRow";
+    row.classList.add("d-none");
+
+    const td = document.createElement("td");
+    td.colSpan = 8;
+
+    const wrapper = document.createElement("div");
+    wrapper.className = "empty-state";
+
+    const iconDiv = document.createElement("div");
+    iconDiv.className = "icon";
+    iconDiv.textContent = "🔎";
+
+    const p = document.createElement("p");
+    p.textContent = "No jobs match this title search.";
+
+    wrapper.append(iconDiv, p);
+
+    td.appendChild(wrapper);
+    row.appendChild(td);
+    jobsTbody.appendChild(row);
+    return row;
+}
+
+function applyJobTitleFilter() {
+    if (!jobsTbody) return;
+
+    const query = (jobsSearchInput?.value || "").trim().toLowerCase();
+    const rows = Array.from(jobsTbody.querySelectorAll("tr[data-job-id]"));
+    let visibleCount = 0;
+
+    for (const row of rows) {
+        const titleCell = row.querySelector("td[data-label='Title']");
+        const titleText = (titleCell?.textContent || "").toLowerCase();
+        const matches = !query || titleText.includes(query);
+        row.classList.toggle("d-none", !matches);
+        if (matches) {
+            visibleCount += 1;
+        }
+    }
+
+    const emptySearchRow = getOrCreateFilterEmptyRow();
+    if (emptySearchRow) {
+        const hasRows = rows.length > 0;
+        emptySearchRow.classList.toggle("d-none", !(query && hasRows && visibleCount === 0));
+    }
+}
+
+function scheduleJobTitleFilter() {
+    if (filterRafId != null) {
+        cancelAnimationFrame(filterRafId);
+    }
+    filterRafId = requestAnimationFrame(() => {
+        filterRafId = null;
+        applyJobTitleFilter();
+    });
+}
 
 function setError(message) {
     if (!formError) return;
@@ -64,12 +145,12 @@ function setError(message) {
 }
 
 function resetVideoMeta() {
-    if (metaTitle) metaTitle.textContent = "–";
-    if (metaChannel) metaChannel.textContent = "–";
-    if (metaUploader) metaUploader.textContent = "–";
-    if (metaDuration) metaDuration.textContent = "–";
-    if (metaViews) metaViews.textContent = "–";
-    if (metaFormats) metaFormats.textContent = "–";
+    setText(metaTitle, "–");
+    setText(metaChannel, "–");
+    setText(metaUploader, "–");
+    setText(metaDuration, "–");
+    setText(metaViews, "–");
+    setText(metaFormats, "–");
 }
 
 function resetQualityOptions() {
@@ -109,11 +190,11 @@ function setSubmitBusy(isBusy) {
 
     btnText.replaceChildren();
     const icon = document.createElement("span");
-    icon.className = "material-symbols-outlined icon-inline";
+    icon.className = "material-symbols-outlined";
     icon.setAttribute("aria-hidden", "true");
     icon.textContent = "download";
     btnText.appendChild(icon);
-    btnText.appendChild(document.createTextNode("Start"));
+    btnText.appendChild(document.createTextNode(" Start"));
 }
 
 function updateQualityOptions(formats) {
@@ -174,20 +255,20 @@ async function updateVideoPreview() {
 
     thumbnailPreview?.replaceChildren(image);
     showVideoPreview();
-    if (metaTitle) metaTitle.textContent = "Loading...";
-    if (metaFormats) metaFormats.textContent = "Loading...";
+    setText(metaTitle, "Loading...");
+    setText(metaFormats, "Loading...");
 
     try {
         const info = await fetchVideoInfo(url, { signal: previewAbortController.signal });
         if (requestSeq !== previewRequestSeq) {
             return;
         }
-        if (metaTitle) metaTitle.textContent = info.title || "–";
-        if (metaChannel) metaChannel.textContent = info.channel || "–";
-        if (metaUploader) metaUploader.textContent = info.uploader || "–";
-        if (metaDuration) metaDuration.textContent = formatDuration(info.duration);
-        if (metaViews) metaViews.textContent = info.view_count?.toLocaleString() || "–";
-        if (metaFormats) metaFormats.textContent = (info.formats || []).slice(0, 5).join(", ") || "–";
+        setText(metaTitle, info.title);
+        setText(metaChannel, info.channel);
+        setText(metaUploader, info.uploader);
+        setText(metaDuration, formatDuration(info.duration));
+        setText(metaViews, info.view_count?.toLocaleString());
+        setText(metaFormats, (info.formats || []).slice(0, 5).join(", ") || "–");
         updateQualityOptions(info.formats || []);
     } catch (error) {
         if (error?.name === "AbortError") {
@@ -196,8 +277,8 @@ async function updateVideoPreview() {
         if (requestSeq !== previewRequestSeq) {
             return;
         }
-        if (metaTitle) metaTitle.textContent = "Metadata unavailable";
-        if (metaFormats) metaFormats.textContent = "–";
+        setText(metaTitle, "Metadata unavailable");
+        setText(metaFormats, "–");
     }
 }
 
@@ -218,16 +299,22 @@ function openDetail(jobId) {
     const row = document.querySelector(`tr[data-job-id="${CSS.escape(jobId)}"]`);
     if (!row) return;
 
-    const cells = row.querySelectorAll("td");
-    const statusValue = row.dataset.status || cells[5]?.querySelector(".status-pill")?.textContent?.trim() || "–";
+    /** Read a cell's trimmed text by its data-label attribute. */
+    const getCellText = (label) => {
+        const cell = row.querySelector(`td[data-label='${CSS.escape(label)}']`);
+        return cell?.textContent?.trim() || "–";
+    };
+
+    const statusValue = row.dataset.status ||
+        row.querySelector("td[data-label='Status'] .status-pill")?.textContent?.trim() || "–";
 
     activeDetailId = jobId;
-    document.getElementById("mId").textContent = jobId;
-    document.getElementById("mUrl").textContent = row.dataset.url || cells[0]?.textContent || "";
-    document.getElementById("mType").textContent = cells[1]?.textContent || "";
-    document.getElementById("mQuality").textContent = cells[2]?.textContent || "";
-    document.getElementById("mStatus").textContent = statusValue || "–";
-    document.getElementById("mMessage").textContent = "–";
+    setText(document.getElementById("mId"), jobId);
+    setText(document.getElementById("mUrl"), row.dataset.url || "–");
+    setText(document.getElementById("mType"), getCellText("Format"));
+    setText(document.getElementById("mQuality"), getCellText("Quality"));
+    setText(document.getElementById("mStatus"), statusValue);
+    setText(document.getElementById("mMessage"), "–");
 
     const downloadBtn = document.getElementById("mDownloadBtn");
     if (downloadBtn) {
@@ -238,25 +325,97 @@ function openDetail(jobId) {
     detailModal.show();
 }
 
-document.addEventListener("click", (event) => {
-    const button = event.target.closest("[data-action='open-detail']");
-    if (!button) return;
+async function handleLalalSplit(btn) {
+    const jobId = btn.dataset.jobId;
+    const stem = btn.dataset.stem;
 
-    event.preventDefault();
-    openDetail(button.dataset.jobId || "");
+    if (!jobId || !stem) return;
+
+    // Listen for progress updates during this request
+    let progressText = null;
+    const progressHandler = (event) => {
+        const detail = event.detail;
+        if (detail.job_id === jobId && detail.stem === stem) {
+            if (!progressText) {
+                progressText = document.createElement("span");
+                progressText.className = "ms-1 small";
+                progressText.dataset.lalalProgress = "1";
+                btn.appendChild(progressText);
+            }
+            const stage = detail.stage === "upload" ? "↑" : "⚙";
+            progressText.textContent = `${stage} ${detail.progress}%`;
+        }
+    };
+    document.addEventListener("tubeyou:lalal-progress", progressHandler);
+
+    try {
+        const data = await handleActionPost(
+            btn,
+            `/api/lalal/${encodeURIComponent(jobId)}?stem=${encodeURIComponent(stem)}`,
+        );
+        if (data.download_url && isSafeRedirect(data.download_url)) {
+            window.location.href = data.download_url;
+        }
+    } catch {
+        // Error already surfaced by handleActionPost.
+    } finally {
+        document.removeEventListener("tubeyou:lalal-progress", progressHandler);
+        progressText?.remove();
+    }
+}
+
+async function handleCancelJob(btn) {
+    const jobId = btn.dataset.jobId;
+    if (!jobId) return;
+
+    if (!confirm("Are you sure you want to cancel this job?")) {
+        return;
+    }
+
+    try {
+        await handleActionPost(btn, `/api/jobs/${encodeURIComponent(jobId)}/cancel`);
+    } catch {
+        // Error already surfaced by handleActionPost.
+    }
+}
+
+document.addEventListener("click", async (event) => {
+    const detailBtn = event.target.closest("[data-action='open-detail']");
+    if (detailBtn) {
+        event.preventDefault();
+        openDetail(detailBtn.dataset.jobId || "");
+        return;
+    }
+
+    const splitBtn = event.target.closest("[data-action='lalal-split']");
+    if (splitBtn) {
+        await handleLalalSplit(splitBtn);
+        return;
+    }
+
+    const cancelBtn = event.target.closest("[data-action='cancel-job']");
+    if (cancelBtn) {
+        await handleCancelJob(cancelBtn);
+    }
 });
 
 document.addEventListener("tubeyou:job-update", (event) => {
     const payload = event.detail;
-    if (!payload || payload.id !== activeDetailId) return;
+    if (!payload) return;
 
-    document.getElementById("mStatus").textContent = payload.status || "–";
-    document.getElementById("mMessage").textContent = payload.message || "–";
-    const downloadBtn = document.getElementById("mDownloadBtn");
-    if (downloadBtn) {
-        downloadBtn.classList.toggle("d-none", payload.status !== "done");
+    if (payload.id === activeDetailId) {
+        document.getElementById("mStatus").textContent = payload.status || "–";
+        document.getElementById("mMessage").textContent = payload.message || "–";
+        const downloadBtn = document.getElementById("mDownloadBtn");
+        if (downloadBtn) {
+            downloadBtn.classList.toggle("d-none", payload.status !== "done");
+        }
     }
+
+    scheduleJobTitleFilter();
 });
+
+jobsSearchInput?.addEventListener("input", scheduleJobTitleFilter);
 
 if (detailModalEl) {
     detailModalEl.addEventListener("show.bs.modal", () => {
@@ -303,6 +462,7 @@ submitForm?.addEventListener("submit", async (event) => {
         const job = await submitJob(formData, getCookie("tubeyou_csrf"));
         document.getElementById("emptyRow")?.remove();
         prependJob(job);
+        scheduleJobTitleFilter();
         submitForm.reset();
         typeSelect?.dispatchEvent(new Event("change"));
         hideVideoPreview();
@@ -327,11 +487,13 @@ typeSelect?.addEventListener("change", () => {
         // Disable quality select for audio (always use best quality)
         if (qualitySelect) {
             qualitySelect.disabled = true;
+            qualitySelect.classList.add("is-disabled");
         }
     } else {
         // Enable quality select for video format
         if (qualitySelect) {
             qualitySelect.disabled = false;
+            qualitySelect.classList.remove("is-disabled");
         }
     }
 });
@@ -342,13 +504,16 @@ window.addEventListener("scroll", () => {
     ticking = true;
     window.requestAnimationFrame(() => {
         if (window.innerHeight + window.scrollY >= document.body.offsetHeight - CONFIG.SCROLL_OFFSET) {
-            void loadMore(fetchJobs);
+            void loadMore(fetchJobs).then(() => {
+                scheduleJobTitleFilter();
+            });
         }
         ticking = false;
     });
 }, { passive: true });
 
-logoutBtn?.addEventListener("click", async () => {
+logoutBtn?.addEventListener("click", async (event) => {
+    event.preventDefault();
     try {
         await fetch("/logout", {
             method: "POST",
@@ -361,13 +526,19 @@ logoutBtn?.addEventListener("click", async () => {
         console.warn("Logout request failed:", err);
     }
 
-    window.location.assign("/login");
+    window.location.assign("/logout");
 });
 
 settingsBtn?.addEventListener("click", (event) => {
     // Fallback for environments/extensions that interfere with normal anchor navigation.
     event.preventDefault();
     window.location.assign("/settings");
+});
+
+window.addEventListener("jobs-load-error", (event) => {
+    const detail = event?.detail;
+    const message = detail instanceof Error ? detail.message : "Could not load more jobs.";
+    showToast(`Jobs load failed: ${message}`, "warning", 3500);
 });
 
 // Security helpers
@@ -422,8 +593,10 @@ async function handleActionPost(btn, url, options = {}) {
         btn.prepend(successIcon);
         setTimeout(() => {
             successIcon.remove();
-            btn.disabled = originalDisabled;
-            delete btn.dataset.loading;
+            if (document.contains(btn)) {
+                btn.disabled = originalDisabled;
+                delete btn.dataset.loading;
+            }
         }, 2000);
 
         return data;
@@ -437,66 +610,5 @@ async function handleActionPost(btn, url, options = {}) {
     }
 }
 
-// Lalal.ai split handler (delegated event listener)
-document.addEventListener("click", async (e) => {
-    const btn = e.target.closest("[data-action='lalal-split']");
-    if (!btn) return;
-
-    const jobId = btn.dataset.jobId;
-    const stem = btn.dataset.stem;
-
-    if (!jobId || !stem) return;
-
-    // Listen for progress updates during this request
-    let progressText = null;
-    const progressHandler = (event) => {
-        const detail = event.detail;
-        if (detail.job_id === jobId && detail.stem === stem) {
-            if (!progressText) {
-                progressText = document.createElement("span");
-                progressText.className = "ms-1 small";
-                progressText.dataset.lalalProgress = "1";
-                btn.appendChild(progressText);
-            }
-            const stage = detail.stage === "upload" ? "↑" : "⚙";
-            progressText.textContent = `${stage} ${detail.progress}%`;
-        }
-    };
-    document.addEventListener("tubeyou:lalal-progress", progressHandler);
-
-    try {
-        const data = await handleActionPost(
-            btn,
-            `/api/lalal/${encodeURIComponent(jobId)}?stem=${encodeURIComponent(stem)}`,
-        );
-        if (data.download_url && isSafeRedirect(data.download_url)) {
-            window.location.href = data.download_url;
-        }
-    } catch {
-        // Error already surfaced by handleActionPost.
-    } finally {
-        document.removeEventListener("tubeyou:lalal-progress", progressHandler);
-        progressText?.remove();
-    }
-});
-
-// Handle cancel job button clicks
-document.addEventListener("click", async (e) => {
-    const btn = e.target.closest("[data-action='cancel-job']");
-    if (!btn) return;
-
-    const jobId = btn.dataset.jobId;
-    if (!jobId) return;
-
-    if (!confirm("Are you sure you want to cancel this job?")) {
-        return;
-    }
-
-    try {
-        await handleActionPost(btn, `/api/jobs/${encodeURIComponent(jobId)}/cancel`);
-    } catch {
-        // Error already surfaced by handleActionPost.
-    }
-});
-
 connectWS();
+applyJobTitleFilter();

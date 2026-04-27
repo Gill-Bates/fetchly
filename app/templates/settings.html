@@ -1,31 +1,23 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>tubeyou Settings</title>
-    <link rel="preconnect" href="https://cdn.jsdelivr.net">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined" rel="stylesheet">
-    <link href="/static/style.css" rel="stylesheet">
-</head>
-<body>
-<nav class="navbar navbar-expand-lg navbar-dark top-navbar fixed-top">
-    <div class="container">
-        <a class="navbar-brand fw-bold" href="/">tubeyou</a>
-        <div class="ms-auto d-flex align-items-center gap-2">
-            <a href="/" class="btn btn-sm btn-outline-light" title="Back to Dashboard">
-                <span class="material-symbols-outlined" style="font-size: 18px;" aria-hidden="true">arrow_back</span>
-            </a>
-        </div>
-    </div>
-</nav>
+{% extends "base.html" %}
 
-<div class="container py-5">
+{% block title %}tubeyou Settings{% endblock %}
+
+{% block head_preconnect %}
+<link rel="preconnect" href="https://cdn.jsdelivr.net">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+{% endblock %}
+
+{% block navbar %}
+{% from "macros/navbar.html" import navbar %}
+{{ navbar(show_back=True, show_settings=False) }}
+{% endblock %}
+
+{% block content %}
+
+<div>
     <h1 class="mb-2 d-flex align-items-center gap-2">
-        <span class="material-symbols-outlined" style="font-size: 32px;" aria-hidden="true">settings</span>
+        <span class="material-symbols-outlined settings-page-icon" aria-hidden="true">settings</span>
         Settings
     </h1>
     <p class="text-muted mb-4">Manage storage, access and integrations from one place.</p>
@@ -35,8 +27,8 @@
 
         <div class="row g-4 mb-4">
             <div class="col-lg-4">
-                <div class="card shadow-sm h-100 settings-panel">
-                    <div class="card-body p-4">
+                <div class="ui-card h-100">
+                    <div>
                         <div class="settings-section">
                             <h6 class="fw-semibold mb-1 d-flex align-items-center gap-1">
                                 <span class="material-symbols-outlined icon-inline" aria-hidden="true">database</span>
@@ -45,8 +37,8 @@
                             <small class="text-muted d-block mb-3">Retention and cleanup rules</small>
 
                             <div class="mb-3">
-                                <label for="retentionDays" class="form-label small text-muted">Max. Job retention (days)</label>
-                                <input type="number" class="form-control form-control-sm" id="retentionDays" name="retention_days" min="1" max="365" value="{{ settings.retention_days | default(7) }}">
+                                <label for="retentionDays" class="form-label">Max. Job retention (days)</label>
+                                <input type="number" class="form-control ui-input" id="retentionDays" name="retention_days" min="1" max="365" value="{{ settings.retention_days | default(7) }}">
                                 <small class="setting-hint">Completed jobs will be deleted after this period (default: 7 days)</small>
                             </div>
                         </div>
@@ -55,38 +47,35 @@
             </div>
 
             <div class="col-lg-4">
-                <div class="card shadow-sm h-100 settings-panel settings-panel--primary">
-                    <div class="card-body p-4">
+                <div class="ui-card h-100">
+                    <div>
                         <div class="settings-section">
                             <h6 class="fw-semibold mb-1 d-flex align-items-center gap-1">
                                 <span class="material-symbols-outlined icon-inline" aria-hidden="true">security</span>
                                 Security
                             </h6>
                             <small class="text-muted d-block mb-3">Access and authentication</small>
-
-                            <div class="mb-3">
-                                <div class="form-check form-switch">
-                                    <input class="form-check-input" type="checkbox" id="loginRequired" name="login_required" {% if settings.login_required %}checked{% endif %}>
-                                    <label class="form-check-label" for="loginRequired">Require login to access dashboard</label>
-                                </div>
-                                <small class="setting-hint">Force authentication to access dashboard</small>
-                            </div>
                         </div>
 
                         <div class="settings-section">
                             <h6 class="settings-section-title">Credentials</h6>
                             <div class="mb-3">
-                                <label for="adminPassword" class="form-label small text-muted">Admin password</label>
-                                <input type="password" class="form-control form-control-sm" id="adminPassword" name="admin_password" value="" placeholder="Leave blank to keep existing" autocomplete="off">
-                                <small class="setting-hint">Leave blank to keep the current password.</small>
+                                <label for="adminPassword" class="form-label">Admin password</label>
+                                <input type="password" class="form-control ui-input" id="adminPassword" name="admin_password" value="" placeholder="Leave blank to keep existing" autocomplete="new-password">
+                                <small class="setting-hint">Leave blank to keep the current password. Min. 8 characters.</small>
+                            </div>
+                            <div class="mb-3">
+                                <label for="adminPasswordConfirm" class="form-label">Confirm password</label>
+                                <input type="password" class="form-control ui-input" id="adminPasswordConfirm" name="admin_password_confirm" value="" placeholder="Repeat new password" autocomplete="new-password">
+                                <div id="passwordError" class="invalid-feedback d-none"></div>
                             </div>
                         </div>
 
                         <div class="settings-section">
                             <h6 class="settings-section-title">Session</h6>
                             <div class="mb-3">
-                                <label for="sessionIdleMinutes" class="form-label small text-muted">Session idle timeout (minutes)</label>
-                                <input type="number" class="form-control form-control-sm" id="sessionIdleMinutes" name="session_idle_minutes" min="5" max="1440" value="{{ settings.session_idle_minutes | default(60) }}">
+                                <label for="sessionIdleMinutes" class="form-label">Session idle timeout (minutes)</label>
+                                <input type="number" class="form-control ui-input" id="sessionIdleMinutes" name="session_idle_minutes" min="5" max="1440" value="{{ settings.session_idle_minutes | default(60) }}">
                                 <small class="setting-hint">Session expires after inactivity. Max 24h hard limit from login.</small>
                             </div>
                         </div>
@@ -95,40 +84,39 @@
             </div>
 
             <div class="col-lg-4">
-                <div class="card shadow-sm h-100 settings-panel">
-                    <div class="card-body p-4">
-                        <div class="settings-section">
-                            <h6 class="fw-semibold mb-1 d-flex align-items-center gap-1">
-                                <span class="material-symbols-outlined icon-inline" aria-hidden="true">extension</span>
-                                Integrations
-                            </h6>
-                            <small class="text-muted d-block mb-3">Connected external services</small>
-
-                            <div class="d-flex justify-content-between align-items-center mb-2">
-                                <div>
-                                    <div class="fw-medium">Lalal.ai</div>
-                                    <small class="text-muted">Audio separation service</small>
-                                </div>
-                                <span id="lalalStatusBadge" class="badge bg-secondary">{{ lalal_status or 'Not configured' }}</span>
+                <div class="ui-card h-100">
+                    <div>
+                        <div class="settings-section lalal-tile-section">
+                            <div class="lalal-tile-header mb-3">
+                                <img src="/static/img/lalal_ai.svg" alt="Lalal.ai" class="lalal-tile-logo">
+                                <span id="lalalStatusBadge" class="badge {{ 'bg-success' if lalal_configured else 'bg-secondary' }}">{{ lalal_status or 'Not configured' }}</span>
                             </div>
 
-                            <button type="button" class="btn btn-outline-primary btn-sm mt-2" id="lalalAuthBtn" data-bs-toggle="modal" data-bs-target="#lalalAuthModal">
-                                <span class="material-symbols-outlined icon-inline" aria-hidden="true">key</span>
-                                Authenticate
-                            </button>
-                            <small class="setting-hint d-block mt-2" id="lalalStatusLine"></small>
+                            <div class="lalal-tile-actions">
+                                <div class="lalal-tile-action-row">
+                                    <button type="button" class="btn btn-outline-primary btn-sm" id="lalalAuthBtn" data-bs-toggle="modal" data-bs-target="#lalalAuthModal">
+                                        <span class="material-symbols-outlined icon-inline" aria-hidden="true">key</span>
+                                        <span id="lalalAuthBtnLabel">{{ 'Reconnect' if lalal_configured else 'Authenticate' }}</span>
+                                    </button>
+                                    <button type="button" class="btn btn-outline-danger btn-sm {{ '' if lalal_configured else 'd-none' }}" id="lalalDisconnectBtn" {{ 'disabled' if not lalal_configured else '' }}>
+                                        <span class="material-symbols-outlined icon-inline" aria-hidden="true">link_off</span>
+                                        Disconnect
+                                    </button>
+                                </div>
+                                <small class="setting-hint" id="lalalStatusLine">{% if lalal_configured and lalal_email %}Logged in as <code class="lalal-status-email">{{ lalal_email }}</code>{% elif lalal_configured %}Session active{% else %}Click 'Authenticate' to connect your Lalal.ai account{% endif %}</small>
+                            </div>
                         </div>
                     </div>
                 </div>
             </div>
         </div>
 
-        <div class="settings-actions-bar d-flex justify-content-end gap-2">
-            <button type="submit" class="btn btn-primary" id="settingsSaveBtn">
-                <span class="material-symbols-outlined icon-inline" aria-hidden="true">save</span>
-                Save Changes
-            </button>
-            <a href="/" class="btn btn-outline-secondary">Cancel</a>
+        <div class="settings-status-bar d-flex justify-content-between align-items-center">
+            <button id="settingsSaveBtn" class="btn btn-primary d-none" type="button">Save</button>
+            <span id="autoSaveIndicator" class="auto-save-indicator">
+                <span class="spinner-border spinner-border-sm" aria-hidden="true"></span>
+                <span>Saving...</span>
+            </span>
         </div>
     </form>
 </div>
@@ -151,7 +139,7 @@
                 <div id="lalalAuthStep1">
                     <div class="auth-step-header mb-3">
                         <span class="badge auth-step-badge">Step 1</span>
-                        <h6 class="mb-1 mt-2">Choose authentication method</h6>
+                        <h6 class="mb-0">Choose authentication method</h6>
                         <p class="text-muted mb-0">Request OTP or use an existing activation key.</p>
                     </div>
 
@@ -163,11 +151,11 @@
                         <p class="small text-muted mb-2">Get your activation key from your <a href="https://www.lalal.ai/api/" target="_blank" rel="noopener">Lalal.ai profile</a> (log in → scroll down → copy key).</p>
                         <div class="mb-2">
                             <label for="lalalAuthEmail" class="form-label">Email Address</label>
-                            <input type="email" class="form-control" id="lalalAuthEmail" placeholder="your@lalal.ai-email.com" autocomplete="email" required>
+                                <input type="email" class="form-control ui-input" id="lalalAuthEmail" placeholder="your@lalal.ai-email.com" autocomplete="email" required>
                         </div>
                         <div class="mb-2">
                             <label for="lalalActivationKey" class="form-label">Activation Key</label>
-                            <input type="text" class="form-control" id="lalalActivationKey" placeholder="e.g. 650d12075f994b3a" autocomplete="off">
+                            <input type="text" class="form-control ui-input font-monospace" id="lalalActivationKey" placeholder="" autocomplete="off">
                         </div>
                         <button type="button" class="btn btn-primary w-100" id="lalalAuthUseKeyBtn">
                             <span class="spinner-border spinner-border-sm d-none me-2" id="lalalAuthUseKeySpinner" aria-hidden="true"></span>
@@ -175,22 +163,22 @@
                         </button>
                     </div>
 
-                    <details class="mt-3">
-                        <summary class="small text-muted" style="cursor: pointer;">Alternative: OTP via email (may require captcha)</summary>
-                        <div class="auth-method-panel mt-2">
+                    <details class="auth-otp-details">
+                        <summary class="small text-muted auth-otp-summary">Alternative: OTP via email (may require captcha)</summary>
+                        <div class="auth-method-panel">
                             <p class="small text-warning mb-2">
                                 <span class="material-symbols-outlined icon-inline" aria-hidden="true">warning</span>
                                 Lalal.ai uses Cloudflare captcha. OTP emails may not be sent without solving it on their website.
                             </p>
                             <div class="mb-2">
                                 <label for="lalalOtpEmail" class="form-label">Email Address</label>
-                                <input type="email" class="form-control" id="lalalOtpEmail" placeholder="your@lalal.ai-email.com" autocomplete="email">
+                                <input type="email" class="form-control ui-input" id="lalalOtpEmail" placeholder="your@lalal.ai-email.com" autocomplete="email">
                             </div>
                             <button type="button" class="btn btn-outline-secondary w-100" id="lalalAuthRequestBtn">
                                 <span class="spinner-border spinner-border-sm d-none me-2" id="lalalAuthRequestSpinner" aria-hidden="true"></span>
                                 <span id="lalalAuthRequestLabel">Request OTP Code</span>
                             </button>
-                            <small class="setting-hint d-block mt-2 text-center" id="lalalAuthCooldownText"></small>
+                            <small class="setting-hint auth-cooldown-hint text-center" id="lalalAuthCooldownText"></small>
                         </div>
                     </details>
                 </div>
@@ -199,7 +187,7 @@
                 <div id="lalalAuthStep2" class="d-none">
                     <div class="auth-step-header mb-3">
                         <span class="badge auth-step-badge">Step 2</span>
-                        <h6 class="mb-1 mt-2">Enter verification code</h6>
+                        <h6 class="mb-0">Enter verification code</h6>
                         <p class="text-muted mb-0">Use the 6-digit code sent to <strong id="lalalAuthEmailDisplay"></strong>.</p>
                     </div>
 
@@ -207,12 +195,18 @@
                         <div class="mb-3">
                             <label class="form-label">Authentication Code</label>
                             <div id="lalalAuthCodeBlocks" class="d-flex justify-content-center gap-2">
-                                <input type="text" class="form-control text-center fs-4" data-auth-digit="0" maxlength="1" inputmode="numeric" pattern="[0-9]" autocomplete="one-time-code" style="width: 48px;">
-                                <input type="text" class="form-control text-center fs-4" data-auth-digit="1" maxlength="1" inputmode="numeric" pattern="[0-9]" autocomplete="one-time-code" style="width: 48px;">
-                                <input type="text" class="form-control text-center fs-4" data-auth-digit="2" maxlength="1" inputmode="numeric" pattern="[0-9]" autocomplete="one-time-code" style="width: 48px;">
-                                <input type="text" class="form-control text-center fs-4" data-auth-digit="3" maxlength="1" inputmode="numeric" pattern="[0-9]" autocomplete="one-time-code" style="width: 48px;">
-                                <input type="text" class="form-control text-center fs-4" data-auth-digit="4" maxlength="1" inputmode="numeric" pattern="[0-9]" autocomplete="one-time-code" style="width: 48px;">
-                                <input type="text" class="form-control text-center fs-4" data-auth-digit="5" maxlength="1" inputmode="numeric" pattern="[0-9]" autocomplete="one-time-code" style="width: 48px;">
+                                <label class="visually-hidden" for="lalalAuthDigit0">Authentication digit 1</label>
+                                <input id="lalalAuthDigit0" type="text" class="form-control ui-input text-center fs-4 auth-code-input" data-auth-digit="0" maxlength="1" inputmode="numeric" pattern="[0-9]" autocomplete="one-time-code">
+                                <label class="visually-hidden" for="lalalAuthDigit1">Authentication digit 2</label>
+                                <input id="lalalAuthDigit1" type="text" class="form-control ui-input text-center fs-4 auth-code-input" data-auth-digit="1" maxlength="1" inputmode="numeric" pattern="[0-9]" autocomplete="one-time-code">
+                                <label class="visually-hidden" for="lalalAuthDigit2">Authentication digit 3</label>
+                                <input id="lalalAuthDigit2" type="text" class="form-control ui-input text-center fs-4 auth-code-input" data-auth-digit="2" maxlength="1" inputmode="numeric" pattern="[0-9]" autocomplete="one-time-code">
+                                <label class="visually-hidden" for="lalalAuthDigit3">Authentication digit 4</label>
+                                <input id="lalalAuthDigit3" type="text" class="form-control ui-input text-center fs-4 auth-code-input" data-auth-digit="3" maxlength="1" inputmode="numeric" pattern="[0-9]" autocomplete="one-time-code">
+                                <label class="visually-hidden" for="lalalAuthDigit4">Authentication digit 5</label>
+                                <input id="lalalAuthDigit4" type="text" class="form-control ui-input text-center fs-4 auth-code-input" data-auth-digit="4" maxlength="1" inputmode="numeric" pattern="[0-9]" autocomplete="one-time-code">
+                                <label class="visually-hidden" for="lalalAuthDigit5">Authentication digit 6</label>
+                                <input id="lalalAuthDigit5" type="text" class="form-control ui-input text-center fs-4 auth-code-input" data-auth-digit="5" maxlength="1" inputmode="numeric" pattern="[0-9]" autocomplete="one-time-code">
                             </div>
                         </div>
                         <button type="button" class="btn btn-primary w-100 mb-2" id="lalalAuthVerifyBtn">
@@ -226,9 +220,9 @@
                 </div>
                 
                 <!-- Step 3: Success -->
-                <div id="lalalAuthStep3" class="d-none text-center py-3 auth-success-panel">
-                    <span class="material-symbols-outlined text-success" style="font-size: 64px;" aria-hidden="true">check_circle</span>
-                    <h5 class="mt-3 mb-2">Authentication Successful!</h5>
+                <div id="lalalAuthStep3" class="d-none auth-success-panel">
+                    <span class="material-symbols-outlined text-success auth-success-icon" aria-hidden="true">check_circle</span>
+                    <h5 class="mb-0">Authentication Successful!</h5>
                     <p class="text-muted mb-0">Your Lalal.ai account is now connected.</p>
                 </div>
             </div>
@@ -238,8 +232,9 @@
         </div>
     </div>
 </div>
+{% endblock %}
 
-<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+{% block page_scripts %}
 <script>
 function getCsrfToken() {
     const prefix = "tubeyou_csrf=";
@@ -263,9 +258,12 @@ function clearAlert(el) {
 
 const formEl = document.getElementById("settingsForm");
 const alertEl = document.getElementById("settingsAlert");
-const btn = document.getElementById("settingsSaveBtn");
+const settingsSaveBtn = document.getElementById("settingsSaveBtn");
+const autoSaveIndicator = document.getElementById("autoSaveIndicator");
 const lalalStatusBadge = document.getElementById("lalalStatusBadge");
 const lalalStatusLine = document.getElementById("lalalStatusLine");
+const lalalAuthBtnLabel = document.getElementById("lalalAuthBtnLabel");
+const lalalDisconnectBtn = document.getElementById("lalalDisconnectBtn");
 
 // Auth modal elements
 const lalalAuthModal = document.getElementById("lalalAuthModal");
@@ -380,6 +378,20 @@ function setLalalStatus(text, type = "secondary") {
         lalalStatusBadge.className = `badge bg-${type}`;
         lalalStatusBadge.textContent = text;
     }
+    updateLalalAuthButtonLabel(text);
+}
+
+function updateLalalAuthButtonLabel(statusText) {
+    if (!lalalAuthBtnLabel) return;
+    const normalized = (statusText || "").trim().toLowerCase();
+    const shouldReconnect = normalized.startsWith("connected") || normalized === "token invalid";
+    lalalAuthBtnLabel.textContent = shouldReconnect ? "Reconnect" : "Authenticate";
+}
+
+function setDisconnectVisible(visible) {
+    if (!lalalDisconnectBtn) return;
+    lalalDisconnectBtn.classList.toggle("d-none", !visible);
+    lalalDisconnectBtn.disabled = !visible;
 }
 
 function setLalalStatusLine(text) {
@@ -413,18 +425,62 @@ async function loadLalalStatus() {
         if (payload.configured && payload.token_valid === false) {
             setLalalStatus("Token invalid", "danger");
             setLalalStatusLine(payload.validation_error || "Stored Lalal token is invalid. Please authenticate again.");
+            setDisconnectVisible(true);
         } else if (payload.configured) {
             setLalalStatus("Connected", "success");
-            setLalalStatusLine(payload.email ? `Logged in as ${payload.email}` : "Session active");
+            const emailPart = payload.email
+                ? `<code class="lalal-status-email">${payload.email}</code>`
+                : "";
+            const minutesPart = (payload.remaining_minutes != null)
+                ? ` &mdash; <span class="lalal-status-minutes">${payload.remaining_minutes} min left</span>`
+                : "";
+            if (lalalStatusLine) {
+                lalalStatusLine.innerHTML = emailPart
+                    ? `Logged in as ${emailPart}${minutesPart}`
+                    : `Session active${minutesPart}`;
+            }
+            setDisconnectVisible(true);
         } else {
             setLalalStatus("Not configured", "secondary");
             setLalalStatusLine("Click 'Authenticate' to connect your Lalal.ai account");
+            setDisconnectVisible(false);
         }
     } catch (err) {
         setLalalStatus("Error", "danger");
         setLalalStatusLine(err.message || "Unable to check status");
+        setDisconnectVisible(false);
     }
 }
+
+lalalDisconnectBtn?.addEventListener("click", async () => {
+    lalalDisconnectBtn.disabled = true;
+    clearAlert(lalalAuthAlert);
+
+    try {
+        const res = await fetch("/api/lalal/auth/logout", {
+            method: "POST",
+            credentials: "same-origin",
+            headers: {
+                "X-CSRF-Token": getCsrfToken(),
+            },
+        });
+
+        const payload = await res.json().catch(() => ({}));
+        if (!res.ok) {
+            throw new Error(payload.detail || `HTTP ${res.status}`);
+        }
+
+        setLalalStatus("Not configured", "secondary");
+        setLalalStatusLine("Session disconnected. Click 'Authenticate' to reconnect.");
+        setDisconnectVisible(false);
+        showToast("Lalal.ai session disconnected", "success");
+    } catch (err) {
+        showToast(err.message || "Failed to disconnect Lalal.ai session", "danger");
+        setDisconnectVisible(true);
+    } finally {
+        lalalDisconnectBtn.disabled = false;
+    }
+});
 
 // Auth flow: Step 1 - Request code (OTP)
 lalalAuthRequestBtn?.addEventListener("click", async () => {
@@ -602,6 +658,10 @@ lalalAuthModal?.addEventListener("show.bs.modal", () => {
     lalalAuthEmail.value = "";
     if (lalalActivationKey) {
         lalalActivationKey.value = "";
+        // Show a random-looking placeholder so no real key is revealed.
+        const rndHex = () => Array.from(crypto.getRandomValues(new Uint8Array(8)))
+            .map((b) => b.toString(16).padStart(2, "0")).join("");
+        lalalActivationKey.placeholder = rndHex();
     }
     clearAuthCodeBlocks();
     renderAuthRequestButton();
@@ -662,54 +722,118 @@ document.getElementById("lalalAuthCodeBlocks")?.addEventListener("keydown", (e) 
 });
 
 // Load initial status
+updateLalalAuthButtonLabel(lalalStatusBadge?.textContent || "");
 void loadLalalStatus();
 
-// Settings form submission
-formEl.addEventListener("submit", async (e) => {
-    e.preventDefault();
+// ── Toast System ────────────────────────────────────────────────────────────
+const TOAST_ICONS = { success: "check_circle", danger: "error", warning: "warning", info: "info" };
+let toastContainer = null;
 
-    if (btn.disabled) return;
+function getToastContainer() {
+    if (toastContainer && document.body.contains(toastContainer)) return toastContainer;
+    toastContainer = document.createElement("div");
+    toastContainer.id = "toastContainer";
+    toastContainer.className = "toast-container";
+    toastContainer.setAttribute("aria-live", "polite");
+    document.body.appendChild(toastContainer);
+    return toastContainer;
+}
 
+function showToast(message, type = "info", duration = 3000) {
+    const wrapper = getToastContainer();
+    const toast = document.createElement("div");
+    toast.className = `toast toast--${type}`;
+    toast.setAttribute("role", "alert");
+
+    const icon = document.createElement("span");
+    icon.className = "material-symbols-outlined toast-icon";
+    icon.setAttribute("aria-hidden", "true");
+    icon.textContent = TOAST_ICONS[type] || TOAST_ICONS.info;
+    toast.appendChild(icon);
+
+    const text = document.createElement("span");
+    text.className = "toast-message";
+    text.textContent = message;
+    toast.appendChild(text);
+
+    const closeBtn = document.createElement("button");
+    closeBtn.type = "button";
+    closeBtn.className = "toast-close";
+    closeBtn.setAttribute("aria-label", "Close");
+    closeBtn.innerHTML = "&times;";
+    closeBtn.addEventListener("click", () => dismissToast(toast));
+    toast.appendChild(closeBtn);
+
+    wrapper.appendChild(toast);
+    void toast.offsetWidth;
+    toast.classList.add("toast--visible");
+
+    if (duration > 0) setTimeout(() => dismissToast(toast), duration);
+    return toast;
+}
+
+function dismissToast(toast) {
+    if (!toast || !toast.parentNode) return;
+    toast.classList.remove("toast--visible");
+    toast.classList.add("toast--hiding");
+    toast.addEventListener("transitionend", () => toast.remove(), { once: true });
+    setTimeout(() => toast.remove(), 300);
+}
+
+// ── Auto-Save System ────────────────────────────────────────────────────────
+let saveTimeout = null;
+let isSaving = false;
+
+function showSavingIndicator() {
+    autoSaveIndicator?.classList.add("auto-save-indicator--visible");
+}
+
+function hideSavingIndicator() {
+    autoSaveIndicator?.classList.remove("auto-save-indicator--visible");
+}
+
+function validateSettings() {
     const form = new FormData(formEl);
-    const originalBtnText = btn.innerHTML;
-
-    btn.disabled = true;
-    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2" aria-hidden="true"></span>Saving...';
-    clearAlert(alertEl);
-
     const retention = parseInt(form.get("retention_days"), 10);
     if (!Number.isFinite(retention) || retention < 1 || retention > 365) {
-        setAlert(alertEl, "danger", "Retention must be between 1 and 365 days");
-        btn.disabled = false;
-        btn.innerHTML = originalBtnText;
-        return;
+        return { valid: false, error: "Retention must be between 1 and 365 days" };
     }
-
     const sessionIdleMinutes = parseInt(form.get("session_idle_minutes"), 10);
     if (!Number.isFinite(sessionIdleMinutes) || sessionIdleMinutes < 5 || sessionIdleMinutes > 1440) {
-        setAlert(alertEl, "danger", "Session timeout must be between 5 and 1440 minutes");
-        btn.disabled = false;
-        btn.innerHTML = originalBtnText;
-        return;
+        return { valid: false, error: "Session timeout must be between 5 and 1440 minutes" };
     }
-
     const adminPassword = form.get("admin_password") || "";
-    if (adminPassword && adminPassword.length < 6) {
-        setAlert(alertEl, "danger", "Password must be at least 6 characters");
-        btn.disabled = false;
-        btn.innerHTML = originalBtnText;
+    const adminPasswordConfirm = document.getElementById("adminPasswordConfirm").value;
+    if (adminPassword) {
+        if (adminPassword.length < 8) {
+            return { valid: false, error: "Password must be at least 8 characters" };
+        }
+        if (adminPassword !== adminPasswordConfirm) {
+            return { valid: false, error: "Passwords do not match" };
+        }
+    }
+    return {
+        valid: true,
+        data: {
+            retention_days: retention,
+            session_idle_minutes: sessionIdleMinutes,
+            ...(adminPassword ? { admin_password: adminPassword } : {}),
+        },
+    };
+}
+
+async function saveSettings() {
+    if (isSaving) return;
+
+    const validation = validateSettings();
+    if (!validation.valid) {
+        showToast(validation.error, "danger");
         return;
     }
 
-    const data = {
-        retention_days: retention,
-        session_idle_minutes: sessionIdleMinutes,
-        login_required: document.getElementById("loginRequired").checked,
-    };
-
-    if (adminPassword) {
-        data.admin_password = adminPassword;
-    }
+    isSaving = true;
+    showSavingIndicator();
+    clearAlert(alertEl);
 
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 10000);
@@ -719,9 +843,9 @@ formEl.addEventListener("submit", async (e) => {
             method: "POST",
             headers: {
                 "Content-Type": "application/json",
-                "X-CSRF-Token": getCsrfToken()
+                "X-CSRF-Token": getCsrfToken(),
             },
-            body: JSON.stringify(data),
+            body: JSON.stringify(validation.data),
             signal: controller.signal,
         });
         clearTimeout(timeoutId);
@@ -736,39 +860,114 @@ formEl.addEventListener("submit", async (e) => {
             throw new Error(payload.detail || `HTTP ${res.status}`);
         }
 
-        document.getElementById("adminPassword").value = "";
-
-        setAlert(alertEl, "success", "Settings saved");
-        btn.innerHTML = '<span class="material-symbols-outlined icon-inline">check</span>Saved';
-        setTimeout(() => {
-            btn.innerHTML = originalBtnText;
-        }, 1200);
+        // Clear password field after successful save
+        if (validation.data.admin_password) {
+            document.getElementById("adminPassword").value = "";
+            document.getElementById("adminPasswordConfirm").value = "";
+            setPasswordError("");
+            showToast("Password updated", "success");
+        } else {
+            showToast("Settings saved", "success");
+        }
     } catch (err) {
         clearTimeout(timeoutId);
         if (err.name === "AbortError") {
-            setAlert(alertEl, "danger", "Request timed out. Please retry.");
+            showToast("Request timed out", "danger");
         } else {
-            setAlert(alertEl, "danger", "Error: " + err.message);
+            showToast("Error: " + err.message, "danger");
         }
     } finally {
-        btn.disabled = false;
+        isSaving = false;
+        hideSavingIndicator();
+    }
+}
+
+function scheduleAutoSave() {
+    if (saveTimeout) clearTimeout(saveTimeout);
+    saveTimeout = setTimeout(saveSettings, 800);
+}
+
+// Bind auto-save to form inputs (except password which requires explicit action)
+
+function setPasswordError(msg) {
+    const pwField = document.getElementById("adminPassword");
+    const confirmField = document.getElementById("adminPasswordConfirm");
+    const errEl = document.getElementById("passwordError");
+    if (msg) {
+        errEl.textContent = msg;
+        errEl.classList.remove("d-none");
+        confirmField.classList.add("is-invalid");
+        pwField.classList.add("is-invalid");
+    } else {
+        errEl.classList.add("d-none");
+        errEl.textContent = "";
+        confirmField.classList.remove("is-invalid");
+        pwField.classList.remove("is-invalid");
+        if (document.getElementById("adminPassword").value) {
+            confirmField.classList.add("is-valid");
+            pwField.classList.add("is-valid");
+        } else {
+            confirmField.classList.remove("is-valid");
+            pwField.classList.remove("is-valid");
+        }
+    }
+}
+
+function validatePasswordFields() {
+    const pw = document.getElementById("adminPassword").value;
+    const confirm = document.getElementById("adminPasswordConfirm").value;
+    if (!pw && !confirm) {
+        setPasswordError("");
+        return;
+    }
+    if (pw && pw.length < 8) {
+        setPasswordError("Password must be at least 8 characters");
+        return;
+    }
+    if (confirm && pw !== confirm) {
+        setPasswordError("Passwords do not match");
+        return;
+    }
+    setPasswordError("");
+}
+
+document.getElementById("adminPassword").addEventListener("input", validatePasswordFields);
+document.getElementById("adminPasswordConfirm").addEventListener("input", validatePasswordFields);
+
+formEl.querySelectorAll("input, select, textarea").forEach((input) => {
+    if (input.name === "admin_password") {
+        // Password field: save on blur only if both fields are filled and valid
+        input.addEventListener("blur", () => {
+            const pw = document.getElementById("adminPassword").value.trim();
+            const confirm = document.getElementById("adminPasswordConfirm").value;
+            if (pw && pw === confirm && pw.length >= 8) scheduleAutoSave();
+        });
+    } else if (input.name === "admin_password_confirm") {
+        // Confirm field triggers save on blur when matching
+        input.addEventListener("blur", () => {
+            const pw = document.getElementById("adminPassword").value.trim();
+            const confirm = input.value;
+            if (pw && pw === confirm && pw.length >= 8) scheduleAutoSave();
+        });
+    } else if (input.type === "checkbox") {
+        input.addEventListener("change", scheduleAutoSave);
+    } else {
+        input.addEventListener("input", scheduleAutoSave);
+        input.addEventListener("change", scheduleAutoSave);
     }
 });
+
+settingsSaveBtn?.addEventListener("click", () => {
+    if (saveTimeout) {
+        clearTimeout(saveTimeout);
+        saveTimeout = null;
+    }
+    void saveSettings();
+});
+
+// Prevent form submission (no more save button)
+formEl.addEventListener("submit", (e) => {
+    e.preventDefault();
+});
 </script>
-<footer class="wb-footer">
-    <span class="wb-footer-content">
-        tubeyou v{{ VERSION }}
-        &middot;&nbsp;&copy;&nbsp;{{ now().year }}&nbsp;Gill-Bates
-        &middot;&nbsp;
-        <a href="https://github.com/Gill-Bates/tubeyou"
-           target="_blank" rel="noopener noreferrer"
-           class="wb-footer-link">
-            <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor" class="wb-footer-link-icon" aria-hidden="true">
-                <path fill-rule="evenodd" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"></path>
-            </svg>
-            GitHub
-        </a>
-    </span>
-</footer>
-</body>
-</html>
+{% endblock %}

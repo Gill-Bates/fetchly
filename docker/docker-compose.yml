@@ -4,10 +4,15 @@ services:
     container_name: tubeyou
     restart: always
     stop_grace_period: 20s
+    cpus: 1.0
     environment:
       LOG_LEVEL: DEBUG
       TZ: Europe/Berlin
-      TUBEYOU_SECRET_KEY: "${TUBEYOU_SECRET_KEY}" # Generate with: head -c 32 /dev/urandom | base64
+      HOST: 0.0.0.0
+      PORT: 8000
+      TIMEOUT: 60
+      #TUBEYOU_SECRET_KEY: "${TUBEYOU_SECRET_KEY}" # Generate with: head -c 32 /dev/urandom | base64
+      TUBEYOU_SECRET_KEY: "sCs/5scuNdAVfe2CJ6oIQB3lMQWsjOHJFwKlZB3PPoE="
       TUBEYOU_ADMIN_PASSWORD: "${TUBEYOU_ADMIN_PASSWORD:-admin}"
     logging:
       driver: json-file
@@ -18,11 +23,18 @@ services:
       - no-new-privileges:true
     volumes:
       - ./data:/app/data
-    ports:
-      - "8000:8000"
+
     healthcheck:
-      test: ["CMD", "curl", "--fail", "--silent", "--max-time", "5", "http://127.0.0.1:8000/"]
+      test: ["CMD", "curl", "--fail", "--silent", "--max-time", "5", "http://127.0.0.1:8000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 15s
+    networks:
+      cloudnet:
+        ipv4_address: 10.30.0.153
+        ipv6_address: 2a02:2479:cf:7600:d0c0::153
+
+networks:
+  cloudnet:
+    external: true

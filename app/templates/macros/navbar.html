@@ -1,0 +1,31 @@
+{% macro navbar(show_back=False, show_settings=True, show_logout=True) %}
+<nav class="navbar navbar-expand-lg navbar-dark top-navbar fixed-top">
+    <div class="app-shell-container top-navbar__inner">
+        <a class="navbar-brand fw-bold" href="/">tubeyou</a>
+        <div class="ms-auto d-flex align-items-center gap-2">
+            {% if show_back %}
+            <a href="/" class="btn btn-sm btn-outline-secondary btn-icon"
+               title="Back to Dashboard" aria-label="Back to Dashboard">
+                <span class="material-symbols-outlined">arrow_back</span>
+            </a>
+            {% endif %}
+
+            {% if show_settings %}
+            <a id="settingsBtn" href="/settings"
+               class="btn btn-sm btn-outline-secondary btn-icon"
+               title="Settings" aria-label="Settings">
+                <span class="material-symbols-outlined">settings</span>
+            </a>
+            {% endif %}
+
+            {% if show_logout %}
+            <a id="logoutBtn" href="/logout"
+               class="btn btn-sm btn-outline-secondary"
+               role="button">
+                Logout
+            </a>
+            {% endif %}
+        </div>
+    </div>
+</nav>
+{% endmacro %}

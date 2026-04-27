@@ -13,9 +13,17 @@ let offset = hasTable ? document.querySelectorAll("#jobsTbody tr[data-job-id]").
 let loading = false;
 let done = false;
 
-function createCell(label, text) {
+function dispatchLoadError(error) {
+    const detail = error instanceof Error ? error : new Error(String(error));
+    window.dispatchEvent(new CustomEvent("jobs-load-error", { detail }));
+}
+
+function createCell(label, text, className = "") {
     const td = document.createElement("td");
     td.dataset.label = label;
+    if (className) {
+        td.className = className;
+    }
     td.textContent = text;
     return td;
 }
@@ -52,16 +60,18 @@ export function buildRow(job) {
 
     const titleCell = document.createElement("td");
     titleCell.dataset.label = "Title";
-    titleCell.className = "text-truncate";
-    titleCell.style.maxWidth = "220px";
+    titleCell.className = "text-truncate job-title-cell job-title-cell--compact";
     titleCell.title = job.video_meta_hover || job.url || "";
-    titleCell.textContent = job.video_title || job.url || "";
+    const titleText = document.createElement("span");
+    titleText.className = "job-title-text";
+    titleText.textContent = job.video_title || job.url || "";
+    titleCell.appendChild(titleText);
 
     tr.appendChild(titleCell);
-    tr.appendChild(createCell("Format", job.type || ""));
-    tr.appendChild(createCell("Quality", getQualityLabel(job)));
-    tr.appendChild(createCell("Codec", job.codec || "-"));
-    tr.appendChild(createCell("Bitrate", job.bitrate_kbps ? `${job.bitrate_kbps} kbps` : "-"));
+    tr.appendChild(createCell("Format", job.type || "", "td-mono job-meta-cell"));
+    tr.appendChild(createCell("Quality", getQualityLabel(job), "td-mono job-meta-cell"));
+    tr.appendChild(createCell("Codec", job.codec || "-", "td-mono job-meta-cell"));
+    tr.appendChild(createCell("Bitrate", job.bitrate_kbps ? `${job.bitrate_kbps} kbps` : "-", "td-mono job-meta-cell"));
 
     const statusCell = document.createElement("td");
     statusCell.dataset.label = "Status";
@@ -94,7 +104,15 @@ export function prependJob(job) {
     if (!existing) {
         offset += 1;
     }
+    // Allow users to paginate again after table mutations.
+    done = false;
     trimRows();
+}
+
+export function resetPagingState() {
+    if (!hasTable) return;
+    offset = tbody.querySelectorAll("tr[data-job-id]").length;
+    done = false;
 }
 
 export async function loadMore(fetchFn) {
@@ -108,10 +126,15 @@ export async function loadMore(fetchFn) {
             return;
         }
 
+        const fragment = document.createDocumentFragment();
         for (const job of jobs) {
             if (!tbody.querySelector(`tr[data-job-id="${CSS.escape(job.id)}"]`)) {
-                tbody.appendChild(buildRow(job));
+                fragment.appendChild(buildRow(job));
             }
+        }
+
+        if (fragment.childNodes.length) {
+            tbody.appendChild(fragment);
         }
 
         offset += jobs.length;
@@ -120,9 +143,18 @@ export async function loadMore(fetchFn) {
         }
 
         trimRows();
-    } catch {
-        // Best-effort paging; keep the table usable on transient network errors.
+    } catch (error) {
+        if (error?.name === "AbortError") {
+            return;
+        }
+        console.error("Failed to load more jobs:", error);
+        dispatchLoadError(error);
     } finally {
         loading = false;
     }
+}
+
+if (hasTable) {
+    trimRows();
+    window.addEventListener("jobs-reload", resetPagingState);
 }

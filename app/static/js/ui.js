@@ -6,12 +6,12 @@
 import { humanSize } from "./utils.js";
 
 const STATUS_META = {
-    done: { color: "success", icon: "check_circle" },
-    error: { color: "danger", icon: "error" },
+    done:  { color: "success", icon: "check_circle", label: "done" },
+    error: { color: "danger",  icon: "error",        label: "error" },
 };
 
 /** @type {boolean} */
-const lalalEnabled = Boolean(globalThis.window?.lalalEnabled);
+const lalalEnabled = (globalThis.document?.documentElement.dataset.lalalEnabled ?? "false") === "true";
 
 /**
  * Create a Material Symbols icon span.
@@ -36,12 +36,13 @@ export function createStatusElement(status, sizeBytes) {
     const wrapper = document.createElement("div");
     wrapper.className = "status-inline";
 
-    const meta = STATUS_META[status] || { color: "primary", icon: "schedule" };
+    const normalizedStatus = status || "queued";
+    const meta = STATUS_META[normalizedStatus] || { color: "primary", icon: "schedule", label: normalizedStatus };
 
     const pill = document.createElement("span");
     pill.className = `status-pill status-pill-${meta.color}`;
     pill.appendChild(icon(meta.icon));
-    pill.appendChild(document.createTextNode(` ${status || "queued"}`));
+    pill.appendChild(document.createTextNode(` ${meta.label}`));
 
     wrapper.appendChild(pill);
 
@@ -65,7 +66,7 @@ export function createStatusElement(status, sizeBytes) {
 function createDownloadLink(jobId) {
     const link = document.createElement("a");
     link.href = `/download/${encodeURIComponent(jobId)}`;
-    link.className = "btn btn-download btn-sm";
+    link.className = "btn btn-primary btn-sm";
     link.setAttribute("title", "Download");
     link.setAttribute("aria-label", "Download");
     link.appendChild(icon("download"));
@@ -89,6 +90,7 @@ function createLalalButton(jobId, stem, title, iconName, colorClass) {
     button.dataset.jobId = jobId;
     button.dataset.stem = stem;
     button.setAttribute("title", title);
+    button.setAttribute("aria-label", title);
     button.appendChild(icon(iconName));
     return button;
 }
@@ -102,23 +104,75 @@ function createLalalButton(jobId, stem, title, iconName, colorClass) {
  */
 export function createActionButton(jobId, status, jobType) {
     const wrapper = document.createElement("div");
-    wrapper.className = "d-flex gap-1 align-items-center";
+    wrapper.className = "action-buttons";
 
     if (status === "done") {
-        wrapper.appendChild(createDownloadLink(jobId));
-
-        // Add Lalal.ai buttons only for audio jobs
         if (jobType === "audio" && lalalEnabled) {
-            wrapper.appendChild(createLalalButton(jobId, "instrumental", "Download Instrumental", "music_off", "btn-outline-info"));
-            wrapper.appendChild(createLalalButton(jobId, "vocals", "Download A Cappella", "mic", "btn-outline-warning"));
+            const dropdown = document.createElement("div");
+            dropdown.className = "dropdown dropup";
+
+            const toggle = document.createElement("button");
+            toggle.type = "button";
+            toggle.className = "btn btn-outline-secondary btn-sm dropdown-toggle action-menu-toggle";
+            toggle.dataset.bsToggle = "dropdown";
+            toggle.setAttribute("aria-expanded", "false");
+            toggle.setAttribute("aria-label", "Actions");
+            toggle.appendChild(icon("more_vert"));
+
+            const menu = document.createElement("ul");
+            menu.className = "dropdown-menu dropdown-menu-end";
+
+            // Download item
+            const liDownload = document.createElement("li");
+            const aDownload = document.createElement("a");
+            aDownload.className = "dropdown-item";
+            aDownload.href = `/download/${encodeURIComponent(jobId)}`;
+            aDownload.appendChild(icon("download"));
+            aDownload.appendChild(document.createTextNode(" Download"));
+            liDownload.appendChild(aDownload);
+
+            const liDivider = document.createElement("li");
+            liDivider.innerHTML = '<hr class="dropdown-divider">';
+
+            // Instrumental item
+            const liInst = document.createElement("li");
+            const btnInst = document.createElement("button");
+            btnInst.type = "button";
+            btnInst.className = "dropdown-item";
+            btnInst.dataset.action = "lalal-split";
+            btnInst.dataset.jobId = jobId;
+            btnInst.dataset.stem = "instrumental";
+            btnInst.setAttribute("aria-label", "Download Instrumental");
+            btnInst.appendChild(icon("music_off"));
+            btnInst.appendChild(document.createTextNode(" Instrumental"));
+            liInst.appendChild(btnInst);
+
+            // Vocals item
+            const liVocals = document.createElement("li");
+            const btnVocals = document.createElement("button");
+            btnVocals.type = "button";
+            btnVocals.className = "dropdown-item";
+            btnVocals.dataset.action = "lalal-split";
+            btnVocals.dataset.jobId = jobId;
+            btnVocals.dataset.stem = "vocals";
+            btnVocals.setAttribute("aria-label", "Download A Cappella");
+            btnVocals.appendChild(icon("mic"));
+            btnVocals.appendChild(document.createTextNode(" A Cappella"));
+            liVocals.appendChild(btnVocals);
+
+            menu.append(liDownload, liDivider, liInst, liVocals);
+            dropdown.append(toggle, menu);
+            wrapper.appendChild(dropdown);
+            return wrapper;
         }
 
+        wrapper.appendChild(createDownloadLink(jobId));
         return wrapper;
     }
 
     const button = document.createElement("button");
     button.type = "button";
-    button.className = "btn btn-details btn-sm btn-outline-secondary";
+    button.className = "btn btn-sm btn-outline-secondary";
     button.dataset.action = "open-detail";
     button.dataset.jobId = jobId;
     button.setAttribute("title", "Details");

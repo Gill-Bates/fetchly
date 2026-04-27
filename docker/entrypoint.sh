@@ -10,114 +10,178 @@ set -euo pipefail
 # Konfiguration
 # --------------------------------------------------------------------------- #
 readonly DATA_DIR="${DATA_DIR:-/app/data}"
-readonly UVICORN_HOST="${UVICORN_HOST:-0.0.0.0}"
-readonly UVICORN_PORT="${UVICORN_PORT:-8000}"
-readonly UVICORN_WORKERS="${UVICORN_WORKERS:-1}"
-readonly MAX_RESTARTS="${MAX_RESTARTS:-5}"
-readonly RESTART_DELAY="${RESTART_DELAY:-3}"
+readonly APP_USER="${APP_USER:-appuser}"
+readonly HOST="${HOST:-${UVICORN_HOST:-0.0.0.0}}"
+readonly PORT="${PORT:-${UVICORN_PORT:-8000}}"
+readonly WORKERS="${WORKERS:-${UVICORN_WORKERS:-auto}}"
+readonly TIMEOUT="${TIMEOUT:-60}"
+readonly MAX_WORKERS="${MAX_WORKERS:-8}"
 
 # --------------------------------------------------------------------------- #
-# DRY: Zentrales Logging
+# Logging
 # --------------------------------------------------------------------------- #
-_log() {
-    local tag="$1"
-    shift
-    printf '[%s] %s\n' "$tag" "$*"
+log() {
+    printf '[%s] [%s] %s\n' "$(date +'%Y-%m-%d %H:%M:%S')" "entrypoint" "$*"
+}
+
+fail() {
+    log "ERROR: $*"
+    exit 1
+}
+
+resolve_workers() {
+    if [[ "${WORKERS}" != "auto" ]]; then
+        if ! [[ "${WORKERS}" =~ ^[0-9]+$ ]]; then
+            fail "WORKERS must be numeric or 'auto', got: ${WORKERS}"
+        fi
+        printf '%s\n' "${WORKERS}"
+        return 0
+    fi
+
+    python - <<'PY'
+import math
+import os
+from pathlib import Path
+
+
+def _read_text(path: str) -> str | None:
+    try:
+        return Path(path).read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+
+
+def _parse_cpuset(spec: str | None) -> int | None:
+    if not spec:
+        return None
+    total = 0
+    for part in spec.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            start, end = part.split("-", 1)
+            total += int(end) - int(start) + 1
+        else:
+            total += 1
+    return total or None
+
+
+limits: list[float] = []
+
+try:
+    limits.append(float(len(os.sched_getaffinity(0))))
+except (AttributeError, OSError):
+    pass
+
+cpuset = _parse_cpuset(_read_text("/sys/fs/cgroup/cpuset.cpus.effective"))
+if cpuset is None:
+    cpuset = _parse_cpuset(_read_text("/sys/fs/cgroup/cpuset/cpuset.cpus"))
+if cpuset is not None:
+    limits.append(float(cpuset))
+
+cpu_max = _read_text("/sys/fs/cgroup/cpu.max")
+if cpu_max:
+    parts = cpu_max.split()
+    if len(parts) >= 2:
+        quota, period = parts[:2]
+        if quota != "max":
+            try:
+                limits.append(float(quota) / float(period))
+            except (ValueError, ZeroDivisionError):
+                pass
+else:
+    quota = _read_text("/sys/fs/cgroup/cpu/cpu.cfs_quota_us")
+    period = _read_text("/sys/fs/cgroup/cpu/cpu.cfs_period_us")
+    if quota and period:
+        quota_value = int(quota)
+        period_value = int(period)
+        if quota_value > 0 and period_value > 0:
+            limits.append(quota_value / period_value)
+
+if not limits:
+    fallback = os.cpu_count() or 1
+    limits.append(float(fallback))
+
+effective_cpus = max(0.5, min(limits))
+workers = max(1, math.ceil(effective_cpus * 2.0))
+
+# safety clamp
+max_workers = int(os.getenv("MAX_WORKERS", "8"))
+workers = min(workers, max_workers)
+
+print(workers if workers > 0 else 1)
+PY
+}
+
+bootstrap() {
+    log "Initializing ${DATA_DIR} ..."
+
+    mkdir -p \
+        "${DATA_DIR}/downloads"
+
+    if [[ "$(id -u)" -eq 0 ]]; then
+        if ! id "${APP_USER}" >/dev/null 2>&1; then
+            fail "User ${APP_USER} does not exist"
+        fi
+
+        # only fix ownership if needed (avoid expensive recursive chown)
+        if [[ "$(stat -c %u "${DATA_DIR}")" != "$(id -u "${APP_USER}")" ]]; then
+            chown -R "${APP_USER}:${APP_USER}" "${DATA_DIR}" 2>/dev/null || true
+        fi
+    fi
+
+    chmod u=rwX,go-rwx \
+        "${DATA_DIR}" \
+        "${DATA_DIR}/downloads" 2>/dev/null || true
+
+    if [[ ! -w "${DATA_DIR}" ]] || [[ ! -w "${DATA_DIR}/downloads" ]]; then
+        log "ERROR: ${DATA_DIR} not writable for user $(id -u):$(id -g)"
+        ls -ld "${DATA_DIR}" "${DATA_DIR}/downloads" 2>/dev/null || true
+        exit 1
+    fi
+
+    log "Bootstrap complete."
 }
 
 # --------------------------------------------------------------------------- #
 # 1. Bootstrap
 # --------------------------------------------------------------------------- #
-_log entrypoint "Bootstrap: Erstelle Verzeichnisse unter ${DATA_DIR} ..."
+if [[ "$(id -u)" -eq 0 ]] && [[ "${1:-}" != "--run" ]]; then
+    bootstrap
+    log "Switching to user ${APP_USER} ..."
 
-mkdir -p \
-    "${DATA_DIR}/downloads" \
-    "${DATA_DIR}/logs"
+    if ! command -v gosu >/dev/null 2>&1; then
+        fail "gosu not found in PATH"
+    fi
 
-# WARNUNG: 'chown -R' / 'chmod -R' auf großen Datenbeständen blockiert
-# den Container-Start. Nur Top-Level-Verzeichnis anwenden.
-chown "$(id -u):$(id -g)" "${DATA_DIR}" 2>/dev/null || true
-chmod u=rwX,go-rwx "${DATA_DIR}" 2>/dev/null || true
-
-_log entrypoint "Bootstrap abgeschlossen."
-
-# Sicherheitshalber: Existiert uvicorn?
-if ! command -v uvicorn >/dev/null 2>&1; then
-    _log entrypoint "FEHLER: uvicorn nicht im PATH."
-    exit 1
+    exec gosu "${APP_USER}" /entrypoint.sh --run
 fi
 
+bootstrap
+
 # --------------------------------------------------------------------------- #
-# 2. Watchdog (mit korrektem Signal-Handling)
+# 2. Start Gunicorn
 # --------------------------------------------------------------------------- #
-_run_watchdog() {
-    local -i shutdown_requested=0
-    local -i restarts=0
-    local child_pid=""
-    local wait_exit=0
+if ! command -v gunicorn >/dev/null 2>&1; then
+    fail "gunicorn not found in PATH"
+fi
 
-    # Signal-Handler: Setzt Flag, killt Kind, aber wartet NICHT im Trap.
-    # Das Warten geschieht ausschließlich im Hauptflow.
-    _on_signal() {
-        local sig="$1"
-        _log watchdog "Signal ${sig} empfangen – initiiere Shutdown ..."
-        shutdown_requested=1
-        if [[ -n "${child_pid:-}" ]] && kill -0 "${child_pid}" 2>/dev/null; then
-            kill -TERM "${child_pid}" 2>/dev/null || true
-        fi
-    }
+resolved_workers="$(resolve_workers)"
 
-    trap '_on_signal TERM' SIGTERM
-    trap '_on_signal INT'  SIGINT
+if ! [[ "${resolved_workers}" =~ ^[0-9]+$ ]]; then
+    fail "Resolved workers is not numeric: ${resolved_workers}"
+fi
 
-    _log watchdog "Starte uvicorn app.main:app auf ${UVICORN_HOST}:${UVICORN_PORT} ..."
+# Print startup banner
+python -c "from app.utils.banner import print_banner; print_banner()" 2>/dev/null || true
 
-    while (( shutdown_requested == 0 )); do
-        # shellcheck disable=SC2086
-        uvicorn app.main:app \
-            --host "${UVICORN_HOST}" \
-            --port "${UVICORN_PORT}" \
-            --workers "${UVICORN_WORKERS}" \
-            --no-access-log \
-            &
-        child_pid=$!
+log "Starting Gunicorn on ${HOST}:${PORT} with ${resolved_workers} workers ..."
 
-        # Warte auf Kind. '||' verhindert, dass set -e bei Exit != 0 abbricht.
-        wait_exit=0
-        wait "${child_pid}" || wait_exit=$?
-
-        # KRITISCH: Wenn ein Signal den Shutdown angefordert hat → sofort beenden,
-        # unabhängig vom Exit-Code des Kindes.
-        if (( shutdown_requested )); then
-            # Kind nochmal kurz abwarten (reaped oder nicht)
-            wait "${child_pid}" 2>/dev/null || true
-            _log watchdog "Sauber beendet."
-            return 0
-        fi
-
-        # Sauberes Beenden → Watchdog beenden
-        if (( wait_exit == 0 )); then
-            _log watchdog "uvicorn sauber beendet (exit 0)."
-            return 0
-        fi
-
-        restarts=$(( restarts + 1 ))
-        _log watchdog "uvicorn beendet mit exit ${wait_exit} (Neustart ${restarts}/${MAX_RESTARTS})"
-
-        if (( restarts >= MAX_RESTARTS )); then
-            _log watchdog "FEHLER: Maximale Neustarts (${MAX_RESTARTS}) erreicht."
-            return 1
-        fi
-
-        # Wenn sleep durch Signal unterbrochen wird, bricht es mit != 0 ab.
-        # Die while-Bedingung verhindert danach den Neustart.
-        sleep "${RESTART_DELAY}" || true
-
-        # Reset für den nächsten Durchlauf
-        child_pid=""
-    done
-
-    return 0
-}
-
-_run_watchdog
+exec gunicorn app.main:app \
+    --bind "${HOST}:${PORT}" \
+    --workers "${resolved_workers}" \
+    --worker-class uvicorn.workers.UvicornWorker \
+    --timeout "${TIMEOUT}" \
+    --access-logfile - \
+    --error-logfile -

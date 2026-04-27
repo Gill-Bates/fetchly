@@ -1,16 +1,47 @@
 {% if job["status"] == "done" %}
-<div class="d-flex gap-1 align-items-center">
-    <a class="btn btn-download btn-sm" href="/download/{{ job["id"] }}" title="Download" aria-label="Download"><span class="material-symbols-outlined icon-inline">download</span></a>
+<div class="action-buttons">
     {% if job["type"] == "audio" and lalal_enabled %}
-    <button class="btn btn-sm btn-outline-info btn-lalal" type="button" data-action="lalal-split" data-job-id="{{ job["id"] }}" data-stem="instrumental" title="Download Instrumental"><span class="material-symbols-outlined icon-inline">music_off</span></button>
-    <button class="btn btn-sm btn-outline-warning btn-lalal" type="button" data-action="lalal-split" data-job-id="{{ job["id"] }}" data-stem="vocals" title="Download A Cappella"><span class="material-symbols-outlined icon-inline">mic</span></button>
+    <div class="dropdown dropup">
+        <button class="btn btn-outline-secondary btn-sm dropdown-toggle action-menu-toggle" type="button"
+                data-bs-toggle="dropdown" aria-expanded="false" aria-label="Actions">
+            <span class="material-symbols-outlined" aria-hidden="true">more_vert</span>
+        </button>
+        <ul class="dropdown-menu dropdown-menu-end">
+            <li>
+                <a class="dropdown-item" href="/download/{{ job["id"] }}">
+                    <span class="material-symbols-outlined icon-inline" aria-hidden="true">download</span> Download
+                </a>
+            </li>
+            <li><hr class="dropdown-divider"></li>
+            <li>
+                <button class="dropdown-item" type="button"
+                        data-action="lalal-split"
+                        data-job-id="{{ job["id"] }}"
+                        data-stem="instrumental">
+                    <span class="material-symbols-outlined icon-inline" aria-hidden="true">music_off</span> Instrumental
+                </button>
+            </li>
+            <li>
+                <button class="dropdown-item" type="button"
+                        data-action="lalal-split"
+                        data-job-id="{{ job["id"] }}"
+                        data-stem="vocals">
+                    <span class="material-symbols-outlined icon-inline" aria-hidden="true">mic</span> A Cappella
+                </button>
+            </li>
+        </ul>
+    </div>
+    {% else %}
+    <a class="btn btn-primary btn-sm" href="/download/{{ job["id"] }}" title="Download" aria-label="Download"><span class="material-symbols-outlined">download</span></a>
     {% endif %}
 </div>
 {% elif job["status"] in ("queued", "processing", "downloading", "transcoding") %}
-<div class="d-flex gap-1 align-items-center">
-    <button class="btn btn-cancel btn-sm btn-outline-danger" type="button" data-action="cancel-job" data-job-id="{{ job["id"] }}" title="Cancel" aria-label="Cancel"><span class="material-symbols-outlined icon-inline">cancel</span></button>
-    <button class="btn btn-details btn-sm btn-outline-secondary" type="button" data-action="open-detail" data-job-id="{{ job["id"] }}" title="Details" aria-label="Details"><span class="material-symbols-outlined icon-inline">info</span></button>
+<div class="action-buttons">
+    <button class="btn btn-danger btn-sm" type="button" data-action="cancel-job" data-job-id="{{ job["id"] }}" title="Cancel" aria-label="Cancel"><span class="material-symbols-outlined">cancel</span></button>
+    <button class="btn btn-sm btn-outline-secondary" type="button" data-action="open-detail" data-job-id="{{ job["id"] }}" title="Details" aria-label="Details"><span class="material-symbols-outlined">info</span></button>
 </div>
 {% else %}
-<button class="btn btn-details btn-sm btn-outline-secondary" type="button" data-action="open-detail" data-job-id="{{ job["id"] }}" title="Details" aria-label="Details"><span class="material-symbols-outlined icon-inline">info</span></button>
+<div class="action-buttons">
+    <button class="btn btn-sm btn-outline-secondary" type="button" data-action="open-detail" data-job-id="{{ job["id"] }}" title="Details" aria-label="Details"><span class="material-symbols-outlined">info</span></button>
+</div>
 {% endif %}

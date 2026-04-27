@@ -1,57 +1,63 @@
-FROM debian:trixie-slim
+FROM python:3.13-slim
 
-# Pinned yt-dlp version for reproducibility
-ARG YTDLP_VERSION=2025.03.31
+# Fail fast + better curl behavior
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # Install dependencies without recommends to keep image slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3 \
-    python3-pip \
-    python3-venv \
+    bash \
     ffmpeg \
     curl \
+    gosu \
+    ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Install yt-dlp with pinned version
-RUN curl -L https://github.com/yt-dlp/yt-dlp/releases/download/${YTDLP_VERSION}/yt-dlp \
+# Install latest yt-dlp (no pinning, but hardened download)
+RUN curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp \
+    --fail --retry 5 --retry-delay 2 --connect-timeout 5 \
     -o /usr/local/bin/yt-dlp \
-    && chmod a+rx /usr/local/bin/yt-dlp
+    && chmod 0755 /usr/local/bin/yt-dlp \
+    && /usr/local/bin/yt-dlp --version >/dev/null
 
 WORKDIR /app
 
 # Create venv and install Python dependencies
 COPY requirements.txt .
-RUN python3 -m venv /venv && \
+RUN python -m venv /venv && \
+    /venv/bin/pip install --upgrade pip && \
     /venv/bin/pip install --no-cache-dir -r requirements.txt
 
 ENV PATH="/venv/bin:$PATH"
 
+# Python runtime hygiene
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
 # Create non-root user
-RUN useradd -m appuser && \
+RUN useradd -u 1000 -m --no-log-init appuser && \
     chown -R appuser:appuser /app
 
 # Copy application files
 COPY app ./app
+COPY middleware ./middleware
+COPY VERSION BUILD_INFO ./
 COPY docker/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
 # Prepare data directory with correct permissions
-RUN mkdir -p /app/data/downloads /app/data/logs && \
+RUN mkdir -p /app/data/downloads && \
     chown -R appuser:appuser /app/data
 
 VOLUME ["/app/data"]
 
 ENV DATA_DIR=/app/data \
-    UVICORN_HOST=0.0.0.0 \
-    UVICORN_PORT=8000 \
-    UVICORN_WORKERS=1 \
-    MAX_RESTARTS=5 \
-    RESTART_DELAY=3
+    HOST=0.0.0.0 \
+    PORT=8000 \
+    WORKERS=auto \
+    TIMEOUT=60
 
 # Health check for orchestration
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=2 \
-    CMD curl -f http://localhost:8000/ || exit 1
-
-USER appuser
+    CMD curl --fail --silent --max-time 2 http://localhost:8000/health || exit 1
 
 ENTRYPOINT ["/entrypoint.sh"]

@@ -12,14 +12,13 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import logging
 import re
 import time
 from collections.abc import Callable
 from enum import Enum
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any, Self, TypedDict
 
 import httpx
 
@@ -54,11 +53,11 @@ class SplitType(str, Enum):
     PHOENIX = "phoenix"
     # Orion neural network (fast, good quality)
     ORION = "orion"
-    # Perseus neural network (legacy naming in older API docs)
+    # Perseus neural network
     PERSEUS = "perseus"
-    # Backward-compatible legacy value used by older integrations.
+    # Cassiopeia neural network
     CASSIOPEIA = "cassiopeia"
-    # Additional splitters exposed by newer API
+    # Additional splitters
     ANDROMEDA = "andromeda"
     LYNX = "lynx"
     LYRA = "lyra"
@@ -122,7 +121,64 @@ class SplitResult(TypedDict):
     duration: float
 
 
-class LalalClient:
+_ALLOWED_DOWNLOAD_SCHEMES: frozenset[str] = frozenset({"https"})
+_ALLOWED_DOWNLOAD_HOSTS: frozenset[str] = frozenset({
+    "cdn.lalal.ai",
+    "storage.lalal.ai",
+    "s3.amazonaws.com",
+})
+_ALLOWED_DOWNLOAD_HOST_SUFFIXES: tuple[str, ...] = (".lalal.ai", ".amazonaws.com")
+
+
+def _is_safe_download_url(url: str) -> bool:
+    """Return True only for HTTPS URLs on known Lalal.ai / CDN hosts."""
+    try:
+        parsed = httpx.URL(url)
+    except Exception:
+        return False
+    if parsed.scheme not in _ALLOWED_DOWNLOAD_SCHEMES:
+        return False
+    host = parsed.host
+    return host in _ALLOWED_DOWNLOAD_HOSTS or any(
+        host.endswith(suffix) for suffix in _ALLOWED_DOWNLOAD_HOST_SUFFIXES
+    )
+
+
+class _BaseLalalClient:
+    """Shared connection lifecycle for all Lalal.ai client variants."""
+
+    def __init__(self, timeout: float) -> None:
+        self._timeout = timeout
+        self._client: httpx.AsyncClient | None = None
+        self._client_lock = asyncio.Lock()
+
+    def _make_client(self) -> httpx.AsyncClient:  # pragma: no cover
+        raise NotImplementedError
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        """Lazy-load a persistent AsyncClient."""
+        if self._client is None:
+            async with self._client_lock:
+                if self._client is None:
+                    self._client = self._make_client()
+        return self._client
+
+    async def close(self) -> None:
+        """Close the underlying HTTP client."""
+        async with self._client_lock:
+            if self._client is not None:
+                await self._client.aclose()
+                self._client = None
+
+    async def __aenter__(self) -> Self:
+        await self._get_client()
+        return self
+
+    async def __aexit__(self, *args: object) -> None:
+        await self.close()
+
+
+class LalalClient(_BaseLalalClient):
     """Async client for Lalal.ai API."""
 
     def __init__(self, api_key: str, timeout: float = 300.0) -> None:
@@ -135,41 +191,19 @@ class LalalClient:
         if not api_key:
             raise ValueError("API key is required")
 
+        super().__init__(timeout)
         self._api_key = api_key
-        self._timeout = timeout
         self._headers = {
-            # v1 API header (official CLI)
             "X-License-Key": api_key,
-            # Keep legacy header for backward compatibility.
             "Authorization": f"license {api_key}",
         }
-        self._client: httpx.AsyncClient | None = None
-        self._client_lock = asyncio.Lock()
 
-    async def _get_client(self) -> httpx.AsyncClient:
-        """Lazy-load a persistent AsyncClient."""
-        if self._client is None:
-            async with self._client_lock:
-                if self._client is None:
-                    self._client = httpx.AsyncClient(
-                        base_url=LALAL_API_BASE,
-                        headers=self._headers,
-                        timeout=self._timeout,
-                    )
-        return self._client
-
-    async def close(self) -> None:
-        """Close the underlying HTTP client."""
-        if self._client is not None:
-            await self._client.aclose()
-            self._client = None
-
-    async def __aenter__(self) -> LalalClient:
-        await self._get_client()
-        return self
-
-    async def __aexit__(self, *args: object) -> None:
-        await self.close()
+    def _make_client(self) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            base_url=LALAL_API_BASE,
+            headers=self._headers,
+            timeout=self._timeout,
+        )
 
     @staticmethod
     def _require_success(data: dict[str, Any], exc_cls: type[Exception], message: str) -> None:
@@ -203,14 +237,6 @@ class LalalClient:
 
         return "Unknown error"
 
-    @staticmethod
-    def _is_safe_download_url(url: str) -> bool:
-        try:
-            parsed = httpx.URL(url)
-        except Exception:
-            return False
-        return parsed.scheme in {"http", "https"}
-
     async def check_quota(self) -> dict[str, Any]:
         """Check remaining API quota/credits.
 
@@ -243,19 +269,18 @@ class LalalClient:
             raise FileNotFoundError(f"File not found: {file_path}")
 
         file_size = file_path.stat().st_size
-        file_content = await asyncio.to_thread(file_path.read_bytes)
-
         logger.info("Uploading %s (%d bytes) to Lalal.ai", file_path.name, file_size)
 
         client = await self._get_client()
-        response = await client.post(
-            f"{LALAL_API_PREFIX}/upload/",
-            content=file_content,
-            headers={
-                "Content-Disposition": f'attachment; filename="{file_path.name}"',
-                "Content-Type": "application/octet-stream",
-            },
-        )
+        with open(file_path, "rb") as f:
+            response = await client.post(
+                f"{LALAL_API_PREFIX}/upload/",
+                content=f,
+                headers={
+                    "Content-Disposition": f'attachment; filename="{file_path.name}"',
+                    "Content-Type": "application/octet-stream",
+                },
+            )
 
         if response.status_code == 401:
             raise LalalError("Invalid API key")
@@ -492,7 +517,7 @@ class LalalClient:
 
         logger.info("Downloading result to %s", output_path)
 
-        if not self._is_safe_download_url(url):
+        if not _is_safe_download_url(url):
             raise LalalError("Unsafe download URL returned by API")
 
         client = await self._get_client()
@@ -502,7 +527,7 @@ class LalalClient:
             downloaded = 0
             with open(output_path, "wb") as output_file:
                 async for chunk in response.aiter_bytes(chunk_size=65536):
-                    output_file.write(chunk)
+                    await asyncio.to_thread(output_file.write, chunk)
                     downloaded += len(chunk)
 
                     if progress_callback and total > 0:
@@ -512,12 +537,6 @@ class LalalClient:
                             logger.debug("Download progress callback failed", exc_info=True)
 
         return output_path
-
-    @staticmethod
-    def _write_file(path: Path, chunks: list[bytes]) -> None:
-        with open(path, "wb") as f:
-            for chunk in chunks:
-                f.write(chunk)
 
     async def process_file(
         self,
@@ -615,28 +634,8 @@ class LalalClient:
 
         return results
 
-    @staticmethod
-    def _compute_hash(file_path: Path) -> str:
-        """Compute MD5 hash of a file for upload verification."""
-        hasher = hashlib.md5()
-        with open(file_path, "rb") as f:
-            for chunk in iter(lambda: f.read(65536), b""):
-                hasher.update(chunk)
-        return hasher.hexdigest()
 
-    @staticmethod
-    def _read_file_and_hash(file_path: Path) -> tuple[bytes, str]:
-        """Read file contents and compute its MD5 hash in one pass."""
-        hasher = hashlib.md5()
-        chunks: list[bytes] = []
-        with open(file_path, "rb") as f:
-            for chunk in iter(lambda: f.read(65536), b""):
-                chunks.append(chunk)
-                hasher.update(chunk)
-        return b"".join(chunks), hasher.hexdigest()
-
-
-class LalalWebSessionClient:
+class LalalWebSessionClient(_BaseLalalClient):
     """Experimental client using Lalal.ai website session credentials.
 
     This mode is best-effort and may break when Lalal.ai web endpoints change.
@@ -649,39 +648,21 @@ class LalalWebSessionClient:
         if not csrf_token.strip():
             raise ValueError("CSRF token is required")
 
-        self._timeout = timeout
         self._session_cookie = session_cookie.strip()
         self._csrf_token = csrf_token.strip()
-        self._client: httpx.AsyncClient | None = None
-        self._client_lock = asyncio.Lock()
+        super().__init__(timeout)
 
-    async def _get_client(self) -> httpx.AsyncClient:
-        if self._client is None:
-            async with self._client_lock:
-                if self._client is None:
-                    self._client = httpx.AsyncClient(
-                        base_url=LALAL_API_BASE,
-                        timeout=self._timeout,
-                        headers={
-                            "x-csrftoken": self._csrf_token,
-                            "origin": LALAL_API_BASE,
-                            "referer": f"{LALAL_API_BASE}/",
-                            "cookie": self._session_cookie,
-                        },
-                    )
-        return self._client
-
-    async def close(self) -> None:
-        if self._client is not None:
-            await self._client.aclose()
-            self._client = None
-
-    async def __aenter__(self) -> LalalWebSessionClient:
-        await self._get_client()
-        return self
-
-    async def __aexit__(self, *args: object) -> None:
-        await self.close()
+    def _make_client(self) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            base_url=LALAL_API_BASE,
+            timeout=self._timeout,
+            headers={
+                "x-csrftoken": self._csrf_token,
+                "origin": LALAL_API_BASE,
+                "referer": f"{LALAL_API_BASE}/",
+                "cookie": self._session_cookie,
+            },
+        )
 
     async def check_quota(self) -> dict[str, Any]:
         """Best-effort check for website session mode.
@@ -703,8 +684,6 @@ class LalalWebSessionClient:
             raise FileNotFoundError(f"File not found: {file_path}")
 
         file_size = file_path.stat().st_size
-        file_content = await asyncio.to_thread(file_path.read_bytes)
-
         client = await self._get_client()
 
         create_resp = await client.post(
@@ -735,12 +714,13 @@ class LalalWebSessionClient:
         if not upload_url:
             raise LalalUploadFailed("Multipart create failed: missing upload URL")
 
-        put_resp = await client.put(
-            upload_url,
-            content=file_content,
-            headers={"Content-Type": "application/octet-stream"},
-            timeout=120.0,
-        )
+        with open(file_path, "rb") as f:
+            put_resp = await client.put(
+                upload_url,
+                content=f,
+                headers={"Content-Type": "application/octet-stream"},
+                timeout=120.0,
+            )
         if put_resp.status_code >= 400:
             raise LalalUploadFailed(f"Multipart upload failed: HTTP {put_resp.status_code}")
 
@@ -894,7 +874,7 @@ class LalalWebSessionClient:
         output_path = Path(output_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        if not LalalClient._is_safe_download_url(url):
+        if not _is_safe_download_url(url):
             raise LalalError("Unsafe download URL returned by web session API")
 
         client = await self._get_client()
@@ -904,7 +884,7 @@ class LalalWebSessionClient:
             downloaded = 0
             with open(output_path, "wb") as output_file:
                 async for chunk in response.aiter_bytes(chunk_size=65536):
-                    output_file.write(chunk)
+                    await asyncio.to_thread(output_file.write, chunk)
                     downloaded += len(chunk)
                     if progress_callback and total > 0:
                         try:
@@ -915,7 +895,7 @@ class LalalWebSessionClient:
         return output_path
 
 
-class LalalOtpAuthClient:
+class LalalOtpAuthClient(_BaseLalalClient):
     """Automates Lalal.ai website OTP login flow.
 
     Flow derived from HAR:
@@ -925,43 +905,25 @@ class LalalOtpAuthClient:
     """
 
     def __init__(self, timeout: float = 30.0) -> None:
-        self._timeout = timeout
-        self._client: httpx.AsyncClient | None = None
-        self._client_lock = asyncio.Lock()
+        super().__init__(timeout)
 
-    async def _get_client(self) -> httpx.AsyncClient:
-        if self._client is None:
-            async with self._client_lock:
-                if self._client is None:
-                    self._client = httpx.AsyncClient(
-                        base_url=LALAL_API_BASE,
-                        timeout=self._timeout,
-                        follow_redirects=True,
-                        headers={
-                            "origin": LALAL_API_BASE,
-                            "referer": f"{LALAL_API_BASE}/de/api/",
-                            "accept": "application/json, text/plain, */*",
-                            "accept-language": "en-US,en;q=0.9",
-                            "user-agent": (
-                                "Mozilla/5.0 (X11; Linux x86_64) "
-                                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                                "Chrome/124.0.0.0 Safari/537.36"
-                            ),
-                        },
-                    )
-        return self._client
-
-    async def close(self) -> None:
-        if self._client is not None:
-            await self._client.aclose()
-            self._client = None
-
-    async def __aenter__(self) -> LalalOtpAuthClient:
-        await self._get_client()
-        return self
-
-    async def __aexit__(self, *args: object) -> None:
-        await self.close()
+    def _make_client(self) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            base_url=LALAL_API_BASE,
+            timeout=self._timeout,
+            follow_redirects=True,
+            headers={
+                "origin": LALAL_API_BASE,
+                "referer": f"{LALAL_API_BASE}/de/api/",
+                "accept": "application/json, text/plain, */*",
+                "accept-language": "en-US,en;q=0.9",
+                "user-agent": (
+                    "Mozilla/5.0 (X11; Linux x86_64) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) "
+                    "Chrome/124.0.0.0 Safari/537.36"
+                ),
+            },
+        )
 
     @staticmethod
     def _extract_error(data: dict[str, Any]) -> str:
@@ -1140,25 +1102,8 @@ class LalalOtpAuthClient:
             raise LalalError("Lalal profile did not contain activation_key")
         return activation_key
 
-    async def process_file(
-        self,
-        input_path: Path | str,
-        output_dir: Path | str,
-        *,
-        stem: StemType = StemType.VOCALS,
-        split_type: SplitType = SplitType.PHOENIX,
-        split_mode: SplitMode = SplitMode.STEM_SEPARATOR,
-        noise_cancelling_level: int | None = None,
-        dereverb_enabled: bool | None = None,
-        extraction_level: ExtractionLevel | str | None = None,
-        multivocal: str | None = None,
-        download_stem: bool = True,
-        download_backing: bool = True,
-        progress_callback: Callable[[str, int], None] | None = None,
-    ) -> dict[str, Path]:
-        del input_path, output_dir, stem, split_type, split_mode
-        del noise_cancelling_level, dereverb_enabled, extraction_level, multivocal
-        del download_stem, download_backing, progress_callback
+    async def process_file(self, *_args: object, **_kwargs: object) -> dict[str, Path]:
+        """Not implemented. Use LalalClient or LalalWebSessionClient for media processing."""
         raise LalalError(
             "LalalOtpAuthClient does not support media processing. "
             "Use LalalClient with activation key or LalalWebSessionClient for processing."
@@ -1205,7 +1150,10 @@ async def separate_vocals(
     Raises:
         LalalError: If auth key is not configured or processing fails
     """
-    client = await asyncio.to_thread(get_lalal_client)
+    try:
+        client = await asyncio.to_thread(get_lalal_client)
+    except Exception as exc:
+        raise LalalError("Failed to load Lalal.ai configuration") from exc
     if not client:
         raise LalalError("Lalal.ai auth key is not configured")
 

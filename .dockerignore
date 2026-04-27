@@ -20,3 +20,13 @@ data/
 BUILD_INFO
 setup.conf
 cookies.txt
+*.backup
+*.har
+.omx/
+.codex
+
+# Local tooling
+tools/
+tools/ui-lint/node_modules/
+tools/ui-lint/output/
+tools/ui-lint/.cache/
