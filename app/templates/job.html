@@ -46,8 +46,8 @@
 
                     <dt class="d-none" id="progressLabel">Progress</dt>
                     <dd class="d-none" id="progressRow">
-                        <div class="progress" style="height: 6px;">
-                            <div id="progressBar" class="progress-bar" style="width: 0%;"></div>
+                        <div class="progress progress-thin">
+                            <div id="progressBar" class="progress-bar"></div></div>
                         </div>
                         <small id="etaText" class="text-muted"></small>
                     </dd>
@@ -59,11 +59,11 @@
                     <dd><span id="bpmConfidence">{% if job["bpm_confidence"] is not none %}{{ '%.2f'|format(job["bpm_confidence"]) }}{% else %}–{% endif %}</span></dd>
 
                     <dt>Created</dt>
-                    <dd>{{ job["created_at"] | localtime }}</dd>
+                    <dd>{{ job["created_at"] | localtime | safe }}</dd>
 
                     {% if job["finished_at"] %}
                     <dt>Completed</dt>
-                    <dd>{{ job["finished_at"] | localtime }}</dd>
+                    <dd>{{ job["finished_at"] | localtime | safe }}</dd>
                     {% endif %}
 
                     <dt>Message</dt>

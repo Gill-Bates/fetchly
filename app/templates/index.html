@@ -11,11 +11,16 @@
 {% import "macros/status.html" as status %}
 
 {% macro stat_card(value, label, icon) %}
+{%- set parts = (value|string).split(' ') %}
 <div class="col-6 col-md-3">
     <div class="ui-card ui-card--stat stat-card" role="group">
         <div class="stat-value">
             <span class="material-symbols-outlined stat-icon" aria-hidden="true">{{ icon }}</span>
-            <span>{{ value }}</span>
+            {%- if parts|length > 1 %}
+                <span>{{ parts[0] }}</span><span class="stat-unit">{{ parts|last }}</span>
+            {%- else %}
+                <span>{{ value }}</span>
+            {%- endif %}
         </div>
         <div class="stat-label">{{ label }}</div>
     </div>
@@ -145,7 +150,7 @@
                             <th scope="col" class="th-mono col-compact">kbps</th>
                             <th scope="col" class="th-mono status-column col-status">Status</th>
                             <th scope="col" class="col-date">Created</th>
-                            <th scope="col" class="col-actions"></th>
+                            <th scope="col" class="col-actions"><span class="visually-hidden">Action</span></th>
                         </tr>
                     </thead>
                     <tbody id="jobsTbody">
@@ -166,8 +171,13 @@
                             <td data-label="Quality" class="td-mono job-meta-cell col-compact">{% if job["type"] == "audio" %}MP3{% else %}{{ job["quality"] }}{% endif %}</td>
                             <td data-label="BPM" class="td-mono job-meta-cell col-compact">{{ job["bpm"] or "–" }}</td>
                             <td data-label="Bitrate" class="td-mono job-meta-cell col-compact">{% if job["bitrate_kbps"] %}{{ job["bitrate_kbps"] }} kbps{% else %}-{% endif %}</td>
-                            <td data-label="Status" class="col-status">{{ status.status_badge(job) }}</td>
-                            <td data-label="Created" class="text-nowrap col-date">{{ job["created_at"] | localtime }}</td>
+                            <td data-label="Status" class="col-status">
+                                <div class="status-action-group">
+                                    {{ status.status_badge(job) }}
+                                    <div class="d-mobile-only">{% include "_action_btn.html" %}</div>
+                                </div>
+                            </td>
+                            <td data-label="Created" class="text-nowrap col-date">{{ job["created_at"] | localtime | safe }}</td>
                             <td data-label="Action" class="col-actions">
                                 <div class="action-cell-wrap">
                                     {% include "_action_btn.html" %}

@@ -66,7 +66,7 @@ const MOTION_RESET_CSS = `
 const VISUAL_STABILITY_CSS = `
     /* Preserve actual fonts for accurate layout testing */
     img, video {
-        visibility: hidden !important;
+        opacity: 0 !important;
     }
 `;
 const MOBILE_VISUAL_STABILITY_CSS = `
@@ -213,6 +213,27 @@ function formatResultSummary(result) {
     if (metrics.clippedDropdowns) parts.push(`clippedDropdowns=${metrics.clippedDropdowns}`);
     if (metrics.importantAbuse) parts.push(`importantAbuse=${metrics.importantAbuse}`);
     if (metrics.tightlyPackedTargets) parts.push(`tightTargets=${metrics.tightlyPackedTargets}`);
+    if (metrics.localOverflowIssues) parts.push(`localOverflow=${metrics.localOverflowIssues}`);
+    if (metrics.brokenTitleTruncation) parts.push(`brokenEllipsis=${metrics.brokenTitleTruncation}`);
+    if (metrics.mobileJobTableIssues) parts.push(`mobileJobTable=${metrics.mobileJobTableIssues}`);
+    if (metrics.mixedLayoutIssues) parts.push(`mixedLayout=${metrics.mixedLayoutIssues}`);
+    if (metrics.statCardCenteringIssues) parts.push(`statCardCentering=${metrics.statCardCenteringIssues}`);
+    if (metrics.containerWidthIssue) parts.push('containerWidth=bad');
+    if (metrics.focusIndicatorMissing) parts.push(`focusIndicatorMissing=${metrics.focusIndicatorMissing}`);
+    if (metrics.ghostScrollContainers) parts.push(`ghostScroll=${metrics.ghostScrollContainers}`);
+    if (metrics.nestedScrollContainers) parts.push(`nestedScroll=${metrics.nestedScrollContainers}`);
+    if (metrics.flexScrollTraps) parts.push(`flexScrollTraps=${metrics.flexScrollTraps}`);
+    if (metrics.doubleScrollRisk) parts.push(`doubleScrollRisk=${metrics.doubleScrollRisk}`);
+    if (metrics.badgeInconsistencies) parts.push(`badgeInconsistencies=${metrics.badgeInconsistencies}`);
+    if (metrics.iconPointerEventsIssues) parts.push(`iconPointerEvents=${metrics.iconPointerEventsIssues}`);
+    if (metrics.gridViolations) parts.push(`gridViolations=${metrics.gridViolations}`);
+    if (metrics.overlapIssues) parts.push(`overlapIssues=${metrics.overlapIssues}`);
+    if (metrics.navbarButtonAlignment) parts.push(`navbarButtonAlignment=bad`);
+    if (metrics.externalFontRequests > 0) parts.push(`externalFontRequests=${metrics.externalFontRequests}`);
+    if (metrics.materialSymbolsMissingVariationSettings) parts.push('materialSymbolsNoVariationSettings=true');
+    if (metrics.dropdownCaretIssues > 0) parts.push(`dropdownCaretIssues=${metrics.dropdownCaretIssues}`);
+    if (metrics.backgroundAttachmentFixedWithoutFallback) parts.push('bgAttachmentFixedNoIOSFallback=true');
+    if (metrics.loginShellAlignmentIssue) parts.push('loginShellAlignment=bad');
     return parts.join(' ');
 }
 
@@ -261,7 +282,28 @@ const BASE_METRICS = Object.freeze({
     unguardedAnimations: 0,
     clippedDropdowns: 0,
     importantAbuse: 0,
+    localOverflowIssues: 0,
+    brokenTitleTruncation: 0,
+    mobileJobTableIssues: 0,
+    mixedLayoutIssues: 0,
+    containerWidthIssue: 0,
+    statCardCenteringIssues: 0,
+    focusIndicatorMissing: 0,
+    ghostScrollContainers: 0,
+    nestedScrollContainers: 0,
+    flexScrollTraps: 0,
+    doubleScrollRisk: 0,
+    badgeInconsistencies: 0,
+    iconPointerEventsIssues: 0,
+    gridViolations: 0,
+    overlapIssues: 0,
+    navbarButtonAlignment: 0,
     fontLoadingStatus: 'unknown',
+    externalFontRequests: 0,
+    materialSymbolsMissingVariationSettings: false,
+    dropdownCaretIssues: 0,
+    backgroundAttachmentFixedWithoutFallback: false,
+    loginShellAlignmentIssue: false,
 });
 
 /**
@@ -454,6 +496,15 @@ async function collectMetrics(page, view) {
             return rect.width > 0 && rect.height > 0;
         };
 
+        const isLayoutVisible = (el) => {
+            if (!el || !el.isConnected) return false;
+            if (el.closest('[hidden], .d-none, [aria-hidden="true"]')) return false;
+            const style = window.getComputedStyle(el);
+            if (style.display === 'none' || style.visibility === 'hidden') return false;
+            const rect = el.getBoundingClientRect();
+            return rect.width > 0 && rect.height > 0;
+        };
+
         const accessibleName = (el) => {
             const ariaLabel = el.getAttribute('aria-label');
             if (ariaLabel && ariaLabel.trim()) return ariaLabel.trim();
@@ -525,7 +576,6 @@ async function collectMetrics(page, view) {
             if ([r, g, b, a].some((n) => Number.isNaN(n))) return null;
             return { r, g, b, a };
         };
-
         const relativeLuminance = ({ r, g, b }) => {
             const srgb = [r, g, b].map((v) => {
                 const c = v / 255;
@@ -800,6 +850,361 @@ async function collectMetrics(page, view) {
             }
         }
 
+        const localOverflowIssues = isMobile
+            ? Array.from(document.querySelectorAll('body *'))
+                .filter((el) => isLayoutVisible(el))
+                .map((el) => {
+                    const rect = el.getBoundingClientRect();
+                    return {
+                        tag: el.tagName.toLowerCase(),
+                        id: el.id || null,
+                        className: typeof el.className === 'string' ? el.className : '',
+                        left: Math.round(rect.left),
+                        right: Math.round(rect.right),
+                    };
+                })
+                .filter((entry) => entry.right > window.innerWidth + 1 || entry.left < -1)
+                .slice(0, 20)
+            : [];
+
+        const focusStyleSnapshot = (el) => {
+            const style = window.getComputedStyle(el);
+            return {
+                outline: style.outline,
+                boxShadow: style.boxShadow,
+                borderColor: style.borderColor,
+                backgroundColor: style.backgroundColor,
+            };
+        };
+
+        const focusIndicatorMissing = [];
+        const focusable = Array.from(document.querySelectorAll('button, a, input, select, textarea, [tabindex]'))
+            .filter((el) => isVisible(el) && !el.disabled)
+            .slice(0, 25);
+
+        for (const el of focusable) {
+            const before = focusStyleSnapshot(el);
+            try {
+                el.focus({ preventScroll: true });
+            } catch {
+                // Ignore focus failures and keep scanning the remaining controls.
+            }
+
+            const after = focusStyleSnapshot(el);
+            if (document.activeElement === el) {
+                const changed =
+                    before.outline !== after.outline ||
+                    before.boxShadow !== after.boxShadow ||
+                    before.borderColor !== after.borderColor ||
+                    before.backgroundColor !== after.backgroundColor;
+
+                if (!changed) {
+                    focusIndicatorMissing.push(el.tagName.toLowerCase());
+                }
+            }
+
+            if (typeof el.blur === 'function') {
+                el.blur();
+            }
+        }
+
+        const iconPointerEventsIssues = Array.from(document.querySelectorAll('button .material-symbols-outlined'))
+            .filter((icon) => window.getComputedStyle(icon).pointerEvents !== 'none')
+            .map((icon) => ({
+                tag: icon.tagName.toLowerCase(),
+                id: icon.id || null,
+                className: typeof icon.className === 'string' ? icon.className : '',
+            }));
+
+        const ghostScrollContainers = Array.from(document.querySelectorAll('*'))
+            .filter((el) => {
+                if (!isLayoutVisible(el)) return false;
+                const style = window.getComputedStyle(el);
+                if (style.overflowY !== 'auto' && style.overflowY !== 'scroll') return false;
+                const delta = el.scrollHeight - el.clientHeight;
+                return delta > 0 && delta < 8 && el.clientHeight > 40;
+            })
+            .map((el) => ({
+                tag: el.tagName.toLowerCase(),
+                id: el.id || null,
+                className: typeof el.className === 'string' ? el.className : '',
+            }));
+
+        const scrollContainers = Array.from(document.querySelectorAll('*'))
+            .filter((el) => {
+                if (!isLayoutVisible(el)) return false;
+                const style = window.getComputedStyle(el);
+                const isScrollable = style.overflowY === 'auto' || style.overflowY === 'scroll';
+                return isScrollable && el.scrollHeight > el.clientHeight + 2;
+            });
+
+        const nestedScrollContainers = scrollContainers.filter((el) => {
+            let parent = el.parentElement;
+            while (parent) {
+                if (scrollContainers.includes(parent)) return true;
+                parent = parent.parentElement;
+            }
+            return false;
+        }).map((el) => ({
+            tag: el.tagName.toLowerCase(),
+            id: el.id || null,
+            className: typeof el.className === 'string' ? el.className : '',
+        }));
+
+        const pageScrollable = document.documentElement.scrollHeight > window.innerHeight + 4;
+        const doubleScrollRisk = pageScrollable && scrollContainers.length > 0 ? 1 : 0;
+
+        const flexScrollTraps = Array.from(document.querySelectorAll('*'))
+            .filter((el) => {
+                if (!isLayoutVisible(el)) return false;
+                const parent = el.parentElement;
+                if (!parent) return false;
+
+                const parentStyle = window.getComputedStyle(parent);
+                const style = window.getComputedStyle(el);
+                const isFlex = parentStyle.display.includes('flex');
+                const scrollable = style.overflowY === 'auto' || style.overflowY === 'scroll';
+                const hasOverflow = el.scrollHeight > el.clientHeight + 2;
+                const minHeightZero = style.minHeight === '0px' || style.minHeight === '0';
+
+                return isFlex && scrollable && hasOverflow && !minHeightZero;
+            })
+            .map((el) => ({
+                tag: el.tagName.toLowerCase(),
+                id: el.id || null,
+                className: typeof el.className === 'string' ? el.className : '',
+            }));
+
+        const badges = Array.from(document.querySelectorAll('.badge')).filter((el) => isVisible(el));
+        let badgeInconsistencies = 0;
+        if (badges.length > 1) {
+            const base = window.getComputedStyle(badges[0]);
+            for (const el of badges.slice(1)) {
+                const style = window.getComputedStyle(el);
+                if (style.borderRadius !== base.borderRadius || style.fontWeight !== base.fontWeight) {
+                    badgeInconsistencies += 1;
+                }
+            }
+        }
+
+        const gridViolations = Array.from(document.querySelectorAll('.row'))
+            .filter((row) => isLayoutVisible(row))
+            .filter((row) => !Array.from(row.children).some((child) => {
+                const className = typeof child.className === 'string' ? child.className : '';
+                return className.includes('col');
+            }))
+            .map((row) => ({
+                tag: row.tagName.toLowerCase(),
+                id: row.id || null,
+                className: typeof row.className === 'string' ? row.className : '',
+            }));
+
+        const overlapIssues = [];
+        for (const row of document.querySelectorAll('table tbody tr')) {
+            if (!isLayoutVisible(row)) continue;
+            const cells = Array.from(row.children).filter((cell) => isLayoutVisible(cell));
+            for (let index = 0; index < cells.length - 1; index += 1) {
+                const current = cells[index].getBoundingClientRect();
+                const next = cells[index + 1].getBoundingClientRect();
+                // Only flag real visual overlaps: cells must be on the same horizontal
+                // row (vertical overlap) AND have crossing right/left edges.
+                // Single-column stacked layouts share x-coordinates but not y-range.
+                const horizontalCross = current.right > next.left + 1;
+                const verticalOverlap = current.bottom > next.top + 1 && current.top < next.bottom - 1;
+                if (horizontalCross && verticalOverlap) {
+                    overlapIssues.push({
+                        rowTag: row.tagName.toLowerCase(),
+                        rowId: row.id || null,
+                    });
+                    break;
+                }
+            }
+        }
+
+        const brokenTitleTruncation = isMobile
+            ? Array.from(document.querySelectorAll('.job-title-text, .job-title-cell'))
+                .filter((el) => isLayoutVisible(el))
+                .filter((el) => {
+                    const style = window.getComputedStyle(el);
+                    if (el.classList.contains('job-title-text')) {
+                        return style.display !== 'block'
+                            || style.overflow !== 'hidden'
+                            || style.textOverflow !== 'ellipsis'
+                            || style.whiteSpace !== 'nowrap';
+                    }
+
+                    if (el.classList.contains('job-title-cell')) {
+                        return style.minWidth !== '0px';
+                    }
+
+                    return false;
+                })
+                .map((el) => ({
+                    tag: el.tagName.toLowerCase(),
+                    id: el.id || null,
+                    className: typeof el.className === 'string' ? el.className : '',
+                }))
+            : [];
+
+        // Mobile job table layout check:
+        // - Table rows should use CSS Grid
+        // - .time-part should be hidden (only date visible)
+        // - Per-cell headers via ::before pseudo-elements
+        // - No horizontal overflow between cells
+        const mobileJobTableIssues = isMobile
+            ? (() => {
+                const issues = [];
+                const tableRows = Array.from(document.querySelectorAll('#jobsTable tbody tr[data-job-id]'));
+
+                for (const row of tableRows) {
+                    if (!isLayoutVisible(row)) continue;
+                    const style = window.getComputedStyle(row);
+
+                    // 1. Row must be a CSS grid
+                    if (!style.display.includes('grid')) {
+                        issues.push({ type: 'not-grid', rowId: row.dataset.jobId });
+                        continue; // remaining checks need grid
+                    }
+
+                    // 2. Grid must have exactly 6 columns: auto auto auto auto 1fr auto
+                    //    Resolved value looks like "NNpx NNpx NNpx NNpx NNpx NNpx" (6 tokens).
+                    const cols = (style.gridTemplateColumns || '').trim();
+                    const colTokens = cols.split(/\s+/);
+                    if (colTokens.length !== 6) {
+                        issues.push({ type: 'wrong-column-count', expected: 6, got: colTokens.length, rowId: row.dataset.jobId });
+                    }
+
+                    // 3. Title cell must span row 1, full width (grid-column starts at 1, ends at -1)
+                    const titleCell = row.querySelector('td[data-label="Title"]');
+                    if (titleCell) {
+                        const cs = window.getComputedStyle(titleCell);
+                        if (cs.gridRow !== '1 / 2' && cs.gridRowStart !== '1') {
+                            issues.push({ type: 'title-wrong-row', rowId: row.dataset.jobId });
+                        }
+                    }
+
+                    // 4. Created cell must be in row 2 (grid-row: 2)
+                    const createdCell = row.querySelector('td[data-label="Created"]');
+                    if (createdCell) {
+                        const cs = window.getComputedStyle(createdCell);
+                        const rowStart = cs.gridRowStart;
+                        if (rowStart !== '2') {
+                            issues.push({ type: 'date-wrong-row', expected: '2', got: rowStart, rowId: row.dataset.jobId });
+                        }
+                    }
+
+                    // 5. Status cell must be in row 2 and rightmost column (col 6)
+                    const statusCell = row.querySelector('td[data-label="Status"]');
+                    if (statusCell) {
+                        const cs = window.getComputedStyle(statusCell);
+                        if (cs.gridRowStart !== '2') {
+                            issues.push({ type: 'status-wrong-row', rowId: row.dataset.jobId });
+                        }
+                        if (cs.gridColumnStart !== '6') {
+                            issues.push({ type: 'status-wrong-column', expected: '6', got: cs.gridColumnStart, rowId: row.dataset.jobId });
+                        }
+                    }
+
+                    // 6. Action cell must be hidden on mobile
+                    const actionCell = row.querySelector('td[data-label="Action"]');
+                    if (actionCell) {
+                        const cs = window.getComputedStyle(actionCell);
+                        if (cs.display !== 'none') {
+                            issues.push({ type: 'action-cell-visible', rowId: row.dataset.jobId });
+                        }
+                    }
+
+                    // 7. Status cell must contain a .status-action-group with an action button
+                    if (statusCell) {
+                        const group = statusCell.querySelector('.status-action-group');
+                        if (!group) {
+                            issues.push({ type: 'missing-status-action-group', rowId: row.dataset.jobId });
+                        } else {
+                            const btn = group.querySelector('.btn');
+                            if (!btn) {
+                                issues.push({ type: 'missing-action-btn-in-group', rowId: row.dataset.jobId });
+                            }
+                        }
+                    }
+
+                    // 8. time-part must be hidden
+                    const timeParts = row.querySelectorAll('.time-part');
+                    for (const tp of timeParts) {
+                        if (window.getComputedStyle(tp).display !== 'none') {
+                            issues.push({ type: 'time-visible', rowId: row.dataset.jobId });
+                            break;
+                        }
+                    }
+
+                    // 9. ::before column headers must exist on Format, Quality, BPM
+                    for (const label of ['Format', 'Quality', 'BPM']) {
+                        const cell = row.querySelector(`td[data-label="${label}"]`);
+                        if (cell) {
+                            const before = window.getComputedStyle(cell, '::before');
+                            const content = before.content;
+                            if (!content || content === 'none' || content === '""') {
+                                issues.push({ type: 'missing-header', label, rowId: row.dataset.jobId });
+                            }
+                        }
+                    }
+                }
+
+                return issues.slice(0, 20);
+            })()
+            : [];
+
+        // Stat-card vertical centering: .ui-card--stat > div must have flex: 0 0 auto
+        // (not flex: 1) so justify-content: center actually works.
+        const statCardCenteringIssues = (() => {
+            const issues = [];
+            const cards = document.querySelectorAll('.ui-card--stat.stat-card');
+            for (const card of cards) {
+                if (!isLayoutVisible(card)) continue;
+                const cardStyle = window.getComputedStyle(card);
+                // Card itself must be flex + column
+                if (cardStyle.display !== 'flex' || cardStyle.flexDirection !== 'column') {
+                    issues.push({ type: 'stat-card-not-flex-column', id: card.id || null });
+                    continue;
+                }
+                // Direct div children must not expand (flex grow must be 0)
+                for (const child of card.children) {
+                    if (child.tagName !== 'DIV') continue;
+                    const cs = window.getComputedStyle(child);
+                    if (cs.flexGrow !== '0') {
+                        issues.push({ type: 'stat-card-child-expands', id: card.id || null, childClass: child.className });
+                        break;
+                    }
+                }
+            }
+            return issues;
+        })();
+
+        const mixedLayoutIssues = isMobile
+            ? Array.from(document.querySelectorAll('.stats-row'))
+                .filter((row) => {
+                    const style = window.getComputedStyle(row);
+                    // Skip Bootstrap .row containers: having both a CSS grid override and
+                    // Bootstrap col-* children is intentional when the CSS explicitly
+                    // neutralizes the col-* classes with !important overrides.
+                    if (row.classList.contains('row')) return false;
+                    return style.display === 'grid' && Boolean(row.querySelector('.col-6, .col-md-3'));
+                })
+                .map((row) => ({
+                    tag: row.tagName.toLowerCase(),
+                    id: row.id || null,
+                    className: typeof row.className === 'string' ? row.className : '',
+                }))
+            : [];
+
+        const containerWidthIssue = isMobile
+            ? (() => {
+                const container = document.querySelector('.app-shell-container');
+                if (!container || !isLayoutVisible(container)) return false;
+                const rect = container.getBoundingClientRect();
+                return rect.width < window.innerWidth - 12 || rect.left > 4 || (window.innerWidth - rect.right) > 4;
+            })()
+            : false;
+
         const hardcodedColors = [];
         const hardcodedColorPattern = /(#[0-9a-fA-F]{3,8}|rgba?\([^)]*\)|hsla?\([^)]*\)|\b(?:white|black)\b)/i;
         for (const el of document.querySelectorAll('[style], [bgcolor], [color], [fill], [stroke]')) {
@@ -930,6 +1335,24 @@ async function collectMetrics(page, view) {
             footerNotFlex = footerStyle.display !== 'flex';
         }
 
+        // Check that all visible buttons inside the fixed navbar are vertically
+        // centred. A button is misaligned when its visual midpoint deviates more
+        // than 3 px from the navbar's own midpoint.
+        const navbarButtonAlignment = (() => {
+            const nav = document.querySelector('.top-navbar, nav.fixed-top, nav[class*="top-navbar"]');
+            if (!nav) return 0;
+            const navRect = nav.getBoundingClientRect();
+            const navMid = navRect.top + navRect.height / 2;
+            const buttons = Array.from(nav.querySelectorAll('.btn, button, a[role="button"]'))
+                .filter((el) => isVisible(el));
+            const misaligned = buttons.filter((el) => {
+                const rect = el.getBoundingClientRect();
+                const elMid = rect.top + rect.height / 2;
+                return Math.abs(elMid - navMid) > 3;
+            });
+            return misaligned.length;
+        })();
+
         // ─── NEW CSS REVIEW CHECKS ────────────────────────────────────────────────
 
         // 1. Undefined CSS Custom Properties
@@ -938,17 +1361,29 @@ async function collectMetrics(page, view) {
             const used = new Map();
             const varPattern = /var\(\s*(--[\w-]+)/g;
 
+            // Collect defined vars from ALL rules across all accessible sheets
+            // (Bootstrap defines --bs-* on component selectors, not only :root,
+            //  so a :root-only scan produces hundreds of false positives).
             for (const sheet of document.styleSheets) {
                 try {
                     for (const rule of sheet.cssRules) {
-                        // Collect defined properties from :root
-                        if (rule.selectorText === ':root' && rule.style) {
+                        if (rule.style) {
                             for (let i = 0; i < rule.style.length; i++) {
                                 const p = rule.style[i];
                                 if (p.startsWith('--')) defined.add(p);
                             }
                         }
-                        // Collect all var() usages
+                    }
+                } catch { /* cross-origin sheet – skip */ }
+            }
+
+            // Collect var() usages only from app-own stylesheets so we don't
+            // report violations in vendor code that we can't fix.
+            for (const sheet of document.styleSheets) {
+                try {
+                    const href = sheet.href ? new URL(sheet.href).pathname : '';
+                    if (href.includes('/vendor/') || href.includes('bootstrap')) continue;
+                    for (const rule of sheet.cssRules) {
                         if (!rule.style) continue;
                         const cssText = rule.style.cssText;
                         let match;
@@ -961,14 +1396,14 @@ async function collectMetrics(page, view) {
                 } catch { /* cross-origin sheet */ }
             }
 
-            // Find used but undefined
-            const undefined = [];
+            // Report vars used in our own CSS but not defined anywhere.
+            const missing = [];
             for (const [prop, selectors] of used.entries()) {
                 if (!defined.has(prop)) {
-                    undefined.push({ property: prop, usedIn: selectors.slice(0, 3) });
+                    missing.push({ property: prop, usedIn: selectors.slice(0, 3) });
                 }
             }
-            return undefined;
+            return missing;
         })();
 
         // 2. Excessive backdrop-filter usage (performance)
@@ -1039,6 +1474,9 @@ async function collectMetrics(page, view) {
 
             for (const sheet of document.styleSheets) {
                 try {
+                    // Skip vendor/third-party sheets – we can't fix Bootstrap animations.
+                    const href = sheet.href ? new URL(sheet.href).pathname : '';
+                    if (href.includes('/vendor/') || href.includes('bootstrap')) continue;
                     for (const rule of sheet.cssRules) {
                         if (rule instanceof CSSMediaRule) {
                             if (rule.conditionText?.includes('prefers-reduced-motion')) {
@@ -1086,12 +1524,14 @@ async function collectMetrics(page, view) {
             id: el.id || null,
         }));
 
-        // 7. !important abuse check
+        // 7. !important abuse check (app stylesheets only – Bootstrap has ~800 legitimate ones)
         const importantAbuse = (() => {
             let count = 0;
             const violations = [];
             for (const sheet of document.styleSheets) {
                 try {
+                    const href = sheet.href ? new URL(sheet.href).pathname : '';
+                    if (href.includes('/vendor/') || href.includes('bootstrap')) continue;
                     for (const rule of sheet.cssRules) {
                         if (!rule.style) continue;
                         for (let i = 0; i < rule.style.length; i++) {
@@ -1157,6 +1597,193 @@ async function collectMetrics(page, view) {
             return { status, customFontLoaded, fontCount: allFonts.length };
         })();
 
+        // 10. External font CDN requests (Material Symbols / Google Fonts must be self-hosted)
+        const externalFontRequests = (() => {
+            const hits = [];
+            const entries = performance.getEntriesByType('resource');
+            for (const e of entries) {
+                if (e.initiatorType !== 'css' && e.initiatorType !== 'link') continue;
+                try {
+                    const host = new URL(e.name).hostname;
+                    if (host.includes('fonts.googleapis.com') || host.includes('fonts.gstatic.com')) {
+                        hits.push(e.name);
+                    }
+                } catch { /* malformed URL */ }
+            }
+            return hits;
+        })();
+
+        // 11. Material Symbols variable font: font-variation-settings must be declared
+        const materialSymbolsMissingVariationSettings = (() => {
+            const icons = Array.from(document.querySelectorAll('.material-symbols-outlined'));
+            if (!icons.length) return false;
+            const style = window.getComputedStyle(icons[0]);
+            const fvs = style.getPropertyValue('font-variation-settings');
+            // Must declare at least FILL and wght axes
+            return !fvs || fvs === 'normal' || !fvs.includes('FILL');
+        })();
+
+        // 12. Dropdown-toggle caret on icon-only buttons (Bootstrap ::after pseudo)
+        const dropdownCaretIssues = (() => {
+            const issues = [];
+            for (const btn of document.querySelectorAll('.btn-icon.dropdown-toggle, .action-menu-toggle.dropdown-toggle')) {
+                if (!isVisible(btn)) continue;
+                const before = window.getComputedStyle(btn, '::after');
+                // Bootstrap caret: display != none and border-top-width > 0
+                if (before.display !== 'none' && parseFloat(before.borderTopWidth) > 0) {
+                    issues.push({
+                        tag: btn.tagName.toLowerCase(),
+                        id: btn.id || null,
+                        className: typeof btn.className === 'string' ? btn.className.split(' ').filter(Boolean).slice(0, 4).join(' ') : '',
+                    });
+                }
+            }
+            return issues;
+        })();
+
+        // 13. iOS background-attachment:fixed without @supports fallback
+        //     Detects fixed attachment on .app-root / body without a matching scroll override.
+
+        // ─── iOS / Rendering Stability Checks ────────────────────────────────────
+
+        // 1. Broken or zero-size icons (SVG / IMG)
+        const brokenIcons = Array.from(document.querySelectorAll('svg, img'))
+            .filter(el => isVisible(el))
+            .map(el => {
+                const rect = el.getBoundingClientRect();
+                return {
+                    tag: el.tagName.toLowerCase(),
+                    id: el.id || null,
+                    width: Math.round(rect.width),
+                    height: Math.round(rect.height),
+                };
+            })
+            .filter(entry => entry.width === 0 || entry.height === 0);
+
+        // 2. SVG rendering issues (missing dimensions / inline issues)
+        const svgIssues = Array.from(document.querySelectorAll('svg'))
+            .filter(el => isVisible(el))
+            .filter(el => {
+                const hasSize = el.getAttribute('width') || el.getAttribute('height');
+                const style = window.getComputedStyle(el);
+                return !hasSize && style.display === 'inline';
+            })
+            .map(el => ({
+                id: el.id || null,
+                className: typeof el.className === 'string' ? el.className : '',
+            }));
+
+        // 3. Icon font fallback issues (FOIT / invisible icons)
+        const iconFontIssues = Array.from(document.querySelectorAll('.material-symbols-outlined'))
+            .filter(el => isVisible(el))
+            .filter(el => {
+                const style = window.getComputedStyle(el);
+                return style.fontFamily.indexOf('Material') === -1;
+            })
+            .map(el => ({
+                id: el.id || null,
+            }));
+
+        // 4. Horizontal scroll container missing on wide tables
+        const tableOverflowIssues = Array.from(document.querySelectorAll('table'))
+            .filter(el => isLayoutVisible(el))
+            .filter(el => el.scrollWidth > window.innerWidth + 2)
+            .filter(el => {
+                let parent = el.parentElement;
+                while (parent) {
+                    const style = window.getComputedStyle(parent);
+                    if (style.overflowX === 'auto' || style.overflowX === 'scroll') {
+                        return false;
+                    }
+                    parent = parent.parentElement;
+                }
+                return true;
+            })
+            .map(el => ({
+                id: el.id || null,
+            }));
+
+        // 5. Missing momentum scroll on iOS containers
+        const missingMomentumScroll = Array.from(document.querySelectorAll('*'))
+            .filter(el => isLayoutVisible(el))
+            .filter(el => {
+                const style = window.getComputedStyle(el);
+                const scrollable = style.overflowY === 'auto' || style.overflowY === 'scroll';
+                if (!scrollable) return false;
+                return style.webkitOverflowScrolling !== 'touch';
+            })
+            .map(el => ({
+                tag: el.tagName.toLowerCase(),
+                id: el.id || null,
+            }));
+
+        // 6. Backdrop-filter without iOS fallback (runtime check)
+        const backdropWithoutFallback = Array.from(document.querySelectorAll('*'))
+            .filter(el => isVisible(el))
+            .filter(el => {
+                const style = window.getComputedStyle(el);
+                if (!style.backdropFilter || style.backdropFilter === 'none') return false;
+
+                // check if any parent disables it (iOS fallback)
+                let parent = el.parentElement;
+                while (parent) {
+                    const ps = window.getComputedStyle(parent);
+                    if (ps.backdropFilter === 'none') return false;
+                    parent = parent.parentElement;
+                }
+                return true;
+            })
+            .map(el => ({
+                tag: el.tagName.toLowerCase(),
+                id: el.id || null,
+            }));
+
+        // 7. Image hidden by opacity hack (false visual stability)
+        const invisibleMedia = Array.from(document.querySelectorAll('img, video'))
+            .filter(el => {
+                const style = window.getComputedStyle(el);
+                return style.opacity === '0';
+            })
+            .map(el => ({
+                tag: el.tagName.toLowerCase(),
+                id: el.id || null,
+            }));
+        const backgroundAttachmentFixedWithoutFallback = (() => {
+            const roots = [document.querySelector('.app-root'), document.body].filter(Boolean);
+            for (const el of roots) {
+                const style = window.getComputedStyle(el);
+                if (style.backgroundAttachment === 'fixed') {
+                    // Check if any stylesheet has a @supports (-webkit-touch-callout:none) override
+                    let hasIosOverride = false;
+                    for (const sheet of document.styleSheets) {
+                        try {
+                            for (const rule of sheet.cssRules) {
+                                if (rule.type === CSSRule.SUPPORTS_RULE &&
+                                    rule.conditionText && rule.conditionText.includes('-webkit-touch-callout')) {
+                                    for (const inner of rule.cssRules) {
+                                        if (inner.selectorText && inner.selectorText.includes('app-root')) {
+                                            const val = inner.style.backgroundAttachment;
+                                            if (val === 'scroll' || val === 'local') hasIosOverride = true;
+                                        }
+                                    }
+                                }
+                            }
+                        } catch { /* cross-origin */ }
+                    }
+                    if (!hasIosOverride) return true;
+                }
+            }
+            return false;
+        })();
+
+        // 14. Login shell layout: must use align-items:center (not flex-start which was a regression)
+        const loginShellAlignmentIssue = (() => {
+            const shell = document.querySelector('.login-shell');
+            if (!shell) return false;
+            const style = window.getComputedStyle(shell);
+            return style.alignItems !== 'center';
+        })();
+
         return {
             duplicateIds,
             unlabeledControls,
@@ -1184,6 +1811,7 @@ async function collectMetrics(page, view) {
             hasAppShell,
             insufficientFixedTopOffset,
             footerNotFlex,
+            navbarButtonAlignment,
             mutationObservers,
             duplicateEventHandlers,
             // New CSS review checks
@@ -1195,7 +1823,34 @@ async function collectMetrics(page, view) {
             clippedDropdowns,
             importantAbuse,
             tightlyPackedTargets,
+            localOverflowIssues,
+            focusIndicatorMissing,
+            ghostScrollContainers,
+            nestedScrollContainers,
+            flexScrollTraps,
+            doubleScrollRisk,
+            badgeInconsistencies,
+            iconPointerEventsIssues,
+            gridViolations,
+            overlapIssues,
+            brokenTitleTruncation,
+            mobileJobTableIssues,
+            mixedLayoutIssues,
+            containerWidthIssue,
             fontLoadingStatus,
+            statCardCenteringIssues,
+            externalFontRequests,
+            materialSymbolsMissingVariationSettings,
+            dropdownCaretIssues,
+            brokenIcons,
+            svgIssues,
+            iconFontIssues,
+            tableOverflowIssues,
+            missingMomentumScroll,
+            backdropWithoutFallback,
+            invisibleMedia,
+            backgroundAttachmentFixedWithoutFallback,
+            loginShellAlignmentIssue,
         };
     }, {
         requiredSelectors: view.requiredSelectors,
@@ -1474,6 +2129,7 @@ async function runView(browser, storageState, view, replacements = {}) {
         if (!metrics.hasAppShell) failures.push('missing app-shell layout container');
         if (metrics.insufficientFixedTopOffset) failures.push('fixed navbar without sufficient body offset');
         if (metrics.footerNotFlex) warnings.push('footer not using flex layout');
+        if (metrics.navbarButtonAlignment > 0) warnings.push(`navbar buttons not vertically centred: ${metrics.navbarButtonAlignment}`);
         if (metrics.mutationObservers > 0) warnings.push('mutation observer usage detected');
         if (metrics.duplicateEventHandlers > 2) warnings.push('multiple global click handlers');
         if (visual.ratio > VISUAL_DRIFT_THRESHOLD) failures.push(`visual drift ratio ${visual.ratio.toFixed(5)} > ${VISUAL_DRIFT_THRESHOLD}`);
@@ -1505,6 +2161,60 @@ async function runView(browser, storageState, view, replacements = {}) {
         }
         if (metrics.tightlyPackedTargets?.length) {
             warnings.push(`tightly packed touch targets: ${metrics.tightlyPackedTargets.length}`);
+        }
+        if (metrics.localOverflowIssues?.length) {
+            failures.push(`local overflow elements: ${metrics.localOverflowIssues.length}`);
+        }
+        if (metrics.brokenTitleTruncation?.length) {
+            failures.push(`broken title truncation: ${metrics.brokenTitleTruncation.length}`);
+        }
+        if (metrics.mobileJobTableIssues?.length) {
+            failures.push(`mobile job table layout issues: ${metrics.mobileJobTableIssues.length}`);
+        }
+        if (metrics.statCardCenteringIssues?.length) {
+            failures.push(`stat card vertical centering broken (child expands): ${metrics.statCardCenteringIssues.length}`);
+        }
+        if (metrics.mixedLayoutIssues?.length) {
+            failures.push(`mixed Bootstrap/grid layout: ${metrics.mixedLayoutIssues.length}`);
+        }
+        if (metrics.containerWidthIssue) {
+            failures.push('app shell container does not fill the mobile viewport');
+        }
+        if (metrics.externalFontRequests > 0) {
+            failures.push(`external font CDN requests (must be self-hosted): ${metrics.externalFontRequests}`);
+        }
+        if (metrics.materialSymbolsMissingVariationSettings) {
+            warnings.push('Material Symbols Outlined missing font-variation-settings (iOS variable font rendering broken)');
+        }
+        if (metrics.dropdownCaretIssues > 0) {
+            warnings.push(`icon-only dropdown buttons with visible Bootstrap caret: ${metrics.dropdownCaretIssues}`);
+        }
+        if (metrics.brokenIcons?.length) {
+            failures.push(`broken or zero-size icons: ${metrics.brokenIcons.length}`);
+        }
+        if (metrics.svgIssues?.length) {
+            warnings.push(`SVG rendering issues: ${metrics.svgIssues.length}`);
+        }
+        if (metrics.iconFontIssues?.length) {
+            failures.push(`icon font fallback issues: ${metrics.iconFontIssues.length}`);
+        }
+        if (metrics.tableOverflowIssues?.length) {
+            failures.push(`tables without horizontal scroll container: ${metrics.tableOverflowIssues.length}`);
+        }
+        if (metrics.missingMomentumScroll?.length > 3) {
+            warnings.push(`missing iOS momentum scroll on containers: ${metrics.missingMomentumScroll.length}`);
+        }
+        if (metrics.backdropWithoutFallback?.length) {
+            warnings.push(`backdrop-filter without iOS-safe fallback: ${metrics.backdropWithoutFallback.length}`);
+        }
+        if (metrics.invisibleMedia?.length) {
+            warnings.push(`media elements hidden via opacity (may break layout tests): ${metrics.invisibleMedia.length}`);
+        }
+        if (metrics.backgroundAttachmentFixedWithoutFallback) {
+            failures.push('background-attachment:fixed used without @supports (-webkit-touch-callout:none) scroll fallback (iOS repaint bug)');
+        }
+        if (metrics.loginShellAlignmentIssue) {
+            failures.push('login-shell align-items is not center (layout regression)');
         }
 
         failures.push(...sameOriginFailures);
@@ -1551,6 +2261,7 @@ async function runView(browser, storageState, view, replacements = {}) {
                 hasAppShell: metrics.hasAppShell,
                 insufficientFixedTopOffset: metrics.insufficientFixedTopOffset,
                 footerNotFlex: metrics.footerNotFlex,
+                navbarButtonAlignment: metrics.navbarButtonAlignment || 0,
                 mutationObservers: metrics.mutationObservers,
                 duplicateEventHandlers: metrics.duplicateEventHandlers,
                 visualDriftRatio: visual.ratio,
@@ -1563,7 +2274,34 @@ async function runView(browser, storageState, view, replacements = {}) {
                 unguardedAnimations: metrics.unguardedAnimations?.unguarded?.length || 0,
                 clippedDropdowns: metrics.clippedDropdowns?.length || 0,
                 importantAbuse: metrics.importantAbuse?.count || 0,
+                localOverflowIssues: metrics.localOverflowIssues?.length || 0,
+                brokenTitleTruncation: metrics.brokenTitleTruncation?.length || 0,
+                mobileJobTableIssues: metrics.mobileJobTableIssues?.length || 0,
+                statCardCenteringIssues: metrics.statCardCenteringIssues?.length || 0,
+                mixedLayoutIssues: metrics.mixedLayoutIssues?.length || 0,
+                containerWidthIssue: metrics.containerWidthIssue ? 1 : 0,
+                focusIndicatorMissing: metrics.focusIndicatorMissing?.length || 0,
+                ghostScrollContainers: metrics.ghostScrollContainers?.length || 0,
+                nestedScrollContainers: metrics.nestedScrollContainers?.length || 0,
+                flexScrollTraps: metrics.flexScrollTraps?.length || 0,
+                doubleScrollRisk: metrics.doubleScrollRisk ? 1 : 0,
+                badgeInconsistencies: metrics.badgeInconsistencies || 0,
+                iconPointerEventsIssues: metrics.iconPointerEventsIssues?.length || 0,
+                gridViolations: metrics.gridViolations?.length || 0,
+                overlapIssues: metrics.overlapIssues?.length || 0,
                 fontLoadingStatus: metrics.fontLoadingStatus?.status || 'unknown',
+                externalFontRequests: metrics.externalFontRequests?.length || 0,
+                materialSymbolsMissingVariationSettings: metrics.materialSymbolsMissingVariationSettings || false,
+                dropdownCaretIssues: metrics.dropdownCaretIssues?.length || 0,
+                brokenIcons: metrics.brokenIcons?.length || 0,
+                svgIssues: metrics.svgIssues?.length || 0,
+                iconFontIssues: metrics.iconFontIssues?.length || 0,
+                tableOverflowIssues: metrics.tableOverflowIssues?.length || 0,
+                missingMomentumScroll: metrics.missingMomentumScroll?.length || 0,
+                backdropWithoutFallback: metrics.backdropWithoutFallback?.length || 0,
+                invisibleMedia: metrics.invisibleMedia?.length || 0,
+                backgroundAttachmentFixedWithoutFallback: metrics.backgroundAttachmentFixedWithoutFallback || false,
+                loginShellAlignmentIssue: metrics.loginShellAlignmentIssue || false,
             },
             screenshots: {
                 first: shots.shotA,

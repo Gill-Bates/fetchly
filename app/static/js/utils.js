@@ -25,9 +25,11 @@
 // Canonical placeholder for missing/invalid values
 export const EMPTY_VALUE = "–";  // U+2013 EN DASH
 
-// Regex for YouTube URL validation (exact video ID matching, no case-folding).
+// Regex for YouTube URL validation (exact video ID matching).
 // Prevents ReDoS by avoiding .* backtracking in query parsing.
-export const YOUTUBE_URL_REGEX = /^https:\/\/(?:www\.|m\.)?(?:youtube\.com\/(?:watch\?(?:[^#]*&)?v=|embed\/|v\/|shorts\/)|youtu\.be\/)[\w-]{11}(?:[?#][^\s]*)?$/;
+// Allows additional query params like &list=... after the video ID.
+// Case-insensitive for protocol/host, case-sensitive video IDs handled separately.
+export const YOUTUBE_URL_REGEX = /^https?:\/\/(?:www\.|m\.)?(?:youtube\.com\/(?:watch\?(?:[^#]*&)?v=|embed\/|v\/|shorts\/)|youtu\.be\/)[\w-]{11}(?:[?#&][^\s]*)?$/i;
 
 const SIZE_UNITS = Object.freeze([
     { unit: "TB", divisor: 1_099_511_627_776, precision: 2 },
@@ -121,8 +123,15 @@ export function getCookie(name) {
  */
 function normalizeYouTubeUrl(url) {
     if (!url || typeof url !== "string") return null;
-    const value = url.trim().toLowerCase();  // Normalize case once
+    let value = url.trim();
+    
+    // Normalize common copy/paste issues
+    value = value.replace(/&amp;/g, "&");
+    // Remove zero-width characters (common from mobile copy/paste)
+    value = value.replace(/[\u200B-\u200D\uFEFF]/g, "");
+    
     if (!value || value.length > 2048) return null;
+    // Test with case-insensitive check (video IDs are case-sensitive but host is not)
     if (!YOUTUBE_URL_REGEX.test(value)) return null;
     return value;
 }

@@ -20,6 +20,34 @@ import { CONFIG } from "./config.js";
 import { createStatusElement, createActionButton } from "./ui.js";
 import { EMPTY_VALUE } from "./utils.js";
 
+/**
+ * Formats a date string into HTML with separate date and time spans.
+ * @param {string} isoOrFormatted - ISO date string or pre-formatted date
+ * @returns {string} HTML string with date-part and time-part spans
+ */
+function formatDateHtml(isoOrFormatted) {
+    if (!isoOrFormatted) return "";
+    try {
+        const dt = new Date(isoOrFormatted);
+        if (Number.isNaN(dt.getTime())) {
+            // Already formatted, return as-is
+            return isoOrFormatted;
+        }
+        const datePart = dt.toLocaleDateString("de-DE", {
+            day: "2-digit",
+            month: "2-digit",
+            year: "numeric",
+        });
+        const timePart = dt.toLocaleTimeString("de-DE", {
+            hour: "2-digit",
+            minute: "2-digit",
+        });
+        return `<span class="date-part">${datePart}</span> <span class="time-part">${timePart}</span>`;
+    } catch {
+        return isoOrFormatted;
+    }
+}
+
 const STATUS = Object.freeze({
     DONE: "done",
     ANALYSIS: "analysis",
@@ -148,13 +176,22 @@ export function buildRow(job) {
     const statusCell = document.createElement("td");
     statusCell.dataset.label = "Status";
     statusCell.className = "col-status";
-    statusCell.appendChild(createStatusElement(job.status, job.filesize_bytes));
+    // On mobile the action button is embedded inside the status cell (.status-action-group).
+    // On desktop the separate actionCell below is used (the group wrapper is hidden via CSS).
+    const statusActionGroup = document.createElement("div");
+    statusActionGroup.className = "status-action-group";
+    statusActionGroup.appendChild(createStatusElement(job.status, job.filesize_bytes));
+    const mobileActionWrap = document.createElement("div");
+    mobileActionWrap.className = "d-mobile-only";
+    mobileActionWrap.appendChild(createActionButton(job.id, job.status, job.type));
+    statusActionGroup.appendChild(mobileActionWrap);
+    statusCell.appendChild(statusActionGroup);
     tr.appendChild(statusCell);
 
     const createdCell = document.createElement("td");
     createdCell.dataset.label = "Created";
     createdCell.className = "text-nowrap col-date";
-    createdCell.textContent = job.created_at || "";
+    createdCell.innerHTML = formatDateHtml(job.created_at);
     tr.appendChild(createdCell);
 
     const actionCell = document.createElement("td");

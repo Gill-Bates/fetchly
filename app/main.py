@@ -121,7 +121,10 @@ def _localtime(value: str | None) -> str:
             dt = dt.replace(tzinfo=UTC)
         else:
             dt = dt.astimezone(UTC)
-        return dt.astimezone(_LOCAL_TZ).strftime("%d.%m.%Y %H:%M:%S")
+        local_dt = dt.astimezone(_LOCAL_TZ)
+        date_part = local_dt.strftime("%d.%m.%Y")
+        time_part = local_dt.strftime("%H:%M")
+        return f'<span class="date-part">{date_part}</span> <span class="time-part">{time_part}</span>'
     except (ValueError, TypeError):
         return value
 
@@ -266,6 +269,10 @@ def _validate_youtube_url(url: str) -> tuple[bool, str]:
     
     url = url.strip()
     
+    # Normalize common copy/paste issues from mobile apps / HTML sources
+    url = url.replace("&amp;", "&")
+    url = re.sub(r"[\u200B-\u200D\uFEFF]", "", url)  # remove zero-width chars
+    
     if not url:
         return False, "URL is required"
     
@@ -276,12 +283,41 @@ def _validate_youtube_url(url: str) -> tuple[bool, str]:
     # Must start with http:// or https://
     if not url.startswith(('http://', 'https://')):
         return False, "URL must start with http:// or https://"
-    
-    # Check if it's a YouTube URL
-    if not _YOUTUBE_URL_PATTERN.match(url):
-        return False, "Invalid YouTube URL. Supported formats: youtube.com/watch?v=..., youtu.be/..., youtube.com/shorts/..."
-    
-    return True, ""
+
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return False, "Invalid URL"
+
+    host = (parsed.hostname or "").lower()
+    path = parsed.path or ""
+
+    def _clean_video_id(value: str) -> str:
+        """Strip zero-width chars and non-ID characters from video ID."""
+        cleaned = re.sub(r"[\u200B-\u200D\uFEFF]", "", value.strip())
+        return re.sub(r"[^\w-]", "", cleaned)
+
+    def _is_video_id(value: str) -> bool:
+        return bool(re.fullmatch(r"[\w-]{11}", value))
+
+    # Check if it's a YouTube video URL. Allow extra query parameters such as
+    # playlist context (list/start_radio), but require a real video ID.
+    if host.endswith("youtu.be"):
+        segment = _clean_video_id(path.strip("/").split("/")[0])
+        if _is_video_id(segment):
+            return True, ""
+    elif host.endswith("youtube.com"):
+        if path == "/watch":
+            params = parse_qs(parsed.query, keep_blank_values=False)
+            video_id = _clean_video_id((params.get("v") or [""])[0])
+            if _is_video_id(video_id):
+                return True, ""
+        elif path.startswith(("/shorts/", "/embed/", "/v/")):
+            segment = _clean_video_id(path.strip("/").split("/")[1]) if "/" in path.strip("/") else ""
+            if _is_video_id(segment):
+                return True, ""
+
+    return False, "Invalid YouTube URL. Supported formats: youtube.com/watch?v=..., youtu.be/..., youtube.com/shorts/..."
 
 
 def _normalize_info_url(url: str) -> str:

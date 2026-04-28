@@ -12,11 +12,24 @@
     font-display: swap;
 }
 
+/* Material Symbols Outlined – self-hosted (iOS/offline safe) */
+@font-face {
+    font-family: "Material Symbols Outlined";
+    src: url("/static/fonts/material-symbols-outlined.woff2") format("woff2");
+    font-style: normal;
+    font-weight: 100 700;
+    /* block: no FOUT – icons must not flash as raw text */
+    font-display: block;
+}
+
 /* ─── Logo colour ───────────────────────────────────────────────────────────
      App UI is dark-only, so the logo should always render for dark surfaces. */
 .logo {
     color: #fff;
     filter: invert(1);
+    width: 180px;
+    height: auto;
+    display: block;
 }
 
 /* ─────────────────────────────────────────────
@@ -105,7 +118,8 @@
     /* Strict text tokens (lint-aligned) */
     --text-strong: #f8fafc;
     --text-default: #e5e7eb;
-    --text-weak: #9ca3af;
+    /* Increased from #9ca3af for better contrast (WCAG AA) */
+    --text-weak: #b8c0cc;
 
     /* Deterministic solid surfaces (no drift) */
     --surface-solid: #0f172a;
@@ -136,6 +150,7 @@
         var(--bg-gradient);
     color: var(--text);
     min-height: 100vh;
+    min-height: 100dvh; /* Fixes iOS Safari URL-bar height calculation */
     font-family: "Roboto Flex", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     padding-top: var(--nav-offset);
     margin: 0;
@@ -147,6 +162,7 @@
 
 .app-shell {
     min-height: calc(100vh - var(--nav-offset));
+    min-height: calc(100dvh - var(--nav-offset)); /* iOS Safari URL-bar fix */
     display: flex;
     flex-direction: column;
 }
@@ -217,6 +233,7 @@
     text-decoration: underline;
 }
 
+/* Footer slide-in animation only on mobile and when motion is allowed */
 @media (max-width: 767.98px) and (prefers-reduced-motion: no-preference) {
     .wb-footer {
         animation: footerSlideIn 0.35s ease-out;
@@ -246,6 +263,8 @@
 
 .top-navbar {
     height: var(--nav-height);
+    padding-top: 0;
+    padding-bottom: 0;
     background: color-mix(in srgb, var(--surface) 70%, transparent);
     backdrop-filter: var(--blur-md);
     -webkit-backdrop-filter: var(--blur-md);
@@ -254,17 +273,34 @@
 }
 
 .top-navbar__inner {
-    min-height: var(--nav-height);
+    height: var(--nav-height);
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: var(--space-4);
 }
 
+/* Navbar buttons – explicit height so Flex centres them exactly in 64px bar */
+.top-navbar .btn {
+    height: 40px;
+    min-height: 40px;
+    padding: 0 var(--space-3);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    line-height: 1;
+}
+
+.top-navbar .btn-icon {
+    width: 40px;
+    min-width: 40px;
+    padding: 0;
+}
+
 .top-navbar .navbar-brand {
     letter-spacing: 0.02em;
     margin: 0;
-    min-height: 40px;
+    height: 40px;
     display: inline-flex;
     align-items: center;
 }
@@ -299,7 +335,16 @@
     margin: 0;
 }
 
-/* ── Stats ───────────────────────────────────────────────────────────────── */
+/* Thin progress bar variant used on job detail page */
+.progress-thin {
+    height: 6px;
+}
+
+#progressBar {
+    width: 0%;
+}
+
+/* ─── Stats ───────────────────────────────────────────────────────────────── */
 
 .stats-row {
     margin-top: -10px;
@@ -307,10 +352,12 @@
 
 .stat-card {
     text-align: center;
-    padding: 1.5rem;
+    padding: 1rem;
     height: 100%;
+    min-height: 110px;
     display: flex;
     flex-direction: column;
+    align-items: center;
     justify-content: center;
 }
 
@@ -320,7 +367,7 @@
     justify-content: center;
     gap: 6px;
     font-size: 2.2rem;
-    font-weight: 400;
+    font-weight: 700;
     line-height: 1.1;
     color: #ffffff;
     letter-spacing: -0.02em;
@@ -339,6 +386,14 @@
     font-size: 0.8rem;
     color: var(--text-muted);
     margin-top: 0.5rem;
+}
+
+.stat-unit {
+    font-size: 1rem;
+    font-weight: 500;
+    color: var(--text-muted);
+    letter-spacing: 0;
+    align-self: baseline;
 }
 
 /* ── Surfaces ─────────────────────────────────────────────────────────────── */
@@ -385,9 +440,9 @@
     min-width: var(--control-height);
     min-height: var(--control-height);
     padding: 0;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
+    /* grid avoids the iOS flex+variable-font glyph clipping bug */
+    display: inline-grid;
+    place-items: center;
 }
 
 .btn-sm.btn-icon {
@@ -411,6 +466,7 @@
 }
 
 .btn .material-symbols-outlined,
+button .material-symbols-outlined,
 .btn .icon-inline {
     font-size: 18px;
     line-height: 1;
@@ -419,8 +475,20 @@
 }
 
 .material-symbols-outlined {
+    font-family: "Material Symbols Outlined";
+    font-weight: normal;
+    font-style: normal;
     line-height: 1;
     display: inline-block;
+    width: 1em;
+    height: 1em;
+    flex-shrink: 0;
+    white-space: nowrap;
+    direction: ltr;
+    -webkit-font-feature-settings: "liga";
+    -webkit-font-smoothing: antialiased;
+    /* Required on iOS Safari for variable font axes to render correctly */
+    font-variation-settings: "FILL" 0, "wght" 400, "GRAD" 0, "opsz" 24;
 }
 
 .btn-sm .material-symbols-outlined,
@@ -461,15 +529,18 @@
 
 .input-icon {
     position: relative;
-    display: block;
+    display: flex;
+    align-items: center;
 }
 
 .input-icon__icon {
     position: absolute;
-        left: 0.75rem;
+    left: 0.75rem;
     top: 50%;
     transform: translateY(-50%);
     font-size: 18px;
+    width: 18px;
+    text-align: center;
     line-height: 1;
     color: var(--text-muted);
     pointer-events: none;
@@ -477,7 +548,13 @@
 }
 
 .input-icon__field {
-    padding-left: 2.25rem;
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+/* !important needed: .form-control-sm shorthand padding overrides descendant-specificity */
+.input-icon .input-icon__field {
+    padding-left: 2.5rem !important;
 }
 
 .jobs-search-wrap {
@@ -689,6 +766,11 @@
 
 .ui-card > div {
     flex: 1;
+}
+
+/* Stat cards: children must not expand; centering happens via justify-content on the card */
+.ui-card--stat > div {
+    flex: 0 0 auto;
 }
 
 .ui-card:hover {
@@ -994,9 +1076,8 @@
 }
 
 .table thead {
-    background: color-mix(in srgb, var(--surface) 85%, transparent);
-    backdrop-filter: var(--blur-sm);
-    -webkit-backdrop-filter: var(--blur-sm);
+    /* Use solid background for sticky header compatibility and better z-index stacking */
+    background: var(--surface-solid);
 }
 
 .table thead th {
@@ -1030,12 +1111,10 @@
     background: color-mix(in srgb, var(--surface) 88%, transparent);
     border-bottom: 1px solid var(--border);
     position: relative;
-    z-index: 1;
 }
 
 .table tbody tr:hover {
     background: rgba(99, 102, 241, 0.12);
-    z-index: 2;
 }
 
 .table tbody td {
@@ -1057,9 +1136,9 @@ td[data-label="Title"] {
     text-overflow: ellipsis;
     white-space: nowrap;
     font-family: "Roboto Flex", system-ui, sans-serif !important;
-    font-stretch: 75%;
-    font-variation-settings: "wdth" 75;
-    letter-spacing: -0.02em;
+    font-stretch: 100%;
+    font-variation-settings: "wdth" 100;
+    letter-spacing: -0.01em;
 }
 
 /* ── Truncation Anchor + Global Title Popover ───────────────────────────── */
@@ -1198,9 +1277,10 @@ td[data-label="Title"] {
 }
 
 .jobs-table .col-actions {
-    width: 124px;
+    width: 56px;
     overflow: visible;
     position: relative;
+    text-align: right;
 }
 
 .jobs-table td:not(.col-actions),
@@ -1240,6 +1320,11 @@ td[data-label="Title"] {
 .action-cell-wrap .dropdown {
     position: static;
     display: inline-flex;
+}
+
+/* Popper uses fixed positioning - ensure proper stacking */
+.action-cell-wrap .dropdown-menu.show {
+    position: fixed !important;
 }
 
 /* ── Status ──────────────────────────────────────────────────────────────── */
@@ -1357,7 +1442,13 @@ td[data-label="Title"] {
 
 .ws-indicator.live {
     will-change: opacity;
-    animation: pulse 2s infinite;
+}
+
+/* Pulse animation only when motion is allowed */
+@media (prefers-reduced-motion: no-preference) {
+    .ws-indicator.live {
+        animation: pulse 2s infinite;
+    }
 }
 
 @keyframes pulse {
@@ -1367,7 +1458,7 @@ td[data-label="Title"] {
 
 /* Action buttons in tables */
 .action-buttons {
-    display: flex;
+    display: inline-flex;
     gap: 0.35rem;
     align-items: center;
     justify-content: flex-end;
@@ -1376,7 +1467,7 @@ td[data-label="Title"] {
 }
 
 .jobs-table .action-buttons {
-    min-width: 76px;
+    min-width: 40px;
 }
 
 .jobs-table .action-buttons .btn-icon,
@@ -1386,9 +1477,8 @@ td[data-label="Title"] {
     min-width: 40px;
     min-height: 40px;
     padding: 0;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
+    display: inline-grid;
+    place-items: center;
     position: relative;
     z-index: 1;
 }
@@ -1396,13 +1486,19 @@ td[data-label="Title"] {
 /* Action dropdown menu — dark theme override */
 .action-menu-toggle {
     cursor: pointer;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
+    display: inline-grid;
+    place-items: center;
     padding: 0;
     width: 40px;
     height: 40px;
     border-radius: 8px;
+}
+
+/* Hide Bootstrap's auto-caret on icon-only dropdown buttons – it pushes the
+   icon off-centre and makes the button wider than intended. */
+.btn-icon.dropdown-toggle::after,
+.action-menu-toggle.dropdown-toggle::after {
+    display: none;
 }
 
 .action-menu-toggle .icon-inline {
@@ -1415,7 +1511,9 @@ td[data-label="Title"] {
     border-radius: var(--radius-md);
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
     min-width: 11rem;
-    z-index: 1060;
+    z-index: 2000;
+    /* Escape overflow:hidden containers via fixed positioning */
+    position: fixed;
 }
 
 /* Bootstrap/Popper positions table dropdowns inline. */
@@ -1447,7 +1545,7 @@ td:last-child {
 .icon-inline {
     font-size: 18px;
     vertical-align: middle;
-    margin-right: 0.2rem;
+    margin: 0;
 }
 
 /* ── Modal ───────────────────────────────────────────────────────────────── */
@@ -1599,44 +1697,55 @@ td:last-child {
         padding-top: calc(var(--space-6) + var(--space-2));
     }
 
+    .app-shell-container {
+        width: 100%;
+        padding-left: var(--space-3);
+        padding-right: var(--space-3);
+    }
+
     .stats-row {
         display: grid;
         grid-template-columns: repeat(2, minmax(0, 1fr));
         gap: 0.75rem;
-        margin-top: 0;
+        margin: 0;
+        --bs-gutter-x: 0;
+        --bs-gutter-y: 0;
     }
 
-    .stats-row > * {
-        width: auto;
-        display: flex;
+    /* Neutralize Bootstrap columns inside the custom mobile grid. */
+    .stats-row > .col-6,
+    .stats-row > .col-md-3 {
+        width: 100% !important;
+        flex: 0 0 auto !important;
+        max-width: none !important;
+        padding: 0 !important;
+        margin: 0 !important;
     }
 
     .stat-card {
         height: 100%;
-        min-height: 96px;
-        display: flex;
-        flex-direction: column;
-        justify-content: center;
+        min-height: 110px;
+        padding: 1rem;
         background: var(--surface-60);
         border: 1px solid var(--border);
         box-shadow: none;
-        padding: 0.9rem 0.85rem;
     }
 
     .stat-value {
-        font-size: 1.7rem;
-        font-weight: 600;
+        font-size: 2rem;
+        font-weight: 700;
         line-height: 1.1;
     }
 
     .stat-icon {
-        font-size: 16px;
+        font-size: 18px;
         opacity: 0.7;
     }
 
-    .stat-value span,
-    .stat-value small {
-        font-size: 0.9rem;
+    /* Keep stat-unit smaller on mobile */
+    .stat-unit {
+        font-size: 0.85rem;
+        font-weight: 500;
     }
 
     .hero-main {
@@ -1649,85 +1758,229 @@ td:last-child {
         font-weight: 700;
     }
 
+    /* Hide table header on mobile - each job card has its own header */
     .table thead {
         display: none;
     }
 
+    /*
+     * Mobile job table – card per job with integrated header.
+     *
+     * Visual layout per card:
+     *   Row 1:  Title (alle 6 Spalten)
+     *   Row 2:  Format | Quality | BPM | Datum | (spacer) | Status+Button
+     */
     .table tbody tr {
         display: grid;
-        grid-template-columns: repeat(4, minmax(0, 1fr));
-        gap: 0.75rem 0.85rem;
-        padding: 1rem;
-        margin: 0.5rem;
-        border-radius: 14px;
-        background: var(--surface);
-        border: 1px solid var(--border);
-    }
-
-    .jobs-table tbody tr {
-        display: block;
+        grid-template-columns: auto auto auto auto 1fr auto;
+        grid-template-rows: auto auto;
+        gap: 0.5rem 0.75rem;
+        padding: 0.65rem 0.75rem;
+        border-bottom: 1px solid var(--border);
+        background: transparent;
+        margin: 0;
+        border-radius: 0;
     }
 
     .table tbody td {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
+        display: block;
         padding: 0;
         border: none;
         min-width: 0;
+        overflow: hidden;
     }
 
-    .table tbody td::before {
-        content: attr(data-label);
-        font-weight: 600;
-        color: var(--text-muted);
-        font-size: 0.82rem;
-        margin-right: 0.75rem;
-    }
-
-    .table tbody td[data-label="Title"],
-    .table tbody td[data-label="Status"],
-    .table tbody td[data-label="Created"],
-    .table tbody td[data-label="Action"] {
-        grid-column: 1 / -1;
-    }
-
+    /* ── Row 1: Title – volle Breite ────────────────────────────── */
     .table tbody td[data-label="Title"] {
-        display: grid;
-        grid-template-columns: auto minmax(0, 1fr);
-        align-items: center;
-        gap: 0.75rem;
-    }
-
-    .table tbody td[data-label="Title"]::before {
-        margin-right: 0;
-    }
-
-    .table tbody td.job-meta-cell {
-        display: flex;
-        flex-direction: column;
-        align-items: flex-start;
-        justify-content: flex-start;
-        gap: 0.2rem;
+        grid-column: 1 / -1;
+        grid-row: 1;
         min-width: 0;
     }
 
-    .table tbody td.job-meta-cell::before {
-        margin-right: 0;
-        margin-bottom: 0;
-        font-size: 0.72rem;
-        letter-spacing: 0.02em;
+    .job-title-cell {
+        min-width: 0;
+        max-width: none;
+        width: 100%;
+        margin-bottom: 2px;
+    }
+
+    .job-title-text {
+        display: block;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-size: 0.88rem;
+        font-weight: 500;
+    }
+
+    /* ── Row 2: Header labels (via ::before on Format/Quality/BPM) ── */
+    .table tbody td[data-label="Format"],
+    .table tbody td[data-label="Quality"],
+    .table tbody td[data-label="BPM"] {
+        display: flex !important;
+        flex-direction: column;
+        gap: 0.15rem;
+        min-width: 0 !important;
+        max-width: 100%;
+        overflow: hidden;
+        text-align: left;
+        align-items: flex-start;
+        white-space: normal !important;
+    }
+
+    /* Created: flex-column für ::before-Label + Wert */
+    .table tbody td[data-label="Created"] {
+        display: flex !important;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 0;
+        min-width: 0 !important;
+        white-space: normal !important;
+    }
+
+    .table tbody td[data-label="Format"]::before,
+    .table tbody td[data-label="Quality"]::before,
+    .table tbody td[data-label="BPM"]::before {
+        font-size: 0.7rem;
+        font-weight: 600;
+        color: var(--text-muted);
         text-transform: uppercase;
+        letter-spacing: 0.03em;
+    }
+
+    .table tbody td[data-label="Format"]::before { content: "Format"; }
+    .table tbody td[data-label="Quality"]::before { content: "Quality"; }
+    .table tbody td[data-label="BPM"]::before { content: "BPM"; }
+
+    /* Grid placement: Row 2 */
+    .table tbody td[data-label="Format"]  { grid-column: 1; grid-row: 2; }
+    .table tbody td[data-label="Quality"] { grid-column: 2; grid-row: 2; }
+    .table tbody td[data-label="BPM"]     { grid-column: 3; grid-row: 2; }
+    .table tbody td[data-label="Created"] { grid-column: 4; grid-row: 2; justify-content: flex-start; align-self: center; text-align: left; }
+    /* col 5 = 1fr spacer (leer, kein Element) */
+    /* Status+Action: ganz rechts */
+    .table tbody td[data-label="Status"]  { grid-column: 6; grid-row: 2; align-self: center; }
+
+    /* Date: muted small text, only date-part visible */
+    .table tbody td[data-label="Created"],
+    .table tbody td.col-date {
+        color: var(--text-muted);
+        font-size: 0.7rem;
+        white-space: normal !important;
+    }
+
+    /* Hide time part completely */
+    .time-part {
+        display: none !important;
+    }
+
+    /* Status cell: col 6 row 2, flex-row with embedded action button */
+    .table tbody td[data-label="Status"],
+    .table tbody td.col-status {
+        grid-column: 6;
+        grid-row: 2;
+        min-width: 0 !important;
+        max-width: 100%;
+        overflow: visible;
+        display: flex !important;
+        flex-direction: row !important;
+        align-items: center;
+        justify-content: flex-end;
+        gap: 0.5rem;
+    }
+
+    .table tbody td[data-label="Status"] .status-inline,
+    .col-status .status-inline {
+        flex-direction: column;
+        align-items: flex-start;
+        min-width: 0;
+        max-width: 100%;
+        gap: 0;
+    }
+
+    /* Bitrate is not shown on mobile */
+    .table tbody td[data-label="Bitrate"] {
+        display: none !important;
+    }
+
+    /* Hide file size on mobile */
+    .status-size {
+        display: none !important;
+    }
+
+    /* Smaller status badge on mobile */
+    .status-pill {
+        font-size: 0.65rem;
+        padding: 0.1rem 0.35rem;
+        white-space: nowrap;
+        max-width: 100%;
+        overflow: hidden;
+        text-overflow: ellipsis;
     }
 
     .table tbody td.job-meta-cell {
-        font-size: 0.82rem;
-        line-height: 1.2;
-        word-break: break-word;
+        font-size: 0.75rem;
+        color: var(--text-muted);
+        line-height: 1.3;
     }
 
-    .status-inline {
+    /* Hide codec sub-label (too dense on mobile) */
+    .table tbody td.job-meta-cell .meta-sub {
+        display: none;
+    }
+
+    /* ── Action cell hidden on mobile (button lives in Status cell) ─── */
+    .table tbody td[data-label="Action"] {
+        display: none !important;
+    }
+
+    /* Status+Action group inside Status cell */
+    .status-action-group {
+        display: flex;
+        align-items: center;
+        gap: 0.4rem;
+        width: 100%;
         justify-content: flex-end;
+    }
+
+    .status-action-group .action-buttons {
+        min-width: 0;
+        width: auto;
+    }
+
+    .status-action-group .btn-icon {
+        width: 32px !important;
+        height: 32px !important;
+        min-width: 32px !important;
+        min-height: 32px !important;
+        padding: 0;
+        /* grid centering avoids the iOS flex+variable-font glyph clipping bug */
+        display: grid;
+        place-items: center;
+        border-radius: var(--radius-sm);
+    }
+
+    .status-action-group .btn-icon .material-symbols-outlined {
+        font-size: 15px;
+    }
+
+    /* Override desktop fixed-width column classes */
+    .jobs-table .col-title,
+    .jobs-table .col-compact,
+    .jobs-table .col-status,
+    .jobs-table .col-date,
+    .jobs-table .col-actions {
+        width: auto;
+        min-width: 0;
+        max-width: none;
+    }
+
+    .jobs-table {
+        min-width: unset;
+    }
+
+    #jobsCard .table-responsive {
+        overflow-x: hidden;
     }
 
     .video-preview-grid {
@@ -1767,8 +2020,9 @@ td:last-child {
     #jobsCard .table-responsive {
         flex: 1 1 auto;
         min-height: 0;
-        max-height: calc(100vh - 220px);
-        overflow-y: auto;
+        /* No vh-based max-height on mobile – rows are cards, page scroll handles it */
+        max-height: none;
+        overflow-y: visible;
         overflow-x: hidden;
     }
 
@@ -1817,7 +2071,16 @@ td:last-child {
     }
 }
 
-/* ── Toast Notifications ─────────────────────────────────────────────────── */
+/* Hidden on desktop, visible on mobile – used for Status-cell embedded action */
+.d-mobile-only {
+    display: none;
+}
+
+@media (max-width: 768px) {
+    .d-mobile-only {
+        display: contents;
+    }
+}
 
 .toast-container {
     position: fixed;
@@ -1967,6 +2230,45 @@ td:last-child {
 
     .toast--hiding {
         transform: translateY(-20px);
+    }
+}
+
+/* ── iOS Safari overrides ─────────────────────────────────────────────────
+   -webkit-touch-callout: none is only supported in iOS Safari, so this
+   block targets real iOS devices without affecting desktop Chrome/Firefox. */
+@supports (-webkit-touch-callout: none) {
+    /* background-attachment: fixed is broken on iOS (repaint on scroll) */
+    .app-root {
+        background-attachment: scroll;
+    }
+
+    /* backdrop-filter is GPU-expensive on iOS and can cause layout shifts */
+    .ui-card,
+    .top-navbar,
+    .modal-content,
+    .wb-footer,
+    .table thead,
+    .video-meta {
+        backdrop-filter: none;
+        -webkit-backdrop-filter: none;
+    }
+
+    /* flex + height:100% is buggy in iOS grid columns */
+    .ui-card {
+        height: auto;
+    }
+
+    /* calc(100vh) in scrollable containers causes clipping on iOS
+       (URL bar is included in vh but not in visible area) */
+    #jobsCard .table-responsive {
+        max-height: none;
+        overflow-y: visible;
+    }
+
+    /* toast backdrop-filter can trigger compositor bugs on older iPhones */
+    .toast {
+        backdrop-filter: none;
+        -webkit-backdrop-filter: none;
     }
 }
 

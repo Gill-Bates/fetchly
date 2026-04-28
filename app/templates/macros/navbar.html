@@ -1,8 +1,8 @@
 {% macro navbar(show_back=False, show_settings=True, show_logout=True) %}
 <nav class="navbar navbar-expand-lg navbar-dark top-navbar fixed-top">
     <div class="app-shell-container top-navbar__inner">
-        <a class="navbar-brand" href="/" style="display: inline-flex; align-items: center; min-height: 40px;">
-            <img src="/static/img/tubeyou.svg" alt="tubeyou" class="logo" style="width: 200px; height: auto; display: block;">
+        <a class="navbar-brand" href="/" aria-label="tubeyou">
+            <img src="/static/img/tubeyou.svg" alt="tubeyou" class="logo">
         </a>
         <div class="ms-auto d-flex align-items-center gap-2">
             {% if show_back %}

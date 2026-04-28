@@ -205,8 +205,33 @@ function applyUpdate(payload) {
         bpmCell.textContent = Number(payload.bpm) > 0 ? String(payload.bpm) : "-";
     }
 
+    // Update status display (inside .status-action-group if mobile layout)
     if (statusCell) {
-        statusCell.replaceChildren(createStatusElement(status, sizeBytes));
+        const statusInline = statusCell.querySelector(".status-inline");
+        const statusGroup = statusCell.querySelector(".status-action-group");
+        const newStatus = createStatusElement(status, sizeBytes);
+
+        if (statusInline) {
+            // Preserve structure: just replace the status-inline element
+            statusInline.replaceWith(newStatus);
+        } else if (statusGroup) {
+            // Mobile layout with action group: prepend new status, remove old if any
+            const existing = statusGroup.querySelector(".status-inline");
+            if (existing) existing.remove();
+            statusGroup.prepend(newStatus);
+        } else {
+            // Fallback: replace entire cell content
+            statusCell.replaceChildren(newStatus);
+        }
+
+        // Update mobile action button inside status cell
+        const mobileActionWrap = statusCell.querySelector(".d-mobile-only .action-buttons, .d-mobile-only .dropdown");
+        if (mobileActionWrap) {
+            const mobileContainer = mobileActionWrap.closest(".d-mobile-only");
+            if (mobileContainer) {
+                mobileContainer.replaceChildren(createActionButton(payload.id, status, row.dataset.type || payload.type));
+            }
+        }
     }
 
     // Class updates
@@ -214,8 +239,14 @@ function applyUpdate(payload) {
     if (status === "done" || status === "analysis_done") row.classList.add("row-done");
     if (status === "error") row.classList.add("row-error");
 
+    // Update desktop action button
     if (actionCell) {
-        actionCell.replaceChildren(createActionButton(payload.id, status, row.dataset.type || payload.type));
+        const actionWrap = actionCell.querySelector(".action-cell-wrap");
+        if (actionWrap) {
+            actionWrap.replaceChildren(createActionButton(payload.id, status, row.dataset.type || payload.type));
+        } else {
+            actionCell.replaceChildren(createActionButton(payload.id, status, row.dataset.type || payload.type));
+        }
     }
 
     document.dispatchEvent(new CustomEvent("tubeyou:job-update", { detail: payload }));
