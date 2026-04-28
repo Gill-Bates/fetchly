@@ -4,11 +4,11 @@
 //
 
 /**
+ * @module toast
+ *
  * Central toast notification system for tubeyou.
- * Usage:
- *   import { showToast } from "./toast.js";
- *   showToast("Settings saved", "success");
- *   showToast("Error occurred", "danger");
+ * Provides accessible, dismissible notifications with a single
+ * container attached to document.body.
  */
 
 const TOAST_ICONS = {
@@ -19,6 +19,12 @@ const TOAST_ICONS = {
 };
 
 const TOAST_DURATION = 3000;
+const TOAST_DISMISS_TIMEOUT = 350;
+
+const VALID_TYPES = new Set(Object.keys(TOAST_ICONS));
+
+/** @type {WeakMap<HTMLDivElement, { dismissing: boolean, autoTimerId: number | null, fallbackTimerId: number | null, removed: boolean }>} */
+const toastState = new WeakMap();
 
 /** @type {HTMLDivElement | null} */
 let container = null;
@@ -36,9 +42,50 @@ function getContainer() {
     container.id = "toastContainer";
     container.className = "toast-container";
     container.setAttribute("aria-live", "polite");
-    container.setAttribute("aria-atomic", "true");
+    container.setAttribute("aria-atomic", "false");
+    container.setAttribute("aria-relevant", "additions");
     document.body.appendChild(container);
     return container;
+}
+
+/**
+ * Get or initialize bookkeeping for a toast element.
+ * @param {HTMLDivElement} toast
+ */
+function getToastState(toast) {
+    let state = toastState.get(toast);
+    if (!state) {
+        state = {
+            dismissing: false,
+            autoTimerId: null,
+            fallbackTimerId: null,
+            removed: false,
+        };
+        toastState.set(toast, state);
+    }
+    return state;
+}
+
+function normalizeToastType(type) {
+    if (type === "error") return "danger";
+    return VALID_TYPES.has(type) ? type : "info";
+}
+
+function removeToast(toast, state) {
+    if (state.removed) return;
+    state.removed = true;
+    state.dismissing = true;
+
+    if (state.autoTimerId !== null) {
+        clearTimeout(state.autoTimerId);
+        state.autoTimerId = null;
+    }
+    if (state.fallbackTimerId !== null) {
+        clearTimeout(state.fallbackTimerId);
+        state.fallbackTimerId = null;
+    }
+
+    toast.remove();
 }
 
 /**
@@ -57,41 +104,45 @@ function icon(name) {
 /**
  * Show a toast notification.
  * @param {string} message - The message to display
- * @param {"success" | "danger" | "warning" | "info"} [type="info"] - Toast type
+ * @param {"success" | "danger" | "warning" | "info" | "error"} [type="info"] - Toast type
  * @param {number} [duration=3000] - Duration in ms before auto-dismiss
  * @returns {HTMLDivElement} The toast element
  */
 export function showToast(message, type = "info", duration = TOAST_DURATION) {
     const wrapper = getContainer();
+    const resolvedType = normalizeToastType(type);
 
     const toast = document.createElement("div");
-    toast.className = `toast toast--${type}`;
-    toast.setAttribute("role", "alert");
+    const state = getToastState(toast);
+    toast.className = `toast toast--${resolvedType}`;
+    toast.setAttribute("role", resolvedType === "danger" ? "alert" : "status");
 
-    const iconName = TOAST_ICONS[type] || TOAST_ICONS.info;
+    const iconName = TOAST_ICONS[resolvedType] || TOAST_ICONS.info;
     toast.appendChild(icon(iconName));
 
     const text = document.createElement("span");
     text.className = "toast-message";
-    text.textContent = message;
+    text.textContent = typeof message === "string" ? message : String(message ?? "");
     toast.appendChild(text);
 
     const closeBtn = document.createElement("button");
     closeBtn.type = "button";
     closeBtn.className = "toast-close";
-    closeBtn.setAttribute("aria-label", "Close");
-    closeBtn.innerHTML = "&times;";
+    closeBtn.setAttribute("aria-label", "Close notification");
+    closeBtn.textContent = "×";
     closeBtn.addEventListener("click", () => dismissToast(toast));
     toast.appendChild(closeBtn);
 
     wrapper.appendChild(toast);
 
-    // Trigger reflow for animation
-    void toast.offsetWidth;
-    toast.classList.add("toast--visible");
+    requestAnimationFrame(() => {
+        if (!state.dismissing && toast.isConnected) {
+            toast.classList.add("toast--visible");
+        }
+    });
 
     if (duration > 0) {
-        setTimeout(() => dismissToast(toast), duration);
+        state.autoTimerId = window.setTimeout(() => dismissToast(toast), duration);
     }
 
     return toast;
@@ -104,22 +155,37 @@ export function showToast(message, type = "info", duration = TOAST_DURATION) {
 function dismissToast(toast) {
     if (!toast || !toast.parentNode) return;
 
+    const state = getToastState(toast);
+    if (state.dismissing) return;
+    state.dismissing = true;
+
+    if (state.autoTimerId !== null) {
+        clearTimeout(state.autoTimerId);
+        state.autoTimerId = null;
+    }
+
     toast.classList.remove("toast--visible");
     toast.classList.add("toast--hiding");
 
-    toast.addEventListener("transitionend", () => {
-        toast.remove();
-    }, { once: true });
+    const doRemove = () => removeToast(toast, state);
+
+    toast.addEventListener("transitionend", doRemove, { once: true });
 
     // Fallback removal if transition doesn't fire
-    setTimeout(() => toast.remove(), 300);
+    state.fallbackTimerId = window.setTimeout(doRemove, TOAST_DISMISS_TIMEOUT);
 }
 
 /**
- * Clear all active toasts.
+ * Dismiss all active toasts.
+ * Pending auto-dismiss timers are cancelled with each toast.
+ * @returns {void}
  */
 export function clearToasts() {
-    const wrapper = getContainer();
+    if (!container || !document.body.contains(container)) {
+        return;
+    }
+
+    const wrapper = container;
     wrapper.querySelectorAll(".toast").forEach((t) => dismissToast(t));
 }
 
@@ -130,5 +196,3 @@ export const toast = {
     warning: (msg, duration) => showToast(msg, "warning", duration),
     info: (msg, duration) => showToast(msg, "info", duration),
 };
-
-export default { showToast, clearToasts, toast };

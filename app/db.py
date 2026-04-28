@@ -36,6 +36,9 @@ _UPDATEABLE_COLUMNS: Final[frozenset[str]] = frozenset(
         "bitrate_kbps",
         "video_title",
         "video_meta_hover",
+        "bpm",
+        "bpm_confidence",
+        "audio_hash",
     }
 )
 
@@ -57,7 +60,11 @@ def _int_parser(default: int) -> Callable[[str], int]:
 
 
 _INTERNAL_SETTINGS_KEYS: Final[frozenset[str]] = frozenset({"admin_password_hash"})
-_ALLOWED_SETTINGS_KEYS: Final[frozenset[str]] = frozenset(_SETTINGS_DEFAULTS) | _INTERNAL_SETTINGS_KEYS
+# Only user-writable keys.  Internal keys require allow_internal=True in set_settings.
+_ALLOWED_SETTINGS_KEYS: Final[frozenset[str]] = frozenset(_SETTINGS_DEFAULTS)
+
+# Statuses that count as "completed" for audio analysis purposes.
+_COMPLETED_STATUSES: Final[frozenset[str]] = frozenset({"done", "analysis", "analysis_done"})
 
 _SETTINGS_TYPES: Final[dict[str, Callable[[str], Any]]] = {
     "retention_days": _int_parser(7),
@@ -118,75 +125,68 @@ def close_db() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Schema (fresh install only - no migration guards)
+# Schema – idempotent (CREATE … IF NOT EXISTS + lightweight migrations)
 # --------------------------------------------------------------------------- #
 def init_db() -> None:
+    """Idempotent schema creation and lightweight column migration."""
     with get_db() as con:
-        tables = {
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS jobs (
+                id TEXT PRIMARY KEY,
+                url TEXT NOT NULL,
+                type TEXT,
+                quality TEXT,
+                status TEXT,
+                filename TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                finished_at TIMESTAMP,
+                duration_seconds INTEGER,
+                filesize_bytes INTEGER,
+                message TEXT,
+                codec TEXT,
+                bitrate_kbps INTEGER,
+                video_title TEXT,
+                video_meta_hover TEXT,
+                bpm INTEGER,
+                bpm_confidence REAL,
+                audio_hash TEXT
+            )
+        """)
+
+        # Lightweight migration: add audio analysis columns to existing rows.
+        existing_cols = {
             row["name"]
-            for row in con.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table'"
-            ).fetchall()
+            for row in con.execute("PRAGMA table_info(jobs)").fetchall()
         }
-        indexes = {
-            row["name"]
-            for row in con.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'index'"
-            ).fetchall()
-        }
+        for col, dtype in (
+            ("bpm", "INTEGER"),
+            ("bpm_confidence", "REAL"),
+            ("audio_hash", "TEXT"),
+        ):
+            if col not in existing_cols:
+                con.execute(f"ALTER TABLE jobs ADD COLUMN {col} {dtype}")
 
-        if "jobs" not in tables:
-            con.execute("""
-                CREATE TABLE jobs (
-                    id TEXT PRIMARY KEY,
-                    url TEXT NOT NULL,
-                    type TEXT,
-                    quality TEXT,
-                    status TEXT,
-                    filename TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    finished_at TIMESTAMP,
-                    duration_seconds INTEGER,
-                    filesize_bytes INTEGER,
-                    message TEXT,
-                    codec TEXT,
-                    bitrate_kbps INTEGER,
-                    video_title TEXT,
-                    video_meta_hover TEXT
-                )
-            """)
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS audio_analysis_cache (
+                hash TEXT PRIMARY KEY,
+                bpm INTEGER,
+                bpm_confidence REAL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
 
-        if "idx_jobs_created_at" not in indexes:
-            con.execute("""
-                CREATE INDEX idx_jobs_created_at
-                ON jobs(created_at DESC)
-            """)
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+        """)
 
-        if "idx_jobs_status" not in indexes:
-            con.execute("""
-                CREATE INDEX idx_jobs_status
-                ON jobs(status)
-            """)
+        con.execute("CREATE INDEX IF NOT EXISTS idx_jobs_created_at ON jobs(created_at DESC)")
+        con.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status)")
+        con.execute("CREATE INDEX IF NOT EXISTS idx_jobs_finished_at ON jobs(finished_at)")
+        con.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status_finished_at ON jobs(status, finished_at)")
 
-        if "idx_jobs_finished_at" not in indexes:
-            con.execute("""
-                CREATE INDEX idx_jobs_finished_at
-                ON jobs(finished_at)
-            """)
-
-        if "idx_jobs_status_finished_at" not in indexes:
-            con.execute("""
-                CREATE INDEX idx_jobs_status_finished_at
-                ON jobs(status, finished_at)
-            """)
-
-        if "settings" not in tables:
-            con.execute("""
-                CREATE TABLE settings (
-                    key TEXT PRIMARY KEY,
-                    value TEXT
-                )
-            """)
         con.commit()
 
 
@@ -227,6 +227,71 @@ def update_job(job_id: str, **fields: Any) -> None:
     with get_db() as con:
         con.execute(f"UPDATE jobs SET {keys} WHERE id=?", values)
         con.commit()
+
+
+def get_audio_analysis_cache(hash_value: str) -> sqlite3.Row | None:
+    with get_db() as con:
+        return con.execute(
+            """
+            SELECT hash, bpm, bpm_confidence, created_at
+            FROM audio_analysis_cache
+            WHERE hash=?
+            """,
+            (hash_value,),
+        ).fetchone()
+
+
+def upsert_audio_analysis_cache(
+    hash_value: str,
+    *,
+    bpm: int | None,
+    bpm_confidence: float | None,
+) -> None:
+    with get_db() as con:
+        con.execute(
+            """
+            INSERT INTO audio_analysis_cache (hash, bpm, bpm_confidence)
+            VALUES (?, ?, ?)
+            ON CONFLICT(hash) DO UPDATE SET
+                bpm=excluded.bpm,
+                bpm_confidence=excluded.bpm_confidence,
+                created_at=CURRENT_TIMESTAMP
+            """,
+            (hash_value, bpm, bpm_confidence),
+        )
+        con.commit()
+
+
+def list_completed_bpms(limit: int = 1000) -> list[int]:
+    with get_db() as con:
+        rows = con.execute(
+            """
+            SELECT bpm
+            FROM jobs
+            WHERE bpm IS NOT NULL
+              AND status IN ('done', 'analysis', 'analysis_done')
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    return [int(row["bpm"]) for row in rows if row["bpm"] is not None]
+
+
+def list_jobs_requiring_audio_analysis(limit: int = 200) -> list[sqlite3.Row]:
+    with get_db() as con:
+        return con.execute(
+            """
+            SELECT id, filename, duration_seconds
+            FROM jobs
+            WHERE type='audio'
+              AND status='analysis'
+              AND filename IS NOT NULL
+            ORDER BY created_at ASC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
 
 
 def get_job(job_id: str) -> sqlite3.Row | None:
@@ -359,9 +424,19 @@ def get_settings() -> dict[str, Any]:
     return settings
 
 
-def set_settings(data: dict[str, Any]) -> None:
-    """Update settings. Unknown keys are ignored."""
-    filtered = {k: v for k, v in data.items() if k in _ALLOWED_SETTINGS_KEYS}
+def set_settings(data: dict[str, Any], *, allow_internal: bool = False) -> None:
+    """Update settings. Unknown keys are ignored.
+
+    Args:
+        data: Key/value pairs to persist.
+        allow_internal: When ``True``, internal keys such as
+            ``admin_password_hash`` are also accepted.  Callers that receive
+            data directly from user input must leave this as ``False`` so that
+            the password hash cannot be overwritten without explicit
+            verification.
+    """
+    allowed = _ALLOWED_SETTINGS_KEYS | _INTERNAL_SETTINGS_KEYS if allow_internal else _ALLOWED_SETTINGS_KEYS
+    filtered = {k: v for k, v in data.items() if k in allowed}
 
     with get_db() as con:
         for key, value in filtered.items():

@@ -10,10 +10,13 @@
 {% block content %}
 {% import "macros/status.html" as status %}
 
-{% macro stat_card(value, label) %}
+{% macro stat_card(value, label, icon) %}
 <div class="col-6 col-md-3">
     <div class="ui-card ui-card--stat stat-card" role="group">
-        <div class="stat-value">{{ value }}</div>
+        <div class="stat-value">
+            <span class="material-symbols-outlined stat-icon" aria-hidden="true">{{ icon }}</span>
+            <span>{{ value }}</span>
+        </div>
         <div class="stat-label">{{ label }}</div>
     </div>
 </div>
@@ -21,10 +24,10 @@
 
 <div>
     <div class="row g-3 mb-4 stats-row">
-        {{ stat_card(stats.total_jobs, "Videos processed") }}
-        {{ stat_card(stats.total_minutes, "Minutes processed") }}
-        {{ stat_card(stats.total_bytes | filesize, "Download traffic") }}
-        {{ stat_card(stats.total_lalal_minutes or 0, "Lalal stems minutes") }}
+        {{ stat_card(stats.total_jobs, "Videos processed", "video_library") }}
+        {{ stat_card(stats.total_minutes, "Minutes processed", "schedule") }}
+        {{ stat_card(stats.total_bytes | filesize, "Download traffic", "download") }}
+        {{ stat_card(stats.total_lalal_minutes or 0, "Lalal stems minutes", "graphic_eq") }}
     </div>
 
     <div class="ui-card mb-4">
@@ -117,11 +120,11 @@
             >● connecting...</span>
             <div class="jobs-card-controls">
                 <label for="jobsSearchInput" class="visually-hidden">Search jobs by title</label>
-                <div class="jobs-search-wrap">
-                    <span class="material-symbols-outlined" aria-hidden="true">search</span>
+                <div class="input-icon jobs-search-wrap">
+                    <span class="material-symbols-outlined input-icon__icon" aria-hidden="true">search</span>
                     <input
                         id="jobsSearchInput"
-                        class="form-control form-control-sm jobs-search-input"
+                        class="form-control form-control-sm input-icon__field jobs-search-input"
                         type="search"
                         placeholder="Search title..."
                         autocomplete="off"
@@ -131,18 +134,18 @@
         </div>
         <div class="ui-card-body ui-card-body--flush">
             <div class="table-responsive">
-                <table class="table table-hover align-middle mb-0" id="jobsTable">
+                <table class="table table-hover align-middle mb-0 jobs-table" id="jobsTable">
                     <caption class="visually-hidden">List of download jobs</caption>
                     <thead>
                         <tr>
-                            <th scope="col">Title</th>
-                            <th scope="col" class="th-mono">Format</th>
-                            <th scope="col" class="th-mono">Quality</th>
-                            <th scope="col" class="th-mono">Codec</th>
-                            <th scope="col" class="th-mono">Bitrate</th>
-                            <th scope="col" class="th-mono status-column">Status</th>
-                            <th scope="col">Created</th>
-                            <th scope="col"></th>
+                            <th scope="col" class="col-title">Title</th>
+                            <th scope="col" class="th-mono col-compact">Format</th>
+                            <th scope="col" class="th-mono col-compact">Quality</th>
+                            <th scope="col" class="th-mono col-compact">BPM</th>
+                            <th scope="col" class="th-mono col-compact">kbps</th>
+                            <th scope="col" class="th-mono status-column col-status">Status</th>
+                            <th scope="col" class="col-date">Created</th>
+                            <th scope="col" class="col-actions"></th>
                         </tr>
                     </thead>
                     <tbody id="jobsTbody">
@@ -151,20 +154,27 @@
                             data-url="{{ job["url"] }}"
                             data-status="{{ job["status"] }}"
                             data-type="{{ job["type"] }}"
+                            data-message="{{ job['message'] or '' }}"
                             data-size-bytes="{{ job['filesize_bytes'] if job['filesize_bytes'] is not none else '' }}"
-                            class="{% if job["status"] == 'done' %}row-done{% elif job["status"] == 'error' %}row-error{% endif %}">
+                            data-bpm="{{ job['bpm'] if job['bpm'] is not none else '' }}"
+                            class="{% if job["status"] in ('done', 'analysis_done') %}row-done{% elif job["status"] == 'error' %}row-error{% endif %}">
                             <td data-label="Title"
-                                class="text-truncate job-title-cell job-title-cell--wide"
-                                title="{{ (job['video_meta_hover'] or job['url'])[:120] }}{% if (job['video_meta_hover'] or job['url'])|length > 120 %}...{% endif %}"
+                                class="job-title-cell job-title-cell--wide col-title"
+                                    data-popover-text="{{ job['video_meta_hover'] or job['url'] or '' }}"
                             ><span class="job-title-text">{{ job["video_title"] or job["url"] }}</span></td>
-                            <td data-label="Format" class="td-mono job-meta-cell">{{ job["type"] }}</td>
-                            <td data-label="Quality" class="td-mono job-meta-cell">{% if job["type"] == "audio" %}MP3{% else %}{{ job["quality"] }}{% endif %}</td>
-                            <td data-label="Codec" class="td-mono job-meta-cell">{{ job["codec"] or "-" }}</td>
-                            <td data-label="Bitrate" class="td-mono job-meta-cell">{% if job["bitrate_kbps"] %}{{ job["bitrate_kbps"] }} kbps{% else %}-{% endif %}</td>
-                            <td data-label="Status">{{ status.status_badge(job) }}</td>
-                            <td data-label="Created" class="text-nowrap">{{ job["created_at"] | localtime }}</td>
-                            <td data-label="Action">{% include "_action_btn.html" %}</td>
+                            <td data-label="Format" class="td-mono job-meta-cell col-compact">{{ job["type"] }}<div class="meta-sub">{{ job["codec"] or "–" }}</div></td>
+                            <td data-label="Quality" class="td-mono job-meta-cell col-compact">{% if job["type"] == "audio" %}MP3{% else %}{{ job["quality"] }}{% endif %}</td>
+                            <td data-label="BPM" class="td-mono job-meta-cell col-compact">{{ job["bpm"] or "–" }}</td>
+                            <td data-label="Bitrate" class="td-mono job-meta-cell col-compact">{% if job["bitrate_kbps"] %}{{ job["bitrate_kbps"] }} kbps{% else %}-{% endif %}</td>
+                            <td data-label="Status" class="col-status">{{ status.status_badge(job) }}</td>
+                            <td data-label="Created" class="text-nowrap col-date">{{ job["created_at"] | localtime }}</td>
+                            <td data-label="Action" class="col-actions">
+                                <div class="action-cell-wrap">
+                                    {% include "_action_btn.html" %}
+                                </div>
+                            </td>
                         </tr>
+
                         {% else %}
                         <tr id="emptyRow">
                             <td colspan="8">
@@ -194,6 +204,8 @@
                 <p><strong>URL:</strong> <span id="mUrl" class="text-break"></span></p>
                 <p><strong>Format:</strong> <span id="mType"></span></p>
                 <p><strong>Quality:</strong> <span id="mQuality"></span></p>
+                <p><strong>BPM:</strong> <span id="mBpm"></span></p>
+                <p><strong>Confidence:</strong> <span id="mBpmConfidence"></span></p>
                 <p><strong>Status:</strong> <span id="mStatus"></span></p>
                 <p><strong>Message:</strong> <span id="mMessage" class="text-muted">–</span></p>
             </div>

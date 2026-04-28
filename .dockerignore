@@ -17,7 +17,6 @@ data/
 
 # Dev-only
 *.log
-BUILD_INFO
 setup.conf
 cookies.txt
 *.backup

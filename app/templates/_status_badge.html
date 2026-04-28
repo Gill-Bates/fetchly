@@ -1,11 +1,11 @@
 {% set status = job["status"] %}
 {% set size = job["filesize_bytes"] %}
+{# Status pill with optional file size badge #}
 <div class="status-inline">
     <span class="status-pill status-pill-{{ status|status_class }} fw-medium px-2 py-1">
-        <span class="material-symbols-outlined icon-inline" aria-hidden="true">{{ status|status_icon }}</span>
         {{ status }}
     </span>
-    {% if size %}
-    <span class="status-size" title="Dateigroesse">{{ size|filesize }}</span>
+    {% if size is not none %}
+    <span class="status-size" title="File size">{{ size|filesize }}</span>
     {% endif %}
 </div>

@@ -6,9 +6,13 @@
 import { humanSize } from "./utils.js";
 
 const STATUS_META = {
-    done:  { color: "success", icon: "check_circle", label: "done" },
-    error: { color: "danger",  icon: "error",        label: "error" },
+    analysis: { color: "primary", label: "analysis" },
+    analysis_done: { color: "success", label: "done" },
+    done:  { color: "success", label: "done" },
+    error: { color: "danger", label: "error" },
 };
+
+const READY_STATUSES = new Set(["done", "analysis", "analysis_done"]);
 
 /** @type {boolean} */
 const lalalEnabled = (globalThis.document?.documentElement.dataset.lalalEnabled ?? "false") === "true";
@@ -37,12 +41,11 @@ export function createStatusElement(status, sizeBytes) {
     wrapper.className = "status-inline";
 
     const normalizedStatus = status || "queued";
-    const meta = STATUS_META[normalizedStatus] || { color: "primary", icon: "schedule", label: normalizedStatus };
+    const meta = STATUS_META[normalizedStatus] || { color: "primary", label: normalizedStatus };
 
     const pill = document.createElement("span");
     pill.className = `status-pill status-pill-${meta.color}`;
-    pill.appendChild(icon(meta.icon));
-    pill.appendChild(document.createTextNode(` ${meta.label}`));
+    pill.textContent = meta.label;
 
     wrapper.appendChild(pill);
 
@@ -66,7 +69,7 @@ export function createStatusElement(status, sizeBytes) {
 function createDownloadLink(jobId) {
     const link = document.createElement("a");
     link.href = `/download/${encodeURIComponent(jobId)}`;
-    link.className = "btn btn-primary btn-sm";
+    link.className = "btn btn-primary btn-sm btn-icon";
     link.setAttribute("title", "Download");
     link.setAttribute("aria-label", "Download");
     link.appendChild(icon("download"));
@@ -106,33 +109,24 @@ export function createActionButton(jobId, status, jobType) {
     const wrapper = document.createElement("div");
     wrapper.className = "action-buttons";
 
-    if (status === "done") {
+    if (READY_STATUSES.has(status || "")) {
+        wrapper.appendChild(createDownloadLink(jobId));
+
         if (jobType === "audio" && lalalEnabled) {
             const dropdown = document.createElement("div");
             dropdown.className = "dropdown dropup";
 
             const toggle = document.createElement("button");
             toggle.type = "button";
-            toggle.className = "btn btn-outline-secondary btn-sm dropdown-toggle action-menu-toggle";
+            toggle.className = "btn btn-sm btn-icon btn-outline-secondary action-menu-toggle";
             toggle.dataset.bsToggle = "dropdown";
+            toggle.dataset.bsBoundary = "viewport";
             toggle.setAttribute("aria-expanded", "false");
-            toggle.setAttribute("aria-label", "Actions");
+            toggle.setAttribute("aria-label", "More actions");
             toggle.appendChild(icon("more_vert"));
 
             const menu = document.createElement("ul");
             menu.className = "dropdown-menu dropdown-menu-end";
-
-            // Download item
-            const liDownload = document.createElement("li");
-            const aDownload = document.createElement("a");
-            aDownload.className = "dropdown-item";
-            aDownload.href = `/download/${encodeURIComponent(jobId)}`;
-            aDownload.appendChild(icon("download"));
-            aDownload.appendChild(document.createTextNode(" Download"));
-            liDownload.appendChild(aDownload);
-
-            const liDivider = document.createElement("li");
-            liDivider.innerHTML = '<hr class="dropdown-divider">';
 
             // Instrumental item
             const liInst = document.createElement("li");
@@ -160,22 +154,32 @@ export function createActionButton(jobId, status, jobType) {
             btnVocals.appendChild(document.createTextNode(" A Cappella"));
             liVocals.appendChild(btnVocals);
 
-            menu.append(liDownload, liDivider, liInst, liVocals);
+            menu.append(liInst, liVocals);
             dropdown.append(toggle, menu);
             wrapper.appendChild(dropdown);
             return wrapper;
         }
 
-        wrapper.appendChild(createDownloadLink(jobId));
+        return wrapper;
+    }
+
+    if (["queued", "processing", "downloading", "transcoding"].includes(status || "")) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "btn btn-danger btn-sm btn-icon";
+        button.dataset.action = "cancel-job";
+        button.dataset.jobId = jobId;
+        button.setAttribute("aria-label", "Cancel");
+        button.appendChild(icon("cancel"));
+        wrapper.appendChild(button);
         return wrapper;
     }
 
     const button = document.createElement("button");
     button.type = "button";
-    button.className = "btn btn-sm btn-outline-secondary";
+    button.className = "btn btn-sm btn-outline-secondary btn-icon";
     button.dataset.action = "open-detail";
     button.dataset.jobId = jobId;
-    button.setAttribute("title", "Details");
     button.setAttribute("aria-label", "Details");
     button.appendChild(icon("info"));
     wrapper.appendChild(button);

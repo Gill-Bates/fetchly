@@ -4,6 +4,8 @@
 # Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 #
 
+from __future__ import annotations
+
 import asyncio
 import logging
 import hmac
@@ -32,9 +34,31 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 from slowapi.util import get_remote_address
 
+from .analysis_worker import (
+    set_status_callback as set_analysis_status_callback,
+    start_analysis_workers,
+    stop_analysis_workers,
+    submit_analysis,
+    SubmitResult,
+)
+from .bpm_cluster import cluster_bpms
 from .governor import governor
 from .worker import get_job_queue, start_workers, set_status_callback, stop_workers, _shutdown_event
-from .db import init_db, close_db, insert_job, get_job, list_jobs, paginate_jobs, purge_old_jobs, get_stats, get_settings, set_settings, update_job
+from .db import (
+    close_db,
+    get_job,
+    get_settings,
+    get_stats,
+    init_db,
+    insert_job,
+    list_completed_bpms,
+    list_jobs,
+    list_jobs_requiring_audio_analysis,
+    paginate_jobs,
+    purge_old_jobs,
+    set_settings,
+    update_job,
+)
 from .utils.version import BUILD_INFO, VERSION
 from .utils.housekeeping import cleanup_expired_jobs
 from .session import (
@@ -105,7 +129,7 @@ def _localtime(value: str | None) -> str:
 def _filesize(value: int | None) -> str:
     """Jinja filter: human-readable filesize."""
     if value is None:
-        return "-"
+        return "–"
     if value == 0:
         return "0 B"
     for unit, divisor in (("TB", 1_099_511_627_776), ("GB", 1_073_741_824), ("MB", 1_048_576), ("KB", 1_024)):
@@ -118,16 +142,20 @@ def _filesize(value: int | None) -> str:
 def _status_class(status: str | None) -> str:
     if status == "error":
         return "danger"
-    if status == "done":
+    if status in {"done", "analysis_done"}:
         return "success"
+    if status == "analysis":
+        return "primary"
     return "primary"
 
 
 def _status_icon(status: str | None) -> str:
-    if status == "done":
+    if status in {"done", "analysis_done"}:
         return "check_circle"
     if status == "error":
         return "error"
+    if status == "analysis":
+        return "graphic_eq"
     return "schedule"
 
 
@@ -219,12 +247,12 @@ _YOUTUBE_URL_PATTERN = re.compile(
     r'^https?://'
     r'(?:www\.|m\.)?'
     r'(?:'
-    r'youtube\.com/(?:watch\?.*v=|embed/|v/|shorts/)'
+    r'youtube\.com/(?:watch\?(?:[^#]*&)?v=|embed/|v/|shorts/)'
     r'|youtu\.be/'
     r')'
     r'[\w-]{11}'
-    r'(?:[?&].*)?$',
-    re.IGNORECASE
+    r'(?:[?#][^\s]*)?$',
+    re.IGNORECASE,
 )
 
 
@@ -301,7 +329,8 @@ def _load_video_info(url: str) -> dict[str, Any] | None:
             extracted = ydl.extract_info(url, download=False)
         if isinstance(extracted, dict):
             info = extracted
-    except Exception:
+    except Exception as exc:
+        logger.debug("yt-dlp library extraction failed for %s: %s", url, exc)
         info = None
 
     if info is None:
@@ -315,12 +344,19 @@ def _load_video_info(url: str) -> dict[str, Any] | None:
                 check=True,
                 capture_output=True,
                 text=True,
-                timeout=120,
+                timeout=15,
             )
             parsed = json.loads(result.stdout or "{}")
             if isinstance(parsed, dict):
                 info = parsed
-        except Exception:
+        except subprocess.TimeoutExpired:
+            logger.warning("yt-dlp subprocess timed out for %s", url)
+            return None
+        except FileNotFoundError:
+            logger.error("yt-dlp command not found in PATH")
+            return None
+        except Exception as exc:
+            logger.debug("yt-dlp subprocess extraction failed for %s: %s", url, exc)
             return None
 
     return info
@@ -356,20 +392,20 @@ def _extract_video_meta(url: str) -> dict[str, object]:
 
 
 def _verify_login(username: str, password: str) -> bool:
-    if username != _DEFAULT_USER:
-        return False
-    
-    # Check if a custom password hash is stored in settings
+    stored_hash = _DEFAULT_HASH
+
+    # Check if a custom password hash is stored in settings.
     try:
         settings = get_settings()
-        if "admin_password_hash" in settings:
-            stored_hash = settings["admin_password_hash"]
-            return hmac.compare_digest(_hash_password(username, password), stored_hash)
+        custom_hash = settings.get("admin_password_hash")
+        if custom_hash and str(custom_hash).strip():
+            stored_hash = str(custom_hash).strip()
     except Exception:
-        pass
-    
-    # Fall back to default password from env
-    return hmac.compare_digest(_hash_password(username, password), _DEFAULT_HASH)
+        logger.warning("Could not load password hash from settings; falling back to default", exc_info=True)
+
+    password_ok = hmac.compare_digest(_hash_password(_DEFAULT_USER, password), stored_hash)
+    username_ok = hmac.compare_digest(username, _DEFAULT_USER)
+    return username_ok and password_ok
 
 
 def _current_user(request: Request) -> str | None:
@@ -411,15 +447,62 @@ def _job_to_dict(job: Any) -> dict[str, object]:
         "quality": job["quality"],
         "status": job["status"],
         "created_at": job["created_at"],
+        "finished_at": job["finished_at"],
+        "message": job["message"],
         "filesize_bytes": job["filesize_bytes"],
+        "duration_seconds": job["duration_seconds"],
         "codec": job["codec"],
         "bitrate_kbps": job["bitrate_kbps"],
+        "bpm": job["bpm"],
+        "bpm_confidence": job["bpm_confidence"],
+        "audio_hash": job["audio_hash"],
+        "filename": job["filename"],
     }
 
+
+def _empty_info_payload() -> dict[str, object]:
+    """Return the canonical fallback payload for `/api/info` failures."""
+    return {
+        "title": None,
+        "channel": None,
+        "uploader": None,
+        "duration": None,
+        "view_count": None,
+        "formats": [],
+        "unavailable": True,
+    }
+
+
 connections: set[WebSocket] = set()
-event_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+_EVENT_QUEUE_MAXSIZE = 10_000
+event_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=_EVENT_QUEUE_MAXSIZE)
+
+_STATS_CACHE_TTL_SECONDS = 60.0
+_stats_cache: dict[str, Any] = {"data": None, "ts": 0.0}
 
 _HOUSEKEEPING_INTERVAL: int = 3600  # Every hour
+
+
+def _queue_event(payload: dict[str, Any]) -> None:
+    """Enqueue a status payload or drop it when the bounded queue is full."""
+    try:
+        event_queue.put_nowait(payload)
+    except asyncio.QueueFull:
+        logger.warning("Status event dropped because the event queue is full")
+
+
+async def _get_cached_stats() -> dict[str, int]:
+    """Return dashboard stats from a short TTL cache to avoid repeated scans."""
+    now_ts = time()
+    cached = _stats_cache.get("data")
+    cached_ts = float(_stats_cache.get("ts", 0.0) or 0.0)
+    if cached is not None and (now_ts - cached_ts) < _STATS_CACHE_TTL_SECONDS:
+        return cached
+
+    stats = await asyncio.to_thread(get_stats)
+    _stats_cache["data"] = stats
+    _stats_cache["ts"] = now_ts
+    return stats
 
 
 async def _housekeeping_daemon() -> None:
@@ -474,10 +557,36 @@ async def lifespan(app: FastAPI):
     loop = asyncio.get_running_loop()
 
     def _thread_status_callback(payload: dict[str, Any]) -> None:
-        loop.call_soon_threadsafe(event_queue.put_nowait, payload)
+        loop.call_soon_threadsafe(_queue_event, payload)
 
     set_status_callback(_thread_status_callback)
+    set_analysis_status_callback(_thread_status_callback)
     start_workers()  # Auto-detect worker count via Governor
+    start_analysis_workers()
+
+    pending_analysis_jobs = await asyncio.to_thread(list_jobs_requiring_audio_analysis)
+    for row in pending_analysis_jobs:
+        raw_filename = str(row["filename"] or "").strip()
+        if not raw_filename:
+            continue
+        result = submit_analysis(
+            str(row["id"]),
+            Path(raw_filename),
+            duration_seconds=int(row["duration_seconds"] or 0) or None,
+            block=False,
+        )
+        if result is not SubmitResult.QUEUED:
+            msg = (
+                "Finished (audio analysis unavailable during shutdown)"
+                if result is SubmitResult.REJECTED_SHUTDOWN
+                else "Finished (audio analysis backlog full)"
+            )
+            await asyncio.to_thread(
+                update_job,
+                str(row["id"]),
+                status="done",
+                message=msg,
+            )
 
     broadcaster_task = asyncio.create_task(_event_broadcaster())
     housekeeping_task = asyncio.create_task(_housekeeping_daemon())
@@ -503,6 +612,7 @@ async def lifespan(app: FastAPI):
                 pass
         connections.clear()
 
+        stop_analysis_workers(timeout=30.0)
         stop_workers(timeout=2.0)
         close_db()
 
@@ -597,7 +707,7 @@ async def index(request: Request):
     if redirect:
         return redirect
     jobs = await asyncio.to_thread(paginate_jobs, limit=50, offset=0)
-    stats = await asyncio.to_thread(get_stats)
+    stats = await _get_cached_stats()
     settings = await asyncio.to_thread(get_settings)
     lalal_enabled = _is_lalal_configured(settings)
     return templates.TemplateResponse(request=request, name="index.html", context={
@@ -608,13 +718,28 @@ async def index(request: Request):
 
 
 @app.get("/api/jobs")
-async def api_jobs(_user: str = Depends(require_user), offset: int = 0, limit: int = 50):
+@limiter.limit("60/minute")
+async def api_jobs(request: Request, _user: str = Depends(require_user), offset: int = 0, limit: int = 50):
+    _ = request
 
     safe_offset = max(0, offset)
     safe_limit = min(max(1, limit), 100)
 
     jobs = await asyncio.to_thread(paginate_jobs, limit=safe_limit, offset=safe_offset)
     return [_job_to_dict(job) for job in jobs]
+
+
+@app.get("/api/stats/bpm-clusters")
+@limiter.limit("30/minute")
+async def api_bpm_clusters(request: Request, _user: str = Depends(require_user), limit: int = 1000):
+    _ = request
+    safe_limit = min(max(1, limit), 5000)
+    bpms = await asyncio.to_thread(list_completed_bpms, safe_limit)
+    clusters = cluster_bpms(bpms)
+    return [
+        {"bpm": bpm_bucket, "count": count}
+        for bpm_bucket, count in clusters
+    ]
 
 
 @app.get("/api/info")
@@ -626,37 +751,14 @@ async def api_info(request: Request, url: str, user: str = Depends(require_user)
     if not is_valid:
         return JSONResponse(status_code=400, content={"detail": error_msg})
 
-    def _empty_info_payload() -> dict[str, object]:
-        return {
-            "title": None,
-            "channel": None,
-            "uploader": None,
-            "duration": None,
-            "view_count": None,
-            "formats": [],
-            "unavailable": True,
-        }
-
     try:
         info_url = _normalize_info_url(url)
-        info: dict[str, Any] | None = None
-        for attempt in range(2):
-            try:
-                info = await asyncio.wait_for(asyncio.to_thread(_load_video_info, info_url), timeout=30.0)
-                if info:
-                    break
-            except asyncio.TimeoutError:
-                if attempt == 1:
-                    raise
-            except Exception:
-                if attempt == 1:
-                    raise
-            await asyncio.sleep(0.75)
+        info = await asyncio.wait_for(asyncio.to_thread(_load_video_info, info_url), timeout=20.0)
 
         if not info:
             return _empty_info_payload()
 
-        # Extract format qualitites
+        # Extract format qualities
         formats = set()
         for fmt in info.get("formats", []):
             note = fmt.get("format_note")
@@ -680,8 +782,10 @@ async def api_info(request: Request, url: str, user: str = Depends(require_user)
 
 
 @app.get("/api/settings")
-async def api_get_settings(_user: str = Depends(require_user)):
+@limiter.limit("30/minute")
+async def api_get_settings(request: Request, _user: str = Depends(require_user)):
     """Get all settings."""
+    _ = request
     settings = await asyncio.to_thread(get_settings)
     return _public_settings(settings)
 
@@ -689,15 +793,18 @@ async def api_get_settings(_user: str = Depends(require_user)):
 @app.post("/api/settings")
 @limiter.limit("10/minute")
 async def api_set_settings(request: Request, _user: str = Depends(require_session)):
-    """Update application settings. Requires active session."""
+    """Update retention/session settings and optional admin password."""
     payload = await _get_json(request)
     
     # Validate inputs
+    settings_to_update: dict[str, Any] = {}
+
     if "retention_days" in payload:
         try:
             retention_days = int(payload["retention_days"])
             if retention_days < 1 or retention_days > 365:
                 raise ValueError("retention_days must be between 1 and 365")
+            settings_to_update["retention_days"] = retention_days
         except (ValueError, TypeError) as e:
             return JSONResponse(status_code=400, content={"detail": str(e)})
     
@@ -706,24 +813,20 @@ async def api_set_settings(request: Request, _user: str = Depends(require_sessio
             session_idle = int(payload["session_idle_minutes"])
             if session_idle < 5 or session_idle > 1440:
                 raise ValueError("session_idle_minutes must be between 5 and 1440")
+            settings_to_update["session_idle_minutes"] = session_idle
         except (ValueError, TypeError) as e:
             return JSONResponse(status_code=400, content={"detail": str(e)})
     
     # Update settings
     try:
-        settings_to_update = {}
-        if "retention_days" in payload:
-            settings_to_update["retention_days"] = payload["retention_days"]
-        if "session_idle_minutes" in payload:
-            settings_to_update["session_idle_minutes"] = payload["session_idle_minutes"]
         if "admin_password" in payload and payload["admin_password"]:
             new_password = str(payload["admin_password"]).strip()
-            if len(new_password) < 6:
-                return JSONResponse(status_code=400, content={"detail": "Password must be at least 6 characters"})
+            if len(new_password) < 8:
+                return JSONResponse(status_code=400, content={"detail": "Password must be at least 8 characters"})
             current_password = str(payload.get("current_password", ""))
             is_valid_current_password = await asyncio.to_thread(_verify_login, _DEFAULT_USER, current_password)
             if not is_valid_current_password:
-                return JSONResponse(status_code=403, content={"detail": "Current password is required"})
+                return JSONResponse(status_code=403, content={"detail": "Current password is invalid"})
             # Hash the new password
             settings_to_update["admin_password_hash"] = await asyncio.to_thread(
                 _hash_password,
@@ -732,16 +835,19 @@ async def api_set_settings(request: Request, _user: str = Depends(require_sessio
             )
         
         if settings_to_update:
-            await asyncio.to_thread(set_settings, settings_to_update)
+            await asyncio.to_thread(set_settings, settings_to_update, allow_internal=True)
         
         return {"ok": True, "message": "Settings updated"}
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"detail": str(e)})
+    except Exception:
+        logger.exception("Settings update failed")
+        return JSONResponse(status_code=500, content={"detail": "Internal server error"})
 
 
 @app.get("/api/lalal/status")
-async def api_lalal_status(force_refresh: bool = False, _user: str = Depends(require_user)):
+@limiter.limit("30/minute")
+async def api_lalal_status(request: Request, force_refresh: bool = False, _user: str = Depends(require_user)):
     """Return saved Lalal.ai auth status and validation state."""
+    _ = request
     settings = await asyncio.to_thread(get_settings)
     email = str(settings.get("lalalaai_email", "")).strip()
     auth_key = str(settings.get("lalalaai_auth_key", "")).strip()
@@ -846,8 +952,10 @@ async def api_lalal_auth_request(request: Request, _user: str = Depends(require_
 
 
 @app.get("/api/lalal/auth/cooldown")
-async def api_lalal_auth_cooldown(_user: str = Depends(require_user)):
+@limiter.limit("30/minute")
+async def api_lalal_auth_cooldown(request: Request, _user: str = Depends(require_user)):
     """Return remaining cooldown seconds for token requests."""
+    _ = request
     settings = await asyncio.to_thread(get_settings)
     now_ts = int(time())
     last_requested_at = int(settings.get("lalalaai_auth_requested_at", 0) or 0)
@@ -944,8 +1052,10 @@ async def api_lalal_auth_activation_key(request: Request, _user: str = Depends(r
 
 
 @app.post("/api/lalal/auth/logout")
-async def api_lalal_auth_logout(_user: str = Depends(require_user)):
+@limiter.limit("20/minute")
+async def api_lalal_auth_logout(request: Request, _user: str = Depends(require_user)):
     """Clear Lalal.ai auth credentials."""
+    _ = request
     await asyncio.to_thread(
         set_settings,
         {
@@ -1031,12 +1141,12 @@ def logout_page(request: Request):
 async def api_submit(
     request: Request,
     url: str = Form(...),
-    type: str = Form(...),
+    media_type: str = Form(..., alias="type"),
     quality: str = Form(...),
     _user: str = Depends(require_user),
 ):
     _ = request
-    media_type = str(type).strip().lower()
+    media_type = str(media_type).strip().lower()
     quality_value = str(quality).strip().lower()
 
     if media_type not in _ALLOWED_MEDIA_TYPES:
@@ -1062,7 +1172,7 @@ async def api_submit(
             asyncio.to_thread(_extract_video_meta, url.strip()),
             timeout=8.0,
         )
-    except (TimeoutError, Exception) as exc:
+    except Exception as exc:
         logger.debug("Metadata extraction skipped for submit (will be fetched by worker): %s", exc)
     
     job_id = str(uuid.uuid4())
@@ -1084,15 +1194,16 @@ async def api_submit(
 
 @app.post("/api/jobs/{job_id}/cancel")
 @limiter.limit("20/minute")
-async def cancel_job(request: Request, job_id: str, _user: str = Depends(require_user_json)):
+async def cancel_job(request: Request, job_id: uuid.UUID, _user: str = Depends(require_user_json)):
     """Cancel a running or queued job."""
 
-    job = await asyncio.to_thread(get_job, job_id)
+    job_id_str = str(job_id)
+    job = await asyncio.to_thread(get_job, job_id_str)
     if not job:
         return JSONResponse(status_code=404, content={"error": "Job not found"})
     
     status = job["status"] or ""
-    if status in ("done", "error", "cancelled"):
+    if status in ("done", "analysis", "analysis_done", "error", "cancelled"):
         return JSONResponse(status_code=400, content={"error": f"Cannot cancel job with status: {status}"})
     
     # Mark job for cancellation
@@ -1103,29 +1214,30 @@ async def cancel_job(request: Request, job_id: str, _user: str = Depends(require
     if status == "queued":
         await asyncio.to_thread(
             update_job,
-            job_id,
+            job_id_str,
             status="cancelled",
             message="Cancelled by user",
             finished_at=datetime.now(UTC).isoformat(),
         )
     
-    logger.info("Cancellation requested for job %s (status: %s)", job_id, status)
+    logger.info("Cancellation requested for job %s (status: %s)", job_id_str, status)
     
-    job = await asyncio.to_thread(get_job, job_id)
+    job = await asyncio.to_thread(get_job, job_id_str)
     return _job_to_dict(job)
 
 
 @app.get("/job/{job_id}", response_class=HTMLResponse)
-async def job_page(request: Request, job_id: str):
+async def job_page(request: Request, job_id: uuid.UUID):
     redirect = _require_html_auth(request)
     if redirect:
         return redirect
-    job = await asyncio.to_thread(get_job, job_id)
+    job_id_str = str(job_id)
+    job = await asyncio.to_thread(get_job, job_id_str)
     if not job:
         return templates.TemplateResponse(
             request=request,
             name="job.html",
-            context={"job": None, "job_id": job_id},
+            context={"job": None, "job_id": job_id_str},
         )
 
     return templates.TemplateResponse(
@@ -1137,22 +1249,21 @@ async def job_page(request: Request, job_id: str):
 
 @app.get("/download/{job_id}")
 @limiter.limit("60/minute")
-async def download(request: Request, job_id: str):
+async def download(request: Request, job_id: uuid.UUID):
     if not _current_user(request):
         return RedirectResponse(url="/login", status_code=303)
-    job = await asyncio.to_thread(get_job, job_id)
-    if not job or job["status"] != "done":
+    job = await asyncio.to_thread(get_job, str(job_id))
+    if not job or job["status"] not in {"done", "analysis", "analysis_done"}:
         return JSONResponse(status_code=404, content={"error": "not ready"})
 
     raw_filename = job["filename"]
     if not raw_filename:
         return JSONResponse(status_code=404, content={"error": "not ready"})
 
-    file_path = Path(str(raw_filename)).resolve()
     try:
-        file_path.relative_to(DATA_DIR)
-    except ValueError:
-        return JSONResponse(status_code=403, content={"error": "forbidden"})
+        file_path = _resolve_job_path(raw_filename)
+    except HTTPException as exc:
+        return JSONResponse(status_code=exc.status_code, content={"error": exc.detail})
 
     if not file_path.is_file():
         return JSONResponse(status_code=404, content={"error": "not found"})
@@ -1162,14 +1273,15 @@ async def download(request: Request, job_id: str):
 
 @app.post("/api/lalal/{job_id}")
 @limiter.limit("5/minute")
-async def lalal_split(request: Request, job_id: str, stem: str = "vocals", _user: str = Depends(require_user_json)):
+async def lalal_split(request: Request, job_id: uuid.UUID, stem: str = "vocals", _user: str = Depends(require_user_json)):
     """Split audio using Lalal.ai API."""
 
     # Validate stem type
     if stem not in ("vocals", "instrumental"):
         return JSONResponse(status_code=400, content={"error": "Invalid stem type. Use 'vocals' or 'instrumental'"})
 
-    job = await asyncio.to_thread(get_job, job_id)
+    job_id_str = str(job_id)
+    job = await asyncio.to_thread(get_job, job_id_str)
     if not job:
         return JSONResponse(status_code=404, content={"error": "Job not found"})
 
@@ -1188,7 +1300,7 @@ async def lalal_split(request: Request, job_id: str, stem: str = "vocals", _user
     if not file_path.is_file():
         return JSONResponse(status_code=404, content={"error": "Source file not found"})
 
-    output_dir = DATA_DIR / job_id
+    output_dir = DATA_DIR / job_id_str
     output_dir.mkdir(parents=True, exist_ok=True)
     base_name = file_path.stem
 
@@ -1201,7 +1313,7 @@ async def lalal_split(request: Request, job_id: str, stem: str = "vocals", _user
         return JSONResponse(content={
             "ok": True,
             "cached": True,
-            "download_url": f"/api/lalal/download/{job_id}?stem={stem}",
+            "download_url": f"/api/lalal/download/{job_id_str}?stem={stem}",
             "filename": cached_path.name,
         })
 
@@ -1225,10 +1337,7 @@ async def lalal_split(request: Request, job_id: str, stem: str = "vocals", _user
             "stage": stage,
             "progress": pct,
         }
-        try:
-            loop.call_soon_threadsafe(event_queue.put_nowait, payload)
-        except Exception:
-            pass
+        loop.call_soon_threadsafe(_queue_event, payload)
 
     try:
         # Process with Lalal.ai
@@ -1258,7 +1367,7 @@ async def lalal_split(request: Request, job_id: str, stem: str = "vocals", _user
         # Return download link
         return JSONResponse(content={
             "ok": True,
-            "download_url": f"/api/lalal/download/{job_id}?stem={stem}",
+            "download_url": f"/api/lalal/download/{job_id_str}?stem={stem}",
             "filename": result_path.name,
         })
 
@@ -1278,7 +1387,7 @@ async def lalal_split(request: Request, job_id: str, stem: str = "vocals", _user
 @app.get("/api/lalal/download/{job_id}")
 async def lalal_download(
     request: Request,
-    job_id: str,
+    job_id: uuid.UUID,
     stem: str = "vocals",
     _user: str = Depends(require_user_json),
 ):
@@ -1288,7 +1397,8 @@ async def lalal_download(
     if stem not in ("vocals", "instrumental"):
         return JSONResponse(status_code=400, content={"error": "Invalid stem type"})
 
-    job = await asyncio.to_thread(get_job, job_id)
+    job_id_str = str(job_id)
+    job = await asyncio.to_thread(get_job, job_id_str)
     if not job:
         return JSONResponse(status_code=404, content={"error": "Job not found"})
 
@@ -1298,7 +1408,7 @@ async def lalal_download(
     except HTTPException as exc:
         return JSONResponse(status_code=exc.status_code, content={"error": exc.detail})
 
-    output_dir = DATA_DIR / job_id
+    output_dir = DATA_DIR / job_id_str
     base_name = source_path.stem
 
     # Find the stem file
@@ -1325,18 +1435,12 @@ def favicon():
 
 @app.get("/thumbnail/{job_id}")
 @limiter.limit("60/minute")
-def thumbnail(request: Request, job_id: str):
+def thumbnail(request: Request, job_id: uuid.UUID):
     """Serve cached thumbnail for a job."""
     if not _current_user(request):
         return JSONResponse(status_code=401, content={"error": "unauthorized"})
-    
-    # Validate job_id is a valid UUID format
-    try:
-        uuid.UUID(job_id)
-    except ValueError:
-        return JSONResponse(status_code=400, content={"error": "invalid job_id"})
-    
-    thumb_path = DATA_DIR / job_id / "thumbnail.jpg"
+
+    thumb_path = DATA_DIR / str(job_id) / "thumbnail.jpg"
     
     if not thumb_path.is_file():
         return JSONResponse(status_code=404, content={"error": "not found"})
@@ -1362,14 +1466,14 @@ async def ws_status(websocket: WebSocket):
     await websocket.accept()
     connections.add(websocket)
 
-    last_pong = asyncio.get_event_loop().time()
+    last_pong = asyncio.get_running_loop().time()
     ping_task: asyncio.Task[None] | None = None
 
     async def _heartbeat() -> None:
         nonlocal last_pong
         while True:
             await asyncio.sleep(_WS_PING_INTERVAL)
-            now = asyncio.get_event_loop().time()
+            now = asyncio.get_running_loop().time()
             # Check if client responded to last ping
             if now - last_pong > _WS_PING_INTERVAL + _WS_PONG_TIMEOUT:
                 logger.debug("WebSocket client idle timeout, closing connection")
@@ -1394,7 +1498,7 @@ async def ws_status(websocket: WebSocket):
                     timeout=_WS_PING_INTERVAL + _WS_PONG_TIMEOUT + 5.0,
                 )
                 # Update last activity on any message (pong, subscribe, etc.)
-                last_pong = asyncio.get_event_loop().time()
+                last_pong = asyncio.get_running_loop().time()
                 # Client can send 'pong' explicitly or any other message counts as alive
                 if message == "pong":
                     logger.debug("WebSocket pong received")

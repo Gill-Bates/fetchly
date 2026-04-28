@@ -2,9 +2,10 @@
 // app/static/js/ws.js
 // Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 //
+
 // WebSocket client for real-time job updates.
 // Requires the server-rendered jobs table to use English data-label values:
-// Title, Format, Quality, Codec, Bitrate, Status, Created, Action.
+// Title, Format, Quality, Codec, Bitrate, BPM, Status, Created, Action.
 //
 
 import { CONFIG } from "./config.js";
@@ -30,6 +31,24 @@ const HEARTBEAT_CHECK_MS = 35000;
 
 /** Max silence before forcing reconnect (server sends ping every 30s) */
 const HEARTBEAT_TIMEOUT_MS = 50000;
+
+function clearReconnectTimer() {
+    if (reconnectTimer) {
+        clearTimeout(reconnectTimer);
+        reconnectTimer = null;
+    }
+}
+
+function clearHeartbeatTimer() {
+    if (heartbeatTimer) {
+        clearInterval(heartbeatTimer);
+        heartbeatTimer = null;
+    }
+}
+
+function escapeAttrValue(value) {
+    return String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
 
 /**
  * Update the connection indicator badge.
@@ -61,7 +80,7 @@ function setIndicator(indicator, online) {
  * @returns {HTMLElement | null}
  */
 function getCell(row, label) {
-    return row.querySelector(`td[data-label="${CSS.escape(label)}"]`);
+    return row.querySelector(`td[data-label="${escapeAttrValue(label)}"]`);
 }
 
 /**
@@ -70,15 +89,8 @@ function getCell(row, label) {
  * @param {WebSocket | null} ws - The WebSocket to tear down
  */
 function teardown(ws) {
-    if (reconnectTimer) {
-        clearTimeout(reconnectTimer);
-        reconnectTimer = null;
-    }
-
-    if (heartbeatTimer) {
-        clearInterval(heartbeatTimer);
-        heartbeatTimer = null;
-    }
+    clearReconnectTimer();
+    clearHeartbeatTimer();
 
     if (!ws) {
         return;
@@ -108,9 +120,7 @@ function teardown(ws) {
  * Forces reconnect if no messages received within timeout.
  */
 function startHeartbeat() {
-    if (heartbeatTimer) {
-        clearInterval(heartbeatTimer);
-    }
+    clearHeartbeatTimer();
 
     lastMessageTime = Date.now();
 
@@ -118,11 +128,9 @@ function startHeartbeat() {
         const silence = Date.now() - lastMessageTime;
         if (silence > HEARTBEAT_TIMEOUT_MS) {
             console.warn(`WebSocket silent for ${Math.round(silence / 1000)}s, forcing reconnect`);
-            if (activeSocket) {
-                teardown(activeSocket);
-            }
-            // Trigger immediate reconnect
-            reconnectAttempt = 0;
+
+            clearHeartbeatTimer();
+            teardown(activeSocket);
             connectWS();
         }
     }, HEARTBEAT_CHECK_MS);
@@ -130,7 +138,6 @@ function startHeartbeat() {
 
 /**
  * Apply a job status update to the DOM.
- * Batches DOM operations to minimize reflows.
  * @param {object} payload - The job update payload from the server
  */
 function applyUpdate(payload) {
@@ -139,12 +146,15 @@ function applyUpdate(payload) {
         return;
     }
 
-    const row = document.querySelector(`tr[data-job-id="${CSS.escape(payload.id)}"]`);
+    const row = document.querySelector(`tr[data-job-id="${escapeAttrValue(payload.id)}"]`);
     if (!row) return;
 
-    // Batch all dataset updates first (no reflow)
+    // Update cached row state first so detail modals and follow-up renders stay in sync.
     const status = payload.status || row.dataset.status || "queued";
     row.dataset.status = status;
+    if (payload.message != null) {
+        row.dataset.message = payload.message;
+    }
     if (payload.type) {
         row.dataset.type = payload.type;
     }
@@ -159,14 +169,23 @@ function applyUpdate(payload) {
         sizeBytes = Number.isFinite(cachedSize) ? cachedSize : null;
     }
 
-    // Batch DOM reads
+    // Update BPM data attribute
+    if (payload.bpm != null) {
+        row.dataset.bpm = String(payload.bpm);
+    }
+    if (payload.bpm_confidence != null) {
+        row.dataset.bpmConfidence = String(payload.bpm_confidence);
+    }
+
+    // Resolve target cells once.
     const titleCell = getCell(row, "Title");
     const codecCell = getCell(row, "Codec");
     const bitrateCell = getCell(row, "Bitrate");
+    const bpmCell = getCell(row, "BPM");
     const statusCell = getCell(row, "Status");
     const actionCell = getCell(row, "Action");
 
-    // Batch DOM writes
+    // Apply DOM updates for the changed row.
     if (titleCell) {
         if (payload.video_title) {
             titleCell.textContent = payload.video_title;
@@ -182,13 +201,17 @@ function applyUpdate(payload) {
         bitrateCell.textContent = `${payload.bitrate_kbps} kbps`;
     }
 
+    if (bpmCell && payload.bpm != null) {
+        bpmCell.textContent = Number(payload.bpm) > 0 ? String(payload.bpm) : "-";
+    }
+
     if (statusCell) {
         statusCell.replaceChildren(createStatusElement(status, sizeBytes));
     }
 
     // Class updates
     row.classList.remove("row-done", "row-error");
-    if (status === "done") row.classList.add("row-done");
+    if (status === "done" || status === "analysis_done") row.classList.add("row-done");
     if (status === "error") row.classList.add("row-error");
 
     if (actionCell) {
@@ -283,14 +306,8 @@ export function connectWS() {
         setIndicator(indicator, false);
         activeSocket = null;
 
-        if (heartbeatTimer) {
-            clearInterval(heartbeatTimer);
-            heartbeatTimer = null;
-        }
-
-        if (reconnectTimer) {
-            clearTimeout(reconnectTimer);
-        }
+        clearHeartbeatTimer();
+        clearReconnectTimer();
 
         reconnectAttempt += 1;
         const baseDelay = Math.min(CONFIG.WS_RECONNECT_MS * (2 ** (reconnectAttempt - 1)), 30000);

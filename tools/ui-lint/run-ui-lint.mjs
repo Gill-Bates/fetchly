@@ -18,6 +18,7 @@ import {
 } from './lib/browser-utils.mjs';
 
 const BASE_URL = process.env.UI_LINT_BASE_URL || 'http://127.0.0.1:8000';
+const BASE_ORIGIN = new URL(BASE_URL).origin;
 const USERNAME = process.env.UI_LINT_USERNAME;
 const PASSWORD = process.env.UI_LINT_PASSWORD;
 const SESSION_ID = Date.now();
@@ -63,9 +64,7 @@ const MOTION_RESET_CSS = `
   }
 `;
 const VISUAL_STABILITY_CSS = `
-    * {
-        font-family: system-ui !important;
-    }
+    /* Preserve actual fonts for accurate layout testing */
     img, video {
         visibility: hidden !important;
     }
@@ -136,9 +135,15 @@ if (!LOGIN_VIEW) {
     throw new Error("VIEW_DEFS must contain a view named 'login'");
 }
 
-const isSameOrigin = (urlStr, baseStr) => {
+/**
+ * Returns true when urlStr belongs to the same origin as BASE_URL.
+ * Swallows malformed URLs and returns false.
+ * @param {string} urlStr
+ * @returns {boolean}
+ */
+const isSameOrigin = (urlStr) => {
     try {
-        return new URL(urlStr).origin === new URL(baseStr).origin;
+        return new URL(urlStr).origin === BASE_ORIGIN;
     } catch {
         return false;
     }
@@ -151,7 +156,7 @@ function createContextOptions(device) {
             ...iphone13,
             viewport: { ...iphone13.viewport },
             screen: { ...iphone13.screen },
-            colorScheme: 'light',
+            colorScheme: 'dark',
             locale: 'en-US',
         };
     }
@@ -161,10 +166,15 @@ function createContextOptions(device) {
         screen: { width: 1440, height: 1200 },
         deviceScaleFactor: 1,
         hasTouch: false,
-        colorScheme: 'light',
+        colorScheme: 'dark',
     };
 }
 
+/**
+ * Formats a result object into a compact single-line summary string for console output.
+ * @param {object} result
+ * @returns {string}
+ */
 function formatResultSummary(result) {
     const parts = [];
     if (result.failures.length) parts.push(`failures=${result.failures.length}`);
@@ -193,51 +203,88 @@ function formatResultSummary(result) {
     if (metrics.mutationObservers) parts.push(`mutationObservers=${metrics.mutationObservers}`);
     if (metrics.duplicateEventHandlers) parts.push(`duplicateGlobalClicks=${metrics.duplicateEventHandlers}`);
     if (metrics.visualDriftRatio > 0) parts.push(`visualDrift=${metrics.visualDriftRatio.toFixed(5)}`);
+    // New checks from CSS review
+    if (metrics.undefinedCustomProperties) parts.push(`undefinedVars=${metrics.undefinedCustomProperties}`);
+    if (metrics.backdropFilterCount > 4) parts.push(`backdropFilters=${metrics.backdropFilterCount}`);
+    if (metrics.stickyWithoutBackground) parts.push(`stickyNoBackground=${metrics.stickyWithoutBackground}`);
+    if (!metrics.hasFocusVisibleRules) parts.push('noFocusVisible=true');
+    if (metrics.noVisibleFocusIndicators) parts.push(`noFocusRing=${metrics.noVisibleFocusIndicators}`);
+    if (metrics.unguardedAnimations) parts.push(`unguardedAnimations=${metrics.unguardedAnimations}`);
+    if (metrics.clippedDropdowns) parts.push(`clippedDropdowns=${metrics.clippedDropdowns}`);
+    if (metrics.importantAbuse) parts.push(`importantAbuse=${metrics.importantAbuse}`);
+    if (metrics.tightlyPackedTargets) parts.push(`tightTargets=${metrics.tightlyPackedTargets}`);
     return parts.join(' ');
 }
 
+/**
+ * Zero-value metrics skeleton shared by skipped and runner-error results.
+ * Always spread before adding result-specific flags.
+ */
+const BASE_METRICS = Object.freeze({
+    duplicateIds: 0,
+    unlabeledControls: 0,
+    missingSelectors: 0,
+    missingSelectorList: [],
+    horizontalOverflow: false,
+    overflowAmount: 0,
+    smallTouchTargets: 0,
+    tightlyPackedTargets: 0,
+    contrastIssues: 0,
+    layoutDriftIssues: 0,
+    unstyledDisabledControls: 0,
+    disabledWithoutStyle: 0,
+    badInputs: 0,
+    inconsistentButtons: false,
+    tinyText: 0,
+    weakText: 0,
+    spacingIssues: 0,
+    alignmentIssues: 0,
+    hardcodedColors: 0,
+    badIconButtons: 0,
+    tokenViolations: 0,
+    iconButtonsWithoutAria: 0,
+    unlabeledInputsStrict: 0,
+    legacyClassViolations: [],
+    hasMainLandmark: true,
+    hasAppShell: true,
+    insufficientFixedTopOffset: false,
+    footerNotFlex: false,
+    mutationObservers: 0,
+    duplicateEventHandlers: 0,
+    visualDriftRatio: 0,
+    // New checks from CSS review
+    undefinedCustomProperties: 0,
+    backdropFilterCount: 0,
+    stickyWithoutBackground: 0,
+    hasFocusVisibleRules: true,
+    noVisibleFocusIndicators: 0,
+    unguardedAnimations: 0,
+    clippedDropdowns: 0,
+    importantAbuse: 0,
+    fontLoadingStatus: 'unknown',
+});
+
+/**
+ * Build a placeholder result for a view that was intentionally skipped.
+ * @param {string} name
+ * @param {string} url
+ * @param {string} warning  Human-readable reason for skipping.
+ * @returns {object}
+ */
 function buildSkippedResult(name, url, warning) {
     return {
         name,
         url,
         failures: [],
         warnings: [warning],
-        metrics: {
-            duplicateIds: 0,
-            unlabeledControls: 0,
-            missingSelectors: 0,
-            missingSelectorList: [],
-            horizontalOverflow: false,
-            overflowAmount: 0,
-            smallTouchTargets: 0,
-            contrastIssues: 0,
-            layoutDriftIssues: 0,
-            unstyledDisabledControls: 0,
-            disabledWithoutStyle: 0,
-            badInputs: 0,
-            inconsistentButtons: false,
-            tinyText: 0,
-            weakText: 0,
-            spacingIssues: 0,
-            alignmentIssues: 0,
-            hardcodedColors: 0,
-            badIconButtons: 0,
-            tokenViolations: 0,
-            iconButtonsWithoutAria: 0,
-            unlabeledInputsStrict: 0,
-            legacyClassViolations: [],
-            hasMainLandmark: true,
-            hasAppShell: true,
-            insufficientFixedTopOffset: false,
-            footerNotFlex: false,
-            mutationObservers: 0,
-            duplicateEventHandlers: 0,
-            visualDriftRatio: 0,
-            skipped: true,
-        },
+        metrics: { ...BASE_METRICS, skipped: true },
     };
 }
 
+/**
+ * Checks whether the app requires authentication by probing the /login route.
+ * @returns {Promise<boolean>}
+ */
 async function detectLoginRequired() {
     try {
         const response = await fetch(`${BASE_URL}/login`, { redirect: 'manual' });
@@ -247,13 +294,21 @@ async function detectLoginRequired() {
     }
 }
 
+/**
+ * Partitions network traffic into same-origin failures (hard) and external
+ * warnings (soft). The optional ignoreBadResponse predicate can suppress
+ * known-benign status codes such as 401 on the login endpoint.
+ * @param {object} traffic
+ * @param {{ignoreBadResponse?: (entry: object) => boolean}} [options]
+ * @returns {{sameOriginFailures: string[], externalWarnings: string[]}}
+ */
 function splitNetworkFindings(traffic, options = {}) {
     const sameOriginFailures = [];
     const externalWarnings = [];
     const ignoreBadResponse = options.ignoreBadResponse || (() => false);
 
     for (const entry of traffic.requestFailures) {
-        const bucket = isSameOrigin(entry.url, BASE_URL) ? sameOriginFailures : externalWarnings;
+        const bucket = isSameOrigin(entry.url) ? sameOriginFailures : externalWarnings;
         bucket.push(`requestfailed ${entry.url} (${entry.error})`);
     }
 
@@ -261,13 +316,20 @@ function splitNetworkFindings(traffic, options = {}) {
         if (ignoreBadResponse(entry)) {
             continue;
         }
-        const bucket = isSameOrigin(entry.url, BASE_URL) ? sameOriginFailures : externalWarnings;
+        const bucket = isSameOrigin(entry.url) ? sameOriginFailures : externalWarnings;
         bucket.push(`response ${entry.status} ${entry.url}`);
     }
 
     return { sameOriginFailures, externalWarnings };
 }
 
+/**
+ * Captures two full-page screenshots after the layout has stabilized,
+ * separated by a configurable settle delay.
+ * @param {import('playwright').Page} page
+ * @param {object} view
+ * @returns {Promise<{shotA: string, shotB: string}>}
+ */
 async function captureStablePair(page, view) {
     const safeName = sanitize(view.name);
     const shotA = path.join(SCREENSHOT_DIR, `${safeName}-a.png`);
@@ -283,6 +345,13 @@ async function captureStablePair(page, view) {
     return { shotA, shotB };
 }
 
+/**
+ * Polls successive animation frames until viewport geometry has been stable
+ * for the required number of consecutive frames or the frame budget runs out.
+ * @param {import('playwright').Page} page
+ * @param {object} view
+ * @returns {Promise<void>}
+ */
 async function waitForLayoutStability(page, view) {
     await page.evaluate(async ({ stableFrames, maxFrames, epsilon }) => {
         const nextFrame = () => new Promise((resolve) => requestAnimationFrame(() => resolve()));
@@ -357,6 +426,13 @@ async function waitForLayoutStability(page, view) {
     });
 }
 
+/**
+ * Runs all accessibility, design-system, and performance metric checks
+ * against the current page state inside the browser context.
+ * @param {import('playwright').Page} page
+ * @param {object} view
+ * @returns {Promise<object>} Raw metric data (arrays, not counts).
+ */
 async function collectMetrics(page, view) {
     let timeoutId;
     const evaluatePromise = page.evaluate(async ({ requiredSelectors, mobileTouchTargetMin, desktopTouchTargetMin, isMobile }) => {
@@ -466,6 +542,35 @@ async function collectMetrics(page, view) {
             return (lighter + 0.05) / (darker + 0.05);
         };
 
+        // Alpha compositing for semi-transparent backgrounds (Porter-Duff)
+        const compositeOver = (fg, bg) => {
+            const a = fg.a + bg.a * (1 - fg.a);
+            if (a === 0) return { r: 0, g: 0, b: 0, a: 0 };
+            return {
+                r: Math.round((fg.r * fg.a + bg.r * bg.a * (1 - fg.a)) / a),
+                g: Math.round((fg.g * fg.a + bg.g * bg.a * (1 - fg.a)) / a),
+                b: Math.round((fg.b * fg.a + bg.b * bg.a * (1 - fg.a)) / a),
+                a,
+            };
+        };
+
+        // Get effective background color with alpha compositing along parent chain
+        const getEffectiveBackground = (el) => {
+            const chain = [];
+            let current = el;
+            while (current && current !== document.documentElement) {
+                const bg = parseColor(window.getComputedStyle(current).backgroundColor);
+                if (bg && bg.a > 0) chain.push(bg);
+                current = current.parentElement;
+            }
+            // Dark theme base color fallback
+            let composite = { r: 15, g: 23, b: 42, a: 1 };
+            for (let i = chain.length - 1; i >= 0; i--) {
+                composite = compositeOver(chain[i], composite);
+            }
+            return composite;
+        };
+
         const contrastIssues = [];
         const contrastCandidates = document.querySelectorAll('p, span, a, button, label, td, th, li');
         for (const el of contrastCandidates) {
@@ -478,24 +583,15 @@ async function collectMetrics(page, view) {
             const fg = parseColor(style.color);
             if (!fg) continue;
 
-            let bg = parseColor(style.backgroundColor);
-            let parent = el;
-            while ((!bg || bg.a === 0) && parent && parent !== document.body) {
-                parent = parent.parentElement;
-                if (!parent) break;
-                bg = parseColor(window.getComputedStyle(parent).backgroundColor);
-            }
-
-            if ((!bg || bg.a === 0) && document.body) {
-                bg = parseColor(window.getComputedStyle(document.body).backgroundColor);
-            }
-
+            // Use alpha-composited effective background
+            const bg = getEffectiveBackground(el);
             if (!bg || bg.a === 0) continue;
 
             if (contrastRatio(fg, bg) < 4.5) {
                 contrastIssues.push({
                     tag: el.tagName.toLowerCase(),
                     id: el.id || null,
+                    ratio: contrastRatio(fg, bg).toFixed(2),
                 });
             }
         }
@@ -622,7 +718,15 @@ async function collectMetrics(page, view) {
             inconsistentButtons = uniqueHeights.size > 2;
         }
 
-        const tinyText = Array.from(document.querySelectorAll('p, span, label, small'))
+        // Broader selector for tiny text detection
+        const tinyTextSelector = [
+            'p', 'span', 'label', 'small', 'a', 'button',
+            'td', 'th', 'li', 'dt', 'dd',
+            '[class*="pill"]', '[class*="badge"]', '[class*="title"]',
+            '[class*="label"]', '[class*="hint"]',
+        ].join(', ');
+
+        const tinyText = Array.from(document.querySelectorAll(tinyTextSelector))
             .filter((el) => isVisible(el))
             .filter((el) => {
                 const size = parseFloat(window.getComputedStyle(el).fontSize);
@@ -631,17 +735,30 @@ async function collectMetrics(page, view) {
             .map((el) => ({
                 tag: el.tagName.toLowerCase(),
                 id: el.id || null,
+                className: typeof el.className === 'string' ? el.className.split(' ')[0] : '',
             }));
 
-        const weakText = Array.from(document.querySelectorAll('p, span, label'))
+        // Luminance-based weak text detection (contrast ratio between 2.0 and 4.5)
+        const weakText = Array.from(
+            document.querySelectorAll('p, span, label, small, .text-muted, [class*="muted"]')
+        )
             .filter((el) => isVisible(el))
             .filter((el) => {
-                const color = window.getComputedStyle(el).color || '';
-                return color.includes('156, 163, 175');
+                const fg = parseColor(window.getComputedStyle(el).color);
+                if (!fg) return false;
+                const bg = getEffectiveBackground(el);
+                if (!bg || bg.a === 0) return false;
+                const ratio = contrastRatio(fg, bg);
+                // Weak = between barely readable and AA threshold
+                return ratio >= 2.0 && ratio < 4.5;
             })
             .map((el) => ({
                 tag: el.tagName.toLowerCase(),
                 id: el.id || null,
+                ratio: contrastRatio(
+                    parseColor(window.getComputedStyle(el).color),
+                    getEffectiveBackground(el)
+                ).toFixed(2),
             }));
 
         const spacingIssues = [];
@@ -813,6 +930,233 @@ async function collectMetrics(page, view) {
             footerNotFlex = footerStyle.display !== 'flex';
         }
 
+        // ─── NEW CSS REVIEW CHECKS ────────────────────────────────────────────────
+
+        // 1. Undefined CSS Custom Properties
+        const undefinedCustomProperties = (() => {
+            const defined = new Set();
+            const used = new Map();
+            const varPattern = /var\(\s*(--[\w-]+)/g;
+
+            for (const sheet of document.styleSheets) {
+                try {
+                    for (const rule of sheet.cssRules) {
+                        // Collect defined properties from :root
+                        if (rule.selectorText === ':root' && rule.style) {
+                            for (let i = 0; i < rule.style.length; i++) {
+                                const p = rule.style[i];
+                                if (p.startsWith('--')) defined.add(p);
+                            }
+                        }
+                        // Collect all var() usages
+                        if (!rule.style) continue;
+                        const cssText = rule.style.cssText;
+                        let match;
+                        while ((match = varPattern.exec(cssText)) !== null) {
+                            const prop = match[1];
+                            if (!used.has(prop)) used.set(prop, []);
+                            used.get(prop).push(rule.selectorText || '(unknown)');
+                        }
+                    }
+                } catch { /* cross-origin sheet */ }
+            }
+
+            // Find used but undefined
+            const undefined = [];
+            for (const [prop, selectors] of used.entries()) {
+                if (!defined.has(prop)) {
+                    undefined.push({ property: prop, usedIn: selectors.slice(0, 3) });
+                }
+            }
+            return undefined;
+        })();
+
+        // 2. Excessive backdrop-filter usage (performance)
+        const backdropFilterCount = Array.from(document.querySelectorAll('*'))
+            .filter(el => {
+                if (!isVisible(el)) return false;
+                const style = window.getComputedStyle(el);
+                return style.backdropFilter && style.backdropFilter !== 'none';
+            }).length;
+
+        // 3. Sticky elements without solid background
+        const stickyWithoutBackground = Array.from(
+            document.querySelectorAll('th, [class*="header"], nav, thead')
+        ).filter(el => {
+            if (!isVisible(el)) return false;
+            const style = window.getComputedStyle(el);
+            if (style.position !== 'sticky' && style.position !== 'fixed') return false;
+            const bg = parseColor(style.backgroundColor);
+            return !bg || bg.a < 0.9;
+        }).map(el => ({
+            tag: el.tagName.toLowerCase(),
+            id: el.id || null,
+            position: window.getComputedStyle(el).position,
+        }));
+
+        // 4. Focus-visible styles check
+        const focusVisibleCheck = (() => {
+            let hasFocusVisible = false;
+            for (const sheet of document.styleSheets) {
+                try {
+                    for (const rule of sheet.cssRules) {
+                        if (rule.selectorText?.includes(':focus-visible')) {
+                            hasFocusVisible = true;
+                            break;
+                        }
+                    }
+                } catch { /* cross-origin */ }
+                if (hasFocusVisible) break;
+            }
+
+            const testElements = Array.from(
+                document.querySelectorAll('a[href], button, input, select, textarea')
+            ).filter(el => isVisible(el) && !el.disabled).slice(0, 10);
+
+            const noVisibleFocus = [];
+            for (const el of testElements) {
+                el.focus();
+                const style = window.getComputedStyle(el);
+                const hasOutline = style.outlineStyle !== 'none' && style.outlineWidth !== '0px';
+                const hasBoxShadow = style.boxShadow !== 'none';
+                if (!hasOutline && !hasBoxShadow) {
+                    noVisibleFocus.push({
+                        tag: el.tagName.toLowerCase(),
+                        id: el.id || null,
+                    });
+                }
+                el.blur();
+            }
+
+            return { hasFocusVisible, noVisibleFocus };
+        })();
+
+        // 5. Animations without prefers-reduced-motion guard
+        const unguardedAnimations = (() => {
+            const animatedProps = ['animation', 'animation-name', 'transition'];
+            let hasReducedMotionMedia = false;
+            const unguarded = [];
+
+            for (const sheet of document.styleSheets) {
+                try {
+                    for (const rule of sheet.cssRules) {
+                        if (rule instanceof CSSMediaRule) {
+                            if (rule.conditionText?.includes('prefers-reduced-motion')) {
+                                hasReducedMotionMedia = true;
+                            }
+                        }
+                        if (!rule.style) continue;
+                        for (const prop of animatedProps) {
+                            const value = rule.style.getPropertyValue(prop);
+                            if (value && value !== 'none' && !value.includes('0s')) {
+                                const parent = rule.parentRule;
+                                const isGuarded = parent instanceof CSSMediaRule
+                                    && parent.conditionText?.includes('prefers-reduced-motion');
+                                if (!isGuarded) {
+                                    unguarded.push({
+                                        selector: rule.selectorText || '(unknown)',
+                                        property: prop,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                } catch { /* cross-origin */ }
+            }
+
+            return { hasReducedMotionMedia, unguarded: unguarded.slice(0, 15) };
+        })();
+
+        // 6. Dropdowns inside overflow:hidden containers
+        const clippedDropdowns = Array.from(
+            document.querySelectorAll('.dropdown-menu, [role="menu"], [role="listbox"]')
+        ).filter(el => {
+            let parent = el.parentElement;
+            while (parent && parent !== document.body) {
+                const style = window.getComputedStyle(parent);
+                const overflow = `${style.overflow} ${style.overflowX} ${style.overflowY}`;
+                if (overflow.includes('hidden') || overflow.includes('clip')) {
+                    return true;
+                }
+                parent = parent.parentElement;
+            }
+            return false;
+        }).map(el => ({
+            tag: el.tagName.toLowerCase(),
+            id: el.id || null,
+        }));
+
+        // 7. !important abuse check
+        const importantAbuse = (() => {
+            let count = 0;
+            const violations = [];
+            for (const sheet of document.styleSheets) {
+                try {
+                    for (const rule of sheet.cssRules) {
+                        if (!rule.style) continue;
+                        for (let i = 0; i < rule.style.length; i++) {
+                            const prop = rule.style[i];
+                            if (rule.style.getPropertyPriority(prop) === 'important') {
+                                count++;
+                                const sel = rule.selectorText || '';
+                                // Only flag base selectors (no ID, no attribute, simple)
+                                if (sel && !sel.includes('#') && !sel.includes('[')
+                                    && (sel.split(/[\s>+~]/).length <= 2)) {
+                                    violations.push({ selector: sel, property: prop });
+                                }
+                            }
+                        }
+                    }
+                } catch { /* cross-origin */ }
+            }
+            return { count, violations: violations.slice(0, 20) };
+        })();
+
+        // 8. Tightly packed touch targets (WCAG 2.5.8)
+        const tightlyPackedTargets = (() => {
+            const targets = Array.from(document.querySelectorAll(interactiveSelector))
+                .filter(el => isVisible(el) && !el.disabled)
+                .map(el => ({ el, rect: el.getBoundingClientRect() }));
+
+            const tight = [];
+            for (let i = 0; i < targets.length; i++) {
+                for (let j = i + 1; j < targets.length; j++) {
+                    const a = targets[i].rect;
+                    const b = targets[j].rect;
+
+                    // Only check horizontally adjacent (same row ± 8px)
+                    if (Math.abs(a.top - b.top) > 8) continue;
+
+                    const gap = Math.max(0, b.left - a.right);
+                    const bothSmall = (a.width < 44 || a.height < 44)
+                        && (b.width < 44 || b.height < 44);
+
+                    if (bothSmall && gap < 8) {
+                        tight.push({
+                            gap: Math.round(gap),
+                            aTag: targets[i].el.tagName.toLowerCase(),
+                            bTag: targets[j].el.tagName.toLowerCase(),
+                        });
+                    }
+                }
+            }
+            return tight.slice(0, 10);
+        })();
+
+        // 9. Font loading status
+        const fontLoadingStatus = (() => {
+            const status = document.fonts.status;
+            const allFonts = Array.from(document.fonts).map(f => ({
+                family: f.family,
+                status: f.status,
+            }));
+            const customFontLoaded = allFonts.some(
+                f => (f.family.includes('Roboto') || f.family.includes('Inter'))
+                    && f.status === 'loaded'
+            );
+            return { status, customFontLoaded, fontCount: allFonts.length };
+        })();
+
         return {
             duplicateIds,
             unlabeledControls,
@@ -842,6 +1186,16 @@ async function collectMetrics(page, view) {
             footerNotFlex,
             mutationObservers,
             duplicateEventHandlers,
+            // New CSS review checks
+            undefinedCustomProperties,
+            backdropFilterCount,
+            stickyWithoutBackground,
+            focusVisibleCheck,
+            unguardedAnimations,
+            clippedDropdowns,
+            importantAbuse,
+            tightlyPackedTargets,
+            fontLoadingStatus,
         };
     }, {
         requiredSelectors: view.requiredSelectors,
@@ -865,13 +1219,21 @@ async function collectMetrics(page, view) {
     }
 }
 
+/**
+ * Navigates to a view URL, waits for the ready selector, injects stability
+ * CSS, and waits for layout to settle before returning.
+ * @param {import('playwright').Page} page
+ * @param {object} view
+ * @param {Record<string, string>} [replacements]  URL path parameter substitutions.
+ * @returns {Promise<void>}
+ */
 async function openView(page, view, replacements = {}) {
     let url = view.url;
     for (const [key, value] of Object.entries(replacements)) {
         url = url.replaceAll(`:${key}`, String(value));
     }
 
-    await page.goto(`${BASE_URL}${url}`, { waitUntil: 'domcontentloaded', timeout: 15000 });
+    await page.goto(new URL(url, BASE_URL).href, { waitUntil: 'domcontentloaded', timeout: 15000 });
     await page.waitForSelector(view.readySelector, { timeout: 10000 });
     await disableMotion(page, MOTION_RESET_CSS, view.name);
     await page.addStyleTag({ content: VISUAL_STABILITY_CSS });
@@ -882,6 +1244,12 @@ async function openView(page, view, replacements = {}) {
     await page.waitForTimeout(SCREENSHOT_SETTLE_MS);
 }
 
+/**
+ * Authenticates once and returns the serialized storage state (cookies +
+ * localStorage) that can be reused across view contexts.
+ * @param {import('playwright').Browser} browser
+ * @returns {Promise<object>} Playwright storage state.
+ */
 async function createAuthState(browser) {
     const context = await browser.newContext(createContextOptions('desktop'));
     const page = await context.newPage();
@@ -898,6 +1266,13 @@ async function createAuthState(browser) {
     return state;
 }
 
+/**
+ * Build a result object for a view that failed with an unexpected runner exception.
+ * @param {string} name
+ * @param {string} url
+ * @param {unknown} error
+ * @returns {object}
+ */
 function buildRunnerErrorResult(name, url, error) {
     const message = error instanceof Error ? error.message : String(error);
     return {
@@ -905,43 +1280,20 @@ function buildRunnerErrorResult(name, url, error) {
         url,
         failures: [`runner exception: ${message}`],
         warnings: [],
-        metrics: {
-            duplicateIds: 0,
-            unlabeledControls: 0,
-            missingSelectors: 0,
-            missingSelectorList: [],
-            horizontalOverflow: false,
-            overflowAmount: 0,
-            smallTouchTargets: 0,
-            contrastIssues: 0,
-            layoutDriftIssues: 0,
-            unstyledDisabledControls: 0,
-            disabledWithoutStyle: 0,
-            badInputs: 0,
-            inconsistentButtons: false,
-            tinyText: 0,
-            weakText: 0,
-            spacingIssues: 0,
-            alignmentIssues: 0,
-            hardcodedColors: 0,
-            badIconButtons: 0,
-            tokenViolations: 0,
-            iconButtonsWithoutAria: 0,
-            unlabeledInputsStrict: 0,
-            legacyClassViolations: [],
-            hasMainLandmark: false,
-            hasAppShell: false,
-            insufficientFixedTopOffset: false,
-            footerNotFlex: false,
-            mutationObservers: 0,
-            duplicateEventHandlers: 0,
-            visualDriftRatio: 0,
-            runnerError: true,
-        },
+        metrics: { ...BASE_METRICS, hasMainLandmark: false, hasAppShell: false, runnerError: true },
         screenshots: {},
     };
 }
 
+/**
+ * Wraps runView and catches any unhandled exception, returning a runner-error
+ * result instead of propagating the rejection.
+ * @param {import('playwright').Browser} browser
+ * @param {object} storageState
+ * @param {object} view
+ * @param {Record<string, string>} [replacements]
+ * @returns {Promise<object>}
+ */
 async function runViewSafely(browser, storageState, view, replacements = {}) {
     try {
         return await runView(browser, storageState, view, replacements);
@@ -950,6 +1302,13 @@ async function runViewSafely(browser, storageState, view, replacements = {}) {
     }
 }
 
+/**
+ * Fetches the first available job ID via the API so the job-detail view can
+ * be linted with real data. Returns null if none exist or the request fails.
+ * @param {import('playwright').Browser} browser
+ * @param {object} storageState
+ * @returns {Promise<string|null>}
+ */
 async function discoverJobId(browser, storageState) {
     const context = await browser.newContext({ storageState });
 
@@ -958,15 +1317,26 @@ async function discoverJobId(browser, storageState) {
         if (!response.ok()) {
             return null;
         }
-        const jobs = await response.json();
+        const data = await response.json();
 
-        const firstJob = Array.isArray(jobs) ? jobs[0] : null;
-        return firstJob?.id || null;
+        // Handle both array response and nested { jobs: [...] } structure
+        const jobsArray = Array.isArray(data)
+            ? data
+            : Array.isArray(data?.jobs) ? data.jobs : [];
+        const firstJob = jobsArray[0];
+        return firstJob?.id ?? firstJob?.job_id ?? null;
     } finally {
         await context.close();
     }
 }
 
+/**
+ * Verifies that an invalid login attempt stays on /login and shows an error
+ * message. Skipped automatically when authentication is disabled.
+ * @param {import('playwright').Browser} browser
+ * @param {boolean} loginRequired
+ * @returns {Promise<object>}
+ */
 async function runInvalidLoginCheck(browser, loginRequired) {
     if (!loginRequired) {
         return buildSkippedResult(
@@ -985,11 +1355,11 @@ async function runInvalidLoginCheck(browser, loginRequired) {
         await page.fill('#username', USERNAME);
         await page.fill('#password', `${PASSWORD}__ui_lint_invalid`);
         await page.click('#submit-btn');
-        await page.waitForSelector('#error-alert:not(.d-none)', { timeout: 10000 });
+        await page.locator('#login-message.error').waitFor({ state: 'visible', timeout: 10000 });
 
         const metrics = await page.evaluate(() => ({
-            errorVisible: !document.querySelector('#error-alert')?.classList.contains('d-none'),
-            errorText: document.querySelector('#error-alert')?.textContent?.trim() || '',
+            errorVisible: document.querySelector('#login-message')?.classList.contains('error') ?? false,
+            errorText: document.querySelector('#message-text')?.textContent?.trim() || '',
             stayedOnLogin: window.location.pathname === '/login',
         }));
 
@@ -1007,7 +1377,10 @@ async function runInvalidLoginCheck(browser, loginRequired) {
             },
         });
 
-        if (!metrics.errorVisible) failures.push('invalid login did not show an error message');
+        if (!metrics.errorVisible) failures.push('invalid login did not show an error state');
+        if (!metrics.errorText || !/error|invalid|failed/i.test(metrics.errorText)) {
+            failures.push('invalid login did not show an expected error message');
+        }
         if (!metrics.stayedOnLogin) failures.push('invalid login navigated away from /login');
         failures.push(...sameOriginFailures);
         if (traffic.pageErrors.length) {
@@ -1032,6 +1405,15 @@ async function runInvalidLoginCheck(browser, loginRequired) {
     }
 }
 
+/**
+ * Runs the full lint suite for a single view: navigation, metric collection,
+ * screenshot diffing, and network analysis.
+ * @param {import('playwright').Browser} browser
+ * @param {object} storageState
+ * @param {object} view
+ * @param {Record<string, string>} [replacements]  URL path parameter substitutions.
+ * @returns {Promise<object>}
+ */
 async function runView(browser, storageState, view, replacements = {}) {
     const context = await browser.newContext({
         ...createContextOptions(view.device),
@@ -1095,6 +1477,36 @@ async function runView(browser, storageState, view, replacements = {}) {
         if (metrics.mutationObservers > 0) warnings.push('mutation observer usage detected');
         if (metrics.duplicateEventHandlers > 2) warnings.push('multiple global click handlers');
         if (visual.ratio > VISUAL_DRIFT_THRESHOLD) failures.push(`visual drift ratio ${visual.ratio.toFixed(5)} > ${VISUAL_DRIFT_THRESHOLD}`);
+
+        // New CSS review checks
+        if (metrics.undefinedCustomProperties?.length) {
+            failures.push(`undefined CSS custom properties: ${metrics.undefinedCustomProperties.map(p => p.property).join(', ')}`);
+        }
+        if (metrics.backdropFilterCount > 4) {
+            warnings.push(`excessive backdrop-filter usage: ${metrics.backdropFilterCount} simultaneous layers`);
+        }
+        if (metrics.stickyWithoutBackground?.length) {
+            warnings.push(`sticky elements without solid background: ${metrics.stickyWithoutBackground.length}`);
+        }
+        if (!metrics.focusVisibleCheck?.hasFocusVisible) {
+            warnings.push('no :focus-visible CSS rules detected');
+        }
+        if (metrics.focusVisibleCheck?.noVisibleFocus?.length) {
+            warnings.push(`elements without visible focus indicator: ${metrics.focusVisibleCheck.noVisibleFocus.length}`);
+        }
+        if (metrics.unguardedAnimations?.unguarded?.length > 5) {
+            warnings.push(`animations without prefers-reduced-motion guard: ${metrics.unguardedAnimations.unguarded.length}`);
+        }
+        if (metrics.clippedDropdowns?.length) {
+            warnings.push(`dropdowns inside overflow:hidden containers: ${metrics.clippedDropdowns.length}`);
+        }
+        if (metrics.importantAbuse?.count > 10) {
+            warnings.push(`excessive !important usage: ${metrics.importantAbuse.count}`);
+        }
+        if (metrics.tightlyPackedTargets?.length) {
+            warnings.push(`tightly packed touch targets: ${metrics.tightlyPackedTargets.length}`);
+        }
+
         failures.push(...sameOriginFailures);
 
         if (traffic.pageErrors.length) {
@@ -1118,6 +1530,7 @@ async function runView(browser, storageState, view, replacements = {}) {
                 horizontalOverflow: metrics.horizontalOverflow,
                 overflowAmount: metrics.overflowAmount,
                 smallTouchTargets: metrics.smallTouchTargets.length,
+                tightlyPackedTargets: metrics.tightlyPackedTargets?.length || 0,
                 contrastIssues: metrics.contrastIssues.length,
                 layoutDriftIssues: metrics.layoutDriftIssues.length,
                 unstyledDisabledControls: metrics.unstyledDisabledControls?.length || 0,
@@ -1141,6 +1554,16 @@ async function runView(browser, storageState, view, replacements = {}) {
                 mutationObservers: metrics.mutationObservers,
                 duplicateEventHandlers: metrics.duplicateEventHandlers,
                 visualDriftRatio: visual.ratio,
+                // New CSS review metrics
+                undefinedCustomProperties: metrics.undefinedCustomProperties?.length || 0,
+                backdropFilterCount: metrics.backdropFilterCount || 0,
+                stickyWithoutBackground: metrics.stickyWithoutBackground?.length || 0,
+                hasFocusVisibleRules: metrics.focusVisibleCheck?.hasFocusVisible ?? false,
+                noVisibleFocusIndicators: metrics.focusVisibleCheck?.noVisibleFocus?.length || 0,
+                unguardedAnimations: metrics.unguardedAnimations?.unguarded?.length || 0,
+                clippedDropdowns: metrics.clippedDropdowns?.length || 0,
+                importantAbuse: metrics.importantAbuse?.count || 0,
+                fontLoadingStatus: metrics.fontLoadingStatus?.status || 'unknown',
             },
             screenshots: {
                 first: shots.shotA,
@@ -1153,6 +1576,10 @@ async function runView(browser, storageState, view, replacements = {}) {
     }
 }
 
+/**
+ * Entry point: sets up output directories, launches a single browser instance,
+ * runs all views in parallel, writes results.json, and sets process.exitCode.
+ */
 async function main() {
     ensureDir(OUTPUT_DIR);
     ensureDir(SCREENSHOT_DIR);
@@ -1232,7 +1659,12 @@ async function main() {
 
         process.exitCode = totals.failures > 0 ? 1 : 0;
     } finally {
-        await browser.close();
+        // Isolate cleanup errors so they never shadow the original exception.
+        try {
+            await browser.close();
+        } catch (closeErr) {
+            console.error('Browser cleanup failed:', closeErr);
+        }
     }
 }
 

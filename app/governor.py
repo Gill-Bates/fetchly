@@ -363,6 +363,11 @@ class Governor:
     def queue_maxsize(self) -> int:
         """Recommended queue maxsize for backpressure."""
         return self._limits_checked.queue_maxsize
+
+    @property
+    def transcode_limit(self) -> int:
+        """Recommended concurrency limit for transcoding/analysis work."""
+        return self._limits_checked.transcode_limit
     
     @property
     def cpu_semaphore(self) -> asyncio.Semaphore:

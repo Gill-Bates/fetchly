@@ -7,6 +7,67 @@
     --login-shadow: 0 14px 36px rgba(2, 6, 23, 0.22);
 }
 
+/* Roboto Flex Font */
+@font-face {
+    font-family: "Roboto Flex";
+    src: url("/static/fonts/roboto-flex.woff2") format("woff2");
+    font-style: normal;
+    font-weight: 100 1000;
+    font-stretch: 25% 151%;
+    font-display: swap;
+}
+
+/* Logo: login page always has a dark background → always render white */
+.logo {
+    display: block;
+    margin-left: auto;
+    margin-right: auto;
+    max-width: 218px;
+    width: 218px;
+    color: #fff;
+    filter: brightness(0) invert(1);
+    opacity: 0;
+    transform: translateY(6px);
+    animation: logoFadeIn 0.5s ease forwards;
+}
+
+@keyframes logoFadeIn {
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.login-header {
+    margin-bottom: auto;
+}
+
+.login-message {
+    flex: 0 0 auto;
+    margin: auto 0;
+    padding: 1.5rem 0;
+    color: var(--login-muted);
+    font-size: 0.95rem;
+    line-height: 1.5;
+    transition: color 0.2s ease;
+}
+
+.login-message p {
+    margin: 0;
+}
+
+.login-message.error {
+    color: #dc3545;
+}
+
+#error-alert {
+    margin-bottom: 1.25rem;
+}
+
+#submit-btn {
+    margin-top: 0.5rem;
+}
+
 * {
     box-sizing: border-box;
 }
@@ -14,45 +75,68 @@
 body {
     margin: 0;
     min-height: 100vh;
-    font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
-    background: #0f172a;
+    font-family: "Roboto Flex", "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+    background:
+        radial-gradient(1200px 600px at 10% -10%, rgba(99, 102, 241, 0.15), transparent 60%),
+        radial-gradient(1000px 500px at 90% 0%, rgba(56, 189, 248, 0.12), transparent 60%),
+        radial-gradient(circle at 20% 20%, #20384f 0%, #0f172a 50%, #0b1222 100%);
+    background-attachment: fixed;
+    -webkit-text-size-adjust: 100%;
+    overflow-x: hidden;
 }
 
 .login-shell {
-    min-height: 100vh;
     min-height: 100dvh;
-    display: grid;
-    place-items: center;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     padding-top: calc(1.5rem + env(safe-area-inset-top, 0px));
     padding-right: calc(1.5rem + env(safe-area-inset-right, 0px));
     padding-bottom: calc(1.5rem + env(safe-area-inset-bottom, 0px));
     padding-left: calc(1.5rem + env(safe-area-inset-left, 0px));
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
 }
 
 .login-card {
     width: 100%;
-    max-width: 532px;
-    background: var(--login-card-bg);
-    border-radius: 14px;
-    box-shadow: var(--login-shadow);
-    padding: 1.75rem;
-    border: 1px solid var(--login-border);
+    max-width: 420px;
+    padding: 2.5rem 2rem;
+    border-radius: 18px;
+    background: rgba(17, 24, 39, 0.95);
+    border: 1px solid rgba(255, 255, 255, 0.08);
     backdrop-filter: blur(10px);
     -webkit-backdrop-filter: blur(10px);
+    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.45),
+                0 2px 8px rgba(0, 0, 0, 0.25);
+    display: flex;
+    flex-direction: column;
+    transform: translateY(0);
+    transition:
+        transform 0.25s ease,
+        box-shadow 0.25s ease,
+        border-color 0.2s ease;
+    will-change: transform;
+    min-height: 480px;
+}
+
+.login-card:hover {
+    border-color: rgba(99, 102, 241, 0.25);
 }
 
 .login-card h1 {
-    margin: 0;
+    margin: 0 0 0.35rem 0;
     color: var(--login-text);
     font-size: 1.85rem;
-    font-weight: 750;
-    letter-spacing: 0.01em;
+    font-weight: 700;
+    letter-spacing: 0.02em;
 }
 
 .subtitle {
-    margin: 0.3rem 0 1rem;
+    margin: 0.3rem 0 1.75rem 0;
     color: var(--login-muted);
-    font-size: 0.96rem;
+    font-size: 0.9rem;
+    line-height: 1.5;
 }
 
 .form-label {
@@ -62,18 +146,30 @@ body {
 }
 
 .form-control {
-    min-height: 46px;
+    height: 48px;
     border-radius: 10px;
-    background: rgba(15, 23, 42, 0.78);
-    border: 1px solid rgba(255, 255, 255, 0.1);
+    background: rgba(15, 23, 42, 0.95);
+    border: 1px solid rgba(255, 255, 255, 0.08);
     color: var(--login-text);
     box-shadow: none;
+    font-size: 16px;
+    -webkit-appearance: none;
+    appearance: none;
+    transition:
+        border-color 0.18s ease,
+        background-color 0.18s ease,
+        box-shadow 0.18s ease;
+}
+
+.form-control,
+.btn-primary {
+    touch-action: manipulation;
 }
 
 .form-control:focus {
     background: rgba(15, 23, 42, 0.9);
     border-color: rgba(99, 102, 241, 0.55);
-    box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.12);
+    box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15);
     color: var(--login-text);
 }
 
@@ -81,11 +177,36 @@ body {
     color: rgba(148, 163, 184, 0.7);
 }
 
+/* Focus state for card */
+.login-card:focus-within {
+    transform: translateY(-2px);
+    border-color: rgba(99, 102, 241, 0.4);
+    box-shadow: 0 0 0 1px rgba(99, 102, 241, 0.25),
+                0 14px 44px rgba(0, 0, 0, 0.5),
+                0 2px 8px rgba(0, 0, 0, 0.25);
+}
+
 .btn-primary {
-    min-height: 50px;
+    height: 48px;
     border-radius: 10px;
     font-weight: 600;
-    box-shadow: none;
+    letter-spacing: 0.02em;
+    box-shadow: 0 4px 14px rgba(99, 102, 241, 0.25);
+    -webkit-tap-highlight-color: transparent;
+    transition:
+        transform 0.12s ease,
+        box-shadow 0.12s ease,
+        background-color 0.2s ease;
+}
+
+.btn-primary:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 6px 18px rgba(99, 102, 241, 0.35);
+}
+
+.btn-primary:active {
+    transform: translateY(0);
+    box-shadow: 0 2px 8px rgba(99, 102, 241, 0.25);
 }
 
 @media (max-width: 480px) {
@@ -103,5 +224,32 @@ body {
 
     .login-card h1 {
         font-size: 1.65rem;
+    }
+}
+
+/* iOS blur fallback for performance */
+@supports (-webkit-touch-callout: none) {
+
+    html {
+        -webkit-text-size-adjust: 100%;
+        height: 100%;
+    }
+
+    body {
+        height: 100%;
+        overflow-x: hidden;
+        overscroll-behavior-y: none;
+        -webkit-overflow-scrolling: touch;
+    }
+
+    .login-shell {
+        min-height: 100vh;
+        min-height: -webkit-fill-available;
+    }
+
+    .login-card {
+        backdrop-filter: none;
+        -webkit-backdrop-filter: none;
+        background: rgba(17, 24, 39, 0.96);
     }
 }

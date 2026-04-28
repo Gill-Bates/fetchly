@@ -19,6 +19,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final
 
+from .analysis_worker import submit_analysis
 from .db import update_job
 from .governor import governor
 
@@ -374,7 +375,9 @@ def _download_media(job_id: str, url: str, *, quality: str, media_type: str) -> 
     _rename_thumbnail(job_dir)
 
     _check_cancellation(job_id)
-    scale = "scale=-2:720" if quality == "medium" else "scale=-2:480"
+    # Cap resolution without upscaling: min(target, input_height)
+    target_height = 720 if quality == "medium" else 480
+    scale = f"scale=-2:'min({target_height},ih)'"
     _emit(job_id, "transcoding", f"Transcoding to {quality}")
     
     # Use Governor semaphore to limit concurrent transcoding (CPU/memory protection)
@@ -497,9 +500,25 @@ def process_job(job: tuple[str, str, str, str]) -> None:
         codec, bitrate_kbps, duration_seconds = _probe_media(out_path, type_)
         video_title = _title_from_output_name(out_path)
 
+        analysis_queued = False
+        status = "done"
+        message = "Finished"
+        if type_ == "audio":
+            analysis_queued = submit_analysis(
+                job_id,
+                out_path,
+                duration_seconds=duration_seconds,
+            )
+            if analysis_queued:
+                status = "analysis"
+                message = "Analyzing audio..."
+            else:
+                message = "Finished (audio analysis queue full)"
+
         update_job(
             job_id,
-            status="done",
+            status=status,
+            message=message,
             filename=str(out_path),
             finished_at=_now_iso(),
             filesize_bytes=filesize_bytes,
@@ -510,8 +529,9 @@ def process_job(job: tuple[str, str, str, str]) -> None:
         )
         _emit(
             job_id,
-            "done",
-            "Finished",
+            status,
+            message,
+            filename=str(out_path),
             filesize_bytes=filesize_bytes,
             codec=codec,
             bitrate_kbps=bitrate_kbps,

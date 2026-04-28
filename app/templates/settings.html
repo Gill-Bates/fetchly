@@ -25,8 +25,9 @@
     <form id="settingsForm" class="settings-form-layout">
         <div id="settingsAlert" class="alert d-none" role="alert"></div>
 
-        <div class="row g-4 mb-4">
-            <div class="col-lg-4">
+        <div class="settings-grid mb-4">
+            <!-- Storage Card -->
+            <div class="settings-grid-item">
                 <div class="ui-card h-100">
                     <div>
                         <div class="settings-section">
@@ -39,14 +40,18 @@
                             <div class="mb-3">
                                 <label for="retentionDays" class="form-label">Max. Job retention (days)</label>
                                 <input type="number" class="form-control ui-input" id="retentionDays" name="retention_days" min="1" max="365" value="{{ settings.retention_days | default(7) }}">
-                                <small class="setting-hint">Completed jobs will be deleted after this period (default: 7 days)</small>
+                                <small class="setting-hint setting-hint--with-icon">
+                                    <span class="material-symbols-outlined setting-hint-icon" aria-hidden="true">info</span>
+                                    <span>Completed jobs will be deleted after this period</span>
+                                </small>
                             </div>
                         </div>
                     </div>
                 </div>
             </div>
 
-            <div class="col-lg-4">
+            <!-- Security Card -->
+            <div class="settings-grid-item">
                 <div class="ui-card h-100">
                     <div>
                         <div class="settings-section">
@@ -58,35 +63,55 @@
                         </div>
 
                         <div class="settings-section">
-                            <h6 class="settings-section-title">Credentials</h6>
-                            <div class="mb-3">
-                                <label for="adminPassword" class="form-label">Admin password</label>
-                                <input type="password" class="form-control ui-input" id="adminPassword" name="admin_password" value="" placeholder="Leave blank to keep existing" autocomplete="new-password">
-                                <small class="setting-hint">Leave blank to keep the current password. Min. 8 characters.</small>
-                            </div>
-                            <div class="mb-3">
-                                <label for="adminPasswordConfirm" class="form-label">Confirm password</label>
-                                <input type="password" class="form-control ui-input" id="adminPasswordConfirm" name="admin_password_confirm" value="" placeholder="Repeat new password" autocomplete="new-password">
-                                <div id="passwordError" class="invalid-feedback d-none"></div>
-                            </div>
-                        </div>
-
-                        <div class="settings-section">
                             <h6 class="settings-section-title">Session</h6>
                             <div class="mb-3">
                                 <label for="sessionIdleMinutes" class="form-label">Session idle timeout (minutes)</label>
                                 <input type="number" class="form-control ui-input" id="sessionIdleMinutes" name="session_idle_minutes" min="5" max="1440" value="{{ settings.session_idle_minutes | default(60) }}">
-                                <small class="setting-hint">Session expires after inactivity. Max 24h hard limit from login.</small>
+                                <small class="setting-hint setting-hint--with-icon">
+                                    <span class="material-symbols-outlined setting-hint-icon" aria-hidden="true">info</span>
+                                    <span>Session expires after inactivity. Max 24h hard limit from login.</span>
+                                </small>
+                            </div>
+                        </div>
+
+                        <div class="settings-section">
+                            <h6 class="settings-section-title">Password</h6>
+                            <small class="setting-hint setting-hint--with-icon mb-3">
+                                <span class="material-symbols-outlined setting-hint-icon" aria-hidden="true">info</span>
+                                <span>Change the admin password explicitly.</span>
+                            </small>
+
+                            <div class="mb-2">
+                                <input type="password" class="form-control ui-input" id="currentPassword" value="" placeholder="Current password" autocomplete="current-password">
+                            </div>
+                            <div class="mb-2">
+                                <input type="password" class="form-control ui-input" id="adminPassword" value="" placeholder="New password" autocomplete="new-password">
+                            </div>
+                            <div class="mb-2">
+                                <input type="password" class="form-control ui-input" id="adminPasswordConfirm" value="" placeholder="Repeat password" autocomplete="new-password">
+                            </div>
+                            <div id="passwordError" class="invalid-feedback d-none"></div>
+                            <div class="d-flex justify-content-end mt-2">
+                                <button id="passwordSaveBtn" class="btn btn-primary btn-sm" type="button">
+                                    Change Password
+                                </button>
                             </div>
                         </div>
                     </div>
                 </div>
             </div>
 
-            <div class="col-lg-4">
+            <!-- Integrations Card -->
+            <div class="settings-grid-item">
                 <div class="ui-card h-100">
                     <div>
                         <div class="settings-section lalal-tile-section">
+                            <h6 class="fw-semibold mb-1 d-flex align-items-center gap-1">
+                                <span class="material-symbols-outlined icon-inline" aria-hidden="true">extension</span>
+                                Lalal.ai
+                            </h6>
+                            <small class="text-muted d-block mb-3">Connect and manage your stem separation account.</small>
+
                             <div class="lalal-tile-header mb-3">
                                 <img src="/static/img/lalal_ai.svg" alt="Lalal.ai" class="lalal-tile-logo">
                                 <span id="lalalStatusBadge" class="badge {{ 'bg-success' if lalal_configured else 'bg-secondary' }}">{{ lalal_status or 'Not configured' }}</span>
@@ -123,7 +148,7 @@
 
 <!-- Lalal.ai Auth Modal -->
 <div class="modal fade" id="lalalAuthModal" tabindex="-1" aria-labelledby="lalalAuthModalLabel" aria-hidden="true">
-    <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-dialog modal-dialog-centered modal-lg">
         <div class="modal-content">
             <div class="modal-header">
                 <h5 class="modal-title" id="lalalAuthModalLabel">
@@ -148,14 +173,16 @@
                             <span class="material-symbols-outlined icon-inline text-success" aria-hidden="true">verified</span>
                             Recommended: Activation Key (captcha-free)
                         </div>
-                        <p class="small text-muted mb-2">Get your activation key from your <a href="https://www.lalal.ai/api/" target="_blank" rel="noopener">Lalal.ai profile</a> (log in → scroll down → copy key).</p>
-                        <div class="mb-2">
-                            <label for="lalalAuthEmail" class="form-label">Email Address</label>
+                        <p class="small text-muted mb-3">Get your activation key from your <a href="https://www.lalal.ai/api/" target="_blank" rel="noopener">Lalal.ai profile</a> (log in → scroll down → copy key).</p>
+                        <div class="row g-3 mb-3">
+                            <div class="col-md-6">
+                                <label for="lalalAuthEmail" class="form-label">Email Address</label>
                                 <input type="email" class="form-control ui-input" id="lalalAuthEmail" placeholder="your@lalal.ai-email.com" autocomplete="email" required>
-                        </div>
-                        <div class="mb-2">
-                            <label for="lalalActivationKey" class="form-label">Activation Key</label>
-                            <input type="text" class="form-control ui-input font-monospace" id="lalalActivationKey" placeholder="" autocomplete="off">
+                            </div>
+                            <div class="col-md-6">
+                                <label for="lalalActivationKey" class="form-label">Activation Key</label>
+                                <input type="text" class="form-control ui-input font-monospace" id="lalalActivationKey" autocomplete="off">
+                            </div>
                         </div>
                         <button type="button" class="btn btn-primary w-100" id="lalalAuthUseKeyBtn">
                             <span class="spinner-border spinner-border-sm d-none me-2" id="lalalAuthUseKeySpinner" aria-hidden="true"></span>
@@ -226,7 +253,7 @@
                     <p class="text-muted mb-0">Your Lalal.ai account is now connected.</p>
                 </div>
             </div>
-            <div class="modal-footer" id="lalalAuthFooter">
+            <div class="modal-footer border-0 pt-0" id="lalalAuthFooter">
                 <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Close</button>
             </div>
         </div>
@@ -260,6 +287,10 @@ const formEl = document.getElementById("settingsForm");
 const alertEl = document.getElementById("settingsAlert");
 const settingsSaveBtn = document.getElementById("settingsSaveBtn");
 const autoSaveIndicator = document.getElementById("autoSaveIndicator");
+const passwordSaveBtn = document.getElementById("passwordSaveBtn");
+const currentPasswordEl = document.getElementById("currentPassword");
+const adminPasswordEl = document.getElementById("adminPassword");
+const adminPasswordConfirmEl = document.getElementById("adminPasswordConfirm");
 const lalalStatusBadge = document.getElementById("lalalStatusBadge");
 const lalalStatusLine = document.getElementById("lalalStatusLine");
 const lalalAuthBtnLabel = document.getElementById("lalalAuthBtnLabel");
@@ -802,22 +833,38 @@ function validateSettings() {
     if (!Number.isFinite(sessionIdleMinutes) || sessionIdleMinutes < 5 || sessionIdleMinutes > 1440) {
         return { valid: false, error: "Session timeout must be between 5 and 1440 minutes" };
     }
-    const adminPassword = form.get("admin_password") || "";
-    const adminPasswordConfirm = document.getElementById("adminPasswordConfirm").value;
-    if (adminPassword) {
-        if (adminPassword.length < 8) {
-            return { valid: false, error: "Password must be at least 8 characters" };
-        }
-        if (adminPassword !== adminPasswordConfirm) {
-            return { valid: false, error: "Passwords do not match" };
-        }
-    }
     return {
         valid: true,
         data: {
             retention_days: retention,
             session_idle_minutes: sessionIdleMinutes,
-            ...(adminPassword ? { admin_password: adminPassword } : {}),
+        },
+    };
+}
+
+function validatePasswordChange() {
+    const currentPassword = currentPasswordEl.value;
+    const nextPassword = adminPasswordEl.value;
+    const confirmPassword = adminPasswordConfirmEl.value;
+
+    if (!currentPassword) {
+        return { valid: false, error: "Current password is required" };
+    }
+    if (!nextPassword) {
+        return { valid: false, error: "New password is required" };
+    }
+    if (nextPassword.length < 8) {
+        return { valid: false, error: "Password must be at least 8 characters" };
+    }
+    if (nextPassword !== confirmPassword) {
+        return { valid: false, error: "Passwords do not match" };
+    }
+
+    return {
+        valid: true,
+        data: {
+            current_password: currentPassword,
+            admin_password: nextPassword,
         },
     };
 }
@@ -860,15 +907,7 @@ async function saveSettings() {
             throw new Error(payload.detail || `HTTP ${res.status}`);
         }
 
-        // Clear password field after successful save
-        if (validation.data.admin_password) {
-            document.getElementById("adminPassword").value = "";
-            document.getElementById("adminPasswordConfirm").value = "";
-            setPasswordError("");
-            showToast("Password updated", "success");
-        } else {
-            showToast("Settings saved", "success");
-        }
+        showToast("Settings saved", "success");
     } catch (err) {
         clearTimeout(timeoutId);
         if (err.name === "AbortError") {
@@ -887,23 +926,76 @@ function scheduleAutoSave() {
     saveTimeout = setTimeout(saveSettings, 800);
 }
 
-// Bind auto-save to form inputs (except password which requires explicit action)
+async function changePassword() {
+    const validation = validatePasswordChange();
+    if (!validation.valid) {
+        setPasswordError(validation.error);
+        showToast(validation.error, "danger");
+        return;
+    }
+
+    passwordSaveBtn.disabled = true;
+    setPasswordError("");
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000);
+
+    try {
+        const res = await fetch("/api/settings", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "X-CSRF-Token": getCsrfToken(),
+            },
+            body: JSON.stringify(validation.data),
+            signal: controller.signal,
+        });
+        clearTimeout(timeoutId);
+
+        let payload = {};
+        const contentType = res.headers.get("content-type") || "";
+        if (contentType.includes("application/json")) {
+            payload = await res.json();
+        }
+
+        if (!res.ok) {
+            throw new Error(payload.detail || `HTTP ${res.status}`);
+        }
+
+        currentPasswordEl.value = "";
+        adminPasswordEl.value = "";
+        adminPasswordConfirmEl.value = "";
+        setPasswordError("");
+        showToast("Password updated", "success");
+    } catch (err) {
+        clearTimeout(timeoutId);
+        const message = err.name === "AbortError" ? "Request timed out" : err.message;
+        setPasswordError(message);
+        showToast("Error: " + message, "danger");
+    } finally {
+        passwordSaveBtn.disabled = false;
+    }
+}
+
+// Bind auto-save to general settings only.
 
 function setPasswordError(msg) {
-    const pwField = document.getElementById("adminPassword");
-    const confirmField = document.getElementById("adminPasswordConfirm");
+    const pwField = adminPasswordEl;
+    const confirmField = adminPasswordConfirmEl;
     const errEl = document.getElementById("passwordError");
     if (msg) {
         errEl.textContent = msg;
         errEl.classList.remove("d-none");
         confirmField.classList.add("is-invalid");
         pwField.classList.add("is-invalid");
+        currentPasswordEl.classList.toggle("is-invalid", msg.toLowerCase().includes("current password"));
     } else {
         errEl.classList.add("d-none");
         errEl.textContent = "";
         confirmField.classList.remove("is-invalid");
         pwField.classList.remove("is-invalid");
-        if (document.getElementById("adminPassword").value) {
+        currentPasswordEl.classList.remove("is-invalid");
+        if (adminPasswordEl.value) {
             confirmField.classList.add("is-valid");
             pwField.classList.add("is-valid");
         } else {
@@ -914,8 +1006,8 @@ function setPasswordError(msg) {
 }
 
 function validatePasswordFields() {
-    const pw = document.getElementById("adminPassword").value;
-    const confirm = document.getElementById("adminPasswordConfirm").value;
+    const pw = adminPasswordEl.value;
+    const confirm = adminPasswordConfirmEl.value;
     if (!pw && !confirm) {
         setPasswordError("");
         return;
@@ -931,25 +1023,20 @@ function validatePasswordFields() {
     setPasswordError("");
 }
 
-document.getElementById("adminPassword").addEventListener("input", validatePasswordFields);
-document.getElementById("adminPasswordConfirm").addEventListener("input", validatePasswordFields);
+adminPasswordEl.addEventListener("input", validatePasswordFields);
+adminPasswordConfirmEl.addEventListener("input", validatePasswordFields);
+currentPasswordEl.addEventListener("input", () => {
+    currentPasswordEl.classList.remove("is-invalid");
+});
+passwordSaveBtn?.addEventListener("click", () => {
+    void changePassword();
+});
 
 formEl.querySelectorAll("input, select, textarea").forEach((input) => {
-    if (input.name === "admin_password") {
-        // Password field: save on blur only if both fields are filled and valid
-        input.addEventListener("blur", () => {
-            const pw = document.getElementById("adminPassword").value.trim();
-            const confirm = document.getElementById("adminPasswordConfirm").value;
-            if (pw && pw === confirm && pw.length >= 8) scheduleAutoSave();
-        });
-    } else if (input.name === "admin_password_confirm") {
-        // Confirm field triggers save on blur when matching
-        input.addEventListener("blur", () => {
-            const pw = document.getElementById("adminPassword").value.trim();
-            const confirm = input.value;
-            if (pw && pw === confirm && pw.length >= 8) scheduleAutoSave();
-        });
-    } else if (input.type === "checkbox") {
+    if (input === currentPasswordEl || input === adminPasswordEl || input === adminPasswordConfirmEl) {
+        return;
+    }
+    if (input.type === "checkbox") {
         input.addEventListener("change", scheduleAutoSave);
     } else {
         input.addEventListener("input", scheduleAutoSave);
