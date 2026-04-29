@@ -1,4 +1,4 @@
-{% macro navbar(show_back=False, show_settings=True, show_logout=True) %}
+{% macro navbar(show_back=False, show_settings=True, show_logout=True, csrf_token='') %}
 <nav class="navbar navbar-expand-lg navbar-dark top-navbar fixed-top">
     <div class="app-shell-container top-navbar__inner">
         <a class="navbar-brand" href="/" aria-label="tubeyou">
@@ -21,11 +21,13 @@
             {% endif %}
 
             {% if show_logout %}
-            <a id="logoutBtn" href="/logout"
-               class="btn btn-sm btn-outline-secondary"
-               role="button">
-                Logout
-            </a>
+            <form class="d-inline m-0" action="/logout" method="post">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token | default('') | e }}">
+                <button id="logoutBtn" type="submit"
+                        class="btn btn-sm btn-outline-secondary">
+                    Logout
+                </button>
+            </form>
             {% endif %}
         </div>
     </div>

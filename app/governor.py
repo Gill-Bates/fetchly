@@ -8,8 +8,6 @@
 # backpressure control, and worker scaling. Designed for small VPS under load.
 #
 
-from __future__ import annotations
-
 import asyncio
 import logging
 import math
@@ -18,7 +16,7 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 from time import monotonic
-from typing import Final, TypedDict
+from typing import Final, Self, TypedDict
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +26,8 @@ _GOVERNOR_NOT_CONFIGURED_MSG: Final = (
 )
 _MEMORY_CACHE_TTL_SECONDS: Final[float] = 5.0
 _CGROUP_V1_UNLIMITED_HEURISTIC: Final[int] = 2 ** 60
+
+type _MemoryCacheEntry = tuple[float, int]
 
 
 def _read_cgroup_file(path: str) -> str | None:
@@ -84,14 +84,14 @@ def _parse_cpuset(spec: str | None) -> int | None:
                 start, end = part.split("-", 1)
                 total += int(end) - int(start) + 1
             else:
-                int(part)
+                int(part)  # Validate that this fragment is a parseable single CPU index.
                 total += 1
         except ValueError:
             logger.warning("Ignoring invalid cpuset fragment: %r", part)
     return total or None
 
 
-def detect_effective_cpus() -> float:
+def _detect_effective_cpus() -> float:
     """
     Detect effective CPU count respecting Docker/cgroup limits.
     
@@ -174,7 +174,7 @@ class GovernorConfig:
     enable_backpressure: bool = True
     
     @classmethod
-    def from_env(cls) -> GovernorConfig:
+    def from_env(cls) -> Self:
         """Create config from environment variables."""
         return cls(
             worker_count=_env_int("WORKER_COUNT", 0, min_value=0),
@@ -258,7 +258,7 @@ class Governor:
         self._transcode_sem_sync: threading.Semaphore | None = None
 
         # Short-lived memory cache to keep status checks cheap
-        self._memory_cache: tuple[float, int] | None = None
+        self._memory_cache: _MemoryCacheEntry | None = None
         self._memory_refreshing = False
         
         self._configured = False
@@ -266,9 +266,10 @@ class Governor:
     def configure(self, config: GovernorConfig | None = None) -> None:
         """
         Configure the governor with resource limits.
-        
-        Call this once at application startup. If config is None,
-        auto-detects from environment and system.
+
+        Idempotent: subsequent calls are ignored and keep the original
+        configuration. If config is None, settings are auto-detected from the
+        environment and system.
         """
         with self._lock:
             if self._configured:
@@ -276,7 +277,7 @@ class Governor:
                 return
             
             self._config = config or GovernorConfig.from_env()
-            effective_cpus = detect_effective_cpus()
+            effective_cpus = _detect_effective_cpus()
             
             # Calculate worker count
             if self._config.worker_count > 0:
@@ -328,88 +329,68 @@ class Governor:
                 io_limit,
                 transcode_limit,
             )
+
+    def _require_value[T](self, value: T | None, _name: str) -> T:
+        if value is None:
+            raise RuntimeError(_GOVERNOR_NOT_CONFIGURED_MSG)
+        return value
     
-    @property
-    def _limits_checked(self) -> ResourceLimits:
-        if self._limits is None:
-            raise RuntimeError(_GOVERNOR_NOT_CONFIGURED_MSG)
-        return self._limits
-
-    @property
-    def _config_checked(self) -> GovernorConfig:
-        if self._config is None:
-            raise RuntimeError(_GOVERNOR_NOT_CONFIGURED_MSG)
-        return self._config
-
     def _require_configured(self) -> tuple[GovernorConfig, ResourceLimits]:
         """Return the configured governor state or raise if not initialized."""
-        config = self._config
-        limits = self._limits
-        if config is None or limits is None:
-            raise RuntimeError(_GOVERNOR_NOT_CONFIGURED_MSG)
-        return config, limits
+        return (
+            self._require_value(self._config, "config"),
+            self._require_value(self._limits, "limits"),
+        )
     
     @property
     def effective_cpus(self) -> float:
         """Effective CPU count (Docker cgroup-aware)."""
-        return self._limits_checked.effective_cpus
+        return self._require_configured()[1].effective_cpus
     
     @property
     def worker_count(self) -> int:
         """Recommended worker count."""
-        return self._limits_checked.worker_count
+        return self._require_configured()[1].worker_count
     
     @property
     def queue_maxsize(self) -> int:
         """Recommended queue maxsize for backpressure."""
-        return self._limits_checked.queue_maxsize
+        return self._require_configured()[1].queue_maxsize
 
     @property
     def transcode_limit(self) -> int:
         """Recommended concurrency limit for transcoding/analysis work."""
-        return self._limits_checked.transcode_limit
+        return self._require_configured()[1].transcode_limit
     
     @property
     def cpu_semaphore(self) -> asyncio.Semaphore:
         """Async semaphore for CPU-intensive operations."""
-        if self._cpu_sem is None:
-            raise RuntimeError(_GOVERNOR_NOT_CONFIGURED_MSG)
-        return self._cpu_sem
+        return self._require_value(self._cpu_sem, "cpu_semaphore")
     
     @property
     def io_semaphore(self) -> asyncio.Semaphore:
         """Async semaphore for IO operations."""
-        if self._io_sem is None:
-            raise RuntimeError(_GOVERNOR_NOT_CONFIGURED_MSG)
-        return self._io_sem
+        return self._require_value(self._io_sem, "io_semaphore")
     
     @property
     def transcode_semaphore(self) -> asyncio.Semaphore:
         """Async semaphore for transcoding operations."""
-        if self._transcode_sem is None:
-            raise RuntimeError(_GOVERNOR_NOT_CONFIGURED_MSG)
-        return self._transcode_sem
+        return self._require_value(self._transcode_sem, "transcode_semaphore")
     
     @property
     def cpu_semaphore_sync(self) -> threading.Semaphore:
         """Threading semaphore for CPU-intensive operations."""
-        if self._cpu_sem_sync is None:
-            raise RuntimeError(_GOVERNOR_NOT_CONFIGURED_MSG)
-        return self._cpu_sem_sync
+        return self._require_value(self._cpu_sem_sync, "cpu_semaphore_sync")
 
     @property
     def io_semaphore_sync(self) -> threading.Semaphore:
         """Threading semaphore for IO operations."""
-        if self._io_sem_sync is None:
-            raise RuntimeError(_GOVERNOR_NOT_CONFIGURED_MSG)
-        return self._io_sem_sync
+        return self._require_value(self._io_sem_sync, "io_semaphore_sync")
     
     @property
     def transcode_semaphore_sync(self) -> threading.Semaphore:
         """Threading semaphore for transcoding operations."""
-        if self._transcode_sem_sync is None:
-            raise RuntimeError(_GOVERNOR_NOT_CONFIGURED_MSG)
-        return self._transcode_sem_sync
+        return self._require_value(self._transcode_sem_sync, "transcode_semaphore_sync")
 
     def _read_memory_available_mb_uncached(self) -> int:
         """Read available memory in MB from cgroup or /proc without caching."""
@@ -477,6 +458,10 @@ class Governor:
         When the cache expires and a previous value exists, this returns the
         stale value immediately and refreshes the cache in a background thread
         to avoid blocking async callers.
+
+        Returns:
+            Available memory in MB, or -1 when the value cannot be determined.
+            A value of -1 disables memory backpressure checks in can_accept_job().
         """
         now = monotonic()
         with self._lock:
@@ -499,7 +484,7 @@ class Governor:
 
     def _memory_backpressure_state(self) -> tuple[int, int, bool]:
         """Return (available_mb, threshold_mb, is_triggered)."""
-        config = self._config_checked
+        config, _ = self._require_configured()
         mem_available = self.get_memory_available_mb()
         threshold = config.memory_threshold_mb
         triggered = config.enable_backpressure and mem_available >= 0 and mem_available < threshold
@@ -546,19 +531,3 @@ class Governor:
 
 # Global singleton
 governor = Governor()
-
-
-# Convenience exports
-def configure(config: GovernorConfig | None = None) -> None:
-    """Configure the global governor."""
-    governor.configure(config)
-
-
-def get_worker_count() -> int:
-    """Get recommended worker count."""
-    return governor.worker_count
-
-
-def get_queue_maxsize() -> int:
-    """Get recommended queue maxsize."""
-    return governor.queue_maxsize

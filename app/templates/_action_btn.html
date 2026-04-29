@@ -2,16 +2,20 @@
 
 {% if job["status"] in ("done", "analysis", "analysis_done") %}
 
-    <div class="dropdown">
-        <a class="btn btn-primary btn-sm btn-icon dropdown-toggle"
+    <div class="btn-group">
+        <a class="btn btn-primary btn-sm btn-icon"
            href="/download/{{ job["id"] }}"
-           data-bs-toggle="dropdown"
-           data-bs-boundary="viewport"
            title="Download"
-           aria-label="Download"
-           role="button">
+           aria-label="Download">
             <span class="material-symbols-outlined" aria-hidden="true">download</span>
         </a>
+        <button type="button"
+                class="btn btn-primary btn-sm dropdown-toggle dropdown-toggle-split"
+                data-bs-toggle="dropdown"
+                data-bs-boundary="viewport"
+                aria-expanded="false">
+            <span class="visually-hidden">More options</span>
+        </button>
         <ul class="dropdown-menu dropdown-menu-end">
             <li>
                 <a class="dropdown-item" href="/download/{{ job["id"] }}">
@@ -19,24 +23,45 @@
                     Download
                 </a>
             </li>
-            {% if job["type"] == "audio" and lalal_enabled %}
+            {% if job["type"] == "audio" %}
             <li><hr class="dropdown-divider"></li>
             <li>
                 <button class="dropdown-item" type="button"
+                        data-action="open-trim"
+                        data-job-id="{{ job["id"] }}">
+                    <span class="material-symbols-outlined icon-inline" aria-hidden="true">content_cut</span>
+                    Trim
+                </button>
+            </li>
+            <li><hr class="dropdown-divider"></li>
+            <li>
+                <button class="dropdown-item{% if not lalal_enabled %} disabled{% endif %}" type="button"
                         data-action="lalal-split"
                         data-job-id="{{ job["id"] }}"
-                        data-stem="instrumental">
+                        data-stem="instrumental"
+                        {% if not lalal_enabled %}disabled aria-disabled="true" title="Lalal.ai is not connected"{% endif %}>
                     <span class="material-symbols-outlined icon-inline" aria-hidden="true">music_off</span>
-                    Instrumental
+                    <span>Instrumental</span>
+                    <img class="dropdown-provider-logo"
+                         src="/static/img/lalal_ai_small.svg"
+                         alt="Lalal.ai"
+                         width="34"
+                         height="10">
                 </button>
             </li>
             <li>
-                <button class="dropdown-item" type="button"
+                <button class="dropdown-item{% if not lalal_enabled %} disabled{% endif %}" type="button"
                         data-action="lalal-split"
                         data-job-id="{{ job["id"] }}"
-                        data-stem="vocals">
+                        data-stem="vocals"
+                        {% if not lalal_enabled %}disabled aria-disabled="true" title="Lalal.ai is not connected"{% endif %}>
                     <span class="material-symbols-outlined icon-inline" aria-hidden="true">mic</span>
-                    A Cappella
+                    <span>A Cappella</span>
+                    <img class="dropdown-provider-logo"
+                         src="/static/img/lalal_ai_small.svg"
+                         alt="Lalal.ai"
+                        width="34"
+                        height="10">
                 </button>
             </li>
             {% endif %}

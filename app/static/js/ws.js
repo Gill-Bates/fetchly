@@ -5,11 +5,13 @@
 
 // WebSocket client for real-time job updates.
 // Requires the server-rendered jobs table to use English data-label values:
-// Title, Format, Quality, Codec, Bitrate, BPM, Status, Created, Action.
+// Title, Format, Quality, Bitrate, BPM, Status, Created, Action.
 //
 
 import { CONFIG } from "./config.js";
-import { createStatusElement, createActionButton } from "./ui.js";
+import { createStatusElement, createActionButton, getActionButtonCategory } from "./ui.js?v=20260429m";
+
+const TERMINAL_STATUSES = new Set(["done", "analysis_done"]);
 
 /** @type {number | null} */
 let reconnectTimer = null;
@@ -46,8 +48,8 @@ function clearHeartbeatTimer() {
     }
 }
 
-function escapeAttrValue(value) {
-    return String(value).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+function escapeSelectorValue(value) {
+    return CSS.escape(String(value));
 }
 
 /**
@@ -80,12 +82,21 @@ function setIndicator(indicator, online) {
  * @returns {HTMLElement | null}
  */
 function getCell(row, label) {
-    return row.querySelector(`td[data-label="${escapeAttrValue(label)}"]`);
+    return row.querySelector(`td[data-label="${escapeSelectorValue(label)}"]`);
+}
+
+function getRenderedActionCategory(root) {
+    if (!root) return null;
+    if (root.querySelector(".btn-group")) return "download";
+    if (root.querySelector("[data-action='cancel-job']")) return "cancel";
+    if (root.querySelector("[data-action='open-detail']")) return "detail";
+    return null;
 }
 
 /**
- * Cleanly tear down a WebSocket connection.
- * Immediately invalidates activeSocket if it matches the provided socket.
+ * Tear down a WebSocket connection cleanly.
+ * Nulls event handlers to prevent stale callbacks, clears timers,
+ * and invalidates activeSocket immediately when it matches the provided socket.
  * @param {WebSocket | null} ws - The WebSocket to tear down
  */
 function teardown(ws) {
@@ -116,8 +127,25 @@ function teardown(ws) {
 }
 
 /**
+ * Schedule a reconnect attempt using exponential backoff and jitter.
+ */
+function scheduleReconnect() {
+    clearReconnectTimer();
+    setIndicator(document.getElementById("wsIndicator"), false);
+
+    reconnectAttempt += 1;
+    const baseDelay = Math.min(CONFIG.WS_RECONNECT_MS * (2 ** (reconnectAttempt - 1)), 30_000);
+    const jitter = Math.random() * 1000;
+
+    reconnectTimer = window.setTimeout(() => {
+        reconnectTimer = null;
+        connectWS();
+    }, baseDelay + jitter);
+}
+
+/**
  * Start heartbeat monitoring.
- * Forces reconnect if no messages received within timeout.
+ * Forces reconnect scheduling if no messages are received within timeout.
  */
 function startHeartbeat() {
     clearHeartbeatTimer();
@@ -129,9 +157,10 @@ function startHeartbeat() {
         if (silence > HEARTBEAT_TIMEOUT_MS) {
             console.warn(`WebSocket silent for ${Math.round(silence / 1000)}s, forcing reconnect`);
 
+            const staleSocket = activeSocket;
             clearHeartbeatTimer();
-            teardown(activeSocket);
-            connectWS();
+            teardown(staleSocket);
+            scheduleReconnect();
         }
     }, HEARTBEAT_CHECK_MS);
 }
@@ -146,14 +175,19 @@ function applyUpdate(payload) {
         return;
     }
 
-    const row = document.querySelector(`tr[data-job-id="${escapeAttrValue(payload.id)}"]`);
+    const row = document.querySelector(`tr[data-job-id="${escapeSelectorValue(payload.id)}"]`);
     if (!row) return;
 
     // Update cached row state first so detail modals and follow-up renders stay in sync.
-    const status = payload.status || row.dataset.status || "queued";
+    const previousStatus = row.dataset.status || "queued";
+    const previousJobType = row.dataset.type || "";
+    const status = payload.status || previousStatus;
     row.dataset.status = status;
     if (payload.message != null) {
         row.dataset.message = payload.message;
+    }
+    if (payload.url != null) {
+        row.dataset.url = payload.url;
     }
     if (payload.type) {
         row.dataset.type = payload.type;
@@ -177,24 +211,48 @@ function applyUpdate(payload) {
         row.dataset.bpmConfidence = String(payload.bpm_confidence);
     }
 
-    // Resolve target cells once.
-    const titleCell = getCell(row, "Title");
-    const codecCell = getCell(row, "Codec");
-    const bitrateCell = getCell(row, "Bitrate");
-    const bpmCell = getCell(row, "BPM");
+    const titleCell = (payload.video_title != null || payload.video_meta_hover != null || payload.url != null)
+        ? getCell(row, "Title")
+        : null;
+    const formatCell = payload.codec != null ? getCell(row, "Format") : null;
+    const bitrateCell = payload.bitrate_kbps != null ? getCell(row, "Bitrate") : null;
+    const bpmCell = payload.bpm != null ? getCell(row, "BPM") : null;
     const statusCell = getCell(row, "Status");
     const actionCell = getCell(row, "Action");
 
+    const jobType = row.dataset.type || payload.type || "";
+    const nextActionCategory = getActionButtonCategory(status);
+    const renderedActionCategory = getRenderedActionCategory(actionCell) || getRenderedActionCategory(statusCell);
+    const shouldRefreshActions = renderedActionCategory == null
+        || renderedActionCategory !== nextActionCategory
+        || previousJobType !== jobType;
+
     // Apply DOM updates for the changed row.
     if (titleCell) {
+        const titleText = titleCell.querySelector(".job-title-text");
         if (payload.video_title) {
-            titleCell.textContent = payload.video_title;
+            if (titleText) {
+                titleText.textContent = payload.video_title;
+            } else {
+                titleCell.textContent = payload.video_title;
+            }
         }
-        titleCell.title = payload.video_meta_hover || row.dataset.url || titleCell.textContent || "";
+
+        const hoverText = payload.video_meta_hover
+            || row.dataset.url
+            || titleText?.textContent
+            || titleCell.textContent
+            || "";
+
+        titleCell.dataset.popoverText = hoverText;
+        titleCell.removeAttribute("title");
     }
 
-    if (codecCell && payload.codec) {
-        codecCell.textContent = payload.codec;
+    if (formatCell && payload.codec != null) {
+        const codecText = formatCell.querySelector(".meta-sub");
+        if (codecText) {
+            codecText.textContent = payload.codec || "–";
+        }
     }
 
     if (bitrateCell && payload.bitrate_kbps != null) {
@@ -202,7 +260,7 @@ function applyUpdate(payload) {
     }
 
     if (bpmCell && payload.bpm != null) {
-        bpmCell.textContent = Number(payload.bpm) > 0 ? String(payload.bpm) : "-";
+        bpmCell.textContent = Number(payload.bpm) > 0 ? String(payload.bpm) : "–";
     }
 
     // Update status display (inside .status-action-group if mobile layout)
@@ -225,27 +283,25 @@ function applyUpdate(payload) {
         }
 
         // Update mobile action button inside status cell
-        const mobileActionWrap = statusCell.querySelector(".d-mobile-only .action-buttons, .d-mobile-only .dropdown");
-        if (mobileActionWrap) {
-            const mobileContainer = mobileActionWrap.closest(".d-mobile-only");
+        if (shouldRefreshActions) {
+            const mobileContainer = statusCell.querySelector(".d-mobile-only");
             if (mobileContainer) {
-                mobileContainer.replaceChildren(createActionButton(payload.id, status, row.dataset.type || payload.type));
+                mobileContainer.replaceChildren(createActionButton(payload.id, status, jobType));
             }
         }
     }
 
     // Class updates
-    row.classList.remove("row-done", "row-error");
-    if (status === "done" || status === "analysis_done") row.classList.add("row-done");
-    if (status === "error") row.classList.add("row-error");
+    row.classList.toggle("row-done", TERMINAL_STATUSES.has(status));
+    row.classList.toggle("row-error", status === "error");
 
     // Update desktop action button
-    if (actionCell) {
+    if (actionCell && shouldRefreshActions) {
         const actionWrap = actionCell.querySelector(".action-cell-wrap");
         if (actionWrap) {
-            actionWrap.replaceChildren(createActionButton(payload.id, status, row.dataset.type || payload.type));
+            actionWrap.replaceChildren(createActionButton(payload.id, status, jobType));
         } else {
-            actionCell.replaceChildren(createActionButton(payload.id, status, row.dataset.type || payload.type));
+            actionCell.replaceChildren(createActionButton(payload.id, status, jobType));
         }
     }
 
@@ -255,17 +311,16 @@ function applyUpdate(payload) {
 /**
  * Handle incoming WebSocket message.
  * Responds to server pings and processes job updates.
- * @param {WebSocket} ws - The active WebSocket
  * @param {string} data - The raw message data
  */
-function handleMessage(ws, data) {
+function handleMessage(data) {
     lastMessageTime = Date.now();
 
     // Server heartbeat ping - respond with pong
-    if (data === "ping") {
+    if (typeof data === "string" && data === "ping") {
         try {
-            if (ws.readyState === WebSocket.OPEN) {
-                ws.send("pong");
+            if (activeSocket?.readyState === WebSocket.OPEN) {
+                activeSocket.send("pong");
             }
         } catch (err) {
             console.warn("Failed to send pong:", err);
@@ -296,8 +351,10 @@ function handleMessage(ws, data) {
  * @returns {WebSocket} The active or newly created WebSocket instance
  */
 export function connectWS() {
+    clearReconnectTimer();
+
     const indicator = document.getElementById("wsIndicator");
-    const proto = location.protocol === "https:" ? "wss" : "ws";
+    const proto = window.location.protocol === "https:" ? "wss" : "ws";
 
     // Guard: Prevent parallel connections
     if (activeSocket?.readyState === WebSocket.OPEN || activeSocket?.readyState === WebSocket.CONNECTING) {
@@ -309,7 +366,7 @@ export function connectWS() {
         teardown(activeSocket);
     }
 
-    const ws = new WebSocket(`${proto}://${location.host}/ws`);
+    const ws = new WebSocket(`${proto}://${window.location.host}/ws`);
     activeSocket = ws;
 
     ws.onopen = () => {
@@ -321,11 +378,11 @@ export function connectWS() {
     };
 
     ws.onmessage = (event) => {
-        handleMessage(ws, event.data);
+        handleMessage(event.data);
     };
 
-    ws.onerror = (err) => {
-        console.error("WebSocket error:", err);
+    ws.onerror = () => {
+        console.error(`WebSocket error on ${ws.url} (readyState=${ws.readyState})`);
     };
 
     ws.onclose = () => {
@@ -334,31 +391,22 @@ export function connectWS() {
             return;
         }
 
-        setIndicator(indicator, false);
         activeSocket = null;
-
         clearHeartbeatTimer();
-        clearReconnectTimer();
-
-        reconnectAttempt += 1;
-        const baseDelay = Math.min(CONFIG.WS_RECONNECT_MS * (2 ** (reconnectAttempt - 1)), 30000);
-        const jitter = Math.random() * 1000;
-        reconnectTimer = setTimeout(connectWS, baseDelay + jitter);
+        scheduleReconnect();
     };
 
     return ws;
 }
 
 /**
- * Clean up WebSocket on page unload.
+ * Tear down the active WebSocket when the page is being hidden or unloaded.
+ * Uses pagehide for better navigation and bfcache compatibility.
  */
-function handleBeforeUnload() {
+function handlePageHide() {
     if (activeSocket) {
         teardown(activeSocket);
     }
 }
 
-if (!window.__tubeyouWsCleanupRegistered) {
-    window.addEventListener("beforeunload", handleBeforeUnload);
-    window.__tubeyouWsCleanupRegistered = true;
-}
+window.addEventListener("pagehide", handlePageHide);

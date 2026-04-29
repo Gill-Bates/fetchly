@@ -3,6 +3,7 @@
 // Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 //
 
+import { CANCELLABLE_STATUSES, DOWNLOADABLE_STATUSES } from "./config.js";
 import { humanSize } from "./utils.js";
 
 const STATUS_META = {
@@ -12,10 +13,8 @@ const STATUS_META = {
     error: { color: "danger", label: "error" },
 };
 
-const READY_STATUSES = new Set(["done", "analysis", "analysis_done"]);
-
-/** @type {boolean} */
-const lalalEnabled = (globalThis.document?.documentElement.dataset.lalalEnabled ?? "false") === "true";
+// Requires <html data-lalal-enabled="true|false"> to be set during server render.
+const lalalEnabled = document.documentElement.dataset.lalalEnabled === "true";
 
 /**
  * Create a Material Symbols icon span.
@@ -30,11 +29,89 @@ function icon(name) {
     return span;
 }
 
+function createProviderLogo() {
+    const image = document.createElement("img");
+    image.className = "dropdown-provider-logo";
+    image.src = "/static/img/lalal_ai_small.svg";
+    image.alt = "Lalal.ai";
+    image.width = 34;
+    image.height = 10;
+    return image;
+}
+
+function createDivider() {
+    const item = document.createElement("li");
+    item.setAttribute("role", "separator");
+
+    const divider = document.createElement("hr");
+    divider.className = "dropdown-divider";
+    item.appendChild(divider);
+
+    return item;
+}
+
+function appendDropdownContent(element, iconName, label, trailingNode = null) {
+    const labelEl = document.createElement("span");
+    labelEl.textContent = label;
+    element.append(icon(iconName), labelEl);
+    if (trailingNode) {
+        element.appendChild(trailingNode);
+    }
+}
+
+function createDropdownLink(iconName, label, href, { download = false } = {}) {
+    const item = document.createElement("li");
+    const link = document.createElement("a");
+    link.className = "dropdown-item";
+    link.href = href;
+    if (download) {
+        link.setAttribute("download", "");
+    }
+    appendDropdownContent(link, iconName, label);
+    item.appendChild(link);
+    return item;
+}
+
+function createDropdownButton(iconName, label, dataset, {
+    trailingNode = null,
+    disabled = false,
+    title = "",
+} = {}) {
+    const item = document.createElement("li");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "dropdown-item";
+    if (disabled) {
+        button.disabled = true;
+        button.classList.add("disabled");
+        button.setAttribute("aria-disabled", "true");
+    }
+    if (title) {
+        button.title = title;
+    }
+    Object.assign(button.dataset, dataset);
+    appendDropdownContent(button, iconName, label, trailingNode);
+    item.appendChild(button);
+    return item;
+}
+
+export function getActionButtonCategory(status) {
+    const normalizedStatus = status || "";
+    if (DOWNLOADABLE_STATUSES.has(normalizedStatus)) {
+        return "download";
+    }
+    if (CANCELLABLE_STATUSES.has(normalizedStatus)) {
+        return "cancel";
+    }
+    return "detail";
+}
+
 /**
  * Build a status pill and optional file-size badge.
+ * Returns a <div class="status-inline">, which ws.js relies on for live updates.
  * @param {string} status
  * @param {number | null | undefined} sizeBytes
- * @returns {HTMLDivElement}
+ * @returns {HTMLDivElement} Element with class "status-inline"
  */
 export function createStatusElement(status, sizeBytes) {
     const wrapper = document.createElement("div");
@@ -63,82 +140,95 @@ export function createStatusElement(status, sizeBytes) {
 
 /**
  * Build the action-cell content for a job row.
+ *
+ * Returns one of three variants:
+ * - download split button with dropdown when the job is downloadable
+ * - cancel button while the job is actively running
+ * - detail button for all remaining states
+ *
+ * Audio downloads add Trim plus Lalal stem-split actions.
+ * Lalal entries remain visible when unavailable and are rendered disabled
+ * based on <html data-lalal-enabled>.
+ *
  * @param {string} jobId
  * @param {string} status
  * @param {string | undefined} jobType
- * @returns {HTMLDivElement}
+ * @returns {HTMLDivElement} Wrapper containing the appropriate action controls
  */
 export function createActionButton(jobId, status, jobType) {
     const wrapper = document.createElement("div");
     wrapper.className = "action-buttons";
 
-    if (READY_STATUSES.has(status || "")) {
-        // Single dropdown with download toggle - matches _action_btn.html template
-        const dropdown = document.createElement("div");
-        dropdown.className = "dropdown";
+    const actionCategory = getActionButtonCategory(status);
+    const downloadHref = `/download/${encodeURIComponent(jobId)}`;
 
-        const toggle = document.createElement("a");
-        toggle.href = `/download/${encodeURIComponent(jobId)}`;
-        toggle.className = "btn btn-primary btn-sm btn-icon dropdown-toggle";
+    if (actionCategory === "download") {
+        // Split button: direct download link + dropdown toggle for more options
+        const btnGroup = document.createElement("div");
+        btnGroup.className = "btn-group";
+
+        // Primary download button (clickable)
+        const downloadBtn = document.createElement("a");
+        downloadBtn.href = downloadHref;
+        downloadBtn.className = "btn btn-primary btn-sm btn-icon";
+        downloadBtn.setAttribute("title", "Download");
+        downloadBtn.setAttribute("aria-label", "Download");
+        downloadBtn.setAttribute("download", "");
+        downloadBtn.appendChild(icon("download"));
+
+        // Separate dropdown toggle
+        const toggle = document.createElement("button");
+        toggle.type = "button";
+        toggle.className = "btn btn-primary btn-sm dropdown-toggle dropdown-toggle-split";
         toggle.dataset.bsToggle = "dropdown";
         toggle.dataset.bsBoundary = "viewport";
-        toggle.setAttribute("title", "Download");
-        toggle.setAttribute("aria-label", "Download");
-        toggle.setAttribute("role", "button");
-        toggle.appendChild(icon("download"));
+        toggle.setAttribute("aria-haspopup", "true");
+        toggle.setAttribute("aria-expanded", "false");
+        const srText = document.createElement("span");
+        srText.className = "visually-hidden";
+        srText.textContent = "More options";
+        toggle.appendChild(srText);
 
         const menu = document.createElement("ul");
         menu.className = "dropdown-menu dropdown-menu-end";
 
         // Download item
-        const liDownload = document.createElement("li");
-        const linkDownload = document.createElement("a");
-        linkDownload.className = "dropdown-item";
-        linkDownload.href = `/download/${encodeURIComponent(jobId)}`;
-        linkDownload.appendChild(icon("download"));
-        linkDownload.appendChild(document.createTextNode(" Download"));
-        liDownload.appendChild(linkDownload);
-        menu.appendChild(liDownload);
+        menu.appendChild(createDropdownLink("download", "Download", downloadHref, { download: true }));
 
-        // Lalal.ai options for audio jobs
-        if (jobType === "audio" && lalalEnabled) {
-            const divider = document.createElement("li");
-            divider.innerHTML = '<hr class="dropdown-divider">';
-            menu.appendChild(divider);
+        // Trim option for audio jobs (always available)
+        if (jobType === "audio") {
+            menu.appendChild(createDivider());
+            menu.appendChild(createDropdownButton("content_cut", "Trim", { action: "open-trim", jobId }));
 
-            // Instrumental item
-            const liInst = document.createElement("li");
-            const btnInst = document.createElement("button");
-            btnInst.type = "button";
-            btnInst.className = "dropdown-item";
-            btnInst.dataset.action = "lalal-split";
-            btnInst.dataset.jobId = jobId;
-            btnInst.dataset.stem = "instrumental";
-            btnInst.appendChild(icon("music_off"));
-            btnInst.appendChild(document.createTextNode(" Instrumental"));
-            liInst.appendChild(btnInst);
-            menu.appendChild(liInst);
-
-            // Vocals item
-            const liVocals = document.createElement("li");
-            const btnVocals = document.createElement("button");
-            btnVocals.type = "button";
-            btnVocals.className = "dropdown-item";
-            btnVocals.dataset.action = "lalal-split";
-            btnVocals.dataset.jobId = jobId;
-            btnVocals.dataset.stem = "vocals";
-            btnVocals.appendChild(icon("mic"));
-            btnVocals.appendChild(document.createTextNode(" A Cappella"));
-            liVocals.appendChild(btnVocals);
-            menu.appendChild(liVocals);
+            menu.appendChild(createDivider());
+            menu.appendChild(createDropdownButton(
+                "music_off",
+                "Instrumental",
+                { action: "lalal-split", jobId, stem: "instrumental" },
+                {
+                    trailingNode: createProviderLogo(),
+                    disabled: !lalalEnabled,
+                    title: lalalEnabled ? "" : "Lalal.ai is not connected",
+                },
+            ));
+            menu.appendChild(createDropdownButton(
+                "mic",
+                "A Cappella",
+                { action: "lalal-split", jobId, stem: "vocals" },
+                {
+                    trailingNode: createProviderLogo(),
+                    disabled: !lalalEnabled,
+                    title: lalalEnabled ? "" : "Lalal.ai is not connected",
+                },
+            ));
         }
 
-        dropdown.append(toggle, menu);
-        wrapper.appendChild(dropdown);
+        btnGroup.append(downloadBtn, toggle, menu);
+        wrapper.appendChild(btnGroup);
         return wrapper;
     }
 
-    if (["queued", "processing", "downloading", "transcoding"].includes(status || "")) {
+    if (actionCategory === "cancel") {
         const button = document.createElement("button");
         button.type = "button";
         button.className = "btn btn-danger btn-sm btn-icon";

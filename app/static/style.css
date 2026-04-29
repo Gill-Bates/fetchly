@@ -25,7 +25,6 @@
 /* ─── Logo colour ───────────────────────────────────────────────────────────
      App UI is dark-only, so the logo should always render for dark surfaces. */
 .logo {
-    color: #fff;
     filter: invert(1);
     width: 180px;
     height: auto;
@@ -38,11 +37,18 @@
 
 .table-responsive {
     overflow-x: auto;
-    overflow-y: auto;
-    scrollbar-gutter: stable;
+    overflow-y: hidden; /* verhindert ghost scroll */
+    /* Use auto gutter to avoid ghost scrollbar when content doesn't overflow */
+    scrollbar-gutter: auto;
     scrollbar-width: thin;
     scrollbar-color: rgba(255, 255, 255, 0.2) transparent;
     position: relative;
+    -webkit-overflow-scrolling: touch; /* iOS momentum scrolling */
+}
+
+/* verhindert Subpixel overflow durch Tabellenberechnung */
+.table-responsive > table {
+    min-width: 0;
 }
 
 /* Optional: cleaner scrollbar styling */
@@ -61,6 +67,7 @@
 }
 
 :root {
+    color-scheme: dark;
     --nav-height: 64px;
     --nav-offset: calc(var(--nav-height) + 8px);
 
@@ -143,6 +150,14 @@
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 40%, transparent);
 }
 
+button:focus-visible,
+.btn:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 35%, transparent);
+}
+
 .app-root {
     background:
         radial-gradient(1200px 600px at 10% -10%, rgba(99, 102, 241, 0.15), transparent 60%),
@@ -161,10 +176,25 @@
 }
 
 .app-shell {
-    min-height: calc(100vh - var(--nav-offset));
-    min-height: calc(100dvh - var(--nav-offset)); /* iOS Safari URL-bar fix */
+    min-height: 100dvh;
     display: flex;
     flex-direction: column;
+    overflow-x: hidden;
+}
+
+.app-root--dashboard {
+    height: 100dvh;
+    overflow: hidden;
+    overscroll-behavior: none;
+    padding-top: 0;
+}
+
+.app-root--dashboard .app-shell {
+    height: 100dvh;
+    min-height: 0;
+    padding-top: var(--nav-offset);
+    box-sizing: border-box;
+    overflow: hidden;
 }
 
 .app-shell-container {
@@ -176,6 +206,36 @@
     flex: 1 1 auto;
     padding-top: var(--space-5);
     padding-bottom: var(--space-6);
+    overflow-x: hidden;
+}
+
+.app-root--dashboard .app-main {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    overflow: hidden;
+}
+
+/* Ensure stable layout + prevent horizontal scroll issues on iOS */
+html {
+    height: 100%;
+    overflow-x: hidden;
+    overscroll-behavior-x: none;
+}
+
+body {
+    height: 100%;
+    overflow-x: hidden;
+    overscroll-behavior: none;
+    position: relative;
+}
+
+.dashboard-layout {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    min-height: 0;
+    overflow: hidden;
 }
 
 .settings-page-icon {
@@ -185,7 +245,7 @@
 /* ── Footer (Sticky) ─────────────────────────────────────────────────────── */
 
 .wb-footer {
-    margin-top: auto;
+    flex: 0 0 auto;
     padding: 0.75rem 1rem;
     display: flex;
     align-items: center;
@@ -309,6 +369,11 @@
     color: var(--text-muted);
 }
 
+.top-navbar,
+.table thead {
+    background: var(--surface-elevated);
+}
+
 /* ── Hero ─────────────────────────────────────────────────────────────────── */
 
 .hero {
@@ -399,10 +464,13 @@
 /* ── Surfaces ─────────────────────────────────────────────────────────────── */
 
 /* Consistent motion */
-.btn,
+.btn {
+    transition: background-color 0.18s ease, border-color 0.18s ease, transform 0.18s ease;
+}
+
 .form-control,
 .form-select {
-    transition: all 0.18s ease;
+    transition: border-color 0.18s ease, box-shadow 0.18s ease, background-color 0.18s ease;
 }
 
 .form-control,
@@ -505,6 +573,9 @@ button .material-symbols-outlined,
 
 .jobs-card-header {
     gap: var(--space-3);
+    flex: 0 0 auto !important;
+    height: auto !important;
+    min-height: 0 !important;
 }
 
 .jobs-card-title {
@@ -754,9 +825,8 @@ button .material-symbols-outlined,
     flex-direction: column;
     height: 100%;
     overflow: hidden;
-    background: color-mix(in srgb, var(--surface) 82%, transparent);
-    backdrop-filter: var(--blur-sm);
-    -webkit-backdrop-filter: var(--blur-sm);
+    /* Solid background instead of backdrop-filter for performance */
+    background: var(--surface-solid);
     box-shadow: 0 6px 18px rgba(0, 0, 0, 0.4);
     border: 1px solid var(--border);
     border-radius: var(--radius-lg);
@@ -764,7 +834,13 @@ button .material-symbols-outlined,
     padding: var(--space-4);
 }
 
-.ui-card > div {
+/* Only card body should expand, not header */
+.ui-card > .ui-card-body {
+    flex: 1;
+}
+
+/* Generic wrapper divs (non-header, non-body) can expand */
+.ui-card:not(.ui-card--stat) > div:not(.ui-card-header):not(.ui-card-body) {
     flex: 1;
 }
 
@@ -914,7 +990,9 @@ button .material-symbols-outlined,
 .ui-card-header {
     background: transparent;
     border-bottom: 1px solid var(--border);
-    padding: 1rem 1.25rem;
+    padding: 0.75rem 1rem;
+    flex: 0 0 auto;
+    min-height: 0;
 }
 
 .ui-card-body {
@@ -967,6 +1045,7 @@ button .material-symbols-outlined,
 .lalal-tile-actions {
     display: flex;
     flex-direction: column;
+    align-items: flex-end;
     gap: var(--space-2);
     margin-top: var(--space-2);
 }
@@ -974,7 +1053,12 @@ button .material-symbols-outlined,
 .lalal-tile-action-row {
     display: flex;
     flex-wrap: wrap;
+    justify-content: flex-end;
     gap: var(--space-2);
+}
+
+#lalalStatusLine {
+    text-align: right;
 }
 
 .lalal-status-email {
@@ -1007,6 +1091,64 @@ button .material-symbols-outlined,
     grid-template-columns: 320px 1fr;
     gap: 1.2rem;
     margin-top: 1rem;
+
+    /* allow collapse */
+    min-height: 0;
+}
+
+/* ─── Collapse when empty ───────────────────────────────────────────── */
+
+/* If container has no actual content → remove it visually */
+.video-preview-grid:empty {
+    display: none !important;
+}
+
+/* If JS keeps nodes but no data → also collapse */
+.video-preview-grid.is-empty {
+    display: none !important;
+}
+
+/* Prevent parent from reserving space */
+#videoPreviewGrid.d-none {
+    display: none !important;
+    margin-top: 0 !important;
+}
+
+/* Extra safety: no phantom height */
+#videoPreviewGrid {
+    min-height: 0;
+}
+
+/* When visible → restore spacing */
+#videoPreviewGrid:not(.d-none) {
+    margin-top: 1rem;
+}
+
+/* ── Submit Form Card ────────────────────────────────────────────────────── */
+
+/* Card containing the submit form should shrink to fit content */
+#submitCard {
+    height: auto !important;
+    flex: 0 0 auto !important;
+    min-height: 0 !important;
+}
+
+/* Inner wrapper div */
+#submitCard > div {
+    flex: 0 0 auto !important;
+    height: auto !important;
+}
+
+/* Fallback using :has() for broader support */
+.ui-card:has(#submitForm) {
+    height: auto !important;
+    flex: 0 0 auto !important;
+    min-height: 0 !important;
+}
+
+.ui-card:has(#submitForm) > div {
+    flex: 0 0 auto !important;
+    height: auto !important;
 }
 
 .video-thumb img {
@@ -1016,15 +1158,14 @@ button .material-symbols-outlined,
 }
 
 .video-meta {
-    background: var(--surface-50);
+    /* Solid background instead of backdrop-filter for performance */
+    background: var(--surface-solid);
     border: 1px solid var(--border);
     border-radius: var(--radius-lg);
     padding: 1rem;
     display: flex;
     flex-direction: column;
     gap: 0.6rem;
-    backdrop-filter: var(--blur-sm);
-    -webkit-backdrop-filter: var(--blur-sm);
 }
 
 .meta-row {
@@ -1061,7 +1202,10 @@ button .material-symbols-outlined,
     color: var(--text);
     background: transparent;
     position: relative;
-    z-index: 1;
+    width: 100%;
+    max-width: 100%;
+    border-collapse: separate;
+    border-spacing: 0;
 }
 
 /* Limit table overrides to actual cells only. */
@@ -1077,7 +1221,11 @@ button .material-symbols-outlined,
 
 .table thead {
     /* Use solid background for sticky header compatibility and better z-index stacking */
+    position: sticky;
+    top: 0;
+    z-index: 5;
     background: var(--surface-solid);
+    will-change: transform;
 }
 
 .table thead th {
@@ -1110,7 +1258,6 @@ button .material-symbols-outlined,
 .table tbody tr {
     background: color-mix(in srgb, var(--surface) 88%, transparent);
     border-bottom: 1px solid var(--border);
-    position: relative;
 }
 
 .table tbody tr:hover {
@@ -1210,9 +1357,13 @@ td[data-label="Title"] {
 
 #jobsCard {
     display: flex;
+    flex: 1 1 auto;
     flex-direction: column;
     min-height: 0;
-    overflow: visible;
+    /* Prevent ghost scroll on iOS */
+    overflow: hidden;
+    touch-action: pan-y;
+    overscroll-behavior-x: none;
 }
 
 #jobsCard .ui-card-body {
@@ -1220,21 +1371,34 @@ td[data-label="Title"] {
     flex-direction: column;
     flex: 1 1 auto;
     min-height: 0;
-    overflow: visible;
+    overflow: hidden;
 }
 
 #jobsCard .table-responsive {
     flex: 1 1 auto;
     min-height: 0;
-    max-height: calc(100vh - 300px);
     overflow-y: auto;
     overflow-x: hidden;
-    scrollbar-gutter: stable;
+    touch-action: pan-y;
+    overscroll-behavior: contain;
+    -webkit-overflow-scrolling: touch;
+    /* Reset scrollbar properties */
+    scrollbar-width: none;
+    scrollbar-gutter: unset;
+    -ms-overflow-style: none;
+}
+
+#jobsCard .table-responsive::-webkit-scrollbar {
+    display: none;
 }
 
 .jobs-table {
     table-layout: fixed;
     width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    border-collapse: separate;
+    border-spacing: 0;
 }
 
 .jobs-table .col-title {
@@ -1302,8 +1466,16 @@ td[data-label="Title"] {
 #jobsCard .table thead th {
     position: sticky;
     top: 0;
-    z-index: 2;
+    z-index: 6;
     background: var(--surface-solid);
+    box-shadow: 0 2px 0 var(--border);
+}
+
+#jobsSentinel {
+    display: block;
+    width: 100%;
+    min-height: 1px;
+    flex: 0 0 auto;
 }
 
 /* ── Status ──────────────────────────────────────────────────────────────── */
@@ -1316,15 +1488,13 @@ td[data-label="Title"] {
     justify-content: flex-end;
 }
 
-/* Ensure dropdown can escape table overflow */
-.action-cell-wrap .dropdown {
-    position: static;
-    display: inline-flex;
-}
-
-/* Popper uses fixed positioning - ensure proper stacking */
-.action-cell-wrap .dropdown-menu.show {
-    position: fixed !important;
+/* Ensure dropdown menus can escape table overflow */
+.action-cell-wrap .dropdown-menu {
+    position: fixed;
+    z-index: 1080;
+    /* Fallback in case JS positioning fails */
+    top: -9999px;
+    left: -9999px;
 }
 
 /* ── Status ──────────────────────────────────────────────────────────────── */
@@ -1512,8 +1682,6 @@ td[data-label="Title"] {
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
     min-width: 11rem;
     z-index: 2000;
-    /* Escape overflow:hidden containers via fixed positioning */
-    position: fixed;
 }
 
 /* Bootstrap/Popper positions table dropdowns inline. */
@@ -1548,7 +1716,44 @@ td:last-child {
     margin: 0;
 }
 
+.dropdown-provider-logo,
+.trim-provider-logo {
+    width: auto;
+    height: 0.82rem;
+    flex: 0 0 auto;
+    opacity: 0.9;
+    display: block;
+}
+
+.dropdown-provider-logo {
+    margin-left: auto;
+}
+
+.trim-provider-button {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.45rem;
+}
+
+.trim-provider-logo {
+    margin-left: 0.1rem;
+}
+
+.dropdown-item:disabled .dropdown-provider-logo,
+.dropdown-item.disabled .dropdown-provider-logo,
+.trim-provider-button:disabled .trim-provider-logo {
+    opacity: 0.45;
+    filter: grayscale(1);
+}
+
 /* ── Modal ───────────────────────────────────────────────────────────────── */
+
+.modal-backdrop.show {
+    opacity: 1;
+    background-color: rgba(10, 15, 30, 0.72);
+    backdrop-filter: blur(10px) saturate(120%);
+    -webkit-backdrop-filter: blur(10px) saturate(120%);
+}
 
 .modal-content {
     background: color-mix(in srgb, var(--surface) 88%, transparent);
@@ -1666,6 +1871,89 @@ td:last-child {
 .modal-header,
 .modal-footer {
     border-color: var(--border);
+}
+
+/* ── Trim Modal Waveform ─────────────────────────────────────────────────── */
+
+#trimWave {
+    width: 100%;
+    height: 120px;
+    min-height: 120px;
+    position: relative;
+    isolation: isolate;
+    background: var(--surface-elevated);
+    border-radius: var(--radius-md);
+    border: 1px solid var(--border);
+    overflow: hidden;
+    cursor: grab;
+}
+
+#trimWave.has-selection {
+    cursor: default;
+}
+
+#trimWave.has-selection::part(regions-container) {
+    background: transparent;
+}
+
+#trimWave::part(region) {
+    background: rgba(99, 102, 241, 0.55) !important;
+    box-shadow:
+        inset 2px 0 0 #c7d2fe,
+        inset -2px 0 0 #c7d2fe,
+        0 0 0 1px rgba(99, 102, 241, 0.25);
+}
+
+#trimWave::part(region):hover {
+    background: rgba(99, 102, 241, 0.6) !important;
+}
+
+#trimWave::part(region-handle-left),
+#trimWave::part(region-handle-right) {
+    width: 8px !important;
+    min-width: 8px !important;
+    background: rgba(255, 255, 255, 0.9) !important;
+}
+
+#trimWave::part(region-handle-left) {
+    border-left-color: #c7d2fe !important;
+}
+
+#trimWave::part(region-handle-right) {
+    border-right-color: #c7d2fe !important;
+}
+
+#trimWave::part(cursor) {
+    background: #f59e0b !important;
+    width: 2px !important;
+    opacity: 0.9;
+}
+
+.trim-overlay {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.45);
+    pointer-events: none;
+    z-index: 10;
+    opacity: 0;
+    transition: opacity 0.12s ease;
+}
+
+.trim-overlay.is-visible {
+    opacity: 1;
+}
+
+.trim-overlay-left {
+    left: 0;
+}
+
+.trim-overlay-right {
+    left: 100%;
+}
+
+#trimInfo {
+    color: var(--text-muted);
 }
 
 /* ── Empty State ─────────────────────────────────────────────────────────── */
@@ -1790,7 +2078,7 @@ td:last-child {
         overflow: hidden;
     }
 
-    /* ── Row 1: Title – volle Breite ────────────────────────────── */
+    /* Row 1: Title – full width */
     .table tbody td[data-label="Title"] {
         grid-column: 1 / -1;
         grid-row: 1;
@@ -1828,7 +2116,7 @@ td:last-child {
         white-space: normal !important;
     }
 
-    /* Created: flex-column für ::before-Label + Wert */
+    /* Created: flex-column for ::before label + value */
     .table tbody td[data-label="Created"] {
         display: flex !important;
         flex-direction: column;
@@ -1857,8 +2145,8 @@ td:last-child {
     .table tbody td[data-label="Quality"] { grid-column: 2; grid-row: 2; }
     .table tbody td[data-label="BPM"]     { grid-column: 3; grid-row: 2; }
     .table tbody td[data-label="Created"] { grid-column: 4; grid-row: 2; justify-content: flex-start; align-self: center; text-align: left; }
-    /* col 5 = 1fr spacer (leer, kein Element) */
-    /* Status+Action: ganz rechts */
+    /* Col 5 = 1fr spacer (empty, no element) */
+    /* Status+Action: far right */
     .table tbody td[data-label="Status"]  { grid-column: 6; grid-row: 2; align-self: center; }
 
     /* Date: muted small text, only date-part visible */
@@ -1979,6 +2267,11 @@ td:last-child {
         min-width: unset;
     }
 
+    #jobsCard {
+        flex: 1 0 16rem;
+        min-height: 0;
+    }
+
     #jobsCard .table-responsive {
         overflow-x: hidden;
     }
@@ -2012,17 +2305,10 @@ td:last-child {
         margin-left: auto;
     }
 
-    /* Keep dropdowns visible on mobile */
-    #jobsCard .ui-card-body {
-        overflow: visible;
-    }
-
     #jobsCard .table-responsive {
         flex: 1 1 auto;
         min-height: 0;
-        /* No vh-based max-height on mobile – rows are cards, page scroll handles it */
-        max-height: none;
-        overflow-y: visible;
+        overflow-y: auto;
         overflow-x: hidden;
     }
 
@@ -2078,7 +2364,7 @@ td:last-child {
 
 @media (max-width: 768px) {
     .d-mobile-only {
-        display: contents;
+        display: block;
     }
 }
 
@@ -2261,8 +2547,7 @@ td:last-child {
     /* calc(100vh) in scrollable containers causes clipping on iOS
        (URL bar is included in vh but not in visible area) */
     #jobsCard .table-responsive {
-        max-height: none;
-        overflow-y: visible;
+        overflow-y: auto;
     }
 
     /* toast backdrop-filter can trigger compositor bugs on older iPhones */
@@ -2276,9 +2561,8 @@ td:last-child {
     *,
     *::before,
     *::after {
-        animation-duration: 0.01ms !important;
-        animation-iteration-count: 1 !important;
-        transition-duration: 0.01ms !important;
+        animation: none !important;
+        transition: none !important;
         scroll-behavior: auto !important;
     }
 }

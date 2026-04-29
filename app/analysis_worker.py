@@ -360,7 +360,3 @@ def stop_analysis_workers(timeout: float = 30.0) -> None:
     with _worker_lock:
         _worker_threads[:] = alive_threads
         _workers_started = bool(alive_threads)
-
-    with _worker_lock:
-        _worker_threads[:] = alive_threads
-        _workers_started = bool(alive_threads)

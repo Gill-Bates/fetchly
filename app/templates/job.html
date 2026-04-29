@@ -4,7 +4,7 @@
 
 {% block navbar %}
 {% from "macros/navbar.html" import navbar %}
-{{ navbar(show_back=True, show_settings=False) }}
+{{ navbar(show_back=True, show_settings=False, csrf_token=csrf_token) }}
 {% endblock %}
 
 {% block content %}
@@ -17,63 +17,75 @@
     {% if not job %}
         <div class="alert alert-warning" role="alert">Job not found.</div>
     {% else %}
+        {% set job_url = job['url'] or '' %}
+        {% set job_url_lower = job_url | lower %}
+        {% set external_job_url = job_url if job_url_lower.startswith('https://') or job_url_lower.startswith('http://') else '' %}
         <div class="ui-card">
             <div class="ui-card-body">
                 <dl class="status-grid mb-0">
                     <dt>ID</dt>
-                    <dd class="font-monospace">{{ job["id"] }}</dd>
+                    <dd class="font-monospace">{{ job['id'] | e }}</dd>
 
                     <dt>URL</dt>
                     <dd>
-                        <a href="{{ job["url"] }}"
-                           title="{{ job['url'] }}"
+                        {% if external_job_url %}
+                        <a href="{{ external_job_url | e }}"
+                           title="{{ external_job_url | e }}"
                            target="_blank"
-                           rel="noopener noreferrer">{{ job["url"] }}</a>
+                           rel="noopener noreferrer">{{ external_job_url | e }}</a>
+                        {% else %}
+                        <span class="text-muted">{{ job_url | e }}</span>
+                        {% endif %}
                     </dd>
 
                     <dt>Format</dt>
-                    <dd>{{ job["type"] }}</dd>
+                    <dd>{{ job['type'] | e }}</dd>
 
                     <dt>Quality</dt>
-                    <dd>{% if job["type"] == "audio" %}MP3{% else %}{{ job["quality"] }}{% endif %}</dd>
+                    <dd>{% if job['type'] == 'audio' %}MP3{% else %}{{ job['quality'] | e }}{% endif %}</dd>
 
                     <dt>Status</dt>
                     <dd>
-                        <span id="status" class="status-pill {% if job['status'] in ('done', 'analysis_done') %}status-pill-success{% elif job['status'] == 'error' %}status-pill-danger{% else %}status-pill-primary{% endif %}">
-                            <span id="statusText">{{ "done" if job["status"] == "analysis_done" else job["status"] }}</span>
+                        <span id="status" class="status-pill status-pill-{{ job['status'] | status_class }}">
+                            <span id="statusText">{{ ('done' if job['status'] == 'analysis_done' else job['status']) | e }}</span>
                         </span>
                     </dd>
 
                     <dt class="d-none" id="progressLabel">Progress</dt>
                     <dd class="d-none" id="progressRow">
-                        <div class="progress progress-thin">
-                            <div id="progressBar" class="progress-bar"></div></div>
+                        <div class="progress progress-thin" role="none">
+                            <div id="progressBar"
+                                 class="progress-bar"
+                                 role="progressbar"
+                                 aria-valuenow="0"
+                                 aria-valuemin="0"
+                                 aria-valuemax="100"></div>
                         </div>
                         <small id="etaText" class="text-muted"></small>
                     </dd>
 
                     <dt>BPM</dt>
-                    <dd class="{% if job['bpm'] is none %}text-muted{% endif %}" id="bpmRow"><span id="bpmValue">{{ job["bpm"] or "–" }}</span></dd>
+                    <dd class="{% if job['bpm'] is none %}text-muted{% endif %}" id="bpmRow"><span id="bpmValue">{{ (job['bpm'] if job['bpm'] is not none else '–') | e }}</span></dd>
 
                     <dt>Confidence</dt>
-                    <dd><span id="bpmConfidence">{% if job["bpm_confidence"] is not none %}{{ '%.2f'|format(job["bpm_confidence"]) }}{% else %}–{% endif %}</span></dd>
+                    <dd><span id="bpmConfidence">{% if job['bpm_confidence'] is not none %}{{ '%.2f'|format(job['bpm_confidence']) }}{% else %}–{% endif %}</span></dd>
 
                     <dt>Created</dt>
-                    <dd>{{ job["created_at"] | localtime | safe }}</dd>
+                    <dd>{{ job['created_at'] | localtime }}</dd>
 
-                    {% if job["finished_at"] %}
+                    {% if job['finished_at'] %}
                     <dt>Completed</dt>
-                    <dd>{{ job["finished_at"] | localtime | safe }}</dd>
+                    <dd>{{ job['finished_at'] | localtime }}</dd>
                     {% endif %}
 
                     <dt>Message</dt>
-                    <dd><span id="message">{{ job["message"] or "–" }}</span></dd>
+                    <dd><span id="message">{{ (job['message'] or '–') | e }}</span></dd>
                 </dl>
 
                 <div class="mt-4">
                     <a id="downloadLink"
-                       class="btn btn-primary btn-lg {% if job["status"] not in ('done', 'analysis', 'analysis_done') %}d-none{% endif %}"
-                       href="/download/{{ job["id"] }}">
+                       class="btn btn-primary btn-lg {% if job['status'] not in ('done', 'analysis', 'analysis_done') %}d-none{% endif %}"
+                       href="/download/{{ job['id'] | e }}">
                         <span class="material-symbols-outlined icon-inline" aria-hidden="true">download</span>
                         Download
                     </a>
@@ -83,7 +95,7 @@
 
         <script>
             {
-                const jobId = "{{ job["id"] }}";
+                const jobId = {{ job['id'] | tojson }};
                 const statusEl = document.getElementById("status");
                 const messageEl = document.getElementById("message");
                 const bpmEl = document.getElementById("bpmValue");
@@ -137,6 +149,7 @@
                         progressLabel.classList.remove("d-none");
                         const pct = Math.max(0, Math.min(100, Number(payload.progress) || 0));
                         progressBar.style.width = `${pct}%`;
+                        progressBar.setAttribute("aria-valuenow", String(pct));
                     }
 
                     if (payload.eta_seconds != null) {
@@ -167,6 +180,12 @@
                     updateProgress(payload);
 
                     if (payload.status && FINAL_STATUSES.has(payload.status)) {
+                        shouldReconnect = false;
+                        if (reconnectTimer != null) {
+                            window.clearTimeout(reconnectTimer);
+                            reconnectTimer = null;
+                        }
+                        try { ws?.close(); } catch (_) {}
                         linkEl.classList.remove("d-none");
                     }
                 }
@@ -175,6 +194,7 @@
                     ws = new WebSocket(`${proto}://${location.host}/ws`);
 
                     ws.onopen = () => {
+                        reconnectTimer = null;
                         ws.send("subscribe");
                     };
 
@@ -186,7 +206,7 @@
                     };
                 }
 
-                if (!FINAL_STATUSES.has("{{ job['status'] }}")) {
+                if (!FINAL_STATUSES.has({{ job['status'] | tojson }})) {
                     connect();
                 }
 
@@ -194,6 +214,7 @@
                     shouldReconnect = false;
                     if (reconnectTimer != null) {
                         window.clearTimeout(reconnectTimer);
+                        reconnectTimer = null;
                     }
                     try { ws?.close(); } catch (_) {}
                 });
@@ -203,32 +224,4 @@
 </div>
 {% endblock %}
 
-{% block page_scripts %}
-<script>
-    function getCookie(name) {
-        const prefix = `${name}=`;
-        const found = document.cookie
-            .split(";")
-            .map((v) => v.trim())
-            .find((v) => v.startsWith(prefix));
-        return found ? decodeURIComponent(found.slice(prefix.length)) : "";
-    }
-
-    document.getElementById("logoutBtn")?.addEventListener("click", async (event) => {
-        event.preventDefault();
-        try {
-            const csrf = getCookie("tubeyou_csrf");
-            await fetch("/logout", {
-                method: "POST",
-                credentials: "same-origin",
-                headers: {
-                    "X-CSRF-Token": csrf,
-                },
-            });
-        } catch (_err) {
-            // Ignore and continue redirecting to login.
-        }
-        window.location.assign("/logout");
-    });
-</script>
-{% endblock %}
+{% block page_scripts %}{% endblock %}

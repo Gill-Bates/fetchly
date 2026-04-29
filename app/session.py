@@ -7,8 +7,6 @@
 # Sliding-window session management with idle timeout and hard expiry.
 #
 
-from __future__ import annotations
-
 import base64
 import hmac
 import logging
@@ -17,10 +15,9 @@ import secrets
 import threading
 from dataclasses import dataclass
 from time import monotonic, time
-from typing import TYPE_CHECKING, Final, TypedDict
+from typing import Final, TypedDict
 
-if TYPE_CHECKING:
-    from fastapi import Request, Response
+from fastapi import Request, Response
 
 from .db import get_settings
 
@@ -40,7 +37,9 @@ if not _SECRET_KEY:
     raise RuntimeError("TUBEYOU_SECRET_KEY is not set. Cannot start with an empty session signing key.")
 _SECRET_KEY_BYTES = _SECRET_KEY.encode("utf-8")
 _IDLE_TIMEOUT_CACHE_TTL: Final = 60.0
-_IDLE_TIMEOUT_CACHE: tuple[float, int] | None = None
+type _IdleTimeoutCacheEntry = tuple[float, int]
+
+_IDLE_TIMEOUT_CACHE: _IdleTimeoutCacheEntry | None = None
 _IDLE_TIMEOUT_CACHE_LOCK = threading.Lock()
 
 logger = logging.getLogger(__name__)
@@ -56,6 +55,7 @@ class SessionData:
     issued_at: int      # Unix timestamp of original login
     last_activity: int  # Unix timestamp of last activity (for sliding window)
     nonce: str
+    session_version: int
 
 
 class SessionInfo(TypedDict):
@@ -67,7 +67,11 @@ class SessionInfo(TypedDict):
 
 
 def _encode_token(payload: str, signature: str) -> str:
-    """Return a base64url-encoded payload:signature token without padding."""
+    """Return an unpadded base64url token encoding ``{payload}:{signature}``.
+
+    The payload itself is colon-delimited and currently stores the username,
+    issued-at timestamp, last-activity timestamp, nonce, and session version.
+    """
     raw = f"{payload}:{signature}".encode("utf-8")
     return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
 
@@ -90,16 +94,25 @@ def _get_idle_timeout_seconds() -> int:
             if now - cached_at < _IDLE_TIMEOUT_CACHE_TTL:
                 return cached_value
 
-    try:
-        minutes = int(get_settings().get("session_idle_minutes", _DEFAULT_IDLE_MINUTES))
-        result = max(5, min(minutes, 1440)) * 60
-    except Exception as exc:
-        logger.warning("Failed to read session_idle_minutes from settings: %s", exc)
-        result = _DEFAULT_IDLE_MINUTES * 60
+        try:
+            minutes = int(get_settings().get("session_idle_minutes", _DEFAULT_IDLE_MINUTES))
+            result = max(5, min(minutes, 1440)) * 60
+        except Exception as exc:
+            logger.warning("Failed to read session_idle_minutes from settings: %s", exc)
+            result = _DEFAULT_IDLE_MINUTES * 60
 
-    with _IDLE_TIMEOUT_CACHE_LOCK:
         _IDLE_TIMEOUT_CACHE = (now, result)
-    return result
+        return result
+
+
+def _get_session_version() -> int:
+    """Return the current session version used for global session invalidation."""
+    try:
+        version = int(get_settings().get("session_version", 0) or 0)
+    except Exception as exc:
+        logger.warning("Failed to read session_version from settings: %s", exc)
+        return 0
+    return max(0, version)
 
 
 def _sign_payload(payload: str) -> str:
@@ -107,24 +120,33 @@ def _sign_payload(payload: str) -> str:
     return hmac.digest(_SECRET_KEY_BYTES, payload.encode("utf-8"), "sha256").hex()
 
 
+def _validate_live_session(session: SessionData, now: int) -> bool:
+    """Return True when a parsed session is still current and accepted."""
+    if _is_session_expired(session, now):
+        return False
+    return session.session_version == _get_session_version()
+
+
 def create_session(username: str) -> str:
     """Create a new session token for a user.
     
-    Token format: username:issued_at:last_activity:nonce:signature
+    Token format: username:issued_at:last_activity:nonce:session_version:signature
     - issued_at: Login time (for 24h hard limit)
     - last_activity: Last request time (for sliding idle timeout)
     """
     now = int(time())
     nonce = secrets.token_urlsafe(12)
-    payload = f"{username}:{now}:{now}:{nonce}"
+    session_version = _get_session_version()
+    payload = f"{username}:{now}:{now}:{nonce}:{session_version}"
     return _encode_token(payload, _sign_payload(payload))
 
 
 def parse_session(token: str | None) -> SessionData | None:
     """Parse and validate a session token.
     
-    Returns SessionData if token is structurally valid and signature matches.
-    Does NOT check expiry - use validate_session() for full validation.
+    Returns SessionData when the unpadded base64 token has the expected
+    six-part structure and its signature matches. This does not check expiry;
+    use validate_session() for full validation.
     """
     if not token:
         return None
@@ -133,12 +155,14 @@ def parse_session(token: str | None) -> SessionData | None:
         raw = base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8")
         parts = raw.split(":")
 
-        if len(parts) != 5:
+        if len(parts) != 6:
             return None
 
-        username, issued_at_str, last_activity_str, nonce, sig = parts
-        payload = f"{username}:{issued_at_str}:{last_activity_str}:{nonce}"
+        username, issued_at_str, last_activity_str, nonce, session_version_str, sig = parts
+        payload = f"{username}:{issued_at_str}:{last_activity_str}:{nonce}:{session_version_str}"
+
         last_activity = int(last_activity_str)
+        session_version = max(0, int(session_version_str))
         
         expected = _sign_payload(payload)
         if not hmac.compare_digest(sig, expected):
@@ -149,6 +173,7 @@ def parse_session(token: str | None) -> SessionData | None:
             issued_at=int(issued_at_str),
             last_activity=last_activity,
             nonce=nonce,
+            session_version=session_version,
         )
     except Exception:
         return None
@@ -169,7 +194,7 @@ def validate_session(token: str | None) -> str | None:
         return None
 
     now = int(time())
-    if _is_session_expired(session, now):
+    if not _validate_live_session(session, now):
         return None
 
     return session.username
@@ -186,20 +211,20 @@ def renew_session(token: str | None) -> str | None:
         return None
 
     now = int(time())
-    if _is_session_expired(session, now):
+    if not _validate_live_session(session, now):
         return None
 
     nonce = secrets.token_urlsafe(12)
-    payload = f"{session.username}:{session.issued_at}:{now}:{nonce}"
+    payload = f"{session.username}:{session.issued_at}:{now}:{nonce}:{session.session_version}"
     return _encode_token(payload, _sign_payload(payload))
 
 
 def get_session_info(token: str | None) -> SessionInfo | None:
-    """Return detailed session metadata for display or debugging.
+    """Return session metadata including computed expiry timestamps.
 
-    Returns None only if the token cannot be parsed or the signature is invalid.
-    This does not check expiry; callers must compare the returned timestamps
-    against the current time themselves.
+    The token is parsed and signature-validated, but expiry is not evaluated.
+    Returns None only when parsing or signature validation fails. Callers must
+    compare the returned timestamps against the current time themselves.
     """
     session = parse_session(token)
     if not session:
@@ -214,12 +239,9 @@ def get_session_info(token: str | None) -> SessionInfo | None:
         "hard_expires_at": session.issued_at + SESSION_HARD_LIMIT_SECONDS,
         "idle_expires_at": session.last_activity + idle_timeout,
     }
-def authenticated_user(token: str | None) -> str | None:
-    """Get authenticated username from token."""
-    return validate_session(token)
 
 
-def set_session_cookie(response: Response, token: str, request: "Request") -> None:
+def set_session_cookie(response: Response, token: str, request: Request) -> None:
     """Set session cookie on response with appropriate security flags."""
     response.set_cookie(
         key=SESSION_COOKIE,
@@ -231,7 +253,7 @@ def set_session_cookie(response: Response, token: str, request: "Request") -> No
     )
 
 
-def delete_session_cookie(response: Response, request: "Request") -> None:
+def delete_session_cookie(response: Response, request: Request) -> None:
     """Delete session cookie from response."""
     response.delete_cookie(
         SESSION_COOKIE,

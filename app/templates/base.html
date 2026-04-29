@@ -1,22 +1,24 @@
 <!DOCTYPE html>
-<html lang="en" data-lalal-enabled="{{ lalal_enabled | default(false) | tojson | forceescape }}">
+<html lang="en" data-bs-theme="dark" data-lalal-enabled="{{ lalal_enabled | default(false) | tojson | forceescape }}">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <meta name="theme-color" content="#0f172a">
     {% block head_meta %}{% endblock %}
     <title>{% block title %}tubeyou{% endblock %}</title>
     {% block head_preconnect %}{% endblock %}
     <link href="/static/vendor/bootstrap.min.css?v=20260428b" rel="stylesheet">
     {% block app_styles %}
-    <link href="/static/style.css?v=20260428b" rel="stylesheet">
+    <link href="/static/style.css?v=20260429t" rel="stylesheet">
     {% endblock %}
     {% block head_extra %}{% endblock %}
 </head>
-<body class="app-root">
+<body class="app-root{% block body_class %}{% endblock %}">
 <div class="app-shell">
     {% from "macros/navbar.html" import navbar %}
     {% block navbar %}
-    {{ navbar() }}
+    {{ navbar(csrf_token=csrf_token) }}
     {% endblock %}
 
     {% block main_shell %}
@@ -30,7 +32,7 @@
     {% block footer %}
     <footer class="wb-footer">
         <div class="wb-footer-content">
-            <span>tubeyou v{{ VERSION }}</span>
+            <span>tubeyou v{{ VERSION | e }} (<span class="font-monospace">{{ (BUILD_INFO or '')[:7] | e }}</span>)</span>
             <span>&middot;</span>
             <span>&copy; {{ now().year }} Gill-Bates</span>
             <span>&middot;</span>

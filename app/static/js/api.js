@@ -6,15 +6,136 @@
 import { CONFIG } from "./config.js";
 
 const TIMEOUT_DEFAULT_MS = 10_000;
+// Kept separate so the jobs polling budget can diverge later without changing all calls.
 const TIMEOUT_FETCH_JOBS_MS = 10_000;
 const TIMEOUT_VIDEO_INFO_MS = 15_000;
 const TIMEOUT_SUBMIT_JOB_MS = 60_000;
+const RETRYABLE_STATUS_CODES = new Set([502, 503, 504]);
+const MAX_ERROR_TEXT_BYTES = 2_048;
+const DEFAULT_RETRY_COUNT = 2;
+const _inFlightRequests = new Map();
 
 /**
- * Extract a readable message from a plain error object.
- * Checks `detail` then `error` then falls back to all values.
+ * @typedef {RequestInit & { signal?: AbortSignal }} ApiOptions
+ */
+
+class ApiHttpError extends Error {
+    /**
+     * @param {number} status
+     * @param {string} message
+     * @param {string | null} [retryAfter]
+     */
+    constructor(status, message, retryAfter = null) {
+        super(message);
+        this.name = "ApiHttpError";
+        this.status = status;
+        this.retryAfter = retryAfter;
+    }
+}
+
+class ApiTimeoutError extends Error {
+    /**
+     * @param {number} timeoutMs
+     */
+    constructor(timeoutMs) {
+        super(`Request timed out after ${Math.ceil(timeoutMs / 1000)}s`);
+        this.name = "ApiTimeoutError";
+        this.timeoutMs = timeoutMs;
+    }
+}
+
+function _sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function _retryDelayMs(attempt) {
+    return 250 * (2 ** attempt);
+}
+
+function _formatRetryAfter(retryAfter) {
+    if (!retryAfter) {
+        return "a moment";
+    }
+
+    const numericRetryAfter = Number(retryAfter);
+    if (Number.isFinite(numericRetryAfter) && numericRetryAfter > 0) {
+        return `${Math.ceil(numericRetryAfter)}s`;
+    }
+
+    const retryAt = Date.parse(retryAfter);
+    if (Number.isFinite(retryAt)) {
+        const seconds = Math.max(1, Math.ceil((retryAt - Date.now()) / 1000));
+        return `${seconds}s`;
+    }
+
+    return retryAfter;
+}
+
+function _isRetryableFetchError(error) {
+    return error instanceof TypeError || error instanceof ApiTimeoutError;
+}
+
+function _isRetryableStatus(status) {
+    return RETRYABLE_STATUS_CODES.has(status);
+}
+
+function _normalizeHeaders(headers) {
+    if (!headers) {
+        return [];
+    }
+
+    const normalized = headers instanceof Headers ? headers : new Headers(headers);
+    return [...normalized.entries()].sort(([a], [b]) => a.localeCompare(b));
+}
+
+function _requestKey(url, options = {}) {
+    const method = String(options.method ?? "GET").toUpperCase();
+    if (method !== "GET" && method !== "HEAD") {
+        throw new Error(`_apiCallDeduped only supports GET/HEAD requests, got ${method}`);
+    }
+
+    return JSON.stringify({
+        method,
+        url,
+        headers: _normalizeHeaders(options.headers),
+    });
+}
+
+function _waitForAbort(signal) {
+    let onAbort = null;
+    const promise = new Promise((_, reject) => {
+        if (signal.aborted) {
+            reject(new DOMException("Request already aborted", "AbortError"));
+            return;
+        }
+
+        onAbort = () => {
+            signal.removeEventListener("abort", onAbort);
+            reject(new DOMException("Request aborted", "AbortError"));
+        };
+
+        signal.addEventListener("abort", onAbort, { once: true });
+    });
+
+    return {
+        promise,
+        cleanup: () => {
+            if (onAbort) {
+                signal.removeEventListener("abort", onAbort);
+            }
+        },
+    };
+}
+
+/**
+ * Extract a human-readable error message from a JSON error response object.
+ *
+ * Priority order:
+ * 1. `detail` (FastAPI convention)
+ * 2. `error` (application convention)
+ * 3. Concatenation of all object values as a lossy fallback
  * @param {Record<string, unknown>} obj
- * @returns {string}
+ * @returns {string} Empty string if no readable message is present.
  */
 function _extractMessages(obj) {
     for (const key of ["detail", "error"]) {
@@ -46,18 +167,79 @@ export function toErrorMessage(value) {
 }
 
 async function parseError(response) {
-    const text = await response.text().catch(() => "");
+    const text = await _readResponseSnippet(response, MAX_ERROR_TEXT_BYTES);
     let data;
-    try { data = JSON.parse(text); } catch { data = {}; }
-    return toErrorMessage(data) || `HTTP ${response.status}: ${text.slice(0, 200)}`;
+    try {
+        data = JSON.parse(text);
+    } catch {
+        data = {};
+    }
+
+    const message = toErrorMessage(data);
+    if (message) {
+        return message;
+    }
+
+    const statusText = response.statusText ? `: ${response.statusText}` : "";
+    return text ? `HTTP ${response.status}${statusText}: ${text.slice(0, 200)}` : `HTTP ${response.status}${statusText}`;
+}
+
+async function _readResponseSnippet(response, maxBytes = MAX_ERROR_TEXT_BYTES) {
+    const reader = response.body?.getReader();
+    if (!reader) {
+        return "";
+    }
+
+    const collected = new Uint8Array(maxBytes);
+    let offset = 0;
+
+    try {
+        while (offset < maxBytes) {
+            const { done, value } = await reader.read();
+            if (done || !value) {
+                break;
+            }
+
+            const remaining = maxBytes - offset;
+            const chunk = value.byteLength > remaining ? value.subarray(0, remaining) : value;
+            collected.set(chunk, offset);
+            offset += chunk.byteLength;
+        }
+
+        return new TextDecoder().decode(collected.subarray(0, offset));
+    } catch {
+        return "";
+    } finally {
+        try {
+            await reader.cancel();
+        } catch {
+            // Ignore cancellation failures when the body is already closed.
+        }
+    }
+}
+
+function _cancelResponseBody(response) {
+    if (!response.body) {
+        return;
+    }
+
+    void response.body.cancel().catch(() => {
+        // Ignore cancellation failures when the body is already closed.
+    });
 }
 
 /**
- * Execute fetch with timeout and optional external cancellation.
+ * Fetch a URL with a timeout while propagating external cancellation.
+ *
+ * Rejects immediately if `options.signal` is already aborted.
+ * Throws `ApiTimeoutError` when the timeout expires.
+ * Propagates external `AbortError` instances unchanged.
  * @param {string} url
- * @param {RequestInit & { signal?: AbortSignal }} [options]
- * @param {number} [timeoutMs]
+ * @param {ApiOptions} [options]
+ * @param {number} [timeoutMs] - Timeout in milliseconds for a single attempt.
  * @returns {Promise<Response>}
+ * @throws {ApiTimeoutError} When timeoutMs is exceeded.
+ * @throws {DOMException} When `options.signal` aborts the request.
  */
 async function fetchWithTimeout(url, options = {}, timeoutMs = TIMEOUT_DEFAULT_MS) {
     const externalSignal = options?.signal;
@@ -67,55 +249,131 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = TIMEOUT_DEFAULT_M
         throw new DOMException("Request already aborted", "AbortError");
     }
 
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-
-    const forwardExternalAbort = () => controller.abort();
-    externalSignal?.addEventListener("abort", forwardExternalAbort, { once: true });
+    const timeoutSignal = AbortSignal.timeout(timeoutMs);
+    const signal = externalSignal
+        ? AbortSignal.any([externalSignal, timeoutSignal])
+        : timeoutSignal;
 
     try {
         return await fetch(url, {
             ...options,
             credentials: options.credentials ?? "same-origin",
-            signal: controller.signal,
+            signal,
         });
     } catch (error) {
-        if (error?.name === "AbortError") {
+        if (error?.name === "AbortError" || error?.name === "TimeoutError") {
             if (externalSignal?.aborted) {
                 throw error;
             }
-            throw new Error(`Request timed out after ${Math.ceil(timeoutMs / 1000)}s`);
+            if (timeoutSignal.aborted) {
+                throw new ApiTimeoutError(timeoutMs);
+            }
         }
         throw error;
-    } finally {
-        clearTimeout(timeoutId);
-        externalSignal?.removeEventListener("abort", forwardExternalAbort);
     }
 }
 
 /**
- * Perform an API call and return parsed JSON or throw normalized error.
+ * Core API request helper with normalized timeout, retry, and HTTP error handling.
  * @template T
  * @param {string} url
- * @param {RequestInit & { signal?: AbortSignal }} [options]
- * @param {number} [timeoutMs]
- * @returns {Promise<T>}
+ * @param {ApiOptions} [options]
+ * @param {number} [timeoutMs] - Per-attempt timeout in milliseconds.
+ * @param {number} [retries] - Retry attempts for network failures or 502/503/504 responses.
+ * @returns {Promise<T>} Parsed JSON response body.
+ * @throws {ApiHttpError} On non-retryable HTTP errors.
+ * @throws {ApiTimeoutError} When a request attempt exceeds timeoutMs.
+ * @throws {DOMException} When the caller aborts via options.signal.
  */
-async function apiCall(url, options = {}, timeoutMs = TIMEOUT_DEFAULT_MS) {
-    const res = await fetchWithTimeout(url, options, timeoutMs);
-    if (!res.ok) {
-        throw new Error(await parseError(res));
+async function _apiCall(url, options = {}, timeoutMs = TIMEOUT_DEFAULT_MS, retries = 0) {
+    let lastError;
+
+    for (let attempt = 0; attempt <= retries; attempt += 1) {
+        try {
+            const res = await fetchWithTimeout(url, options, timeoutMs);
+            if (res.ok) {
+                return res.json();
+            }
+
+            if (res.status === 429) {
+                _cancelResponseBody(res);
+                throw new ApiHttpError(
+                    429,
+                    `Rate limited. Try again in ${_formatRetryAfter(res.headers.get("Retry-After"))}.`,
+                    res.headers.get("Retry-After"),
+                );
+            }
+
+            if (_isRetryableStatus(res.status) && attempt < retries && !options?.signal?.aborted) {
+                _cancelResponseBody(res);
+                await _sleep(_retryDelayMs(attempt));
+                continue;
+            }
+
+            throw new ApiHttpError(res.status, await parseError(res));
+        } catch (error) {
+            lastError = error;
+            if (_isRetryableFetchError(error) && attempt < retries && !options?.signal?.aborted) {
+                await _sleep(_retryDelayMs(attempt));
+                continue;
+            }
+            throw error;
+        }
     }
-    return res.json();
+
+    throw lastError;
+}
+
+async function apiCall(url, options = {}, timeoutMs = TIMEOUT_DEFAULT_MS) {
+    return _apiCall(url, options, timeoutMs, 0);
+}
+
+async function _apiCallWithRetry(url, options = {}, timeoutMs = TIMEOUT_DEFAULT_MS) {
+    return _apiCall(url, options, timeoutMs, DEFAULT_RETRY_COUNT);
+}
+
+async function _raceWithAbort(promise, signal) {
+    if (!signal) {
+        return promise;
+    }
+
+    const abort = _waitForAbort(signal);
+    try {
+        return await Promise.race([promise, abort.promise]);
+    } finally {
+        abort.cleanup();
+    }
+}
+
+async function _apiCallDeduped(url, options = {}, timeoutMs = TIMEOUT_DEFAULT_MS) {
+    const key = _requestKey(url, options);
+    const cachedPromise = _inFlightRequests.get(key);
+    if (cachedPromise) {
+        return _raceWithAbort(cachedPromise, options?.signal);
+    }
+
+    const sharedPromise = _apiCallWithRetry(url, options, timeoutMs).then(
+        (result) => {
+            _inFlightRequests.delete(key);
+            return result;
+        },
+        (error) => {
+            _inFlightRequests.delete(key);
+            throw error;
+        },
+    );
+    _inFlightRequests.set(key, sharedPromise);
+
+    return _raceWithAbort(sharedPromise, options?.signal);
 }
 
 /**
  * Fetch paginated jobs.
  * @param {number|string} offset
- * @param {RequestInit & { signal?: AbortSignal }} [options]
+ * @param {ApiOptions} [options]
  */
 export async function fetchJobs(offset, options = {}) {
-    return apiCall(
+    return _apiCallDeduped(
         `/api/jobs?offset=${encodeURIComponent(String(offset))}&limit=${CONFIG.PAGE_SIZE}`,
         options,
         TIMEOUT_FETCH_JOBS_MS,
@@ -126,18 +384,18 @@ export async function fetchJobs(offset, options = {}) {
  * Submit a new processing job.
  * @param {FormData} formData
  * @param {string} csrf
- * @param {RequestInit & { signal?: AbortSignal, headers?: Record<string, string> }} [options]
+ * @param {ApiOptions} [options]
  */
 export async function submitJob(formData, csrf, options = {}) {
+    const headers = new Headers(options.headers);
+    headers.set("X-CSRF-Token", csrf);
+
     return apiCall(
         "/api/submit",
         {
-            method: "POST",
             ...options,
-            headers: {
-                "X-CSRF-Token": csrf,
-                ...(options.headers || {}),
-            },
+            method: "POST",
+            headers,
             body: formData,
         },
         TIMEOUT_SUBMIT_JOB_MS,
@@ -147,10 +405,10 @@ export async function submitJob(formData, csrf, options = {}) {
 /**
  * Fetch metadata for a YouTube URL.
  * @param {string} url
- * @param {RequestInit & { signal?: AbortSignal }} [options]
+ * @param {ApiOptions} [options]
  */
 export async function fetchVideoInfo(url, options = {}) {
-    return apiCall(
+    return _apiCallDeduped(
         `/api/info?url=${encodeURIComponent(url)}`,
         options,
         TIMEOUT_VIDEO_INFO_MS,

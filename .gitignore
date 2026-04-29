@@ -16,6 +16,7 @@ cookies.txt
 *.har
 .omx/
 .codex
+app/static/vendor/wavesurfer/
 
 # Editor
 .vscode/

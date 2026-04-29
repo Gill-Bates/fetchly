@@ -9,13 +9,11 @@
 
 """
 
-from __future__ import annotations
-
 import asyncio
 import logging
 import re
 import time
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Callable
 from enum import Enum
 from pathlib import Path
 from typing import Any, Self, TypedDict
@@ -26,10 +24,20 @@ logger = logging.getLogger(__name__)
 
 LALAL_API_BASE = "https://www.lalal.ai"
 LALAL_API_PREFIX = "/api/v1"
+_TRANSFER_CHUNK_SIZE = 65536
+
+type ProgressCallback = Callable[[int], None]
+type StageProgressCallback = Callable[[str, int], None]
+type DownloadProgressCallback = Callable[[int, int], None]
 
 
 class StemType(str, Enum):
-    """Available stem separation types."""
+    """Stem separation target types.
+
+    Note: ``INSTRUMENTAL`` maps to the API value ``"drum"``. Lalal.ai uses
+    that value for full instrumental extraction, while ``DRUMS``
+    (``"drums"``) targets percussion only.
+    """
 
     VOCALS = "vocals"
     INSTRUMENTAL = "drum"  # API uses 'drum' internally for instrumental
@@ -130,6 +138,53 @@ _ALLOWED_DOWNLOAD_HOSTS: frozenset[str] = frozenset({
 _ALLOWED_DOWNLOAD_HOST_SUFFIXES: tuple[str, ...] = (".lalal.ai", ".amazonaws.com")
 
 
+def _safe_header_filename(name: str) -> str:
+    """Sanitize a filename for use inside HTTP header values."""
+    cleaned = re.sub(r'["\\\r\n]', "_", name).strip()
+    return cleaned or "upload"
+
+
+def _stringify_error_value(value: Any) -> str | None:
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    if isinstance(value, dict):
+        nested = value.get("detail")
+        if isinstance(nested, str) and nested.strip():
+            return nested.strip()
+        nested_code = value.get("code")
+        if isinstance(nested_code, str) and nested_code.strip():
+            return nested_code.strip()
+        return str(value) if value else None
+    if isinstance(value, list) and value:
+        return "; ".join(str(item) for item in value)
+    return None
+
+
+def _extract_api_error(data: dict[str, Any]) -> str:
+    """Extract a human-readable error message from Lalal.ai API variants."""
+    for key in ("message", "detail", "error", "errors", "code"):
+        message = _stringify_error_value(data.get(key))
+        if message:
+            return message
+    return "Unknown error"
+
+
+def _extract_processing_error(error: Any, default: str = "Processing failed") -> str:
+    """Normalize processing error payloads into a readable string."""
+    message = _stringify_error_value(error)
+    return message or default
+
+
+async def _iter_file_chunks(file_path: Path, chunk_size: int = _TRANSFER_CHUNK_SIZE) -> AsyncIterator[bytes]:
+    """Yield file contents in bounded chunks without loading the full file into memory."""
+    with file_path.open("rb") as file_handle:
+        while True:
+            chunk = await asyncio.to_thread(file_handle.read, chunk_size)
+            if not chunk:
+                break
+            yield chunk
+
+
 def _is_safe_download_url(url: str) -> bool:
     """Return True only for HTTPS URLs on known Lalal.ai / CDN hosts."""
     try:
@@ -156,12 +211,26 @@ class _BaseLalalClient:
         raise NotImplementedError
 
     async def _get_client(self) -> httpx.AsyncClient:
-        """Lazy-load a persistent AsyncClient."""
-        if self._client is None:
-            async with self._client_lock:
-                if self._client is None:
-                    self._client = self._make_client()
-        return self._client
+        """Return the shared AsyncClient, creating it on first use."""
+        async with self._client_lock:
+            if self._client is None:
+                self._client = self._make_client()
+            return self._client
+
+    def _progress_log_label(self) -> str:
+        return "Lalal.ai processing"
+
+    def _task_state(self, task_info: dict[str, Any]) -> str:  # pragma: no cover
+        raise NotImplementedError
+
+    def _task_progress(self, task_info: dict[str, Any]) -> int:  # pragma: no cover
+        raise NotImplementedError
+
+    def _task_error(self, task_info: dict[str, Any]) -> str:  # pragma: no cover
+        raise NotImplementedError
+
+    def _build_split_result(self, task_info: dict[str, Any]) -> SplitResult:  # pragma: no cover
+        raise NotImplementedError
 
     async def close(self) -> None:
         """Close the underlying HTTP client."""
@@ -176,6 +245,75 @@ class _BaseLalalClient:
 
     async def __aexit__(self, *args: object) -> None:
         await self.close()
+
+    async def wait_for_completion(
+        self,
+        task_id: str,
+        *,
+        poll_interval: float = 3.0,
+        timeout: float = 600.0,
+        progress_callback: ProgressCallback | None = None,
+    ) -> SplitResult:
+        """Poll the Lalal.ai API until processing completes or times out."""
+        start_time = time.monotonic()
+
+        while True:
+            if time.monotonic() - start_time > timeout:
+                raise LalalProcessingFailed(f"Processing timed out after {timeout}s")
+
+            task_info = await self.check_progress(task_id)
+            state = self._task_state(task_info)
+
+            if state in {"error", "server_error", "cancelled"}:
+                raise LalalProcessingFailed(self._task_error(task_info))
+
+            if state == "success":
+                return self._build_split_result(task_info)
+
+            progress_pct = self._task_progress(task_info)
+            if progress_callback:
+                try:
+                    progress_callback(progress_pct)
+                except Exception:
+                    logger.debug("Progress callback failed", exc_info=True)
+
+            logger.debug("%s: %d%% (state=%s)", self._progress_log_label(), progress_pct, state)
+            await asyncio.sleep(poll_interval)
+
+    async def download_result(
+        self,
+        url: str,
+        output_path: Path | str,
+        *,
+        progress_callback: DownloadProgressCallback | None = None,
+    ) -> Path:
+        """Download a processed audio file from a validated Lalal.ai URL."""
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        logger.info("Downloading result to %s", output_path)
+
+        if not _is_safe_download_url(url):
+            raise LalalError("Unsafe download URL returned by API")
+
+        client = await self._get_client()
+        async with client.stream("GET", url) as response:
+            response.raise_for_status()
+            total = int(response.headers.get("content-length", 0) or 0)
+            downloaded = 0
+
+            with output_path.open("wb") as output_file:
+                async for chunk in response.aiter_bytes(chunk_size=_TRANSFER_CHUNK_SIZE):
+                    output_file.write(chunk)
+                    downloaded += len(chunk)
+
+                    if progress_callback and total > 0:
+                        try:
+                            progress_callback(downloaded, total)
+                        except Exception:
+                            logger.debug("Download progress callback failed", exc_info=True)
+
+        return output_path
 
 
 class LalalClient(_BaseLalalClient):
@@ -205,37 +343,38 @@ class LalalClient(_BaseLalalClient):
             timeout=self._timeout,
         )
 
-    @staticmethod
-    def _require_success(data: dict[str, Any], exc_cls: type[Exception], message: str) -> None:
-        """Raise if the API response status is not success."""
-        if data.get("status") != "success":
-            raise exc_cls(f"{message}: {data.get('error', 'Unknown error')}")
+    def _task_state(self, task_info: dict[str, Any]) -> str:
+        return str(task_info.get("status", "unknown"))
 
-    @staticmethod
-    def _extract_error(data: dict[str, Any]) -> str:
-        """Extract human-readable error details from v1 error responses."""
-        detail = data.get("detail")
-        if isinstance(detail, str) and detail.strip():
-            return detail.strip()
-        if isinstance(detail, dict) and detail:
-            return str(detail)
-        if isinstance(detail, list) and detail:
-            return "; ".join(str(item) for item in detail)
+    def _task_progress(self, task_info: dict[str, Any]) -> int:
+        return int(task_info.get("progress") or 0)
 
-        error = data.get("error")
-        if isinstance(error, str) and error.strip():
-            return error.strip()
-        if isinstance(error, dict):
-            nested = error.get("detail")
-            if isinstance(nested, str) and nested.strip():
-                return nested.strip()
-            return str(error)
+    def _task_error(self, task_info: dict[str, Any]) -> str:
+        return _extract_processing_error(task_info.get("error"), "Processing failed")
 
-        code = data.get("code")
-        if isinstance(code, str) and code.strip():
-            return code.strip()
+    def _build_split_result(self, task_info: dict[str, Any]) -> SplitResult:
+        result_info = task_info.get("result", {})
+        tracks = result_info.get("tracks", []) if isinstance(result_info, dict) else []
 
-        return "Unknown error"
+        stem_info: dict[str, Any] = {}
+        back_info: dict[str, Any] = {}
+        if isinstance(tracks, list):
+            for track in tracks:
+                if not isinstance(track, dict):
+                    continue
+                track_type = track.get("type")
+                if track_type == "stem" and not stem_info:
+                    stem_info = track
+                elif track_type == "back" and not back_info:
+                    back_info = track
+
+        return SplitResult(
+            stem_track=stem_info.get("url", ""),
+            back_track=back_info.get("url", ""),
+            stem_track_size=int(stem_info.get("size") or 0),
+            back_track_size=int(back_info.get("size") or 0),
+            duration=float((result_info.get("duration") if isinstance(result_info, dict) else None) or 0),
+        )
 
     async def check_quota(self) -> dict[str, Any]:
         """Check remaining API quota/credits.
@@ -251,7 +390,7 @@ class LalalClient(_BaseLalalClient):
 
         data = response.json()
         if response.status_code >= 400:
-            raise LalalError(self._extract_error(data))
+            raise LalalError(_extract_api_error(data if isinstance(data, dict) else {}))
         return data if isinstance(data, dict) else {}
 
     async def upload_file(self, file_path: Path | str) -> UploadResult:
@@ -272,15 +411,15 @@ class LalalClient(_BaseLalalClient):
         logger.info("Uploading %s (%d bytes) to Lalal.ai", file_path.name, file_size)
 
         client = await self._get_client()
-        with open(file_path, "rb") as f:
-            response = await client.post(
-                f"{LALAL_API_PREFIX}/upload/",
-                content=f,
-                headers={
-                    "Content-Disposition": f'attachment; filename="{file_path.name}"',
-                    "Content-Type": "application/octet-stream",
-                },
-            )
+        response = await client.post(
+            f"{LALAL_API_PREFIX}/upload/",
+            content=_iter_file_chunks(file_path),
+            headers={
+                "Content-Disposition": f'attachment; filename="{_safe_header_filename(file_path.name)}"',
+                "Content-Type": "application/octet-stream",
+                "Content-Length": str(file_size),
+            },
+        )
 
         if response.status_code == 401:
             raise LalalError("Invalid API key")
@@ -291,7 +430,7 @@ class LalalClient(_BaseLalalClient):
         result = response.json()
 
         if response.status_code >= 400:
-            raise LalalUploadFailed(self._extract_error(result))
+            raise LalalUploadFailed(_extract_api_error(result if isinstance(result, dict) else {}))
 
         file_info = result if isinstance(result, dict) else {}
 
@@ -321,7 +460,7 @@ class LalalClient(_BaseLalalClient):
             file_id: ID from upload_file result
             stem: Type of stem to extract
             split_type: Neural network to use
-            enhanced_processing: Use enhanced processing (higher quality)
+            enhanced_processing: Forward Lalal.ai's enhanced-processing flag when supported
             split_mode: Processing mode/endpoint (v1 API)
             noise_cancelling_level: Optional noise cancelling level (0-2)
             dereverb_enabled: Optional dereverb toggle
@@ -347,7 +486,6 @@ class LalalClient(_BaseLalalClient):
 
         presets: dict[str, Any] = {
             "splitter": split_type.value,
-            # Keep compatibility with previous behavior.
             "enhanced_processing_enabled": bool(enhanced_processing),
         }
         if dereverb_enabled is not None:
@@ -389,7 +527,7 @@ class LalalClient(_BaseLalalClient):
 
         result = response.json()
         if response.status_code >= 400:
-            raise LalalProcessingFailed(self._extract_error(result))
+            raise LalalProcessingFailed(_extract_api_error(result if isinstance(result, dict) else {}))
 
         task_id = str(result.get("task_id", "")).strip() if isinstance(result, dict) else ""
         if not task_id:
@@ -425,119 +563,6 @@ class LalalClient(_BaseLalalClient):
         task_info = result_map.get(task_id, {})
         return task_info if isinstance(task_info, dict) else {}
 
-    async def wait_for_completion(
-        self,
-        task_id: str,
-        *,
-        poll_interval: float = 3.0,
-        timeout: float = 600.0,
-        progress_callback: Callable[[int], None] | None = None,
-    ) -> SplitResult:
-        """Wait for processing to complete.
-
-        Args:
-            task_id: Task ID from split()
-            poll_interval: Seconds between progress checks
-            timeout: Maximum wait time in seconds
-            progress_callback: Optional callback(progress_percent: int)
-
-        Returns:
-            Split result with download URLs
-        """
-        start_time = time.monotonic()
-
-        while True:
-            elapsed = time.monotonic() - start_time
-            if elapsed > timeout:
-                raise LalalProcessingFailed(f"Processing timed out after {timeout}s")
-
-            task_info = await self.check_progress(task_id)
-            state = str(task_info.get("status", "unknown"))
-
-            if state in {"error", "server_error", "cancelled"}:
-                error = task_info.get("error", "Processing failed")
-                if isinstance(error, dict):
-                    error = error.get("detail") or error.get("code") or str(error)
-                raise LalalProcessingFailed(str(error))
-
-            if state == "success":
-                result_info = task_info.get("result", {})
-                tracks = result_info.get("tracks", []) if isinstance(result_info, dict) else []
-
-                stem_info: dict[str, Any] = {}
-                back_info: dict[str, Any] = {}
-                if isinstance(tracks, list):
-                    for track in tracks:
-                        if not isinstance(track, dict):
-                            continue
-                        track_type = track.get("type")
-                        if track_type == "stem" and not stem_info:
-                            stem_info = track
-                        elif track_type == "back" and not back_info:
-                            back_info = track
-
-                return SplitResult(
-                    stem_track=stem_info.get("url", ""),
-                    back_track=back_info.get("url", ""),
-                    stem_track_size=int(stem_info.get("size") or 0),
-                    back_track_size=int(back_info.get("size") or 0),
-                    duration=float((result_info.get("duration") if isinstance(result_info, dict) else None) or 0),
-                )
-
-            # Still processing
-            progress_pct = int(task_info.get("progress") or 0)
-            if progress_callback:
-                try:
-                    progress_callback(progress_pct)
-                except Exception:
-                    logger.debug("Progress callback failed", exc_info=True)
-
-            logger.debug("Lalal.ai processing: %d%% (state=%s)", progress_pct, state)
-            await asyncio.sleep(poll_interval)
-
-    async def download_result(
-        self,
-        url: str,
-        output_path: Path | str,
-        *,
-        progress_callback: Callable[[int, int], None] | None = None,
-    ) -> Path:
-        """Download a processed audio file.
-
-        Args:
-            url: Download URL from split result
-            output_path: Where to save the file
-            progress_callback: Optional callback(downloaded_bytes: int, total_bytes: int)
-
-        Returns:
-            Path to downloaded file
-        """
-        output_path = Path(output_path)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-
-        logger.info("Downloading result to %s", output_path)
-
-        if not _is_safe_download_url(url):
-            raise LalalError("Unsafe download URL returned by API")
-
-        client = await self._get_client()
-        async with client.stream("GET", url) as response:
-            response.raise_for_status()
-            total = int(response.headers.get("content-length", 0))
-            downloaded = 0
-            with open(output_path, "wb") as output_file:
-                async for chunk in response.aiter_bytes(chunk_size=65536):
-                    await asyncio.to_thread(output_file.write, chunk)
-                    downloaded += len(chunk)
-
-                    if progress_callback and total > 0:
-                        try:
-                            progress_callback(downloaded, total)
-                        except Exception:
-                            logger.debug("Download progress callback failed", exc_info=True)
-
-        return output_path
-
     async def process_file(
         self,
         input_path: Path | str,
@@ -552,7 +577,7 @@ class LalalClient(_BaseLalalClient):
         multivocal: str | None = None,
         download_stem: bool = True,
         download_backing: bool = True,
-        progress_callback: Callable[[str, int], None] | None = None,
+        progress_callback: StageProgressCallback | None = None,
     ) -> dict[str, Path]:
         """Complete workflow: upload, process, and download results.
 
@@ -664,6 +689,37 @@ class LalalWebSessionClient(_BaseLalalClient):
             },
         )
 
+
+    def _progress_log_label(self) -> str:
+        return "Lalal.ai web processing"
+
+    def _task_state(self, task_info: dict[str, Any]) -> str:
+        task = task_info.get("task", {}) if isinstance(task_info, dict) else {}
+        return str(task.get("state", "unknown"))
+
+    def _task_progress(self, task_info: dict[str, Any]) -> int:
+        task = task_info.get("task", {}) if isinstance(task_info, dict) else {}
+        return int(task.get("progress", 0) or 0)
+
+    def _task_error(self, task_info: dict[str, Any]) -> str:
+        task = task_info.get("task", {}) if isinstance(task_info, dict) else {}
+        return _extract_processing_error(task_info.get("error") or task, "Processing failed")
+
+    def _build_split_result(self, task_info: dict[str, Any]) -> SplitResult:
+        split_data = task_info.get("split") or task_info.get("preview") or {}
+        if not isinstance(split_data, dict):
+            split_data = {}
+
+        stem_track = str(split_data.get("stem_track") or split_data.get("stem_track_playlist") or "")
+        back_track = str(split_data.get("back_track") or split_data.get("back_track_playlist") or "")
+
+        return SplitResult(
+            stem_track=stem_track,
+            back_track=back_track,
+            stem_track_size=int(split_data.get("stem_track_size", 0) or 0),
+            back_track_size=int(split_data.get("back_track_size", 0) or 0),
+            duration=float(split_data.get("duration", task_info.get("duration", 0)) or 0),
+        )
     async def check_quota(self) -> dict[str, Any]:
         """Best-effort check for website session mode.
 
@@ -675,7 +731,7 @@ class LalalWebSessionClient(_BaseLalalClient):
         if response.status_code in {401, 403}:
             raise LalalError("Lalal.ai web session is invalid or expired")
         if response.status_code >= 400:
-            raise LalalError(f"Web session check failed: {response.status_code}")
+            raise LalalError(f"Web session check failed: {_extract_api_error(data if isinstance(data, dict) else {})}")
         return data if isinstance(data, dict) else {"mode": "web_session"}
 
     async def upload_file(self, file_path: Path | str) -> UploadResult:
@@ -714,13 +770,15 @@ class LalalWebSessionClient(_BaseLalalClient):
         if not upload_url:
             raise LalalUploadFailed("Multipart create failed: missing upload URL")
 
-        with open(file_path, "rb") as f:
-            put_resp = await client.put(
-                upload_url,
-                content=f,
-                headers={"Content-Type": "application/octet-stream"},
-                timeout=120.0,
-            )
+        put_resp = await client.put(
+            upload_url,
+            content=_iter_file_chunks(file_path),
+            headers={
+                "Content-Type": "application/octet-stream",
+                "Content-Length": str(file_size),
+            },
+            timeout=120.0,
+        )
         if put_resp.status_code >= 400:
             raise LalalUploadFailed(f"Multipart upload failed: HTTP {put_resp.status_code}")
 
@@ -759,8 +817,13 @@ class LalalWebSessionClient(_BaseLalalClient):
         extraction_level: ExtractionLevel | str | None = None,
         multivocal: str | None = None,
     ) -> str:
-        # Web session endpoint does not currently support these options.
-        _ = extraction_level, split_mode
+        if extraction_level is not None:
+            logger.warning("extraction_level is ignored in Lalal.ai web session mode")
+        if split_mode != SplitMode.STEM_SEPARATOR:
+            logger.warning(
+                "split_mode=%s is ignored in Lalal.ai web session mode; using stem_separator",
+                split_mode.value,
+            )
 
         client = await self._get_client()
         if noise_cancelling_level is None:
@@ -817,83 +880,6 @@ class LalalWebSessionClient(_BaseLalalClient):
         task_info = result.get(task_id, {})
         return task_info if isinstance(task_info, dict) else {}
 
-    async def wait_for_completion(
-        self,
-        task_id: str,
-        *,
-        poll_interval: float = 3.0,
-        timeout: float = 600.0,
-        progress_callback: Callable[[int], None] | None = None,
-    ) -> SplitResult:
-        start_time = time.monotonic()
-
-        while True:
-            if time.monotonic() - start_time > timeout:
-                raise LalalProcessingFailed(f"Processing timed out after {timeout}s")
-
-            task_info = await self.check_progress(task_id)
-            task = task_info.get("task", {}) if isinstance(task_info, dict) else {}
-            state = str(task.get("state", "unknown"))
-
-            if state in {"error", "server_error", "cancelled"}:
-                raise LalalProcessingFailed(str(task_info.get("error") or task or "Processing failed"))
-
-            if state == "success":
-                split_data = task_info.get("split") or task_info.get("preview") or {}
-                if not isinstance(split_data, dict):
-                    split_data = {}
-
-                stem_track = str(split_data.get("stem_track") or split_data.get("stem_track_playlist") or "")
-                back_track = str(split_data.get("back_track") or split_data.get("back_track_playlist") or "")
-
-                return SplitResult(
-                    stem_track=stem_track,
-                    back_track=back_track,
-                    stem_track_size=int(split_data.get("stem_track_size", 0) or 0),
-                    back_track_size=int(split_data.get("back_track_size", 0) or 0),
-                    duration=float(split_data.get("duration", task_info.get("duration", 0)) or 0),
-                )
-
-            progress_pct = int(task.get("progress", 0) or 0)
-            if progress_callback:
-                try:
-                    progress_callback(progress_pct)
-                except Exception:
-                    logger.debug("Progress callback failed", exc_info=True)
-
-            logger.debug("Lalal.ai web processing: %d%% (state=%s)", progress_pct, state)
-            await asyncio.sleep(poll_interval)
-
-    async def download_result(
-        self,
-        url: str,
-        output_path: Path | str,
-        *,
-        progress_callback: Callable[[int, int], None] | None = None,
-    ) -> Path:
-        output_path = Path(output_path)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-
-        if not _is_safe_download_url(url):
-            raise LalalError("Unsafe download URL returned by web session API")
-
-        client = await self._get_client()
-        async with client.stream("GET", url) as response:
-            response.raise_for_status()
-            total = int(response.headers.get("content-length", 0))
-            downloaded = 0
-            with open(output_path, "wb") as output_file:
-                async for chunk in response.aiter_bytes(chunk_size=65536):
-                    await asyncio.to_thread(output_file.write, chunk)
-                    downloaded += len(chunk)
-                    if progress_callback and total > 0:
-                        try:
-                            progress_callback(downloaded, total)
-                        except Exception:
-                            logger.debug("Download progress callback failed", exc_info=True)
-
-        return output_path
-
 
 class LalalOtpAuthClient(_BaseLalalClient):
     """Automates Lalal.ai website OTP login flow.
@@ -924,36 +910,6 @@ class LalalOtpAuthClient(_BaseLalalClient):
                 ),
             },
         )
-
-    @staticmethod
-    def _extract_error(data: dict[str, Any]) -> str:
-        message = data.get("message")
-        if isinstance(message, str) and message.strip():
-            return message.strip()
-
-        detail = data.get("detail")
-        if isinstance(detail, str) and detail.strip():
-            return detail.strip()
-        if isinstance(detail, dict) and detail:
-            return str(detail)
-        if isinstance(detail, list) and detail:
-            return "; ".join(str(item) for item in detail)
-
-        error = data.get("error")
-        if isinstance(error, str) and error.strip():
-            return error.strip()
-        if isinstance(error, dict) and error:
-            return str(error)
-
-        errors = data.get("errors")
-        if isinstance(errors, str) and errors.strip():
-            return errors.strip()
-        if isinstance(errors, dict) and errors:
-            return str(errors)
-        if isinstance(errors, list) and errors:
-            return "; ".join(str(item) for item in errors)
-
-        return "Unknown error"
 
     @staticmethod
     def _is_success_response(data: dict[str, Any]) -> bool:
@@ -1047,10 +1003,10 @@ class LalalOtpAuthClient(_BaseLalalClient):
         data = response.json() if response.text else {}
 
         if response.status_code >= 400:
-            raise LalalError(f"OTP request failed (HTTP {response.status_code}): {self._extract_error(data)}")
+            raise LalalError(f"OTP request failed (HTTP {response.status_code}): {_extract_api_error(data if isinstance(data, dict) else {})}")
 
         if not isinstance(data, dict) or not self._is_success_response(data):
-            raise LalalError(self._extract_error(data) if isinstance(data, dict) else "OTP request failed")
+            raise LalalError(_extract_api_error(data) if isinstance(data, dict) else "OTP request failed")
 
         sent_flags = ("otp_sent", "email_sent", "sent", "code_sent", "mail_sent")
         for key in sent_flags:
@@ -1079,19 +1035,19 @@ class LalalOtpAuthClient(_BaseLalalClient):
         data = response.json() if response.text else {}
 
         if response.status_code >= 400:
-            raise LalalError(f"Login failed (HTTP {response.status_code}): {self._extract_error(data)}")
+            raise LalalError(f"Login failed (HTTP {response.status_code}): {_extract_api_error(data if isinstance(data, dict) else {})}")
 
         if not isinstance(data, dict) or not self._is_success_response(data):
-            raise LalalError(self._extract_error(data) if isinstance(data, dict) else "Login failed")
+            raise LalalError(_extract_api_error(data) if isinstance(data, dict) else "Login failed")
 
     async def get_profile(self) -> dict[str, Any]:
         client = await self._get_client()
         response = await client.get("/auth/profile/")
         data = response.json() if response.text else {}
         if response.status_code >= 400:
-            raise LalalError(f"Profile fetch failed (HTTP {response.status_code}): {self._extract_error(data)}")
+            raise LalalError(f"Profile fetch failed (HTTP {response.status_code}): {_extract_api_error(data if isinstance(data, dict) else {})}")
         if not isinstance(data, dict) or not self._is_success_response(data):
-            raise LalalError(self._extract_error(data) if isinstance(data, dict) else "Profile fetch failed")
+            raise LalalError(_extract_api_error(data) if isinstance(data, dict) else "Profile fetch failed")
         return data
 
     async def exchange_code_for_activation_key(self, email: str, code: str) -> str:
@@ -1133,7 +1089,7 @@ async def separate_vocals(
     *,
     extract_vocals: bool = True,
     extract_instrumental: bool = True,
-    progress_callback: Callable[[str, int], None] | None = None,
+    progress_callback: StageProgressCallback | None = None,
 ) -> dict[str, Path]:
     """Convenience function to separate vocals from instrumental.
 

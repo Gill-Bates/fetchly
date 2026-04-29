@@ -3,7 +3,7 @@
 // Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 //
 
-import { writeFile } from 'node:fs/promises';
+import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { chromium, devices } from 'playwright';
@@ -25,6 +25,44 @@ const SESSION_ID = Date.now();
 const OUTPUT_DIR = process.env.UI_LINT_OUTPUT_DIR || `/tmp/tubeyou-ui-lint-${SESSION_ID}`;
 const SCREENSHOT_DIR = path.join(OUTPUT_DIR, 'screenshots');
 const RESULTS_PATH = path.join(OUTPUT_DIR, 'results.json');
+const MAIN_JS_PATH = new URL('../../app/static/js/main.js', import.meta.url);
+const JOBS_JS_PATH = new URL('../../app/static/js/jobs.js', import.meta.url);
+
+let jobsScrollContractMetricsPromise;
+
+function viewAuditsJobsList(view) {
+    return Array.isArray(view?.requiredSelectors) && view.requiredSelectors.includes('#jobsTable');
+}
+
+async function getJobsScrollContractMetrics() {
+    if (!jobsScrollContractMetricsPromise) {
+        jobsScrollContractMetricsPromise = (async () => {
+            const [mainJsSource, jobsJsSource] = await Promise.all([
+                readFile(MAIN_JS_PATH, 'utf8'),
+                readFile(JOBS_JS_PATH, 'utf8'),
+            ]);
+
+            const observerBoundToScroller = /new IntersectionObserver\([\s\S]*?root:\s*jobsScrollContainer[\s\S]*?observer\.observe\(jobsSentinel\)/.test(mainJsSource);
+            const localScrollFallback = /jobsScrollContainer\.addEventListener\(\s*['"]scroll['"]\s*,\s*onScroll/.test(mainJsSource);
+            const windowScrollLoadsMore = /window\.addEventListener\(\s*['"]scroll['"][\s\S]{0,400}?maybeLoadMoreJobs/.test(mainJsSource);
+
+            const tracksMonotonicOffset = /nextOffset:\s*0/.test(jobsJsSource)
+                && /const currentOffset = state\.nextOffset/.test(jobsJsSource)
+                && /await fetchFn\(currentOffset\)/.test(jobsJsSource)
+                && /state\.nextOffset \+= jobs\.length/.test(jobsJsSource)
+                && /if \(!existing\) \{\s*state\.nextOffset \+= 1;\s*\}/.test(jobsJsSource);
+            const usesRenderedCountAsFetchOffset = /fetchFn\(\s*(?:getRenderedJobCount\(|tbody\s*\.\s*querySelectorAll\(|document\s*\.\s*querySelectorAll\()[\s\S]*?\)/.test(jobsJsSource);
+
+            return {
+                jobsInfiniteScrollNotObserverBased: !(observerBoundToScroller && localScrollFallback) || windowScrollLoadsMore,
+                jobsPagingOffsetContractBroken: !tracksMonotonicOffset || usesRenderedCountAsFetchOffset,
+            };
+        })();
+    }
+
+    return jobsScrollContractMetricsPromise;
+}
+
 function envFloat(name, defaultValue) {
     const raw = process.env[name];
     if (raw === undefined) return defaultValue;
@@ -203,6 +241,15 @@ function formatResultSummary(result) {
     if (metrics.mutationObservers) parts.push(`mutationObservers=${metrics.mutationObservers}`);
     if (metrics.duplicateEventHandlers) parts.push(`duplicateGlobalClicks=${metrics.duplicateEventHandlers}`);
     if (metrics.visualDriftRatio > 0) parts.push(`visualDrift=${metrics.visualDriftRatio.toFixed(5)}`);
+    if (metrics.trimInvalidRanges) parts.push('trimInvalidRange=true');
+    if (metrics.trimSnapViolations) parts.push(`trimSnap=${metrics.trimSnapViolations}`);
+    if (metrics.trimLoopDriftMs) parts.push(`trimLoopDrift=${metrics.trimLoopDriftMs}`);
+    if (metrics.trimZoomInstability) parts.push(`trimZoom=${metrics.trimZoomInstability}`);
+    if (metrics.trimHandleTooSmall) parts.push(`trimHandles=${metrics.trimHandleTooSmall}`);
+    if (metrics.trimKeyboardMissing?.length) parts.push(`trimKeysMissing=${metrics.trimKeyboardMissing.join('|')}`);
+    if (metrics.trimKeyboardConflicts?.length) parts.push(`trimKeyConflict=${metrics.trimKeyboardConflicts.join('|')}`);
+    if (metrics.trimInstanceLeaks) parts.push(`trimLeaks=${metrics.trimInstanceLeaks}`);
+    if (metrics.trimUiAudioMismatchMs) parts.push(`trimDrift=${metrics.trimUiAudioMismatchMs}`);
     // New checks from CSS review
     if (metrics.undefinedCustomProperties) parts.push(`undefinedVars=${metrics.undefinedCustomProperties}`);
     if (metrics.backdropFilterCount > 4) parts.push(`backdropFilters=${metrics.backdropFilterCount}`);
@@ -211,6 +258,7 @@ function formatResultSummary(result) {
     if (metrics.noVisibleFocusIndicators) parts.push(`noFocusRing=${metrics.noVisibleFocusIndicators}`);
     if (metrics.unguardedAnimations) parts.push(`unguardedAnimations=${metrics.unguardedAnimations}`);
     if (metrics.clippedDropdowns) parts.push(`clippedDropdowns=${metrics.clippedDropdowns}`);
+    if (metrics.escapedHtmlElements) parts.push(`escapedHtml=${metrics.escapedHtmlElements}`);
     if (metrics.importantAbuse) parts.push(`importantAbuse=${metrics.importantAbuse}`);
     if (metrics.tightlyPackedTargets) parts.push(`tightTargets=${metrics.tightlyPackedTargets}`);
     if (metrics.localOverflowIssues) parts.push(`localOverflow=${metrics.localOverflowIssues}`);
@@ -224,6 +272,13 @@ function formatResultSummary(result) {
     if (metrics.nestedScrollContainers) parts.push(`nestedScroll=${metrics.nestedScrollContainers}`);
     if (metrics.flexScrollTraps) parts.push(`flexScrollTraps=${metrics.flexScrollTraps}`);
     if (metrics.doubleScrollRisk) parts.push(`doubleScrollRisk=${metrics.doubleScrollRisk}`);
+    if (metrics.viewportScrollLeak) parts.push(`viewportScrollLeak=${metrics.viewportScrollLeak}`);
+    if (metrics.overflowHiddenScrollBlockers > 0)
+        parts.push(`overflowHiddenBlocks=${metrics.overflowHiddenScrollBlockers}`);
+    if (metrics.hasSelectorLayoutUsage > 0)
+        parts.push(`hasLayoutRules=${metrics.hasSelectorLayoutUsage}`);
+    if (metrics.viewportLockingIssues > 0)
+        parts.push(`viewportLock=${metrics.viewportLockingIssues}`);
     if (metrics.badgeInconsistencies) parts.push(`badgeInconsistencies=${metrics.badgeInconsistencies}`);
     if (metrics.iconPointerEventsIssues) parts.push(`iconPointerEvents=${metrics.iconPointerEventsIssues}`);
     if (metrics.gridViolations) parts.push(`gridViolations=${metrics.gridViolations}`);
@@ -234,6 +289,20 @@ function formatResultSummary(result) {
     if (metrics.dropdownCaretIssues > 0) parts.push(`dropdownCaretIssues=${metrics.dropdownCaretIssues}`);
     if (metrics.backgroundAttachmentFixedWithoutFallback) parts.push('bgAttachmentFixedNoIOSFallback=true');
     if (metrics.loginShellAlignmentIssue) parts.push('loginShellAlignment=bad');
+    // Layout stability checks
+    if (metrics.submitCardNotShrinking) parts.push('submitCardNotShrinking=true');
+    if (metrics.jobsCardHeaderExpanding) parts.push('jobsCardHeaderExpanding=true');
+    if (metrics.tableResponsiveGhostScroll) parts.push('tableResponsiveGhostScroll=true');
+    if (metrics.dashboardViewportContractBroken) parts.push('dashboardViewportContractBroken=true');
+    if (metrics.jobsCardNotFillingHeight) parts.push('jobsCardNotFillingHeight=true');
+    if (metrics.stickyFooterDetached) parts.push('stickyFooterDetached=true');
+    if (metrics.stickyTableHeaderBroken) parts.push('stickyTableHeaderBroken=true');
+    if (metrics.jobsSentinelOutsideScrollContainer) parts.push('jobsSentinelOutsideScroller=true');
+    if (metrics.jobsInfiniteScrollNotObserverBased) parts.push('jobsInfiniteScrollNotObserverBased=true');
+    if (metrics.jobsPagingOffsetContractBroken) parts.push('jobsPagingOffsetContractBroken=true');
+    if (metrics.trimWaveformMissingStyle) parts.push('trimWaveformMissingStyle=true');
+    if (metrics.trimDefaultRegionPresent) parts.push('trimDefaultRegion=true');
+    if (metrics.uiCardChildExpands) parts.push(`uiCardChildExpands=${metrics.uiCardChildExpands}`);
     return parts.join(' ');
 }
 
@@ -273,6 +342,15 @@ const BASE_METRICS = Object.freeze({
     mutationObservers: 0,
     duplicateEventHandlers: 0,
     visualDriftRatio: 0,
+    trimInvalidRanges: false,
+    trimSnapViolations: 0,
+    trimLoopDriftMs: 0,
+    trimZoomInstability: 0,
+    trimHandleTooSmall: 0,
+    trimKeyboardMissing: [],
+    trimKeyboardConflicts: [],
+    trimInstanceLeaks: 0,
+    trimUiAudioMismatchMs: 0,
     // New checks from CSS review
     undefinedCustomProperties: 0,
     backdropFilterCount: 0,
@@ -281,6 +359,7 @@ const BASE_METRICS = Object.freeze({
     noVisibleFocusIndicators: 0,
     unguardedAnimations: 0,
     clippedDropdowns: 0,
+    escapedHtmlElements: 0,
     importantAbuse: 0,
     localOverflowIssues: 0,
     brokenTitleTruncation: 0,
@@ -293,6 +372,10 @@ const BASE_METRICS = Object.freeze({
     nestedScrollContainers: 0,
     flexScrollTraps: 0,
     doubleScrollRisk: 0,
+    viewportScrollLeak: 0,
+    overflowHiddenScrollBlockers: 0,
+    hasSelectorLayoutUsage: 0,
+    viewportLockingIssues: 0,
     badgeInconsistencies: 0,
     iconPointerEventsIssues: 0,
     gridViolations: 0,
@@ -304,6 +387,20 @@ const BASE_METRICS = Object.freeze({
     dropdownCaretIssues: 0,
     backgroundAttachmentFixedWithoutFallback: false,
     loginShellAlignmentIssue: false,
+    // Layout stability checks (2026-04-28)
+    submitCardNotShrinking: false,
+    jobsCardHeaderExpanding: false,
+    tableResponsiveGhostScroll: false,
+    dashboardViewportContractBroken: false,
+    jobsCardNotFillingHeight: false,
+    stickyFooterDetached: false,
+    stickyTableHeaderBroken: false,
+    jobsSentinelOutsideScrollContainer: false,
+    jobsInfiniteScrollNotObserverBased: false,
+    jobsPagingOffsetContractBroken: false,
+    trimWaveformMissingStyle: false,
+    trimDefaultRegionPresent: false,
+    uiCardChildExpands: 0,
 });
 
 /**
@@ -646,6 +743,27 @@ async function collectMetrics(page, view) {
             }
         }
 
+        const detectEscapedHTML = (root = document) => {
+            const bad = [];
+            root.querySelectorAll('*').forEach((el) => {
+                if (!isVisible(el)) return;
+                if (el.children.length === 0 && el.textContent.includes('<')) {
+                    if (el.textContent.match(/<\w+/)) {
+                        bad.push(el);
+                    }
+                }
+            });
+            return bad;
+        };
+
+        const escapedHtmlElements = detectEscapedHTML(document)
+            .map((el) => ({
+                tag: el.tagName.toLowerCase(),
+                id: el.id || null,
+                className: typeof el.className === 'string' ? el.className : '',
+                text: (el.textContent || '').trim().slice(0, 120),
+            }));
+
         const layoutDriftIssues = [];
         const candidates = document.querySelectorAll('nav, header, [class*="nav"]');
         const fixedTops = Array.from(candidates).filter((el) => {
@@ -938,6 +1056,64 @@ async function collectMetrics(page, view) {
                 return isScrollable && el.scrollHeight > el.clientHeight + 2;
             });
 
+        // ─────────────────────────────────────────────────────────────
+        // iOS Scroll Blocking / Layout Bug Detection
+        // ─────────────────────────────────────────────────────────────
+
+        // 1. Parent with overflow:hidden blocking scrollable child
+        const overflowHiddenScrollBlockers = [];
+        const overflowHiddenSeen = new Set();
+        for (const el of scrollContainers) {
+            let parent = el.parentElement;
+            while (parent && parent !== document.body) {
+                const style = window.getComputedStyle(parent);
+                if (
+                    style.overflow === 'hidden' ||
+                    style.overflowY === 'hidden'
+                ) {
+                    const key = `${parent.tagName}|${parent.className || ''}`;
+                    if (!overflowHiddenSeen.has(key)) {
+                        overflowHiddenSeen.add(key);
+                        overflowHiddenScrollBlockers.push({
+                            child: el.tagName.toLowerCase(),
+                            parent: parent.tagName.toLowerCase(),
+                            parentClass: parent.className || '',
+                        });
+                    }
+                    break;
+                }
+                parent = parent.parentElement;
+            }
+        }
+
+        // 2. Dangerous usage of :has() with layout-critical properties
+        const hasSelectorLayoutUsage = [];
+        const hasSelectorSeen = new Set();
+        for (const sheet of document.styleSheets) {
+            let rules;
+            try {
+                rules = sheet.cssRules;
+            } catch {
+                continue;
+            }
+            for (const rule of rules) {
+                if (!rule.selectorText) continue;
+                if (rule.selectorText.includes(':has(')) {
+                    const css = rule.cssText || '';
+                    if (
+                        css.includes('overflow') ||
+                        css.includes('height') ||
+                        css.includes('position')
+                    ) {
+                        if (!hasSelectorSeen.has(rule.selectorText)) {
+                            hasSelectorSeen.add(rule.selectorText);
+                            hasSelectorLayoutUsage.push(rule.selectorText);
+                        }
+                    }
+                }
+            }
+        }
+
         const nestedScrollContainers = scrollContainers.filter((el) => {
             let parent = el.parentElement;
             while (parent) {
@@ -953,6 +1129,42 @@ async function collectMetrics(page, view) {
 
         const pageScrollable = document.documentElement.scrollHeight > window.innerHeight + 4;
         const doubleScrollRisk = pageScrollable && scrollContainers.length > 0 ? 1 : 0;
+        const jobsTableScroller = document.querySelector('#jobsCard .table-responsive');
+        const viewportScrollLeak = (() => {
+            if (!jobsTableScroller || !isLayoutVisible(jobsTableScroller)) return 0;
+            const style = window.getComputedStyle(jobsTableScroller);
+            const localScroll = (style.overflowY === 'auto' || style.overflowY === 'scroll')
+                && jobsTableScroller.scrollHeight > jobsTableScroller.clientHeight + 2;
+            return localScroll && pageScrollable ? 1 : 0;
+        })();
+
+        // 3. Viewport locking via vh/dvh + overflow hidden (iOS trap)
+        const viewportLockingIssues = (() => {
+            const root = document.documentElement;
+            const body = document.body;
+            const issues = [];
+
+            for (const el of [root, body]) {
+                const style = window.getComputedStyle(el);
+
+                const hasVh =
+                    /(vh|dvh|svh)/.test(style.height) ||
+                    /(vh|dvh|svh)/.test(style.minHeight);
+
+                const overflowHidden =
+                    style.overflow === 'hidden' ||
+                    style.overflowY === 'hidden';
+
+                if (hasVh && overflowHidden) {
+                    issues.push({
+                        element: el.tagName.toLowerCase(),
+                        height: style.height,
+                        overflow: style.overflow,
+                    });
+                }
+            }
+            return issues;
+        })();
 
         const flexScrollTraps = Array.from(document.querySelectorAll('*'))
             .filter((el) => {
@@ -1784,6 +1996,291 @@ async function collectMetrics(page, view) {
             return style.alignItems !== 'center';
         })();
 
+        // ─── LAYOUT STABILITY CHECKS (2026-04-28) ─────────────────────────────────
+
+        const isDashboardViewportLayout = Boolean(
+            document.body.classList.contains('app-root--dashboard')
+            && document.querySelector('.dashboard-layout')
+            && document.querySelector('#jobsCard')
+        );
+
+        // 15. Submit card must shrink to content (height: auto, flex: 0 0 auto)
+        const submitCardNotShrinking = (() => {
+            const card = document.querySelector('#submitCard');
+            if (!card || !isLayoutVisible(card)) return false;
+            const style = window.getComputedStyle(card);
+            // Must have flex-grow: 0 to prevent expansion
+            return style.flexGrow !== '0' || style.height === '100%';
+        })();
+
+        // 16. Jobs card header must not expand (flex: 0 0 auto)
+        const jobsCardHeaderExpanding = (() => {
+            const header = document.querySelector('.jobs-card-header, #jobsCard .ui-card-header');
+            if (!header || !isLayoutVisible(header)) return false;
+            const style = window.getComputedStyle(header);
+            // Header must have flex-grow: 0
+            return style.flexGrow !== '0';
+        })();
+
+        // 17. Dashboard shell must own the viewport and delegate scrolling locally
+        const dashboardViewportContractBroken = (() => {
+            if (!isDashboardViewportLayout) return false;
+            const shell = document.querySelector('.app-shell');
+            const main = document.querySelector('.app-main');
+            const layout = document.querySelector('.dashboard-layout');
+            if (!shell || !main || !layout) return true;
+
+            const bodyStyle = window.getComputedStyle(document.body);
+            const shellStyle = window.getComputedStyle(shell);
+            const mainStyle = window.getComputedStyle(main);
+            const layoutStyle = window.getComputedStyle(layout);
+            const shellRect = shell.getBoundingClientRect();
+
+            const bodyLocksViewport = bodyStyle.overflow === 'hidden' || bodyStyle.overflowY === 'hidden';
+            const shellFitsViewport = Math.abs(shellRect.height - window.innerHeight) <= 4;
+            const shellIsColumn = shellStyle.display.includes('flex') && shellStyle.flexDirection === 'column';
+            const mainIsFlexColumn = mainStyle.display.includes('flex') && mainStyle.flexDirection === 'column';
+            const mainLocksScroll = mainStyle.overflowX === 'hidden' && mainStyle.overflowY === 'hidden';
+            const layoutLocksScroll = layoutStyle.overflowX === 'hidden' && layoutStyle.overflowY === 'hidden';
+
+            return !(bodyLocksViewport && shellFitsViewport && shellIsColumn && mainIsFlexColumn && mainLocksScroll && layoutLocksScroll);
+        })();
+
+        // 18. Jobs card must fill the remaining viewport height
+        const jobsCardNotFillingHeight = (() => {
+            if (!isDashboardViewportLayout) return false;
+            const card = document.querySelector('#jobsCard');
+            const body = document.querySelector('#jobsCard .ui-card-body');
+            const scroller = document.querySelector('#jobsCard .table-responsive');
+            if (!card || !body || !scroller) return true;
+
+            const cardStyle = window.getComputedStyle(card);
+            const bodyStyle = window.getComputedStyle(body);
+            const scrollerStyle = window.getComputedStyle(scroller);
+
+            const fillsHeight = cardStyle.flexGrow === '1'
+                && bodyStyle.flexGrow === '1'
+                && scrollerStyle.flexGrow === '1';
+            const shrinkable = cardStyle.minHeight === '0px'
+                && bodyStyle.minHeight === '0px'
+                && scrollerStyle.minHeight === '0px';
+
+            return !(fillsHeight && shrinkable);
+        })();
+
+        // 19. Jobs table scroller must be the only vertical scroll owner
+        const tableResponsiveGhostScroll = (() => {
+            const container = document.querySelector('#jobsCard .table-responsive');
+            if (!container || !isLayoutVisible(container)) return isDashboardViewportLayout;
+            const style = window.getComputedStyle(container);
+            const overflowYOk = style.overflowY === 'auto' || style.overflowY === 'scroll';
+            const overflowXOk = style.overflowX === 'hidden' || style.overflowX === 'clip';
+            const flexes = style.flexGrow === '1';
+            const minHeightZero = style.minHeight === '0px' || style.minHeight === '0';
+
+            return isDashboardViewportLayout
+                && (!(overflowYOk && overflowXOk && flexes && minHeightZero) || pageScrollable);
+        })();
+
+        // 19b. The sentinel must live inside the local jobs scroll container
+        const jobsSentinelOutsideScrollContainer = (() => {
+            if (!document.querySelector('#jobsTable')) return false;
+            const container = document.querySelector('#jobsCard .table-responsive');
+            const sentinel = document.querySelector('#jobsSentinel');
+            if (!container || !sentinel) return true;
+            return !container.contains(sentinel);
+        })();
+
+        // 20. Footer must stay pinned inside the viewport shell
+        const stickyFooterDetached = (() => {
+            if (!isDashboardViewportLayout) return false;
+            const footer = document.querySelector('.wb-footer');
+            if (!footer || !isLayoutVisible(footer)) return true;
+            const style = window.getComputedStyle(footer);
+            const rect = footer.getBoundingClientRect();
+
+            const pinnedToBottom = Math.abs(rect.bottom - window.innerHeight) <= 4;
+            const stableFlexItem = style.flexGrow === '0' && style.flexShrink === '0';
+
+            return !(pinnedToBottom && stableFlexItem);
+        })();
+
+        // 21. Desktop jobs table header must remain sticky inside the scroller
+        const stickyTableHeaderBroken = await (async () => {
+            if (!isDashboardViewportLayout || isMobile) return false;
+            const container = document.querySelector('#jobsCard .table-responsive');
+            const thead = document.querySelector('#jobsCard .table thead');
+            const firstHeader = document.querySelector('#jobsCard .table thead th');
+            if (!container || !thead || !firstHeader || !isLayoutVisible(firstHeader)) return true;
+
+            const theadStyle = window.getComputedStyle(thead);
+            const headerStyle = window.getComputedStyle(firstHeader);
+            const stickyConfigured = (theadStyle.position === 'sticky' || headerStyle.position === 'sticky')
+                && headerStyle.top === '0px';
+            const hasSolidBackground = headerStyle.backgroundColor
+                && headerStyle.backgroundColor !== 'rgba(0, 0, 0, 0)'
+                && headerStyle.backgroundColor !== 'transparent';
+
+            if (!stickyConfigured || !hasSolidBackground) return true;
+            if (container.scrollHeight <= container.clientHeight + 2) return false;
+
+            const previousScrollTop = container.scrollTop;
+            const scrollerTop = container.getBoundingClientRect().top;
+            const nextScrollTop = Math.min(previousScrollTop + 96, container.scrollHeight - container.clientHeight);
+
+            container.scrollTop = nextScrollTop;
+            await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+            const stickyTop = firstHeader.getBoundingClientRect().top;
+            container.scrollTop = previousScrollTop;
+            await new Promise((resolve) => requestAnimationFrame(resolve));
+
+            return Math.abs(stickyTop - scrollerTop) > 4;
+        })();
+
+        // 22. Trim waveform container must have proper styling
+        const trimWaveformMissingStyle = (() => {
+            const wave = document.querySelector('#trimWave');
+            if (!wave) return false;
+            const style = window.getComputedStyle(wave);
+            // Must have background, border, and border-radius
+            const hasBg = style.backgroundColor && style.backgroundColor !== 'rgba(0, 0, 0, 0)';
+            const hasBorder = style.borderStyle !== 'none' && style.borderWidth !== '0px';
+            const hasRadius = style.borderRadius && style.borderRadius !== '0px';
+            return !hasBg || !hasBorder || !hasRadius;
+        })();
+
+        // 23. Trim modal should not have default region on open (user must select)
+        const trimDefaultRegionPresent = (() => {
+            const trimModal = document.querySelector('#trimModal');
+            if (!trimModal || !trimModal.classList.contains('show')) return false;
+            // Check if a region exists immediately after modal open
+            const regions = document.querySelectorAll('#trimWave [data-id], #trimWave .wavesurfer-region');
+            const infoText = document.querySelector('#trimInfo');
+            // If info shows a time range (not "Click and drag" prompt), region was auto-created
+            if (infoText && infoText.textContent) {
+                const text = infoText.textContent.trim();
+                // Should show instruction, not a pre-selected range
+                const hasTimeRange = /\d+:\d+.*–.*\d+:\d+/.test(text);
+                const hasInstruction = text.toLowerCase().includes('click') || text.toLowerCase().includes('drag');
+                if (hasTimeRange && !hasInstruction && regions.length > 0) {
+                    return true;
+                }
+            }
+            return false;
+        })();
+
+        // 24. UI card children should not expand unless explicitly needed
+        const uiCardChildExpands = (() => {
+            let count = 0;
+            // Check generic .ui-card > div children (not header/body)
+            const cards = document.querySelectorAll('.ui-card:not(.ui-card--stat)');
+            for (const card of cards) {
+                if (!isLayoutVisible(card)) continue;
+                const children = Array.from(card.children).filter(
+                    c => c.tagName === 'DIV' &&
+                         !c.classList.contains('ui-card-header') &&
+                         !c.classList.contains('ui-card-body')
+                );
+                for (const child of children) {
+                    const style = window.getComputedStyle(child);
+                    // Check if #submitCard's inner div has flex-grow: 0
+                    if (card.id === 'submitCard' && style.flexGrow !== '0') {
+                        count++;
+                    }
+                }
+            }
+            return count;
+        })();
+
+        // Trim modal stability checks
+        const trimModal = document.querySelector('#trimModal');
+        let trimInvalidRanges = false;
+        let trimSnapViolations = 0;
+        let trimLoopDriftMs = 0;
+        let trimZoomInstability = 0;
+        let trimHandleTooSmall = 0;
+        let trimKeyboardMissing = [];
+        let trimKeyboardConflicts = [];
+        let trimInstanceLeaks = 0;
+        let trimUiAudioMismatchMs = 0;
+
+        if (trimModal && trimModal.classList.contains('show')) {
+            const SNAP = 0.5;
+
+            const start = window.__trimStart;
+            const end = window.__trimEnd;
+            const duration = window.__trimDuration;
+
+            if (
+                !Number.isFinite(start) ||
+                !Number.isFinite(end) ||
+                !Number.isFinite(duration) ||
+                start < 0 ||
+                end > duration ||
+                start >= end
+            ) {
+                trimInvalidRanges = true;
+            }
+
+            const isSnapped = (value) => Math.abs(value / SNAP - Math.round(value / SNAP)) < 0.001;
+            if (Number.isFinite(start) && !isSnapped(start)) trimSnapViolations++;
+            if (Number.isFinite(end) && !isSnapped(end)) trimSnapViolations++;
+
+            const handles = document.querySelectorAll('.trim-handle');
+            for (const handle of handles) {
+                const rect = handle.getBoundingClientRect();
+                if (rect.width < 24 || rect.height < 24) {
+                    trimHandleTooSmall++;
+                }
+            }
+
+            const expectedKeys = [' ', 'ArrowLeft', 'ArrowRight'];
+            for (const key of expectedKeys) {
+                let handled = false;
+                const listener = (event) => {
+                    if (event.key === key) handled = true;
+                };
+                document.addEventListener('keydown', listener);
+                document.dispatchEvent(new KeyboardEvent('keydown', { key }));
+                document.removeEventListener('keydown', listener);
+                if (!handled) trimKeyboardMissing.push(key);
+            }
+
+            const beforeScroll = window.scrollY;
+            document.dispatchEvent(new KeyboardEvent('keydown', { key: ' ' }));
+            const afterScroll = window.scrollY;
+            if (afterScroll !== beforeScroll) {
+                trimKeyboardConflicts.push('space-scroll');
+            }
+
+            if (window.__wavesurferInstances && window.__wavesurferInstances.length > 1) {
+                trimInstanceLeaks = window.__wavesurferInstances.length;
+            }
+
+            if (window.__wavesurfer && Number.isFinite(start)) {
+                try {
+                    const current = window.__wavesurfer.getCurrentTime();
+                    trimUiAudioMismatchMs = Math.abs(current - start) * 1000;
+                } catch {
+                    // ignore runtime probe failures
+                }
+            }
+
+            const wave = document.querySelector('#trimWave');
+            if (wave) {
+                const rect1 = wave.getBoundingClientRect();
+                await new Promise((resolve) => requestAnimationFrame(resolve));
+                const rect2 = wave.getBoundingClientRect();
+                if (Math.abs(rect1.width - rect2.width) > 2) {
+                    trimZoomInstability++;
+                }
+            }
+
+            if (window.__trimLoopDriftMs) {
+                trimLoopDriftMs = window.__trimLoopDriftMs;
+            }
+        }
+
         return {
             duplicateIds,
             unlabeledControls,
@@ -1821,6 +2318,7 @@ async function collectMetrics(page, view) {
             focusVisibleCheck,
             unguardedAnimations,
             clippedDropdowns,
+            escapedHtmlElements,
             importantAbuse,
             tightlyPackedTargets,
             localOverflowIssues,
@@ -1829,6 +2327,10 @@ async function collectMetrics(page, view) {
             nestedScrollContainers,
             flexScrollTraps,
             doubleScrollRisk,
+            viewportScrollLeak,
+            overflowHiddenScrollBlockers,
+            hasSelectorLayoutUsage,
+            viewportLockingIssues,
             badgeInconsistencies,
             iconPointerEventsIssues,
             gridViolations,
@@ -1851,6 +2353,27 @@ async function collectMetrics(page, view) {
             invisibleMedia,
             backgroundAttachmentFixedWithoutFallback,
             loginShellAlignmentIssue,
+            // Layout stability (2026-04-28)
+            submitCardNotShrinking,
+            jobsCardHeaderExpanding,
+            tableResponsiveGhostScroll,
+            jobsSentinelOutsideScrollContainer,
+            dashboardViewportContractBroken,
+            jobsCardNotFillingHeight,
+            stickyFooterDetached,
+            stickyTableHeaderBroken,
+            trimWaveformMissingStyle,
+            trimDefaultRegionPresent,
+            uiCardChildExpands,
+            trimInvalidRanges,
+            trimSnapViolations,
+            trimLoopDriftMs,
+            trimZoomInstability,
+            trimHandleTooSmall,
+            trimKeyboardMissing,
+            trimKeyboardConflicts,
+            trimInstanceLeaks,
+            trimUiAudioMismatchMs,
         };
     }, {
         requiredSelectors: view.requiredSelectors,
@@ -2080,7 +2603,14 @@ async function runView(browser, storageState, view, replacements = {}) {
     try {
         await openView(page, view, replacements);
 
-        const metrics = await collectMetrics(page, view);
+        const runtimeMetrics = await collectMetrics(page, view);
+        const jobsScrollContracts = viewAuditsJobsList(view)
+            ? await getJobsScrollContractMetrics()
+            : {
+                jobsInfiniteScrollNotObserverBased: false,
+                jobsPagingOffsetContractBroken: false,
+            };
+        const metrics = { ...runtimeMetrics, ...jobsScrollContracts };
         const shots = await captureStablePair(page, view);
         const visual = diffScreenshots({
             name: view.name,
@@ -2156,11 +2686,17 @@ async function runView(browser, storageState, view, replacements = {}) {
         if (metrics.clippedDropdowns?.length) {
             warnings.push(`dropdowns inside overflow:hidden containers: ${metrics.clippedDropdowns.length}`);
         }
+        if (metrics.escapedHtmlElements?.length) {
+            failures.push(`escaped HTML detected: ${metrics.escapedHtmlElements.length}`);
+        }
         if (metrics.importantAbuse?.count > 10) {
             warnings.push(`excessive !important usage: ${metrics.importantAbuse.count}`);
         }
         if (metrics.tightlyPackedTargets?.length) {
             warnings.push(`tightly packed touch targets: ${metrics.tightlyPackedTargets.length}`);
+        }
+        if (metrics.viewportScrollLeak) {
+            warnings.push('page scroll leaks past local table scroller');
         }
         if (metrics.localOverflowIssues?.length) {
             failures.push(`local overflow elements: ${metrics.localOverflowIssues.length}`);
@@ -2215,6 +2751,45 @@ async function runView(browser, storageState, view, replacements = {}) {
         }
         if (metrics.loginShellAlignmentIssue) {
             failures.push('login-shell align-items is not center (layout regression)');
+        }
+        if (metrics.submitCardNotShrinking) {
+            failures.push('dashboard submit card expands instead of shrinking to content');
+        }
+        if (metrics.jobsCardHeaderExpanding) {
+            failures.push('jobs card header expands instead of remaining fixed-height');
+        }
+        if (metrics.dashboardViewportContractBroken) {
+            failures.push('dashboard shell is not pinned to the viewport');
+        }
+        if (metrics.jobsCardNotFillingHeight) {
+            failures.push('jobs card does not fill the remaining dashboard height');
+        }
+        if (metrics.tableResponsiveGhostScroll) {
+            failures.push('jobs table scroller is misconfigured or page scroll is leaking');
+        }
+        if (metrics.stickyFooterDetached) {
+            failures.push('dashboard footer is outside the viewport');
+        }
+        if (metrics.stickyTableHeaderBroken) {
+            failures.push('jobs table header is not sticky inside the scroll container');
+        }
+        if (metrics.jobsSentinelOutsideScrollContainer) {
+            failures.push('jobs sentinel is missing from the local scroll container');
+        }
+        if (metrics.jobsInfiniteScrollNotObserverBased) {
+            failures.push('jobs infinite scroll is not driven by an IntersectionObserver rooted at the local scroller');
+        }
+        if (metrics.jobsPagingOffsetContractBroken) {
+            failures.push('jobs pagination offset is not monotonic across row trimming');
+        }
+        if (metrics.trimWaveformMissingStyle) {
+            failures.push('trim waveform container styling is incomplete');
+        }
+        if (metrics.trimDefaultRegionPresent) {
+            failures.push('trim modal opens with a preselected region');
+        }
+        if (metrics.uiCardChildExpands) {
+            failures.push(`ui-card children expanding unexpectedly: ${metrics.uiCardChildExpands}`);
         }
 
         failures.push(...sameOriginFailures);
@@ -2273,6 +2848,7 @@ async function runView(browser, storageState, view, replacements = {}) {
                 noVisibleFocusIndicators: metrics.focusVisibleCheck?.noVisibleFocus?.length || 0,
                 unguardedAnimations: metrics.unguardedAnimations?.unguarded?.length || 0,
                 clippedDropdowns: metrics.clippedDropdowns?.length || 0,
+                escapedHtmlElements: metrics.escapedHtmlElements?.length || 0,
                 importantAbuse: metrics.importantAbuse?.count || 0,
                 localOverflowIssues: metrics.localOverflowIssues?.length || 0,
                 brokenTitleTruncation: metrics.brokenTitleTruncation?.length || 0,
@@ -2285,6 +2861,7 @@ async function runView(browser, storageState, view, replacements = {}) {
                 nestedScrollContainers: metrics.nestedScrollContainers?.length || 0,
                 flexScrollTraps: metrics.flexScrollTraps?.length || 0,
                 doubleScrollRisk: metrics.doubleScrollRisk ? 1 : 0,
+                viewportScrollLeak: metrics.viewportScrollLeak ? 1 : 0,
                 badgeInconsistencies: metrics.badgeInconsistencies || 0,
                 iconPointerEventsIssues: metrics.iconPointerEventsIssues?.length || 0,
                 gridViolations: metrics.gridViolations?.length || 0,
@@ -2302,6 +2879,22 @@ async function runView(browser, storageState, view, replacements = {}) {
                 invisibleMedia: metrics.invisibleMedia?.length || 0,
                 backgroundAttachmentFixedWithoutFallback: metrics.backgroundAttachmentFixedWithoutFallback || false,
                 loginShellAlignmentIssue: metrics.loginShellAlignmentIssue || false,
+                overflowHiddenScrollBlockers: metrics.overflowHiddenScrollBlockers?.length || 0,
+                hasSelectorLayoutUsage: metrics.hasSelectorLayoutUsage?.length || 0,
+                viewportLockingIssues: metrics.viewportLockingIssues?.length || 0,
+                submitCardNotShrinking: metrics.submitCardNotShrinking || false,
+                jobsCardHeaderExpanding: metrics.jobsCardHeaderExpanding || false,
+                tableResponsiveGhostScroll: metrics.tableResponsiveGhostScroll || false,
+                dashboardViewportContractBroken: metrics.dashboardViewportContractBroken || false,
+                jobsCardNotFillingHeight: metrics.jobsCardNotFillingHeight || false,
+                stickyFooterDetached: metrics.stickyFooterDetached || false,
+                stickyTableHeaderBroken: metrics.stickyTableHeaderBroken || false,
+                jobsSentinelOutsideScrollContainer: metrics.jobsSentinelOutsideScrollContainer || false,
+                jobsInfiniteScrollNotObserverBased: metrics.jobsInfiniteScrollNotObserverBased || false,
+                jobsPagingOffsetContractBroken: metrics.jobsPagingOffsetContractBroken || false,
+                trimWaveformMissingStyle: metrics.trimWaveformMissingStyle || false,
+                trimDefaultRegionPresent: metrics.trimDefaultRegionPresent || false,
+                uiCardChildExpands: metrics.uiCardChildExpands || 0,
             },
             screenshots: {
                 first: shots.shotA,

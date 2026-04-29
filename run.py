@@ -8,6 +8,7 @@ import logging
 import os
 import re
 import sys
+from typing import TextIO
 
 import uvicorn
 
@@ -18,7 +19,7 @@ class RedactingFormatter(logging.Formatter):
     """Formatter that redacts sensitive data from the final log line."""
 
     SENSITIVE_PATTERNS = (
-        (re.compile(r"(auth_token|tubeyou_csrf|tubeyou_session|session|token)=([^;\s]+)", re.IGNORECASE), r"\1=***REDACTED***"),
+        (re.compile(r"\b(auth_token|tubeyou_csrf|tubeyou_session|session|token)\b=([^;\s]+)", re.IGNORECASE), r"\1=***REDACTED***"),
         (re.compile(r"(authorization:\s*)(bearer\s+)?([^\s]+)", re.IGNORECASE), r"\1\2***REDACTED***"),
         (re.compile(r"(x-api-key:\s*)([^\s]+)", re.IGNORECASE), r"\1***REDACTED***"),
     )
@@ -34,7 +35,12 @@ def _env_truthy(value: str | None) -> bool:
     return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _should_use_colors(stream: object) -> bool:
+def _env_csv(name: str, default_value: str) -> str:
+    raw = str(os.environ.get(name, default_value)).strip()
+    return raw or default_value
+
+
+def _should_use_colors(stream: TextIO) -> bool:
     # Respect explicit opt-out first.
     if os.environ.get("NO_COLOR") is not None:
         return False
@@ -60,6 +66,7 @@ class ColoredRedactingFormatter(RedactingFormatter):
     """Redacting formatter with optional ANSI level colors."""
 
     RESET = "\x1b[0m"
+    TIMESTAMP_COLOR = "\x1b[90m"  # dark gray
     LEVEL_COLORS = {
         logging.DEBUG: "\x1b[36m",     # cyan
         logging.INFO: "\x1b[32m",      # green
@@ -73,25 +80,47 @@ class ColoredRedactingFormatter(RedactingFormatter):
         self.use_colors = use_colors
 
     def format(self, record: logging.LogRecord) -> str:
+        message = super().format(record)
         if not self.use_colors:
-            return super().format(record)
+            return message
 
-        original_levelname = record.levelname
+        timestamp = getattr(record, "asctime", None)
+        if timestamp and message.startswith(timestamp):
+            colored_timestamp = f"{self.TIMESTAMP_COLOR}{timestamp}{self.RESET}"
+            message = f"{colored_timestamp}{message[len(timestamp):]}"
+
         color = self.LEVEL_COLORS.get(record.levelno)
-        if color:
-            record.levelname = f"{color}{original_levelname}{self.RESET}"
-        try:
-            return super().format(record)
-        finally:
-            record.levelname = original_levelname
+        if not color:
+            return message
+
+        levelname = record.levelname
+        colored_levelname = f"{color}{levelname}{self.RESET}"
+        marker = f" - {levelname} - "
+        colored_marker = f" - {colored_levelname} - "
+        if marker in message:
+            return message.replace(marker, colored_marker, 1)
+        return message.replace(levelname, colored_levelname, 1)
 
 
 if __name__ == "__main__":
     print_banner_once()
 
     log_level = os.environ.get("LOG_LEVEL", "info").lower()
+    log_level_upper = log_level.upper()
     reload_enabled = _env_truthy(os.environ.get("UVICORN_RELOAD"))
     use_colors = _should_use_colors(sys.stdout)
+    host = os.environ.get("HOST", "0.0.0.0")
+    port = int(os.environ.get("PORT", "8000"))
+    forwarded_allow_ips = _env_csv(
+        "FORWARDED_ALLOW_IPS",
+        "127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7",
+    )
+
+    stream_handler = {
+        "class": "logging.StreamHandler",
+        "stream": "ext://sys.stdout",
+        "formatter": "redacted",
+    }
 
     log_config = {
         "version": 1,
@@ -105,35 +134,27 @@ if __name__ == "__main__":
             },
         },
         "handlers": {
-            "default": {
-                "formatter": "redacted",
-                "class": "logging.StreamHandler",
-                "stream": "ext://sys.stdout",
-            },
-            "access": {
-                "formatter": "redacted",
-                "class": "logging.StreamHandler",
-                "stream": "ext://sys.stdout",
-            },
+            "default": dict(stream_handler),
+            "access": dict(stream_handler),
         },
         "root": {
             "handlers": ["default"],
-            "level": log_level.upper(),
+            "level": log_level_upper,
         },
         "loggers": {
             "uvicorn": {
                 "handlers": ["default"],
-                "level": log_level.upper(),
+                "level": log_level_upper,
                 "propagate": False,
             },
             "uvicorn.error": {
                 "handlers": ["default"],
-                "level": log_level.upper(),
+                "level": log_level_upper,
                 "propagate": False,
             },
             "uvicorn.access": {
                 "handlers": ["access"],
-                "level": log_level.upper(),
+                "level": log_level_upper,
                 "propagate": False,
             },
         },
@@ -141,8 +162,10 @@ if __name__ == "__main__":
 
     uvicorn.run(
         "app.main:app",
-        host="0.0.0.0",
-        port=8000,
+        host=host,
+        port=port,
         reload=reload_enabled,
+        proxy_headers=True,
+        forwarded_allow_ips=forwarded_allow_ips,
         log_config=log_config,
     )

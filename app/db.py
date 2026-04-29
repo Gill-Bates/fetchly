@@ -59,7 +59,7 @@ def _int_parser(default: int) -> Callable[[str], int]:
     return lambda v: int(v) if str(v).isdigit() else default
 
 
-_INTERNAL_SETTINGS_KEYS: Final[frozenset[str]] = frozenset({"admin_password_hash"})
+_INTERNAL_SETTINGS_KEYS: Final[frozenset[str]] = frozenset({"admin_password_hash", "session_version"})
 # Only user-writable keys.  Internal keys require allow_internal=True in set_settings.
 _ALLOWED_SETTINGS_KEYS: Final[frozenset[str]] = frozenset(_SETTINGS_DEFAULTS)
 
@@ -70,6 +70,7 @@ _SETTINGS_TYPES: Final[dict[str, Callable[[str], Any]]] = {
     "retention_days": _int_parser(7),
     "login_required": lambda v: v.lower() in ("true", "1", "yes"),
     "session_idle_minutes": _int_parser(60),
+    "session_version": _int_parser(0),
     "lalalaai_email": str,
     "lalalaai_auth_key": str,
     "lalalaai_auth_requested_at": _int_parser(0),

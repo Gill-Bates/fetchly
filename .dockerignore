@@ -23,6 +23,7 @@ cookies.txt
 *.har
 .omx/
 .codex
+app/static/vendor/wavesurfer/
 
 # Local tooling
 tools/

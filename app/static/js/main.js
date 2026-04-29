@@ -3,26 +3,16 @@
 // Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 //
 
-import { CONFIG } from "./config.js";
-import * as api from "./api.js";
-import { getCookie, isValidYouTubeUrl, extractYouTubeVideoId, formatDuration } from "./utils.js";
-import { prependJob, loadMore, applyRowStatusClasses } from "./jobs.js";
-import { connectWS } from "./ws.js";
+import { CONFIG, DOWNLOADABLE_STATUSES } from "./config.js";
+import { fetchJobs, submitJob, fetchVideoInfo, toErrorMessage } from "./api.js";
+import { getCookie, isValidYouTubeUrl, extractYouTubeVideoId, formatDuration, isSafeRedirect, subscribeToLalalProgress } from "./utils.js";
+import { prependJob, loadMore, applyRowStatusClasses } from "./jobs.js?v=20260429l";
+import { connectWS } from "./ws.js?v=20260429m";
 import { showToast, clearToasts, toast } from "./toast.js";
+import { initTrim } from "./trim.js?v=20260429v";
 
 // Expose toast globally for inline scripts
 window.TubeYou = Object.freeze({ toast, showToast });
-
-const { fetchJobs, submitJob, fetchVideoInfo } = api;
-const toErrorMessage = typeof api.toErrorMessage === "function"
-    ? api.toErrorMessage
-    : (value) => {
-        if (value == null) return "";
-        if (typeof value === "string") return value;
-        if (typeof value?.detail === "string") return value.detail;
-        if (typeof value?.error === "string") return value.error;
-        return String(value);
-    };
 
 const submitForm = document.getElementById("submitForm");
 const urlInput = document.getElementById("urlInput");
@@ -41,8 +31,9 @@ const btnText = document.getElementById("btnText");
 const formError = document.getElementById("formError");
 const jobsSearchInput = document.getElementById("jobsSearchInput");
 const jobsTbody = document.getElementById("jobsTbody");
+const jobsScrollContainer = document.querySelector("#jobsCard .table-responsive");
+const jobsSentinel = document.getElementById("jobsSentinel");
 const detailModalEl = document.getElementById("detailModal");
-const logoutBtn = document.getElementById("logoutBtn");
 const settingsBtn = document.getElementById("settingsBtn");
 const titlePopover = document.getElementById("titlePopover");
 
@@ -50,13 +41,15 @@ const detailModal = (typeof bootstrap !== "undefined" && detailModalEl)
     ? bootstrap.Modal.getOrCreateInstance(detailModalEl)
     : null;
 const defaultQualityHtml = qualitySelect ? qualitySelect.innerHTML : "";
-
-/** Statuses that allow downloading the finished file. */
-const DOWNLOADABLE_STATUSES = new Set(["done", "analysis", "analysis_done"]);
+const AUDIO_TYPE = "audio";
+const VIDEO_QUALITY_OPTIONS = [
+    { label: "Max (best available)", value: "max" },
+    { label: "720p", value: "medium" },
+    { label: "480p", value: "small" },
+];
 
 let activeDetailId = null;
 let lastFocusedBeforeModal = null;
-let ticking = false;
 let isLoadingMore = false;
 let isSubmitting = false;
 let previewDebounceId = null;
@@ -64,22 +57,14 @@ let previewAbortController = null;
 let filterRafId = null;
 let activeTitleCell = null;
 const inflightActions = new WeakSet();
-let successIconTimeoutId = null;
+const actionTimers = new WeakMap();
 
-function ensureJobsDropdownConfig(toggle) {
-    if (!toggle || typeof bootstrap === "undefined" || !bootstrap.Dropdown) {
-        return;
-    }
+function getCsrfToken() {
+    return getCookie("tubeyou_csrf");
+}
 
-    bootstrap.Dropdown.getOrCreateInstance(toggle, {
-        boundary: "viewport",
-        popperConfig(defaultBsConfig) {
-            return {
-                ...defaultBsConfig,
-                strategy: "fixed",
-            };
-        },
-    });
+function isNativeNavigation(event) {
+    return event.ctrlKey || event.metaKey || event.shiftKey || event.button !== 0;
 }
 
 function positionTitlePopover(target) {
@@ -173,7 +158,25 @@ document.addEventListener("click", (event) => {
         return;
     }
 
-    ensureJobsDropdownConfig(toggle);
+    // Initialize with fixed positioning if not already done
+    if (typeof bootstrap !== "undefined" && bootstrap.Dropdown) {
+        let dropdown = bootstrap.Dropdown.getInstance(toggle);
+        if (!dropdown) {
+            dropdown = new bootstrap.Dropdown(toggle, {
+                boundary: "viewport",
+                popperConfig(defaultBsConfig) {
+                    return {
+                        ...(defaultBsConfig || {}),
+                        strategy: "fixed",
+                    };
+                },
+            });
+            // Manually toggle since we intercepted the click
+            event.preventDefault();
+            event.stopPropagation();
+            dropdown.toggle();
+        }
+    }
 }, true);
 
 function getOrCreateFilterEmptyRow() {
@@ -187,7 +190,7 @@ function getOrCreateFilterEmptyRow() {
     row.classList.add("d-none");
 
     const td = document.createElement("td");
-    td.colSpan = 7;
+    td.colSpan = 8;
 
     const wrapper = document.createElement("div");
     wrapper.className = "empty-state";
@@ -249,6 +252,55 @@ function scheduleJobTitleFilter() {
     });
 }
 
+async function maybeLoadMoreJobs() {
+    if (isLoadingMore) return;
+
+    isLoadingMore = true;
+    try {
+        await loadMore(fetchJobs);
+        scheduleJobTitleFilter();
+    } catch (err) {
+        console.warn("loadMore failed:", err);
+    } finally {
+        isLoadingMore = false;
+    }
+}
+
+function setupInfiniteJobsScroll() {
+    if (!jobsScrollContainer) return;
+
+    if (typeof IntersectionObserver === "function" && jobsSentinel) {
+        const observer = new IntersectionObserver(
+            (entries) => {
+                const entry = entries[0];
+                if (!entry?.isIntersecting || isLoadingMore) return;
+                void maybeLoadMoreJobs();
+            },
+            {
+                root: jobsScrollContainer,
+                rootMargin: `0px 0px ${CONFIG.SCROLL_OFFSET}px 0px`,
+                threshold: 0.01,
+            },
+        );
+
+        observer.observe(jobsSentinel);
+        return;
+    }
+
+    const onScroll = () => {
+        if (isLoadingMore) return;
+
+        const nearBottom =
+            jobsScrollContainer.scrollTop + jobsScrollContainer.clientHeight
+            >= jobsScrollContainer.scrollHeight - CONFIG.SCROLL_OFFSET;
+
+        if (!nearBottom) return;
+        void maybeLoadMoreJobs();
+    };
+
+    jobsScrollContainer.addEventListener("scroll", onScroll, { passive: true });
+}
+
 function setError(message) {
     if (!formError) return;
     if (message) {
@@ -278,7 +330,7 @@ function resetQualityOptions() {
 
 function hideVideoPreview() {
     if (videoPreviewGrid) {
-        videoPreviewGrid.classList.add("d-none");
+        videoPreviewGrid.classList.add("d-none", "is-empty");
     }
     if (thumbnailPreview) {
         thumbnailPreview.replaceChildren();
@@ -288,7 +340,7 @@ function hideVideoPreview() {
 }
 
 function showVideoPreview() {
-    videoPreviewGrid?.classList.remove("d-none");
+    videoPreviewGrid?.classList.remove("d-none", "is-empty");
 }
 
 function setSubmitBusy(isBusy) {
@@ -314,11 +366,24 @@ function setSubmitBusy(isBusy) {
     btnText.appendChild(document.createTextNode(" Start"));
 }
 
+function abortPreviewRequest() {
+    previewAbortController?.abort();
+    previewAbortController = null;
+}
+
+function abortAndResetPreview() {
+    if (previewDebounceId) {
+        clearTimeout(previewDebounceId);
+        previewDebounceId = null;
+    }
+    abortPreviewRequest();
+}
+
 function updateQualityOptions(formats) {
     if (!qualitySelect) return;
 
     // For audio, keep default quality options (quality is ignored for audio anyway)
-    if (typeSelect?.value === "audio") {
+    if (typeSelect?.value === AUDIO_TYPE) {
         resetQualityOptions();
         return;
     }
@@ -329,15 +394,8 @@ function updateQualityOptions(formats) {
         return;
     }
 
-    // Map YouTube format notes to our quality values
-    const qualityMap = [
-        { label: "Max (best available)", value: "max" },
-        { label: "720p", value: "medium" },
-        { label: "480p", value: "small" },
-    ];
-
     const fragment = document.createDocumentFragment();
-    for (const q of qualityMap) {
+    for (const q of VIDEO_QUALITY_OPTIONS) {
         const option = document.createElement("option");
         option.value = q.value;
         option.textContent = q.label;
@@ -347,7 +405,7 @@ function updateQualityOptions(formats) {
 }
 
 async function updateVideoPreview() {
-    previewAbortController?.abort();
+    abortPreviewRequest();
     const controller = new AbortController();
     previewAbortController = controller;
 
@@ -396,6 +454,10 @@ async function updateVideoPreview() {
         resetVideoMeta();
         setText(metaTitle, "Metadata unavailable");
         setText(metaFormats, "–");
+    } finally {
+        if (previewAbortController === controller) {
+            previewAbortController = null;
+        }
     }
 }
 
@@ -411,7 +473,7 @@ function scheduleVideoPreviewUpdate() {
 }
 
 function openDetail(jobId) {
-    if (!detailModalEl || !detailModal) return;
+    if (!jobId || !detailModalEl || !detailModal) return;
 
     const row = document.querySelector(`tr[data-job-id="${CSS.escape(jobId)}"]`);
     if (!row) return;
@@ -423,7 +485,7 @@ function openDetail(jobId) {
     };
 
     const statusValue = row.dataset.status ||
-        row.querySelector("td[data-label='Status'] .status-pill")?.textContent?.trim() || "–";
+        row.querySelector("td[data-label='Status'] .status-pill, td[data-label='Status'] .status-inline")?.textContent?.trim() || "–";
 
     activeDetailId = jobId;
     setText(document.getElementById("mId"), jobId);
@@ -450,25 +512,17 @@ async function handleLalalSplit(btn) {
 
     if (!jobId || !stem) return;
 
-    // Use AbortController for lifecycle management of event listener
     const ac = new AbortController();
     let progressText = null;
-    const progressHandler = (event) => {
-        const detail = event.detail;
-        if (detail.job_id === jobId && detail.stem === stem) {
-            if (!progressText) {
-                progressText = document.createElement("span");
-                progressText.className = "ms-1 small";
-                progressText.dataset.lalalProgress = "1";
-                btn.appendChild(progressText);
-            }
-            const stage = detail.stage === "upload" ? "↑" : "⚙";
-            progressText.textContent = `${stage} ${detail.progress}%`;
+    subscribeToLalalProgress(jobId, stem, (stage, progress) => {
+        if (!progressText) {
+            progressText = document.createElement("span");
+            progressText.className = "ms-1 small";
+            progressText.dataset.lalalProgress = "1";
+            btn.appendChild(progressText);
         }
-    };
-    document.addEventListener("tubeyou:lalal-progress", progressHandler, {
-        signal: ac.signal
-    });
+        progressText.textContent = `${stage} ${progress}%`;
+    }, ac.signal);
 
     try {
         const data = await handleActionPost(
@@ -479,7 +533,7 @@ async function handleLalalSplit(btn) {
             // Cleanup before navigation
             ac.abort();
             progressText?.remove();
-            window.location.href = data.download_url;
+            window.location.assign(data.download_url);
             return;
         }
     } catch (err) {
@@ -509,26 +563,29 @@ async function handleCancelJob(btn) {
     }
 }
 
-document.addEventListener("click", async (event) => {
-    const detailBtn = event.target.closest("[data-action='open-detail']");
-    if (detailBtn) {
+const ACTION_HANDLERS = Object.freeze({
+    "open-detail": (btn, event) => {
         event.preventDefault();
-        openDetail(detailBtn.dataset.jobId || "");
-        return;
-    }
+        openDetail(btn.dataset.jobId || "");
+    },
+    "lalal-split": (btn, event) => {
+        event.preventDefault();
+        void handleLalalSplit(btn);
+    },
+    "cancel-job": (btn, event) => {
+        event.preventDefault();
+        void handleCancelJob(btn);
+    },
+});
 
-    const splitBtn = event.target.closest("[data-action='lalal-split']");
-    if (splitBtn) {
-        event.preventDefault();
-        await handleLalalSplit(splitBtn);
-        return;
-    }
+document.addEventListener("click", (event) => {
+    if (!(event.target instanceof Element)) return;
 
-    const cancelBtn = event.target.closest("[data-action='cancel-job']");
-    if (cancelBtn) {
-        event.preventDefault();
-        await handleCancelJob(cancelBtn);
-    }
+    const actionBtn = event.target.closest("[data-action]");
+    if (!(actionBtn instanceof HTMLElement)) return;
+
+    const handler = ACTION_HANDLERS[actionBtn.dataset.action || ""];
+    handler?.(actionBtn, event);
 });
 
 document.addEventListener("tubeyou:job-update", (event) => {
@@ -606,28 +663,28 @@ submitForm?.addEventListener("submit", async (event) => {
 
     setError("");
 
-    const urlValue = urlInput?.value.trim() || "";
-    if (!isValidYouTubeUrl(urlValue)) {
-        setError("Invalid YouTube URL. Please enter a valid youtube.com or youtu.be link.");
-        isSubmitting = false;
-        return;
-    }
-
-    // Kill any in-flight video preview fetch so it cannot race the submit.
-    previewAbortController?.abort();
-    setSubmitBusy(true);
-
     try {
+        const urlValue = urlInput?.value.trim() || "";
+        if (!isValidYouTubeUrl(urlValue)) {
+            setError("Invalid YouTube URL. Please enter a valid youtube.com or youtu.be link.");
+            return;
+        }
+
+        // Kill any pending preview work so it cannot race the submit.
+        abortAndResetPreview();
+        setSubmitBusy(true);
+
         const formData = new FormData(submitForm);
         // Audio downloads ignore quality selection - always use max (best audio)
-        if (typeSelect?.value === "audio") {
+        if (typeSelect?.value === AUDIO_TYPE) {
             formData.set("quality", "max");
         }
 
-        const job = await submitJob(formData, getCookie("tubeyou_csrf"));
+        const job = await submitJob(formData, getCsrfToken());
         document.getElementById("emptyRow")?.remove();
         prependJob(job);
         scheduleJobTitleFilter();
+
         submitForm.reset();
         typeSelect?.dispatchEvent(new Event("change"));
         hideVideoPreview();
@@ -646,7 +703,7 @@ urlInput?.addEventListener("input", scheduleVideoPreviewUpdate);
 urlInput?.addEventListener("change", scheduleVideoPreviewUpdate);
 
 typeSelect?.addEventListener("change", () => {
-    if (typeSelect.value === "audio") {
+    if (typeSelect.value === AUDIO_TYPE) {
         // Set quality to "best" (first option) when audio format is selected.
         if (qualitySelect && qualitySelect.options.length > 0) {
             qualitySelect.selectedIndex = 0;
@@ -665,49 +722,11 @@ typeSelect?.addEventListener("change", () => {
     }
 });
 
-window.addEventListener("scroll", () => {
-    if (ticking || isLoadingMore) return;
-
-    ticking = true;
-    window.requestAnimationFrame(() => {
-        ticking = false;
-        const nearBottom =
-            window.innerHeight + window.scrollY
-            >= document.body.offsetHeight - CONFIG.SCROLL_OFFSET;
-
-        if (!nearBottom || isLoadingMore) return;
-
-        isLoadingMore = true;
-        loadMore(fetchJobs)
-            .then(scheduleJobTitleFilter)
-            .catch((err) => {
-                console.warn("loadMore failed:", err);
-            })
-            .finally(() => {
-                isLoadingMore = false;
-            });
-    });
-}, { passive: true });
-
-logoutBtn?.addEventListener("click", async (event) => {
-    event.preventDefault();
-    try {
-        await fetch("/logout", {
-            method: "POST",
-            credentials: "same-origin",
-            headers: {
-                "X-CSRF-Token": getCookie("tubeyou_csrf"),
-            },
-        });
-    } catch (err) {
-        console.warn("Logout request failed:", err);
+settingsBtn?.addEventListener("click", (event) => {
+    if (isNativeNavigation(event)) {
+        return;
     }
 
-    window.location.assign("/logout");
-});
-
-settingsBtn?.addEventListener("click", (event) => {
-    // Fallback for environments/extensions that interfere with normal anchor navigation.
     event.preventDefault();
     window.location.assign("/settings");
 });
@@ -718,20 +737,18 @@ window.addEventListener("jobs-load-error", (event) => {
     showToast(`Jobs load failed: ${message}`, "warning", 3500);
 });
 
-// Security helpers
-function isSafeRedirect(url) {
-    if (typeof url !== "string") return false;
-    try {
-        const parsed = new URL(url, window.location.href);
-        if (parsed.origin !== window.location.origin) return false;
-        // Only allow known download paths
-        return parsed.pathname.startsWith("/download/")
-            || parsed.pathname.startsWith("/api/lalal/");
-    } catch {
-        return false;
-    }
-}
-
+/**
+ * POST to an action endpoint with CSRF protection, inflight deduplication,
+ * and inline button feedback.
+ *
+ * Shows a spinner while the request is active and a temporary success icon on
+ * completion. Concurrent calls for the same button are rejected.
+ *
+ * @param {HTMLElement} btn
+ * @param {string} url
+ * @param {{ headers?: Record<string, string>, body?: BodyInit }} [options]
+ * @returns {Promise<object>}
+ */
 async function handleActionPost(btn, url, options = {}) {
     if (!btn || inflightActions.has(btn)) {
         throw new Error("Action already in progress");
@@ -746,12 +763,19 @@ async function handleActionPost(btn, url, options = {}) {
     spinner.setAttribute("aria-hidden", "true");
     btn.prepend(spinner);
 
+    const existingTimer = actionTimers.get(btn);
+    if (existingTimer) {
+        clearTimeout(existingTimer);
+        actionTimers.delete(btn);
+    }
+    btn.querySelector("[data-action-post-success='1']")?.remove();
+
     try {
         const response = await fetch(url, {
             method: "POST",
             credentials: "same-origin",
             headers: {
-                "X-CSRF-Token": getCookie("tubeyou_csrf"),
+                "X-CSRF-Token": getCsrfToken(),
                 ...options.headers,
             },
             body: options.body,
@@ -766,18 +790,15 @@ async function handleActionPost(btn, url, options = {}) {
 
         const successIcon = document.createElement("span");
         successIcon.className = "material-symbols-outlined icon-inline me-1";
+    successIcon.dataset.actionPostSuccess = "1";
         successIcon.setAttribute("aria-hidden", "true");
         successIcon.textContent = "check";
 
         spinner.remove();
         btn.prepend(successIcon);
 
-        // Clear any previous timeout
-        if (successIconTimeoutId !== null) {
-            clearTimeout(successIconTimeoutId);
-        }
-        successIconTimeoutId = setTimeout(() => {
-            successIconTimeoutId = null;
+        const timerId = setTimeout(() => {
+            actionTimers.delete(btn);
             if (successIcon.isConnected) {
                 successIcon.remove();
             }
@@ -785,6 +806,7 @@ async function handleActionPost(btn, url, options = {}) {
                 btn.disabled = originalDisabled;
             }
         }, 2000);
+        actionTimers.set(btn, timerId);
 
         return data;
     } catch (err) {
@@ -800,3 +822,5 @@ async function handleActionPost(btn, url, options = {}) {
 
 connectWS();
 applyJobTitleFilter();
+setupInfiniteJobsScroll();
+initTrim();

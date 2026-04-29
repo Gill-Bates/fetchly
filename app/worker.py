@@ -4,8 +4,6 @@
 # Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 #
 
-from __future__ import annotations
-
 import json
 import logging
 import os
@@ -18,27 +16,38 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final
+from urllib.parse import parse_qs, urlparse
 
-from .analysis_worker import submit_analysis
+from .analysis_worker import SubmitResult, submit_analysis
 from .db import update_job
 from .governor import governor
 
 logger = logging.getLogger(__name__)
+
+type Job = tuple[str, str, str, str]
+type StatusPayload = dict[str, Any]
+type StatusCallback = Callable[[StatusPayload], None]
 
 _COOKIES_PATH: Final = Path(__file__).parent.parent / "youtube_cookies.txt"
 _BASE_DIR: Path | None = None
 _base_dir_lock = threading.Lock()
 
 
+class _ShutdownSentinelType:
+    __slots__ = ()
+
+
+type QueueItem = Job | _ShutdownSentinelType
+
+
 def _get_base_dir() -> Path:
     """Lazily initialize the worker output directory."""
     global _BASE_DIR
-    if _BASE_DIR is None:
-        with _base_dir_lock:
-            if _BASE_DIR is None:
-                _BASE_DIR = (Path(__file__).parent.parent / "data").resolve()
-                _BASE_DIR.mkdir(parents=True, exist_ok=True)
-    return _BASE_DIR
+    with _base_dir_lock:
+        if _BASE_DIR is None:
+            _BASE_DIR = (Path(__file__).parent.parent / "data").resolve()
+            _BASE_DIR.mkdir(parents=True, exist_ok=True)
+        return _BASE_DIR
 
 
 def _cookies_args() -> list[str]:
@@ -50,7 +59,6 @@ def _cookies_args() -> list[str]:
 
 def _normalize_url(url: str) -> str:
     """Strip playlist parameters from YouTube URLs to avoid yt-dlp issues."""
-    from urllib.parse import urlparse, parse_qs
     value = url.strip()
     try:
         parsed = urlparse(value)
@@ -71,28 +79,28 @@ def _normalize_url(url: str) -> str:
 
 # Queue maxsize managed by Governor for backpressure
 # Use get_job_queue() to access the queue (lazy initialization)
-_job_queue: queue.Queue[tuple[str, str, str, str]] | None = None
+_job_queue: queue.Queue[QueueItem] | None = None
 _queue_lock = threading.Lock()
 
 
-def get_job_queue() -> queue.Queue[tuple[str, str, str, str]]:
+def get_job_queue() -> queue.Queue[QueueItem]:
     """Get the job queue with Governor-managed maxsize for backpressure."""
     global _job_queue
-    if _job_queue is None:
-        with _queue_lock:
-            if _job_queue is None:
-                maxsize = governor.queue_maxsize
-                _job_queue = queue.Queue(maxsize=maxsize)
-                logger.info("Job queue initialized with maxsize=%d (backpressure %s)",
-                           maxsize, "enabled" if maxsize > 0 else "disabled")
-    return _job_queue
+    with _queue_lock:
+        if _job_queue is None:
+            maxsize = governor.queue_maxsize
+            _job_queue = queue.Queue(maxsize=maxsize)
+            logger.info("Job queue initialized with maxsize=%d (backpressure %s)",
+                       maxsize, "enabled" if maxsize > 0 else "disabled")
+        return _job_queue
 
 
-_status_callback: Callable[[dict[str, Any]], None] | None = None
+_status_callback: StatusCallback | None = None
 _workers_started = False
 _worker_lock = threading.Lock()
 _shutdown_event = threading.Event()
 _worker_threads: list[threading.Thread] = []
+_SHUTDOWN_SENTINEL: Final = _ShutdownSentinelType()  # Sentinel to wake workers immediately on shutdown
 _cancel_lock = threading.Lock()
 _cancelled_jobs: set[str] = set()
 _active_lock = threading.Lock()
@@ -115,6 +123,7 @@ def _env_int(name: str, default: int) -> int:
 
 _TIMEOUT_DOWNLOAD: Final = _env_int("WORKER_TIMEOUT_DL", 3600)
 _TIMEOUT_TRANSCODE: Final = _env_int("WORKER_TIMEOUT_TC", 7200)
+_COMMAND_POLL_INTERVAL: Final = 1.0
 
 
 _QUALITY_LABELS: Final[dict[str, str]] = {
@@ -137,9 +146,14 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
-def set_status_callback(callback: Callable[[dict[str, Any]], None] | None) -> None:
+def set_status_callback(callback: StatusCallback | None) -> None:
     global _status_callback
     _status_callback = callback
+
+
+def signal_shutdown() -> None:
+    """Set the worker shutdown flag so threads stop accepting new work."""
+    _shutdown_event.set()
 
 
 def cancel_job(job_id: str) -> None:
@@ -169,7 +183,8 @@ def _check_cancellation(job_id: str) -> None:
 
 
 def _emit(job_id: str, status: str, message: str = "", **extra: Any) -> None:
-    if _status_callback is None:
+    callback = _status_callback
+    if callback is None:
         return
     payload = {
         "id": job_id,
@@ -178,7 +193,16 @@ def _emit(job_id: str, status: str, message: str = "", **extra: Any) -> None:
         "timestamp": _now_iso(),
     }
     payload.update(extra)
-    _status_callback(payload)
+    try:
+        callback(payload)
+    except Exception as exc:
+        logger.warning("Status callback failed for %s: %s", job_id, exc)
+
+
+def _transition(job_id: str, status: str, message: str = "", **extra: Any) -> None:
+    """Persist a job state change and emit the matching status event."""
+    update_job(job_id, status=status, message=message, **extra)
+    _emit(job_id, status, message, **extra)
 
 
 def _terminate_process(proc: subprocess.Popen[str], *, grace_seconds: float = 2.0) -> None:
@@ -208,55 +232,57 @@ def _run_cmd(
     stdout_value = ""
     proc: subprocess.Popen[str] | None = None
     try:
-        proc = subprocess.Popen(
+        with subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE if capture_stdout else subprocess.DEVNULL,
             # Avoid PIPE deadlocks on long-running yt-dlp/ffmpeg stderr output.
             stderr=subprocess.DEVNULL,
             text=True,
-        )
-        if job_id is not None:
-            with _active_lock:
-                _active_processes[job_id] = proc
-
-        while True:
-            # Terminate quickly on cancellation/shutdown instead of waiting for timeout.
-            if job_id is not None and is_job_cancelled(job_id):
-                _terminate_process(proc)
-                raise JobCancelledError(f"Job {job_id} was cancelled")
-            if _shutdown_event.is_set():
-                _terminate_process(proc)
-                raise ShutdownError("Shutdown requested")
-
-            elapsed = time.monotonic() - started
-            remaining = timeout - elapsed
-            if remaining <= 0:
-                _terminate_process(proc)
-                raise RuntimeError(f"Command timed out after {timeout}s")
+        ) as process:
+            proc = process
+            if job_id is not None:
+                with _active_lock:
+                    _active_processes[job_id] = proc
 
             try:
-                stdout_value, _ = proc.communicate(timeout=min(0.5, remaining))
-                break
-            except subprocess.TimeoutExpired:
-                continue
+                while proc.poll() is None:
+                    if job_id is not None and is_job_cancelled(job_id):
+                        _terminate_process(proc)
+                        raise JobCancelledError(f"Job {job_id} was cancelled")
+                    if _shutdown_event.is_set():
+                        _terminate_process(proc)
+                        raise ShutdownError("Shutdown requested")
 
-        if proc.returncode != 0:
-            raise RuntimeError(f"Command failed: {proc.returncode}")
-    except JobCancelledError:
-        raise
-    except ShutdownError:
-        raise
-    except RuntimeError:
-        if proc is not None and proc.poll() is None:
-            proc.kill()
+                    elapsed = time.monotonic() - started
+                    remaining = timeout - elapsed
+                    if remaining <= 0:
+                        _terminate_process(proc)
+                        raise RuntimeError(f"Command timed out after {timeout}s")
+
+                    try:
+                        proc.wait(timeout=min(_COMMAND_POLL_INTERVAL, remaining))
+                    except subprocess.TimeoutExpired:
+                        continue
+
+                if capture_stdout and proc.stdout is not None:
+                    stdout_value = proc.stdout.read()
+
+                if proc.returncode != 0:
+                    raise RuntimeError(f"Command failed: {proc.returncode}")
+            except Exception:
+                if proc.poll() is None:
+                    _terminate_process(proc)
+                raise
+    except (JobCancelledError, ShutdownError, RuntimeError):
         raise
     except Exception as exc:
-        # Check if shutdown was requested (Ctrl+C or SIGTERM)
         if _shutdown_event.is_set():
             raise ShutdownError("Shutdown requested") from exc
         logger.error("Command failed: %s", " ".join(cmd), exc_info=True)
         raise RuntimeError("Command execution failed") from exc
     finally:
+        if proc is not None and proc.poll() is None:
+            _terminate_process(proc)
         if job_id is not None:
             with _active_lock:
                 _active_processes.pop(job_id, None)
@@ -299,8 +325,17 @@ def _build_ytdlp_cmd(
     *,
     media_type: str,
     quality: str,
+    lossless_audio: bool = False,
 ) -> list[str]:
-    """Build a yt-dlp command with shared baseline arguments."""
+    """Build a yt-dlp command for the requested media type and quality.
+
+    Args:
+        url: Normalized video URL.
+        output_template: yt-dlp output template including ``%(ext)s``.
+        media_type: ``"audio"`` or ``"video"``.
+        quality: ``"max"`` for best quality, otherwise a capped transcode path.
+        lossless_audio: When True, download the source audio without re-encoding.
+    """
     cmd = [
         "yt-dlp",
         "--no-playlist",
@@ -312,13 +347,35 @@ def _build_ytdlp_cmd(
         output_template,
     ]
     if media_type == "audio":
-        cmd.extend(["-f", "ba/b", "--extract-audio", "--audio-format", "mp3", "--audio-quality", "0"])
+        if lossless_audio:
+            # Download best audio without re-encoding - keeps original codec (opus/m4a/etc)
+            cmd.extend(["-f", "ba/b", "-x"])
+        else:
+            cmd.extend(["-f", "ba/b", "--extract-audio", "--audio-format", "mp3", "--audio-quality", "0"])
     elif quality == "max":
         cmd.extend(["-f", "bv*+ba/b", "--merge-output-format", "mp4"])
     else:
         cmd.extend(["-f", "bv*[height<=720]+ba/b", "--merge-output-format", "mp4"])
     cmd.append(url)
     return cmd
+
+
+def _find_audio_source(job_dir: Path, stem: str) -> Path | None:
+    """Find the lossless audio source file in the job directory.
+    
+    yt-dlp outputs audio in various formats (opus, m4a, webm, etc.) depending on source.
+    This function finds the actual downloaded file matching the stem pattern.
+    """
+    # Common audio extensions from YouTube
+    for ext in ("opus", "m4a", "webm", "ogg", "aac", "flac", "wav"):
+        source = job_dir / f"{stem}.source.{ext}"
+        if source.is_file():
+            return source
+    # Fallback: search for any .source.* audio file
+    for candidate in job_dir.glob(f"{stem}.source.*"):
+        if candidate.suffix.lower() not in (".jpg", ".json", ".part"):
+            return candidate
+    return None
 
 
 def _download_media(job_id: str, url: str, *, quality: str, media_type: str) -> Path:
@@ -330,18 +387,26 @@ def _download_media(job_id: str, url: str, *, quality: str, media_type: str) -> 
     clean_url = _normalize_url(url)
     stem = _build_output_stem(clean_url, quality)
     if media_type == "audio":
-        out = job_dir / f"{stem}.mp3"
+        # Download lossless audio (no transcode) - we'll convert to MP3 on download
+        _emit(job_id, "downloading", "Downloading audio (lossless)")
         cmd = _build_ytdlp_cmd(
             clean_url,
-            str(job_dir / f"{stem}.%(ext)s"),
+            str(job_dir / f"{stem}.source.%(ext)s"),
             media_type=media_type,
             quality=quality,
+            lossless_audio=True,
         )
         _check_cancellation(job_id)
         _run_cmd(cmd, timeout=_TIMEOUT_DOWNLOAD, job_id=job_id)
         _check_cancellation(job_id)
         _rename_thumbnail(job_dir)
-        return out
+        
+        # Find the actual downloaded file (extension varies by source)
+        source_file = _find_audio_source(job_dir, stem)
+        if source_file is None:
+            raise RuntimeError(f"Audio source file not found in {job_dir}")
+        
+        return source_file
 
     if quality == "max":
         out = job_dir / f"{stem}.mp4"
@@ -484,8 +549,8 @@ def _probe_media(path: Path, media_type: str) -> tuple[str | None, int | None, i
     return codec, bitrate_kbps, duration_seconds
 
 
-def process_job(job: tuple[str, str, str, str]) -> None:
-    """Process a single download/transcode job."""
+def process_job(job: Job) -> None:
+    """Download, transcode, probe metadata, and optionally queue audio analysis."""
     job_id, url, type_, quality = job
 
     try:
@@ -500,38 +565,28 @@ def process_job(job: tuple[str, str, str, str]) -> None:
         codec, bitrate_kbps, duration_seconds = _probe_media(out_path, type_)
         video_title = _title_from_output_name(out_path)
 
-        analysis_queued = False
         status = "done"
         message = "Finished"
         if type_ == "audio":
-            analysis_queued = submit_analysis(
+            analysis_result = submit_analysis(
                 job_id,
                 out_path,
                 duration_seconds=duration_seconds,
             )
-            if analysis_queued:
+            if analysis_result is SubmitResult.QUEUED:
                 status = "analysis"
                 message = "Analyzing audio..."
+            elif analysis_result is SubmitResult.REJECTED_SHUTDOWN:
+                message = "Finished (audio analysis unavailable during shutdown)"
             else:
                 message = "Finished (audio analysis queue full)"
 
-        update_job(
-            job_id,
-            status=status,
-            message=message,
-            filename=str(out_path),
-            finished_at=_now_iso(),
-            filesize_bytes=filesize_bytes,
-            codec=codec,
-            bitrate_kbps=bitrate_kbps,
-            duration_seconds=duration_seconds,
-            video_title=video_title,
-        )
-        _emit(
+        _transition(
             job_id,
             status,
             message,
             filename=str(out_path),
+            finished_at=_now_iso(),
             filesize_bytes=filesize_bytes,
             codec=codec,
             bitrate_kbps=bitrate_kbps,
@@ -541,10 +596,7 @@ def process_job(job: tuple[str, str, str, str]) -> None:
 
     except JobCancelledError:
         logger.info("Job %s was cancelled", job_id)
-        update_job(job_id, status="cancelled", finished_at=_now_iso(), message="Job was cancelled by user")
-        _emit(job_id, "cancelled", "Job was cancelled")
-        with _cancel_lock:
-            _cancelled_jobs.discard(job_id)
+        _transition(job_id, "cancelled", "Job was cancelled by user", finished_at=_now_iso())
     except ShutdownError:
         # Graceful shutdown - keep the job queued for the next startup.
         logger.info("Job %s interrupted by shutdown", job_id)
@@ -553,8 +605,10 @@ def process_job(job: tuple[str, str, str, str]) -> None:
     except Exception as exc:
         err_msg = f"Job failed: {exc}"
         logger.exception("Job %s failed", job_id)
-        update_job(job_id, status="error", finished_at=_now_iso(), message=err_msg)
-        _emit(job_id, "error", err_msg)
+        _transition(job_id, "error", err_msg, finished_at=_now_iso())
+    finally:
+        with _cancel_lock:
+            _cancelled_jobs.discard(job_id)
 
 
 def worker() -> None:
@@ -565,10 +619,16 @@ def worker() -> None:
             return
 
         try:
-            job = q.get(timeout=0.5)
+            item = q.get(timeout=0.5)
         except queue.Empty:
             continue
 
+        # Sentinel check - exit immediately
+        if item is _SHUTDOWN_SENTINEL:
+            q.task_done()
+            return
+
+        job: Job = item
         job_id = job[0]
         try:
             update_job(job_id, status="processing")
@@ -585,10 +645,9 @@ def worker() -> None:
         except Exception:
             logger.exception("Unhandled worker error for job %s", job_id)
             try:
-                update_job(job_id, status="error", finished_at=_now_iso())
-                _emit(job_id, "error", "Internal worker error")
+                _transition(job_id, "error", "Internal worker error", finished_at=_now_iso())
             except Exception:
-                pass
+                logger.exception("Failed to persist internal error state for job %s", job_id)
         finally:
             q.task_done()
 
@@ -629,8 +688,20 @@ def stop_workers(timeout: float = 5.0) -> None:
     with _worker_lock:
         threads = list(_worker_threads)
 
+    # Send sentinel to each worker to wake them from queue.get()
+    q = get_job_queue()
+    for _ in threads:
+        try:
+            q.put_nowait(_SHUTDOWN_SENTINEL)
+        except queue.Full:
+            break
+
+    # Divide timeout among threads to avoid O(n * timeout) worst case
+    per_thread_timeout = max(0.5, timeout / max(len(threads), 1))
     for t in threads:
-        t.join(timeout=timeout)
+        t.join(timeout=per_thread_timeout)
+        if t.is_alive():
+            logger.warning("Worker thread %s did not stop cleanly", t.name)
 
     with _worker_lock:
         _worker_threads.clear()

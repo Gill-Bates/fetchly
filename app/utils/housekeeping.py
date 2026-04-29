@@ -10,30 +10,49 @@ This module provides functions for cleaning up job artifacts,
 including database records and filesystem directories.
 """
 
-from __future__ import annotations
-
+from collections.abc import Callable
 import logging
+import re
 import shutil
 from pathlib import Path
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from collections.abc import Callable
 
 logger = logging.getLogger(__name__)
+
+type PurgeDbFunc = Callable[[int], list[str]]
+type JobExistsFunc = Callable[[str], bool]
+
+_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
+
+
+def _is_job_uuid(name: str) -> bool:
+    """Return True if the directory name uses canonical UUID formatting."""
+    return _UUID_RE.fullmatch(name) is not None
 
 
 def cleanup_job_directory(job_id: str, data_dir: Path) -> bool:
     """Delete a job's download directory and all its artifacts.
 
     Args:
-        job_id: The job UUID
-        data_dir: Base data directory containing job folders
+        job_id: The job UUID.
+        data_dir: Base data directory containing job folders.
 
     Returns:
-        True if directory was deleted or didn't exist, False on error
+        True if the directory was deleted or already absent, False on error.
     """
-    job_dir = data_dir / job_id
+    data_dir_resolved = data_dir.resolve()
+    job_dir = (data_dir_resolved / job_id).resolve()
+
+    if not job_dir.is_relative_to(data_dir_resolved):
+        logger.error(
+            "Refusing to delete %s because it escapes data directory %s",
+            job_dir,
+            data_dir_resolved,
+        )
+        return False
+
     if not job_dir.exists():
         return True
 
@@ -45,25 +64,30 @@ def cleanup_job_directory(job_id: str, data_dir: Path) -> bool:
         shutil.rmtree(job_dir)
         logger.debug("Deleted job directory: %s", job_dir)
         return True
-    except OSError as e:
-        logger.warning("Failed to delete directory %s: %s", job_dir, e)
+    except OSError as exc:
+        logger.warning("Failed to delete directory %s: %s", job_dir, exc)
         return False
 
 
 def cleanup_expired_jobs(
     keep_days: int,
     data_dir: Path,
-    purge_db_func: "Callable[[int], list[str]]",
+    purge_db_func: PurgeDbFunc,
 ) -> tuple[int, int]:
-    """Delete expired jobs from database and filesystem.
+    """Delete expired jobs from the database and clean their filesystem artifacts.
 
     Args:
-        keep_days: Number of days to retain completed jobs
-        data_dir: Base data directory containing job folders
-        purge_db_func: Function that purges DB records and returns deleted IDs
+        keep_days: Number of days to retain completed jobs.
+        data_dir: Base data directory containing job folders.
+        purge_db_func: Callable that purges DB records and returns deleted IDs.
 
     Returns:
-        Tuple of (jobs_deleted, directories_deleted)
+        Tuple of `(db_records_deleted, directories_cleaned)`.
+        The second count includes successful cleanup outcomes for returned job IDs,
+        including directories that were already absent.
+
+    Raises:
+        ValueError: If keep_days is negative.
     """
     if keep_days < 0:
         raise ValueError("keep_days must be non-negative")
@@ -91,42 +115,40 @@ def cleanup_expired_jobs(
 
 def cleanup_orphaned_directories(
     data_dir: Path,
-    job_exists_func: "Callable[[str], bool]",
+    job_exists_func: JobExistsFunc,
     *,
     dry_run: bool = False,
 ) -> list[str]:
-    """Find and optionally delete directories without matching DB records.
+    """Find orphaned job directories without matching DB records.
 
     Args:
-        data_dir: Base data directory containing job folders
-        job_exists_func: Function that checks if a job_id exists in DB
-        dry_run: If True, only report orphans without deleting
+        data_dir: Base data directory containing job folders.
+        job_exists_func: Function that checks if a job_id exists in DB.
+        dry_run: If True, only report orphans without deleting them.
 
     Returns:
-        List of orphaned directory names (deleted if not dry_run)
+        List of directory names identified as orphans. All detected orphans are
+        returned regardless of `dry_run`. When `dry_run` is False, deletion is
+        attempted for each orphan; failures are logged and still included.
     """
     orphans: list[str] = []
 
     if not data_dir.exists():
         return orphans
 
-    for entry in data_dir.iterdir():
-        if not entry.is_dir():
-            continue
+    # Snapshot candidates first to reduce races with concurrent directory creation.
+    candidates = [
+        entry
+        for entry in data_dir.iterdir()
+        if entry.is_dir() and _is_job_uuid(entry.name)
+    ]
 
-        # Skip non-UUID directories (e.g., "downloads" subfolder)
+    for entry in candidates:
         name = entry.name
-        if len(name) != 36 or name.count("-") != 4:
-            continue
-
         if not job_exists_func(name):
             orphans.append(name)
-            if not dry_run:
-                try:
-                    shutil.rmtree(entry)
-                    logger.info("Deleted orphaned directory: %s", name)
-                except OSError as e:
-                    logger.warning("Failed to delete orphan %s: %s", name, e)
+            if not dry_run and cleanup_job_directory(name, data_dir):
+                logger.info("Cleaned orphaned directory: %s", name)
 
     if orphans:
         action = "Found" if dry_run else "Cleaned"

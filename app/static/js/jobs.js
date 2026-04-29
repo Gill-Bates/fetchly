@@ -12,39 +12,59 @@
  * State:
  *  - state.loading  Prevents concurrent loadMore() calls.
  *  - state.done     Suppresses loadMore() when all pages are fetched.
+ *  - state.nextOffset  Monotonic count of rows accounted for from the server.
+ *                      trimRows() does not reduce it, so older pages are not
+ *                      re-fetched after visible rows are trimmed from the DOM.
  *
  * Exports: buildRow, applyRowStatusClasses, prependJob, loadMore, resetPagingState
  */
 
 import { CONFIG } from "./config.js";
-import { createStatusElement, createActionButton } from "./ui.js";
+import { createStatusElement, createActionButton } from "./ui.js?v=20260429m";
 import { EMPTY_VALUE } from "./utils.js";
 
+const FALLBACK_JOBS_TABLE_COLUMN_COUNT = 8;
+
 /**
- * Formats a date string into HTML with separate date and time spans.
- * @param {string} isoOrFormatted - ISO date string or pre-formatted date
- * @returns {string} HTML string with date-part and time-part spans
+ * Build the Created cell using safe DOM APIs only.
+ * Invalid values are rendered as plain text.
+ * @param {unknown} isoOrFormatted
+ * @returns {HTMLTableCellElement}
  */
-function formatDateHtml(isoOrFormatted) {
-    if (!isoOrFormatted) return "";
+function buildCreatedCell(isoOrFormatted) {
+    const td = document.createElement("td");
+    td.dataset.label = "Created";
+    td.className = "text-nowrap col-date";
+
+    const fallbackText = isoOrFormatted == null ? "" : String(isoOrFormatted);
+
     try {
-        const dt = new Date(isoOrFormatted);
+        const dt = new Date(fallbackText);
         if (Number.isNaN(dt.getTime())) {
-            // Already formatted, return as-is
-            return isoOrFormatted;
+            td.textContent = fallbackText;
+            return td;
         }
-        const datePart = dt.toLocaleDateString("de-DE", {
+
+        const datePart = document.createElement("span");
+        datePart.className = "date-part";
+        datePart.textContent = dt.toLocaleDateString(undefined, {
             day: "2-digit",
             month: "2-digit",
             year: "numeric",
         });
-        const timePart = dt.toLocaleTimeString("de-DE", {
+
+        const timePart = document.createElement("span");
+        timePart.className = "time-part";
+        timePart.textContent = dt.toLocaleTimeString(undefined, {
             hour: "2-digit",
             minute: "2-digit",
         });
-        return `<span class="date-part">${datePart}</span> <span class="time-part">${timePart}</span>`;
+
+        td.append(datePart, document.createTextNode(" "), timePart);
+        return td;
     } catch {
-        return isoOrFormatted;
+        td.textContent = fallbackText;
+        return td;
     }
 }
 
@@ -60,12 +80,23 @@ const JOB_TYPE = Object.freeze({
     AUDIO: "audio",
 });
 
-/** @type {{ loading: boolean, done: boolean }} */
-const state = { loading: false, done: false };
+/** @type {{ loading: boolean, done: boolean, nextOffset: number }} */
+const state = { loading: false, done: false, nextOffset: 0 };
 
 /** @returns {HTMLTableSectionElement | null} */
 function getTbody() {
     return document.getElementById("jobsTbody");
+}
+
+function getRenderedJobCount() {
+    const tbody = getTbody();
+    return tbody ? tbody.querySelectorAll("tr[data-job-id]").length : 0;
+}
+
+function getJobsTableColumnCount() {
+    const tbody = getTbody();
+    const headerCells = tbody?.closest("table")?.tHead?.rows?.[0]?.cells;
+    return headerCells?.length || FALLBACK_JOBS_TABLE_COLUMN_COUNT;
 }
 
 /**
@@ -188,11 +219,7 @@ export function buildRow(job) {
     statusCell.appendChild(statusActionGroup);
     tr.appendChild(statusCell);
 
-    const createdCell = document.createElement("td");
-    createdCell.dataset.label = "Created";
-    createdCell.className = "text-nowrap col-date";
-    createdCell.innerHTML = formatDateHtml(job.created_at);
-    tr.appendChild(createdCell);
+    tr.appendChild(buildCreatedCell(job.created_at));
 
     const actionCell = document.createElement("td");
     actionCell.dataset.label = "Action";
@@ -207,8 +234,8 @@ export function buildRow(job) {
 }
 
 /**
- * Builds a hidden placeholder row paired with a job row.
- * Reserved for future expandable detail view functionality.
+ * Build the hidden companion row paired with a job row.
+ * The row is addressed by `detail-{jobId}` from live-update handlers.
  * @param {object} job
  * @returns {HTMLTableRowElement}
  */
@@ -218,7 +245,7 @@ function buildDetailRow(job) {
     tr.id = `detail-${String(job.id)}`;
     // Valid HTML: <tr> must have <td> children
     const td = document.createElement("td");
-    td.colSpan = 7; // Match column count in buildRow
+    td.colSpan = getJobsTableColumnCount();
     tr.appendChild(td);
     return tr;
 }
@@ -241,6 +268,9 @@ export function prependJob(job) {
     // Insert detail row first so prepend puts the main row on top of it.
     tbody.prepend(buildDetailRow(job));
     tbody.prepend(buildRow(job));
+    if (!existing) {
+        state.nextOffset += 1;
+    }
     // Allow users to paginate again after table mutations.
     state.done = false;
     trimRows();
@@ -252,11 +282,15 @@ export function prependJob(job) {
  */
 export function resetPagingState() {
     state.done = false;
+    state.nextOffset = getRenderedJobCount();
 }
 
 /**
- * Fetches and appends the next page of jobs to the table.
- * Skips duplicates by checking existing job IDs.
+ * Fetch and append the next page of jobs to the table.
+ * Skips jobs whose IDs already exist in the table.
+ * Appends both a main row and a hidden detail row per job.
+ * Advances pagination state monotonically and dispatches `jobs-load-error`
+ * on non-abort failures.
  * @param {(offset: number) => Promise<object[]>} fetchFn
  *   Function that accepts a row offset and resolves to a job array.
  * @returns {Promise<void>}
@@ -269,7 +303,7 @@ export async function loadMore(fetchFn) {
 
     // Snapshot row count from the DOM to avoid race conditions with prependJob
     // incrementing a shared counter while this fetch is in-flight.
-    const currentOffset = tbody.querySelectorAll("tr[data-job-id]").length;
+    const currentOffset = state.nextOffset;
 
     try {
         const jobs = await fetchFn(currentOffset);
@@ -285,6 +319,9 @@ export async function loadMore(fetchFn) {
             return;
         }
 
+        const expectedNextOffset = currentOffset + jobs.length;
+        state.nextOffset = Math.max(state.nextOffset, expectedNextOffset);
+
         // Build a Set of existing IDs for O(1) duplicate checks instead of
         // running a querySeletor per job inside the loop (O(n²)).
         const existingIds = new Set(
@@ -293,7 +330,9 @@ export async function loadMore(fetchFn) {
 
         const fragment = document.createDocumentFragment();
         for (const job of jobs) {
-            if (!existingIds.has(String(job.id))) {
+            const jobId = String(job.id);
+            if (!existingIds.has(jobId)) {
+                existingIds.add(jobId);
                 fragment.appendChild(buildRow(job));
                 fragment.appendChild(buildDetailRow(job));
             }
@@ -321,6 +360,7 @@ export async function loadMore(fetchFn) {
 
 function init() {
     if (!getTbody()) return;
+    state.nextOffset = getRenderedJobCount();
     trimRows();
     window.addEventListener("jobs-reload", resetPagingState);
 }

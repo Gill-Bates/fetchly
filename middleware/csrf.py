@@ -118,8 +118,28 @@ class CSRFMiddleware:
         path = request.url.path
         secure = request.url.scheme == "https"
 
+        # Track if we've consumed the body (need to replay for downstream)
+        body_cache: bytes | None = None
+        body_consumed = False
+
         if method not in SAFE_METHODS and self._path_protected(path):
+            # Check header first (for JS fetch requests)
             sent_token = request.headers.get("X-CSRF-Token")
+            
+            # Fall back to form data for traditional HTML form submissions
+            if not sent_token:
+                content_type = request.headers.get("content-type", "")
+                if "application/x-www-form-urlencoded" in content_type:
+                    # Parse form body to extract csrf_token
+                    body_cache = await request.body()
+                    body_consumed = True
+                    try:
+                        from urllib.parse import parse_qs
+                        form_data = parse_qs(body_cache.decode("utf-8"))
+                        sent_token = form_data.get("csrf_token", [None])[0]
+                    except Exception:
+                        pass
+            
             if not sent_token:
                 await self._reject(
                     "Missing CSRF token",
@@ -141,6 +161,19 @@ class CSRFMiddleware:
                     secure=secure,
                 )
                 return
+
+        # If we consumed the body, create a receive that replays it
+        if body_consumed and body_cache is not None:
+            body_sent = False
+            
+            async def receive_with_body() -> dict:
+                nonlocal body_sent
+                if not body_sent:
+                    body_sent = True
+                    return {"type": "http.request", "body": body_cache, "more_body": False}
+                return {"type": "http.disconnect"}
+            
+            receive = receive_with_body
 
         async def send_wrapper(message: dict) -> None:
             if is_new_cookie and message.get("type") == "http.response.start":

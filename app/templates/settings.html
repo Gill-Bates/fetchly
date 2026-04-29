@@ -10,7 +10,7 @@
 
 {% block navbar %}
 {% from "macros/navbar.html" import navbar %}
-{{ navbar(show_back=True, show_settings=False) }}
+{{ navbar(show_back=True, show_settings=False, csrf_token=csrf_token) }}
 {% endblock %}
 
 {% block content %}
@@ -76,10 +76,6 @@
 
                         <div class="settings-section">
                             <h6 class="settings-section-title">Password</h6>
-                            <small class="setting-hint setting-hint--with-icon mb-3">
-                                <span class="material-symbols-outlined setting-hint-icon" aria-hidden="true">info</span>
-                                <span>Change the admin password explicitly.</span>
-                            </small>
 
                             <div class="mb-2">
                                 <label class="visually-hidden" for="currentPassword">Current password</label>
@@ -969,7 +965,12 @@ async function changePassword() {
         adminPasswordEl.value = "";
         adminPasswordConfirmEl.value = "";
         setPasswordError("");
-        showToast("Password updated", "success");
+        if (payload.redirect) {
+            window.location.replace(payload.redirect);
+            return;
+        }
+
+        showToast(payload.message || "Password updated", "success");
     } catch (err) {
         clearTimeout(timeoutId);
         const message = err.name === "AbortError" ? "Request timed out" : err.message;

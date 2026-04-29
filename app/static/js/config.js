@@ -9,3 +9,7 @@ export const CONFIG = {
     SCROLL_OFFSET: 250,
     WS_RECONNECT_MS: 3000,
 };
+
+export const DOWNLOADABLE_STATUSES = new Set(["done", "analysis", "analysis_done"]);
+
+export const CANCELLABLE_STATUSES = new Set(["queued", "processing", "downloading", "transcoding"]);

@@ -1,5 +1,7 @@
 FROM python:3.13-slim
 
+ARG WAVESURFER_VERSION=7
+
 # Fail fast + better curl behavior
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
@@ -22,33 +24,38 @@ RUN curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp \
 WORKDIR /app
 
 # Create venv and install Python dependencies
-COPY requirements.txt .
+COPY requirements.txt ./requirements.txt
 RUN python -m venv /venv && \
     /venv/bin/pip install --upgrade pip && \
     /venv/bin/pip install --no-cache-dir -r requirements.txt
 
 ENV PATH="/venv/bin:$PATH"
 
+# Refresh WaveSurfer assets during image build.
+RUN mkdir -p /app/static/vendor/wavesurfer/dist/plugins && \
+    curl -L "https://unpkg.com/wavesurfer.js@${WAVESURFER_VERSION}/dist/wavesurfer.esm.js" \
+        --fail --retry 5 --retry-delay 2 --connect-timeout 5 \
+        -o /app/static/vendor/wavesurfer/dist/wavesurfer.esm.js && \
+    curl -L "https://unpkg.com/wavesurfer.js@${WAVESURFER_VERSION}/dist/plugins/regions.esm.js" \
+        --fail --retry 5 --retry-delay 2 --connect-timeout 5 \
+        -o /app/static/vendor/wavesurfer/dist/plugins/regions.esm.js
+
+# Create non-root user
+RUN useradd -u 1000 -m --no-log-init appuser
+
+# Copy application files from the local build context
+COPY --chown=appuser:appuser app ./app
+COPY --chown=appuser:appuser middleware ./middleware
+COPY --chown=appuser:appuser VERSION BUILD_INFO ./
+COPY --chmod=755 docker/entrypoint.sh /entrypoint.sh
+
 # Python runtime hygiene
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-# Create non-root user
-RUN useradd -u 1000 -m --no-log-init appuser && \
-    chown -R appuser:appuser /app
-
-# Copy application files
-COPY app ./app
-COPY middleware ./middleware
-COPY VERSION BUILD_INFO ./
-COPY docker/entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
-
 # Prepare data directory with correct permissions
 RUN mkdir -p /app/data/downloads && \
     chown -R appuser:appuser /app/data
-
-VOLUME ["/app/data"]
 
 ENV DATA_DIR=/app/data \
     HOST=0.0.0.0 \

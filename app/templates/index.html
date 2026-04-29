@@ -2,23 +2,24 @@
 
 {% block title %}tubeyou{% endblock %}
 
+{% block body_class %} app-root--dashboard{% endblock %}
+
 {% block navbar %}
 {% from "macros/navbar.html" import navbar %}
-{{ navbar(show_back=False, show_settings=True) }}
+{{ navbar(show_back=False, show_settings=True, csrf_token=csrf_token) }}
 {% endblock %}
 
 {% block content %}
 {% import "macros/status.html" as status %}
 
 {% macro stat_card(value, label, icon) %}
-{%- set parts = (value|string).split(' ') %}
 <div class="col-6 col-md-3">
     <div class="ui-card ui-card--stat stat-card" role="group">
         <div class="stat-value">
             <span class="material-symbols-outlined stat-icon" aria-hidden="true">{{ icon }}</span>
-            {%- if parts|length > 1 %}
-                <span>{{ parts[0] }}</span><span class="stat-unit">{{ parts|last }}</span>
-            {%- else %}
+            {%- if value.value is defined and value.unit is defined -%}
+                <span>{{ value.value }}</span><span class="stat-unit">{{ value.unit }}</span>
+            {%- else -%}
                 <span>{{ value }}</span>
             {%- endif %}
         </div>
@@ -27,7 +28,7 @@
 </div>
 {% endmacro %}
 
-<div>
+<div class="dashboard-layout">
     <div class="row g-3 mb-4 stats-row">
         {{ stat_card(stats.total_jobs, "Videos processed", "video_library") }}
         {{ stat_card(stats.total_minutes, "Minutes processed", "schedule") }}
@@ -35,9 +36,10 @@
         {{ stat_card(stats.total_lalal_minutes or 0, "Lalal stems minutes", "graphic_eq") }}
     </div>
 
-    <div class="ui-card mb-4">
+    <div class="ui-card mb-4" id="submitCard">
         <div>
-            <form id="submitForm">
+            <form id="submitForm" method="POST" action="/api/submit">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token | e }}">
                 <div class="row g-3 align-items-end">
                     <div class="col-12">
                         <label class="form-label fw-medium" for="urlInput">YouTube URL</label>
@@ -155,22 +157,22 @@
                     </thead>
                     <tbody id="jobsTbody">
                         {% for job in jobs %}
-                        <tr data-job-id="{{ job["id"] }}"
-                            data-url="{{ job["url"] }}"
-                            data-status="{{ job["status"] }}"
-                            data-type="{{ job["type"] }}"
-                            data-message="{{ job['message'] or '' }}"
-                            data-size-bytes="{{ job['filesize_bytes'] if job['filesize_bytes'] is not none else '' }}"
-                            data-bpm="{{ job['bpm'] if job['bpm'] is not none else '' }}"
+                        <tr data-job-id="{{ job['id'] | e }}"
+                            data-url="{{ job['url'] | e }}"
+                            data-status="{{ job['status'] | e }}"
+                            data-type="{{ job['type'] | e }}"
+                            data-message="{{ (job['message'] or '') | e }}"
+                            data-size-bytes="{{ (job['filesize_bytes'] if job['filesize_bytes'] is not none else '') | e }}"
+                            data-bpm="{{ (job['bpm'] if job['bpm'] is not none else '') | e }}"
                             class="{% if job["status"] in ('done', 'analysis_done') %}row-done{% elif job["status"] == 'error' %}row-error{% endif %}">
                             <td data-label="Title"
                                 class="job-title-cell job-title-cell--wide col-title"
-                                    data-popover-text="{{ job['video_meta_hover'] or job['url'] or '' }}"
-                            ><span class="job-title-text">{{ job["video_title"] or job["url"] }}</span></td>
-                            <td data-label="Format" class="td-mono job-meta-cell col-compact">{{ job["type"] }}<div class="meta-sub">{{ job["codec"] or "–" }}</div></td>
-                            <td data-label="Quality" class="td-mono job-meta-cell col-compact">{% if job["type"] == "audio" %}MP3{% else %}{{ job["quality"] }}{% endif %}</td>
-                            <td data-label="BPM" class="td-mono job-meta-cell col-compact">{{ job["bpm"] or "–" }}</td>
-                            <td data-label="Bitrate" class="td-mono job-meta-cell col-compact">{% if job["bitrate_kbps"] %}{{ job["bitrate_kbps"] }} kbps{% else %}-{% endif %}</td>
+                                    data-popover-text="{{ (job['video_meta_hover'] or job['url'] or '') | e }}"
+                            ><span class="job-title-text">{{ (job['video_title'] or job['url']) | e }}</span></td>
+                            <td data-label="Format" class="td-mono job-meta-cell col-compact">{{ job['type'] | e }}<div class="meta-sub">{{ (job['codec'] or '–') | e }}</div></td>
+                            <td data-label="Quality" class="td-mono job-meta-cell col-compact">{% if job['type'] == 'audio' %}MP3{% else %}{{ job['quality'] | e }}{% endif %}</td>
+                            <td data-label="BPM" class="td-mono job-meta-cell col-compact">{{ (job['bpm'] if job['bpm'] is not none else '–') | e }}</td>
+                            <td data-label="Bitrate" class="td-mono job-meta-cell col-compact">{% if job['bitrate_kbps'] %}{{ job['bitrate_kbps'] | e }} kbps{% else %}–{% endif %}</td>
                             <td data-label="Status" class="col-status">
                                 <div class="status-action-group">
                                     {{ status.status_badge(job) }}
@@ -197,9 +199,82 @@
                         {% endfor %}
                     </tbody>
                 </table>
+                <div id="jobsSentinel" aria-hidden="true"></div>
             </div>
         </div>
     </section>
+</div>
+
+<!-- Trim Modal -->
+<div class="modal fade" id="trimModal" tabindex="-1">
+    <div class="modal-dialog modal-xl modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">
+                    <span class="material-symbols-outlined icon-inline" aria-hidden="true">content_cut</span>
+                    Trim Audio
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close dialog"></button>
+            </div>
+            <div class="modal-body d-flex flex-column gap-3">
+                <!-- Loader -->
+                <div id="trimLoader" class="text-center py-4">
+                    <div class="spinner-border text-primary" role="status">
+                        <span class="visually-hidden">Loading...</span>
+                    </div>
+                    <p class="mt-2 text-muted small">Loading waveform...</p>
+                </div>
+                
+                <!-- Waveform -->
+                <div id="trimWave" class="d-none"></div>
+                
+                <!-- Time display -->
+                <div class="text-muted small" id="trimInfo">–</div>
+                
+                <!-- Playback controls -->
+                <div class="d-flex gap-2">
+                    <button class="btn btn-outline-secondary btn-sm" id="trimPlay" type="button">
+                        <span class="material-symbols-outlined icon-inline">play_arrow</span>
+                        Play
+                    </button>
+                    <button class="btn btn-outline-secondary btn-sm" id="trimPause" type="button">
+                        <span class="material-symbols-outlined icon-inline">pause</span>
+                        Pause
+                    </button>
+                    <button class="btn btn-primary btn-sm ms-auto" id="trimApply" type="button" disabled>
+                        Use Selection
+                    </button>
+                    <a class="btn btn-success btn-sm d-none" id="trimDownload" href="#" download>
+                        <span class="material-symbols-outlined icon-inline">download</span>
+                        Download
+                    </a>
+                </div>
+                
+                <!-- Lalal actions -->
+                <div class="d-flex gap-2 pt-3 border-top">
+                    <span class="small text-muted me-2 align-self-center">Send to Lalal:</span>
+                    <button class="btn btn-outline-secondary btn-sm trim-provider-button" id="trimVocals" type="button" disabled{% if not lalal_enabled %} title="Lalal.ai is not connected"{% endif %}>
+                        <span class="material-symbols-outlined icon-inline">mic</span>
+                        A Cappella
+                        <img class="trim-provider-logo"
+                             src="/static/img/lalal_ai_small.svg"
+                             alt="Lalal.ai"
+                             width="34"
+                             height="10">
+                    </button>
+                    <button class="btn btn-outline-secondary btn-sm trim-provider-button" id="trimInstr" type="button" disabled{% if not lalal_enabled %} title="Lalal.ai is not connected"{% endif %}>
+                        <span class="material-symbols-outlined icon-inline">music_off</span>
+                        Instrumental
+                        <img class="trim-provider-logo"
+                             src="/static/img/lalal_ai_small.svg"
+                             alt="Lalal.ai"
+                             width="34"
+                             height="10">
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
 </div>
 
 <div class="modal fade" id="detailModal" tabindex="-1">
@@ -207,7 +282,7 @@
         <div class="modal-content">
             <div class="modal-header">
                 <h5 class="modal-title">Job Details</h5>
-                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close dialog"></button>
             </div>
             <div class="modal-body">
                 <p><strong>ID:</strong> <code id="mId"></code></p>
@@ -232,5 +307,5 @@
 {% endblock %}
 
 {% block page_scripts %}
-<script type="module" src="/static/js/main.js"></script>
+<script type="module" src="/static/js/main.js?v=20260429w"></script>
 {% endblock %}
