@@ -1,11 +1,47 @@
-FROM python:3.13-slim
+FROM python:3.13-slim AS builder
+
+ARG WAVESURFER_VERSION=7
+
+# Builder commands do not require bash-specific features.
+SHELL ["/bin/sh", "-c"]
+
+# Install builder dependencies without recommends.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    git \
+    ca-certificates \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+ENV VIRTUAL_ENV=/venv \
+    PATH="/venv/bin:$PATH"
+
+# Create venv and install Python dependencies.
+COPY requirements.txt ./requirements.txt
+RUN python -m venv "$VIRTUAL_ENV" && \
+    pip install --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
+
+# Refresh WaveSurfer assets during image build.
+RUN mkdir -p /build/static/vendor/wavesurfer/dist/plugins && \
+    curl -L "https://unpkg.com/wavesurfer.js@${WAVESURFER_VERSION}/dist/wavesurfer.esm.js" \
+        --fail --retry 5 --retry-delay 2 --connect-timeout 5 \
+        -o /build/static/vendor/wavesurfer/dist/wavesurfer.esm.js && \
+    curl -L "https://unpkg.com/wavesurfer.js@${WAVESURFER_VERSION}/dist/plugins/regions.esm.js" \
+        --fail --retry 5 --retry-delay 2 --connect-timeout 5 \
+        -o /build/static/vendor/wavesurfer/dist/plugins/regions.esm.js
+
+
+FROM python:3.13-slim AS runtime
 
 ARG WAVESURFER_VERSION=7
 
 # Fail fast + better curl behavior
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
-# Install dependencies without recommends to keep image slim
+# Install runtime dependencies without recommends to keep image slim.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bash \
     ffmpeg \
@@ -23,22 +59,11 @@ RUN curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp \
 
 WORKDIR /app
 
-# Create venv and install Python dependencies
-COPY requirements.txt ./requirements.txt
-RUN python -m venv /venv && \
-    /venv/bin/pip install --upgrade pip && \
-    /venv/bin/pip install --no-cache-dir -r requirements.txt
+# Copy the prebuilt virtualenv from the builder stage.
+COPY --from=builder /venv /venv
 
-ENV PATH="/venv/bin:$PATH"
-
-# Refresh WaveSurfer assets during image build.
-RUN mkdir -p /app/static/vendor/wavesurfer/dist/plugins && \
-    curl -L "https://unpkg.com/wavesurfer.js@${WAVESURFER_VERSION}/dist/wavesurfer.esm.js" \
-        --fail --retry 5 --retry-delay 2 --connect-timeout 5 \
-        -o /app/static/vendor/wavesurfer/dist/wavesurfer.esm.js && \
-    curl -L "https://unpkg.com/wavesurfer.js@${WAVESURFER_VERSION}/dist/plugins/regions.esm.js" \
-        --fail --retry 5 --retry-delay 2 --connect-timeout 5 \
-        -o /app/static/vendor/wavesurfer/dist/plugins/regions.esm.js
+ENV VIRTUAL_ENV=/venv \
+    PATH="/venv/bin:$PATH"
 
 # Create non-root user
 RUN useradd -u 1000 -m --no-log-init appuser
@@ -47,6 +72,7 @@ RUN useradd -u 1000 -m --no-log-init appuser
 COPY --chown=appuser:appuser app ./app
 COPY --chown=appuser:appuser middleware ./middleware
 COPY --chown=appuser:appuser VERSION BUILD_INFO ./
+COPY --from=builder --chown=appuser:appuser /build/static/vendor/wavesurfer ./static/vendor/wavesurfer
 COPY --chmod=755 docker/entrypoint.sh /entrypoint.sh
 
 # Python runtime hygiene
@@ -64,7 +90,7 @@ ENV DATA_DIR=/app/data \
     TIMEOUT=60
 
 # Health check for orchestration
-HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=2 \
+HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
     CMD curl --fail --silent --max-time 2 http://localhost:8000/health || exit 1
 
 ENTRYPOINT ["/entrypoint.sh"]

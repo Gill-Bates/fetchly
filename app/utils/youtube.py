@@ -6,8 +6,6 @@
 
 """YouTube URL validation and metadata extraction utilities."""
 
-from __future__ import annotations
-
 import asyncio
 import json
 import logging
@@ -15,6 +13,7 @@ import re
 import subprocess
 from functools import lru_cache
 from pathlib import Path
+import threading
 from time import monotonic
 from typing import Any, TypedDict
 from urllib.parse import parse_qs, urlparse
@@ -36,6 +35,8 @@ _YOUTUBE_HOSTS = frozenset(
 _ZWSP_RE = re.compile(r"[\u200B-\u200D\uFEFF]")
 _VIDEO_ID_RE = re.compile(r"[\w-]{11}")
 _CACHE_TTL_SECONDS = 300
+_INFO_CACHE_MAXSIZE = 256
+_yt_dlp_local = threading.local()
 
 
 class InfoPayload(TypedDict):
@@ -84,6 +85,56 @@ def _build_yt_dlp_cmd(url: str) -> list[str]:
 
 def _cache_bucket() -> int:
     return int(monotonic() // _CACHE_TTL_SECONDS)
+
+
+def _prune_info(info: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Keep only the metadata fields the API actually uses before caching."""
+    if not isinstance(info, dict):
+        return None
+
+    raw_formats = info.get("formats")
+    formats: list[dict[str, Any]] = []
+    if isinstance(raw_formats, list):
+        for fmt in raw_formats:
+            if not isinstance(fmt, dict):
+                continue
+            formats.append(
+                {
+                    "format_id": fmt.get("format_id"),
+                    "ext": fmt.get("ext"),
+                    "vcodec": fmt.get("vcodec"),
+                    "acodec": fmt.get("acodec"),
+                    "height": fmt.get("height"),
+                    "abr": fmt.get("abr"),
+                    "filesize": fmt.get("filesize"),
+                }
+            )
+
+    return {
+        "title": info.get("title"),
+        "channel": info.get("channel"),
+        "uploader": info.get("uploader"),
+        "duration": info.get("duration"),
+        "view_count": info.get("view_count"),
+        "formats": formats,
+    }
+
+
+def _ydl_opts_signature(ydl_opts: dict[str, Any]) -> tuple[tuple[str, str], ...]:
+    return tuple(sorted((key, str(value)) for key, value in ydl_opts.items()))
+
+
+def _get_yt_dlp_instance(ydl_opts: dict[str, Any]) -> Any:
+    import yt_dlp
+
+    signature = _ydl_opts_signature(ydl_opts)
+    cached_signature = getattr(_yt_dlp_local, "signature", None)
+    cached_ydl = getattr(_yt_dlp_local, "ydl", None)
+    if cached_ydl is None or cached_signature != signature:
+        cached_ydl = yt_dlp.YoutubeDL(ydl_opts)
+        _yt_dlp_local.signature = signature
+        _yt_dlp_local.ydl = cached_ydl
+    return cached_ydl
 
 
 def validate_youtube_url(url: str) -> tuple[bool, str]:
@@ -148,7 +199,8 @@ def normalize_info_url(url: str) -> str:
     """Normalize a YouTube URL to a single-video URL for metadata extraction.
 
     This removes playlist context (e.g. list/index) that can trigger slower
-    resolution paths and intermittent timeouts in yt-dlp.
+    resolution paths and intermittent timeouts in yt-dlp. Callers should
+    validate the input URL first.
     """
     value = url.strip()
     try:
@@ -195,17 +247,22 @@ def _load_video_info_uncached(url: str) -> dict[str, Any] | None:
     ydl_opts = _build_ydl_opts()
     
     try:
-        import yt_dlp
         from yt_dlp.utils import DownloadError, ExtractorError
 
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            extracted = ydl.extract_info(url, download=False)
+        ydl = _get_yt_dlp_instance(ydl_opts)
+        extracted = ydl.extract_info(url, download=False)
         if isinstance(extracted, dict):
-            info = extracted
+            info = _prune_info(extracted)
     except ImportError:
         info = None
-    except (DownloadError, ExtractorError, OSError, ValueError) as exc:
+    except (DownloadError, ExtractorError, ValueError) as exc:
         logger.debug("yt-dlp library extraction failed for %s: %s", url, exc)
+        info = None
+    except OSError:
+        logger.exception("System-level yt-dlp library error for %s", url)
+        raise
+    except Exception:
+        logger.exception("Unexpected yt-dlp library extraction error for %s", url)
         info = None
 
     if info is None:
@@ -220,13 +277,13 @@ def _load_video_info_uncached(url: str) -> dict[str, Any] | None:
             )
             parsed = json.loads(result.stdout or "{}")
             if isinstance(parsed, dict):
-                info = parsed
+                info = _prune_info(parsed)
         except subprocess.TimeoutExpired:
             logger.warning("yt-dlp subprocess timed out for %s", url)
             return None
         except FileNotFoundError:
             logger.error("yt-dlp command not found in PATH")
-            return None
+            raise
         except subprocess.CalledProcessError as exc:
             logger.debug("yt-dlp subprocess extraction failed for %s: %s", url, exc)
             return None
@@ -235,12 +292,12 @@ def _load_video_info_uncached(url: str) -> dict[str, Any] | None:
             return None
         except Exception:
             logger.exception("Unexpected yt-dlp subprocess error for %s", url)
-            raise
+            return None
 
     return info
 
 
-@lru_cache(maxsize=256)
+@lru_cache(maxsize=_INFO_CACHE_MAXSIZE)
 def _cached_load_video_info(normalized_url: str, cache_bucket: int) -> dict[str, Any] | None:
     _ = cache_bucket
     return _load_video_info_uncached(normalized_url)

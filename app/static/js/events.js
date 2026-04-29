@@ -1,50 +1,31 @@
 //
-// app/static/js/ws.js
+// app/static/js/events.js
 // Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 //
 
-// WebSocket client for real-time job updates.
+// Server-sent event client for real-time job updates.
 // Requires the server-rendered jobs table to use English data-label values:
 // Title, Format, Quality, Bitrate, BPM, Status, Created, Action.
 //
 
 import { CONFIG } from "./config.js";
+import { TERMINAL_STATUSES } from "./config.js";
 import { createStatusElement, createActionButton, getActionButtonCategory } from "./ui.js?v=20260429m";
-
-const TERMINAL_STATUSES = new Set(["done", "analysis_done"]);
 
 /** @type {number | null} */
 let reconnectTimer = null;
 
-/** @type {WebSocket | null} */
-let activeSocket = null;
+/** @type {EventSource | null} */
+let activeStream = null;
 
 /** @type {number} */
 let reconnectAttempt = 0;
-
-/** @type {number | null} */
-let heartbeatTimer = null;
-
-/** @type {number} */
-let lastMessageTime = 0;
-
-/** Heartbeat interval in ms - should be slightly less than server ping interval */
-const HEARTBEAT_CHECK_MS = 35000;
-
-/** Max silence before forcing reconnect (server sends ping every 30s) */
-const HEARTBEAT_TIMEOUT_MS = 50000;
+let shouldReconnect = true;
 
 function clearReconnectTimer() {
     if (reconnectTimer) {
         clearTimeout(reconnectTimer);
         reconnectTimer = null;
-    }
-}
-
-function clearHeartbeatTimer() {
-    if (heartbeatTimer) {
-        clearInterval(heartbeatTimer);
-        heartbeatTimer = null;
     }
 }
 
@@ -86,43 +67,32 @@ function getCell(row, label) {
 }
 
 function getRenderedActionCategory(root) {
-    if (!root) return null;
-    if (root.querySelector(".btn-group")) return "download";
-    if (root.querySelector("[data-action='cancel-job']")) return "cancel";
-    if (root.querySelector("[data-action='open-detail']")) return "detail";
-    return null;
+    return root?.querySelector("[data-action-category]")?.dataset.actionCategory || null;
 }
 
 /**
- * Tear down a WebSocket connection cleanly.
- * Nulls event handlers to prevent stale callbacks, clears timers,
- * and invalidates activeSocket immediately when it matches the provided socket.
- * @param {WebSocket | null} ws - The WebSocket to tear down
+ * Tear down an EventSource cleanly.
+ * @param {EventSource | null} stream - The stream to tear down
  */
-function teardown(ws) {
+function teardown(stream) {
     clearReconnectTimer();
-    clearHeartbeatTimer();
 
-    if (!ws) {
+    if (!stream) {
         return;
     }
 
-    // Immediate state cleanup - don't wait for async onclose
-    if (activeSocket === ws) {
-        activeSocket = null;
+    if (activeStream === stream) {
+        activeStream = null;
     }
 
-    ws.onopen = null;
-    ws.onmessage = null;
-    ws.onerror = null;
-    ws.onclose = null;
+    stream.onopen = null;
+    stream.onmessage = null;
+    stream.onerror = null;
 
-    if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
-        try {
-            ws.close();
-        } catch (err) {
-            console.warn("WebSocket close error:", err);
-        }
+    try {
+        stream.close();
+    } catch (err) {
+        console.warn("SSE close error:", err);
     }
 }
 
@@ -130,6 +100,10 @@ function teardown(ws) {
  * Schedule a reconnect attempt using exponential backoff and jitter.
  */
 function scheduleReconnect() {
+    if (!shouldReconnect) {
+        return;
+    }
+
     clearReconnectTimer();
     setIndicator(document.getElementById("wsIndicator"), false);
 
@@ -139,30 +113,8 @@ function scheduleReconnect() {
 
     reconnectTimer = window.setTimeout(() => {
         reconnectTimer = null;
-        connectWS();
+        connectEventStream();
     }, baseDelay + jitter);
-}
-
-/**
- * Start heartbeat monitoring.
- * Forces reconnect scheduling if no messages are received within timeout.
- */
-function startHeartbeat() {
-    clearHeartbeatTimer();
-
-    lastMessageTime = Date.now();
-
-    heartbeatTimer = setInterval(() => {
-        const silence = Date.now() - lastMessageTime;
-        if (silence > HEARTBEAT_TIMEOUT_MS) {
-            console.warn(`WebSocket silent for ${Math.round(silence / 1000)}s, forcing reconnect`);
-
-            const staleSocket = activeSocket;
-            clearHeartbeatTimer();
-            teardown(staleSocket);
-            scheduleReconnect();
-        }
-    }, HEARTBEAT_CHECK_MS);
 }
 
 /**
@@ -171,7 +123,7 @@ function startHeartbeat() {
  */
 function applyUpdate(payload) {
     if (!payload?.id) {
-        console.warn("WebSocket update missing job id:", payload);
+        console.warn("SSE update missing job id:", payload);
         return;
     }
 
@@ -179,9 +131,8 @@ function applyUpdate(payload) {
     if (!row) return;
 
     // Update cached row state first so detail modals and follow-up renders stay in sync.
-    const previousStatus = row.dataset.status || "queued";
     const previousJobType = row.dataset.type || "";
-    const status = payload.status || previousStatus;
+    const status = payload.status || row.dataset.status || "queued";
     row.dataset.status = status;
     if (payload.message != null) {
         row.dataset.message = payload.message;
@@ -209,6 +160,12 @@ function applyUpdate(payload) {
     }
     if (payload.bpm_confidence != null) {
         row.dataset.bpmConfidence = String(payload.bpm_confidence);
+    }
+    if (payload.progress != null) {
+        const parsedProgress = Number(payload.progress);
+        row.dataset.progress = Number.isFinite(parsedProgress) ? String(parsedProgress) : "";
+    } else if (status !== "transcoding") {
+        row.dataset.progress = "";
     }
 
     const titleCell = (payload.video_title != null || payload.video_meta_hover != null || payload.url != null)
@@ -267,7 +224,7 @@ function applyUpdate(payload) {
     if (statusCell) {
         const statusInline = statusCell.querySelector(".status-inline");
         const statusGroup = statusCell.querySelector(".status-action-group");
-        const newStatus = createStatusElement(status, sizeBytes);
+        const newStatus = createStatusElement(status, sizeBytes, row.dataset.progress);
 
         if (statusInline) {
             // Preserve structure: just replace the status-inline element
@@ -309,26 +266,10 @@ function applyUpdate(payload) {
 }
 
 /**
- * Handle incoming WebSocket message.
- * Responds to server pings and processes job updates.
+ * Handle incoming SSE message and process job updates.
  * @param {string} data - The raw message data
  */
 function handleMessage(data) {
-    lastMessageTime = Date.now();
-
-    // Server heartbeat ping - respond with pong
-    if (typeof data === "string" && data === "ping") {
-        try {
-            if (activeSocket?.readyState === WebSocket.OPEN) {
-                activeSocket.send("pong");
-            }
-        } catch (err) {
-            console.warn("Failed to send pong:", err);
-        }
-        return;
-    }
-
-    // Job update payload
     try {
         const payload = JSON.parse(data);
         
@@ -341,72 +282,68 @@ function handleMessage(data) {
         // Regular job update
         applyUpdate(payload);
     } catch (err) {
-        console.warn("Malformed WebSocket frame:", err);
+        console.warn("Malformed SSE event data:", err);
     }
 }
 
 /**
- * Establish a WebSocket connection for real-time job updates.
- * Implements reconnection with exponential backoff and heartbeat monitoring.
- * @returns {WebSocket} The active or newly created WebSocket instance
+ * Establish an SSE connection for real-time job updates.
+ * @returns {EventSource} The active or newly created event stream
  */
-export function connectWS() {
+export function connectEventStream() {
     clearReconnectTimer();
+    shouldReconnect = true;
 
     const indicator = document.getElementById("wsIndicator");
-    const proto = window.location.protocol === "https:" ? "wss" : "ws";
 
-    // Guard: Prevent parallel connections
-    if (activeSocket?.readyState === WebSocket.OPEN || activeSocket?.readyState === WebSocket.CONNECTING) {
-        return activeSocket;
+    if (activeStream && activeStream.readyState !== EventSource.CLOSED) {
+        return activeStream;
     }
 
-    // Clean up any stale socket
-    if (activeSocket) {
-        teardown(activeSocket);
+    if (activeStream) {
+        teardown(activeStream);
     }
 
-    const ws = new WebSocket(`${proto}://${window.location.host}/ws`);
-    activeSocket = ws;
+    const stream = new EventSource("/events");
+    activeStream = stream;
 
-    ws.onopen = () => {
+    stream.onopen = () => {
         reconnectAttempt = 0;
-        lastMessageTime = Date.now();
         setIndicator(indicator, true);
-        startHeartbeat();
-        ws.send("subscribe");
     };
 
-    ws.onmessage = (event) => {
+    stream.onmessage = (event) => {
         handleMessage(event.data);
     };
 
-    ws.onerror = () => {
-        console.error(`WebSocket error on ${ws.url} (readyState=${ws.readyState})`);
-    };
-
-    ws.onclose = () => {
-        // Only clean up if this is still the active connection (race condition guard)
-        if (activeSocket !== ws) {
+    stream.onerror = () => {
+        setIndicator(indicator, false);
+        if (activeStream !== stream) {
             return;
         }
 
-        activeSocket = null;
-        clearHeartbeatTimer();
+        teardown(stream);
         scheduleReconnect();
     };
 
-    return ws;
+    return stream;
 }
 
 /**
- * Tear down the active WebSocket when the page is being hidden or unloaded.
- * Uses pagehide for better navigation and bfcache compatibility.
+ * Tear down the active SSE stream when the page is being hidden or unloaded.
  */
 function handlePageHide() {
-    if (activeSocket) {
-        teardown(activeSocket);
+    shouldReconnect = false;
+    if (activeStream) {
+        teardown(activeStream);
+    }
+}
+
+function handlePageShow(event) {
+    if (event.persisted) {
+        connectEventStream();
     }
 }
 
 window.addEventListener("pagehide", handlePageHide);
+window.addEventListener("pageshow", handlePageShow);

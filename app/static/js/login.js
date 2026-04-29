@@ -10,9 +10,7 @@
  * redirect-safe navigation, and iOS keyboard scroll stabilization.
  */
 
-(function () {
-    "use strict";
-
+function initLogin() {
     const form = document.getElementById("login-form");
     const submitBtn = document.getElementById("submit-btn");
     const usernameIn = document.getElementById("username");
@@ -63,7 +61,6 @@
     function isSafeLocalRedirect(url) {
         if (typeof url !== "string" || !url) return false;
         try {
-            // Resolve against current origin — rejects external URLs and javascript:
             const parsed = new URL(url, window.location.origin);
             return parsed.origin === window.location.origin;
         } catch {
@@ -115,15 +112,12 @@
                 try {
                     data = await response.json();
                 } catch {
-                    // Malformed JSON: treat as empty data, rely on HTTP status
                     console.warn("Login response contained invalid JSON");
                 }
             }
 
-            // Fail on HTTP error OR explicitly marked failure only.
             if (!response.ok || data.ok === false) {
                 setMessage(data.detail || "Login failed.", "error");
-                // Focus on the field that likely caused the error
                 const focusTarget =
                     data.error_code === "USER_NOT_FOUND"
                         ? usernameIn
@@ -140,13 +134,12 @@
             if (err?.name === "TimeoutError" || err?.name === "AbortError") {
                 setMessage(
                     "Request timed out. If this persists, try refreshing the page.",
-                    "error"
+                    "error",
                 );
             } else {
                 setMessage("Network error. Please try again.", "error");
             }
         } finally {
-            // Always clear the password field to prevent credential exposure
             if (passwordIn) passwordIn.value = "";
 
             if (!success) {
@@ -154,36 +147,28 @@
                 submitBtn.disabled = false;
                 submitBtn.textContent = originalText;
             }
-            // On success: isSubmitting stays true to prevent re-entry
         }
     }
 
     form.addEventListener("submit", submitLogin);
 
-    /**
-     * iOS Keyboard Scroll Stabilization
-     *
-     * On iOS Safari, the virtual keyboard resize causes the viewport to scroll
-     * unpredictably, sometimes hiding the focused input field behind the keyboard.
-     * This listener detects keyboard open/close via visualViewport height changes
-     * and scrolls the active input into view.
-     */
-    (function () {
+    function setupIOSKeyboardStabilization() {
         if (!window.visualViewport) return;
 
         const vv = window.visualViewport;
         let lastHeight = vv.height;
         let keyboardOpen = false;
+        let scrollYBeforeKeyboard = window.scrollY;
 
         /** Delay in ms to let the iOS keyboard animation settle before scrolling. */
         const IOS_KEYBOARD_SETTLE_MS = 50;
 
-        const activeInput = function () {
+        function activeInput() {
             return document.activeElement &&
                 /input|textarea/i.test(document.activeElement.tagName)
                 ? document.activeElement
                 : null;
-        };
+        }
 
         function stabilizeScroll() {
             const el = activeInput();
@@ -197,23 +182,35 @@
             }
         }
 
-        vv.addEventListener("resize", function () {
+        function onViewportResize() {
             const heightDiff = lastHeight - vv.height;
             if (heightDiff > 120) {
                 keyboardOpen = true;
+                scrollYBeforeKeyboard = window.scrollY;
                 setTimeout(stabilizeScroll, IOS_KEYBOARD_SETTLE_MS);
             }
             if (heightDiff < -120) {
                 keyboardOpen = false;
-                window.scrollTo({ top: 0, behavior: "instant" });
+                window.scrollTo({ top: scrollYBeforeKeyboard, behavior: "instant" });
             }
             lastHeight = vv.height;
-        });
+        }
 
-        document.addEventListener("focusin", function () {
+        function onFocusIn() {
             if (keyboardOpen) {
                 setTimeout(stabilizeScroll, IOS_KEYBOARD_SETTLE_MS);
             }
-        });
-    })();
-})();
+        }
+
+        vv.addEventListener("resize", onViewportResize);
+        document.addEventListener("focusin", onFocusIn);
+    }
+
+    setupIOSKeyboardStabilization();
+}
+
+if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", initLogin, { once: true });
+} else {
+    initLogin();
+}

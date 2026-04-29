@@ -12,6 +12,7 @@ import asyncio
 import logging
 import os
 import re
+import stat as stat_module
 import uuid
 from pathlib import Path
 from time import time
@@ -21,7 +22,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
 
 from ..common.rate_limit import limiter
-from ..db import get_db, get_job, get_settings, set_settings
+from ..db import get_job, get_settings, set_settings, update_job
 from ..utils.template_filters import is_lalala_configured
 from .auth import require_user, require_user_json
 
@@ -30,10 +31,14 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/lalal", tags=["lalal"])
 
 # Constants
-_LALAL_AUTH_REQUEST_COOLDOWN_SECONDS = 30
 _LALAL_AUTH_VALIDATION_CACHE_SECONDS = 300
+_LOCK_TIMEOUT_SECONDS = 600
+_MAX_EMAIL_LENGTH = 320
 _EMAIL_RE = re.compile(r"^[^@]+@[^@]+\.[^@]+$")
 _TRIM_ID_RE = re.compile(r"^\d+_\d+$")
+_STEM_VOCALS = "vocals"
+_STEM_INSTRUMENTAL = "instrumental"
+_VALID_STEMS = frozenset({_STEM_VOCALS, _STEM_INSTRUMENTAL})
 
 # Module-level state
 _DATA_DIR: Path | None = None
@@ -64,17 +69,20 @@ async def _get_json(request: Request) -> dict[str, Any]:
 def _require_initialized() -> Path:
     if _DATA_DIR is None:
         raise RuntimeError("Lalal routes are not initialized")
-    return _DATA_DIR
+    return _DATA_DIR.resolve()
 
 
 def _validate_email(email: str) -> None:
-    if not _EMAIL_RE.fullmatch(email):
+    if len(email) > _MAX_EMAIL_LENGTH or not _EMAIL_RE.fullmatch(email):
         raise HTTPException(status_code=400, detail="Valid email address is required")
 
 
 def _validate_stem(stem: str) -> None:
-    if stem not in ("vocals", "instrumental"):
-        raise HTTPException(status_code=400, detail="Invalid stem type. Use 'vocals' or 'instrumental'")
+    if stem not in _VALID_STEMS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid stem type. Use '{_STEM_VOCALS}' or '{_STEM_INSTRUMENTAL}'",
+        )
 
 
 def _validate_trim_id(trim_id: str) -> str:
@@ -88,7 +96,10 @@ def _resolve_job_file(raw_filename: str | None) -> Path:
     if not raw_filename:
         raise HTTPException(status_code=404, detail="not ready")
 
-    file_path = Path(str(raw_filename)).resolve()
+    file_path = Path(str(raw_filename).strip())
+    if not file_path.is_absolute():
+        file_path = data_dir / file_path
+    file_path = file_path.resolve()
     try:
         file_path.relative_to(data_dir)
     except ValueError as exc:
@@ -102,9 +113,40 @@ async def _path_is_file(path: Path) -> bool:
 
 async def _path_is_ready_file(path: Path) -> bool:
     def _check() -> bool:
-        return path.is_file() and path.stat().st_size > 0
+        try:
+            stat_result = path.stat()
+        except FileNotFoundError:
+            return False
+        return stat_module.S_ISREG(stat_result.st_mode) and stat_result.st_size > 0
 
     return await asyncio.to_thread(_check)
+
+
+def _acquire_processing_lock(lock_file: Path) -> int:
+    now_ts = int(time())
+
+    for _attempt in range(2):
+        try:
+            lock_fd = os.open(lock_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError as exc:
+            try:
+                lock_age = now_ts - int(lock_file.stat().st_mtime)
+            except FileNotFoundError:
+                continue
+            except OSError:
+                lock_age = -1
+
+            if lock_age >= _LOCK_TIMEOUT_SECONDS:
+                logger.warning("Removing stale Lalal lock file: %s", lock_file)
+                lock_file.unlink(missing_ok=True)
+                continue
+
+            raise HTTPException(status_code=409, detail="Lalal processing already in progress") from exc
+
+        os.write(lock_fd, f"{now_ts}\n".encode("ascii"))
+        return lock_fd
+
+    raise HTTPException(status_code=409, detail="Lalal processing already in progress")
 
 
 async def _latest_trim_input(output_dir: Path, trim_id: str | None) -> tuple[Path, str]:
@@ -188,32 +230,21 @@ def _make_split_response(
     return response
 
 
-def _reserve_auth_request_slot() -> int:
-    now_ts = int(time())
-    with get_db() as con:
-        con.execute("BEGIN IMMEDIATE")
-        row = con.execute(
-            "SELECT value FROM settings WHERE key = ?",
-            ("lalalaai_auth_requested_at",),
-        ).fetchone()
-        last_requested_at = 0
-        if row is not None:
-            try:
-                last_requested_at = int(row["value"] or 0)
-            except (TypeError, ValueError):
-                last_requested_at = 0
-
-        remaining_seconds = _LALAL_AUTH_REQUEST_COOLDOWN_SECONDS - (now_ts - last_requested_at)
-        if remaining_seconds > 0:
-            con.rollback()
-            return remaining_seconds
-
-        con.execute(
-            "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
-            ("lalalaai_auth_requested_at", str(now_ts)),
-        )
-        con.commit()
-        return 0
+async def _mark_lalal_split_done_if_ready(
+    job_id_str: str,
+    vocals_path: Path,
+    instrumental_path: Path,
+    *,
+    trimmed: bool,
+) -> None:
+    if trimmed:
+        return
+    vocals_exists, instrumental_exists = await asyncio.gather(
+        _path_is_ready_file(vocals_path),
+        _path_is_ready_file(instrumental_path),
+    )
+    if vocals_exists and instrumental_exists:
+        await asyncio.to_thread(update_job, job_id_str, lalal_split_done=1)
 
 
 # ============================================================================
@@ -286,101 +317,6 @@ async def api_lalal_status(request: Request, force_refresh: bool = False, _user:
     }
 
 
-@router.post("/auth/request")
-@limiter.limit("3/minute")
-async def api_lalal_auth_request(request: Request, _user: str = Depends(require_user)):
-    """Request OTP email via Lalal website auth flow."""
-
-    payload = await _get_json(request)
-
-    email = str(payload.get("email", "")).strip().lower()
-    google_cid = str(payload.get("google_cid", "")).strip()
-
-    _validate_email(email)
-
-    remaining_seconds = await asyncio.to_thread(_reserve_auth_request_slot)
-
-    if remaining_seconds > 0:
-        raise HTTPException(
-            status_code=429,
-            detail=f"Please wait {remaining_seconds} seconds before requesting another token.",
-            headers={"Retry-After": str(remaining_seconds)},
-        )
-
-    from ..lalal import LalalOtpAuthClient
-
-    try:
-        async with LalalOtpAuthClient(timeout=30.0) as auth_client:
-            await auth_client.request_otp(
-                email=email,
-                google_cid=google_cid,
-            )
-    except Exception:
-        logger.exception("Lalal auth request failed")
-        raise HTTPException(status_code=502, detail="External service unavailable")
-
-    return {"ok": True, "message": "Verification email sent. Please enter your 6-digit code."}
-
-
-@router.get("/auth/cooldown")
-@limiter.limit("60/minute")
-async def api_lalal_auth_cooldown(request: Request, _user: str = Depends(require_user)):
-    """Return remaining cooldown seconds for token requests."""
-    _ = request
-    settings = await asyncio.to_thread(get_settings)
-    now_ts = int(time())
-    last_requested_at = int(settings.get("lalalaai_auth_requested_at", 0) or 0)
-    remaining_seconds = max(0, _LALAL_AUTH_REQUEST_COOLDOWN_SECONDS - (now_ts - last_requested_at))
-
-    return {
-        "ok": True,
-        "remaining_seconds": remaining_seconds,
-        "cooldown_seconds": _LALAL_AUTH_REQUEST_COOLDOWN_SECONDS,
-    }
-
-
-@router.post("/auth/verify")
-@limiter.limit("5/minute")
-async def api_lalal_auth_verify(request: Request, _user: str = Depends(require_user)):
-    """Verify 6-digit OTP code and store Lalal activation key."""
-
-    payload = await _get_json(request)
-
-    email = str(payload.get("email", "")).strip().lower()
-    code = str(payload.get("code", "")).strip()
-
-    _validate_email(email)
-    if not code or len(code) != 6 or not code.isdigit():
-        raise HTTPException(status_code=400, detail="Invalid 6-digit code")
-
-    from ..lalal import LalalClient, LalalOtpAuthClient
-
-    try:
-        async with LalalOtpAuthClient(timeout=30.0) as auth_client:
-            activation_key = await auth_client.exchange_code_for_activation_key(email=email, code=code)
-
-        client = LalalClient(activation_key)
-        async with client:
-            await asyncio.wait_for(client.check_quota(), timeout=20.0)
-    except Exception:
-        logger.exception("Lalal authentication failed")
-        raise HTTPException(status_code=400, detail="Authentication failed")
-
-    # Store auth credentials
-    await asyncio.to_thread(
-        set_settings,
-        {
-            "lalalaai_email": email,
-            "lalalaai_auth_key": activation_key,
-            "lalalaai_auth_checked_at": int(time()),
-            "lalalaai_auth_is_valid": True,
-            "lalalaai_auth_last_error": "",
-        },
-    )
-
-    return {"ok": True, "message": "Authentication successful"}
-
-
 @router.post("/auth/activation-key")
 @limiter.limit("5/minute")
 async def api_lalal_auth_activation_key(request: Request, _user: str = Depends(require_user)):
@@ -440,7 +376,14 @@ async def api_lalal_auth_logout(request: Request, _user: str = Depends(require_u
 
 @router.post("/{job_id}")
 @limiter.limit("5/minute")
-async def lalal_split(request: Request, job_id: uuid.UUID, stem: str = "vocals", trimmed: bool = False, trim_id: str | None = None, _user: str = Depends(require_user_json)):
+async def lalal_split(
+    request: Request,
+    job_id: uuid.UUID,
+    stem: str = _STEM_VOCALS,
+    trimmed: bool = False,
+    trim_id: str | None = None,
+    _user: str = Depends(require_user_json),
+):
     """Split audio using Lalal.ai API.
 
     Note: Lalal always processes a vocals/instrumental split; `stem`
@@ -484,8 +427,14 @@ async def lalal_split(request: Request, job_id: uuid.UUID, stem: str = "vocals",
         _path_is_ready_file(instrumental_path),
     )
     if vocals_exists and instrumental_exists:
-        cached_path = vocals_path if stem == "vocals" else instrumental_path
+        cached_path = vocals_path if stem == _STEM_VOCALS else instrumental_path
         logger.debug("Returning cached Lalal result for %s (stem=%s, trim_id=%s)", job_id, stem, trim_id)
+        await _mark_lalal_split_done_if_ready(
+            job_id_str,
+            vocals_path,
+            instrumental_path,
+            trimmed=trimmed,
+        )
         return _make_split_response(
             job_id_str,
             stem,
@@ -500,17 +449,25 @@ async def lalal_split(request: Request, job_id: uuid.UUID, stem: str = "vocals",
     lock_fd: int | None = None
 
     try:
-        try:
-            lock_fd = os.open(lock_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError as exc:
-            raise HTTPException(status_code=409, detail="Lalal processing already in progress") from exc
+        from ..lalal import LalalClient, LalalError, StemType, get_lalal_client
+    except ImportError as exc:
+        raise HTTPException(status_code=500, detail="Lalal.ai module not available") from exc
+
+    try:
+        lock_fd = _acquire_processing_lock(lock_file)
 
         vocals_exists, instrumental_exists = await asyncio.gather(
             _path_is_ready_file(vocals_path),
             _path_is_ready_file(instrumental_path),
         )
         if vocals_exists and instrumental_exists:
-            cached_path = vocals_path if stem == "vocals" else instrumental_path
+            cached_path = vocals_path if stem == _STEM_VOCALS else instrumental_path
+            await _mark_lalal_split_done_if_ready(
+                job_id_str,
+                vocals_path,
+                instrumental_path,
+                trimmed=trimmed,
+            )
             return _make_split_response(
                 job_id_str,
                 stem,
@@ -519,16 +476,17 @@ async def lalal_split(request: Request, job_id: uuid.UUID, stem: str = "vocals",
                 cached=True,
                 trim_id=trim_id,
             )
-
-        from ..lalal import LalalClient, LalalError, StemType, get_lalal_client
-    except ImportError as exc:
-        raise HTTPException(status_code=500, detail="Lalal.ai module not available") from exc
+    except HTTPException:
+        raise
 
     client = get_lalal_client()
     if not client:
         raise HTTPException(status_code=400, detail="Lalal.ai API key not configured")
 
     loop = asyncio.get_running_loop()
+    queue_event = _queue_event
+    if queue_event is None:
+        raise RuntimeError("Lalal routes are not initialized")
 
     def sync_progress_callback(stage: str, pct: int) -> None:
         payload = {
@@ -538,7 +496,7 @@ async def lalal_split(request: Request, job_id: uuid.UUID, stem: str = "vocals",
             "stage": stage,
             "progress": pct,
         }
-        loop.call_soon_threadsafe(_queue_event, payload)
+        loop.call_soon_threadsafe(queue_event, payload)
 
     try:
         stem_type = StemType.VOCALS
@@ -555,12 +513,19 @@ async def lalal_split(request: Request, job_id: uuid.UUID, stem: str = "vocals",
                 progress_callback=sync_progress_callback,
             )
 
-        if stem == "vocals" and "stem" in results:
+        if stem == _STEM_VOCALS and "stem" in results:
             result_path = results["stem"]
-        elif stem == "instrumental" and "backing" in results:
+        elif stem == _STEM_INSTRUMENTAL and "backing" in results:
             result_path = results["backing"]
         else:
             raise HTTPException(status_code=500, detail="Processing completed but no output file")
+
+        await _mark_lalal_split_done_if_ready(
+            job_id_str,
+            vocals_path,
+            instrumental_path,
+            trimmed=trimmed,
+        )
 
         return _make_split_response(
             job_id_str,
@@ -590,7 +555,7 @@ async def lalal_split(request: Request, job_id: uuid.UUID, stem: str = "vocals",
 async def lalal_download(
     request: Request,
     job_id: uuid.UUID,
-    stem: str = "vocals",
+    stem: str = _STEM_VOCALS,
     trimmed: bool = False,
     trim_id: str | None = None,
     _user: str = Depends(require_user_json),

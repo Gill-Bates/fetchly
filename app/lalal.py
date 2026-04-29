@@ -14,7 +14,7 @@ import logging
 import re
 import time
 from collections.abc import AsyncIterator, Callable
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, Self, TypedDict
 
@@ -31,7 +31,7 @@ type StageProgressCallback = Callable[[str, int], None]
 type DownloadProgressCallback = Callable[[int, int], None]
 
 
-class StemType(str, Enum):
+class StemType(StrEnum):
     """Stem separation target types.
 
     Note: ``INSTRUMENTAL`` maps to the API value ``"drum"``. Lalal.ai uses
@@ -53,7 +53,7 @@ class StemType(str, Enum):
     WIND = "wind"
 
 
-class SplitType(str, Enum):
+class SplitType(StrEnum):
     """Split configuration types."""
 
     AUTO = "auto"
@@ -71,14 +71,14 @@ class SplitType(str, Enum):
     LYRA = "lyra"
 
 
-class ExtractionLevel(str, Enum):
+class ExtractionLevel(StrEnum):
     """Extraction intensity for compatible split modes."""
 
     DEEP_EXTRACTION = "deep_extraction"
     CLEAR_CUT = "clear_cut"
 
 
-class SplitMode(str, Enum):
+class SplitMode(StrEnum):
     """Processing mode/endpoint family in Lalal.ai v1 API."""
 
     STEM_SEPARATOR = "stem_separator"
@@ -140,7 +140,7 @@ _ALLOWED_DOWNLOAD_HOST_SUFFIXES: tuple[str, ...] = (".lalal.ai", ".amazonaws.com
 
 def _safe_header_filename(name: str) -> str:
     """Sanitize a filename for use inside HTTP header values."""
-    cleaned = re.sub(r'["\\\r\n]', "_", name).strip()
+    cleaned = re.sub(r"[^A-Za-z0-9._-]", "_", name).strip("._")
     return cleaned or "upload"
 
 
@@ -304,7 +304,7 @@ class _BaseLalalClient:
 
             with output_path.open("wb") as output_file:
                 async for chunk in response.aiter_bytes(chunk_size=_TRANSFER_CHUNK_SIZE):
-                    output_file.write(chunk)
+                    await asyncio.to_thread(output_file.write, chunk)
                     downloaded += len(chunk)
 
                     if progress_callback and total > 0:
@@ -720,6 +720,7 @@ class LalalWebSessionClient(_BaseLalalClient):
             back_track_size=int(split_data.get("back_track_size", 0) or 0),
             duration=float(split_data.get("duration", task_info.get("duration", 0)) or 0),
         )
+
     async def check_quota(self) -> dict[str, Any]:
         """Best-effort check for website session mode.
 
@@ -879,193 +880,6 @@ class LalalWebSessionClient(_BaseLalalClient):
             return {}
         task_info = result.get(task_id, {})
         return task_info if isinstance(task_info, dict) else {}
-
-
-class LalalOtpAuthClient(_BaseLalalClient):
-    """Automates Lalal.ai website OTP login flow.
-
-    Flow derived from HAR:
-    1) POST /auth/signin/ (email + turnstile token)
-    2) POST /auth/login/ (email + 6-digit code)
-    3) GET /auth/profile/  -> activation_key
-    """
-
-    def __init__(self, timeout: float = 30.0) -> None:
-        super().__init__(timeout)
-
-    def _make_client(self) -> httpx.AsyncClient:
-        return httpx.AsyncClient(
-            base_url=LALAL_API_BASE,
-            timeout=self._timeout,
-            follow_redirects=True,
-            headers={
-                "origin": LALAL_API_BASE,
-                "referer": f"{LALAL_API_BASE}/de/api/",
-                "accept": "application/json, text/plain, */*",
-                "accept-language": "en-US,en;q=0.9",
-                "user-agent": (
-                    "Mozilla/5.0 (X11; Linux x86_64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/124.0.0.0 Safari/537.36"
-                ),
-            },
-        )
-
-    @staticmethod
-    def _is_success_response(data: dict[str, Any]) -> bool:
-        status = str(data.get("status", "")).strip().lower()
-        result = str(data.get("result", "")).strip().lower()
-        return status in {"success", "ok"} or result in {"success", "ok"}
-
-    @staticmethod
-    def _extract_csrf_from_html(html: str) -> str:
-        if not html:
-            return ""
-
-        patterns = (
-            r'name=["\']csrfmiddlewaretoken["\']\s+value=["\']([^"\']+)["\']',
-            r'"csrfToken"\s*:\s*"([^"]+)"',
-            r"'csrfToken'\s*:\s*'([^']+)'",
-        )
-        for pattern in patterns:
-            match = re.search(pattern, html, flags=re.IGNORECASE)
-            if match:
-                return str(match.group(1)).strip()
-        return ""
-
-    async def _bootstrap_session(self) -> str:
-        """Prime cookie jar and best-effort return CSRF token.
-
-        Some environments block third-party challenge storage, so a missing
-        CSRF cookie should not abort the flow immediately.
-        """
-        client = await self._get_client()
-        csrf = ""
-        last_html = ""
-
-        for path in ("/de/api/", "/api/", "/"):
-            try:
-                response = await client.get(path)
-            except Exception:
-                continue
-
-            if isinstance(response.text, str):
-                last_html = response.text
-
-            for cookie_name in ("csrftoken", "csrf", "csrf_token"):
-                csrf = str(client.cookies.get(cookie_name, "")).strip()
-                if csrf:
-                    return csrf
-
-            set_cookie = response.headers.get("set-cookie", "")
-            header_match = re.search(r"csrftoken=([^;]+)", set_cookie, flags=re.IGNORECASE)
-            if header_match:
-                csrf = str(header_match.group(1)).strip()
-                if csrf:
-                    return csrf
-
-            csrf_from_html = self._extract_csrf_from_html(last_html)
-            if csrf_from_html:
-                return csrf_from_html
-
-        return ""
-
-    @staticmethod
-    def _multipart_payload(data: dict[str, str]) -> dict[str, tuple[None, str]]:
-        return {k: (None, v) for k, v in data.items()}
-
-    async def request_otp(self, email: str, google_cid: str = "", turnstile_response: str = "") -> None:
-        email = email.strip().lower()
-        if not email or "@" not in email:
-            raise ValueError("Valid email address is required")
-
-        csrf = await self._bootstrap_session()
-        client = await self._get_client()
-        payload = {
-            "email": email,
-            "auth_type": "otp",
-        }
-        cid = google_cid.strip()
-        if cid:
-            payload["google_cid"] = cid
-        if turnstile_response.strip():
-            payload["turnstile-response"] = turnstile_response.strip()
-
-        headers: dict[str, str] = {}
-        if csrf:
-            headers["x-csrftoken"] = csrf
-
-        response = await client.post(
-            "/auth/signin/",
-            files=self._multipart_payload(payload),
-            headers=headers,
-        )
-        data = response.json() if response.text else {}
-
-        if response.status_code >= 400:
-            raise LalalError(f"OTP request failed (HTTP {response.status_code}): {_extract_api_error(data if isinstance(data, dict) else {})}")
-
-        if not isinstance(data, dict) or not self._is_success_response(data):
-            raise LalalError(_extract_api_error(data) if isinstance(data, dict) else "OTP request failed")
-
-        sent_flags = ("otp_sent", "email_sent", "sent", "code_sent", "mail_sent")
-        for key in sent_flags:
-            if key in data and data.get(key) is False:
-                raise LalalError("OTP request was accepted but no verification email was sent")
-
-    async def login_with_code(self, email: str, code: str) -> None:
-        email = email.strip().lower()
-        code = code.strip()
-        if not email or "@" not in email:
-            raise ValueError("Valid email address is required")
-        if len(code) != 6 or not code.isdigit():
-            raise ValueError("Invalid 6-digit code")
-
-        csrf = await self._bootstrap_session()
-        client = await self._get_client()
-        headers: dict[str, str] = {}
-        if csrf:
-            headers["x-csrftoken"] = csrf
-
-        response = await client.post(
-            "/auth/login/",
-            files=self._multipart_payload({"email": email, "code": code}),
-            headers=headers,
-        )
-        data = response.json() if response.text else {}
-
-        if response.status_code >= 400:
-            raise LalalError(f"Login failed (HTTP {response.status_code}): {_extract_api_error(data if isinstance(data, dict) else {})}")
-
-        if not isinstance(data, dict) or not self._is_success_response(data):
-            raise LalalError(_extract_api_error(data) if isinstance(data, dict) else "Login failed")
-
-    async def get_profile(self) -> dict[str, Any]:
-        client = await self._get_client()
-        response = await client.get("/auth/profile/")
-        data = response.json() if response.text else {}
-        if response.status_code >= 400:
-            raise LalalError(f"Profile fetch failed (HTTP {response.status_code}): {_extract_api_error(data if isinstance(data, dict) else {})}")
-        if not isinstance(data, dict) or not self._is_success_response(data):
-            raise LalalError(_extract_api_error(data) if isinstance(data, dict) else "Profile fetch failed")
-        return data
-
-    async def exchange_code_for_activation_key(self, email: str, code: str) -> str:
-        await self.login_with_code(email=email, code=code)
-        profile = await self.get_profile()
-        activation_key = str(profile.get("activation_key", "")).strip()
-        if not activation_key:
-            raise LalalError("Lalal profile did not contain activation_key")
-        return activation_key
-
-    async def process_file(self, *_args: object, **_kwargs: object) -> dict[str, Path]:
-        """Not implemented. Use LalalClient or LalalWebSessionClient for media processing."""
-        raise LalalError(
-            "LalalOtpAuthClient does not support media processing. "
-            "Use LalalClient with activation key or LalalWebSessionClient for processing."
-        )
-
-
 def get_lalal_client() -> LalalClient | None:
     """Get Lalal.ai client using stored auth key credentials.
 

@@ -164,6 +164,7 @@ class GovernorConfig:
     
     # Semaphore limits (0 = auto-detect)
     cpu_semaphore_limit: int = 0
+    analysis_semaphore_limit: int = 0
     io_semaphore_limit: int = 0
     transcode_semaphore_limit: int = 0
     
@@ -180,6 +181,7 @@ class GovernorConfig:
             worker_count=_env_int("WORKER_COUNT", 0, min_value=0),
             queue_maxsize=_env_int("WORKER_QUEUE_MAXSIZE", 0, min_value=0),
             cpu_semaphore_limit=_env_int("CPU_SEMAPHORE_LIMIT", 0, min_value=0),
+            analysis_semaphore_limit=_env_int("ANALYSIS_SEMAPHORE_LIMIT", 0, min_value=0),
             io_semaphore_limit=_env_int("IO_SEMAPHORE_LIMIT", 0, min_value=0),
             transcode_semaphore_limit=_env_int("TRANSCODE_SEMAPHORE_LIMIT", 0, min_value=0),
             memory_threshold_mb=_env_int("MEMORY_THRESHOLD_MB", 256, min_value=0),
@@ -195,6 +197,7 @@ class ResourceLimits:
     worker_count: int
     queue_maxsize: int
     cpu_limit: int
+    analysis_limit: int
     io_limit: int
     transcode_limit: int
 
@@ -204,6 +207,7 @@ class GovernorStatus(TypedDict):
     worker_count: int
     queue_maxsize: int
     cpu_limit: int
+    analysis_limit: int
     io_limit: int
     transcode_limit: int
     memory_available_mb: int
@@ -249,11 +253,13 @@ class Governor:
         
         # Semaphores are initialized eagerly in configure()
         self._cpu_sem: asyncio.Semaphore | None = None
+        self._analysis_sem: asyncio.Semaphore | None = None
         self._io_sem: asyncio.Semaphore | None = None
         self._transcode_sem: asyncio.Semaphore | None = None
         
         # Sync semaphores (threading)
         self._cpu_sem_sync: threading.Semaphore | None = None
+        self._analysis_sem_sync: threading.Semaphore | None = None
         self._io_sem_sync: threading.Semaphore | None = None
         self._transcode_sem_sync: threading.Semaphore | None = None
 
@@ -297,6 +303,7 @@ class Governor:
             
             # Calculate semaphore limits
             cpu_limit = self._config.cpu_semaphore_limit or max(1, math.ceil(effective_cpus))
+            analysis_limit = self._config.analysis_semaphore_limit or max(1, min(2, math.ceil(effective_cpus)))
             io_limit = self._config.io_semaphore_limit or max(2, math.ceil(effective_cpus * 4))
             transcode_limit = self._config.transcode_semaphore_limit or max(1, min(2, math.ceil(effective_cpus)))
             
@@ -305,15 +312,18 @@ class Governor:
                 worker_count=worker_count,
                 queue_maxsize=queue_maxsize,
                 cpu_limit=cpu_limit,
+                analysis_limit=analysis_limit,
                 io_limit=io_limit,
                 transcode_limit=transcode_limit,
             )
             
             # Initialize semaphores eagerly to avoid race conditions.
             self._cpu_sem = asyncio.Semaphore(cpu_limit)
+            self._analysis_sem = asyncio.Semaphore(analysis_limit)
             self._io_sem = asyncio.Semaphore(io_limit)
             self._transcode_sem = asyncio.Semaphore(transcode_limit)
             self._cpu_sem_sync = threading.Semaphore(cpu_limit)
+            self._analysis_sem_sync = threading.Semaphore(analysis_limit)
             self._io_sem_sync = threading.Semaphore(io_limit)
             self._transcode_sem_sync = threading.Semaphore(transcode_limit)
             
@@ -321,11 +331,12 @@ class Governor:
             
             logger.info(
                 "Governor configured: cpus=%.2f, workers=%d, queue=%d, "
-                "cpu_sem=%d, io_sem=%d, transcode_sem=%d",
+                "cpu_sem=%d, analysis_sem=%d, io_sem=%d, transcode_sem=%d",
                 effective_cpus,
                 worker_count,
                 queue_maxsize,
                 cpu_limit,
+                analysis_limit,
                 io_limit,
                 transcode_limit,
             )
@@ -358,6 +369,11 @@ class Governor:
         return self._require_configured()[1].queue_maxsize
 
     @property
+    def analysis_limit(self) -> int:
+        """Recommended concurrency limit for audio analysis work."""
+        return self._require_configured()[1].analysis_limit
+
+    @property
     def transcode_limit(self) -> int:
         """Recommended concurrency limit for transcoding/analysis work."""
         return self._require_configured()[1].transcode_limit
@@ -366,6 +382,11 @@ class Governor:
     def cpu_semaphore(self) -> asyncio.Semaphore:
         """Async semaphore for CPU-intensive operations."""
         return self._require_value(self._cpu_sem, "cpu_semaphore")
+
+    @property
+    def analysis_semaphore(self) -> asyncio.Semaphore:
+        """Async semaphore for audio analysis operations."""
+        return self._require_value(self._analysis_sem, "analysis_semaphore")
     
     @property
     def io_semaphore(self) -> asyncio.Semaphore:
@@ -381,6 +402,11 @@ class Governor:
     def cpu_semaphore_sync(self) -> threading.Semaphore:
         """Threading semaphore for CPU-intensive operations."""
         return self._require_value(self._cpu_sem_sync, "cpu_semaphore_sync")
+
+    @property
+    def analysis_semaphore_sync(self) -> threading.Semaphore:
+        """Threading semaphore for audio analysis operations."""
+        return self._require_value(self._analysis_sem_sync, "analysis_semaphore_sync")
 
     @property
     def io_semaphore_sync(self) -> threading.Semaphore:
@@ -519,6 +545,7 @@ class Governor:
             "worker_count": limits.worker_count,
             "queue_maxsize": limits.queue_maxsize,
             "cpu_limit": limits.cpu_limit,
+            "analysis_limit": limits.analysis_limit,
             "io_limit": limits.io_limit,
             "transcode_limit": limits.transcode_limit,
             "memory_available_mb": mem_available,

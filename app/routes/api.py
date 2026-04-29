@@ -6,8 +6,6 @@
 
 """Core API routes for jobs, settings, and info."""
 
-from __future__ import annotations
-
 import asyncio
 import logging
 from queue import Full
@@ -15,11 +13,11 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from time import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Protocol
+from weakref import WeakKeyDictionary
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
-from slowapi import Limiter
 
 from ..common.rate_limit import limiter
 from ..bpm_cluster import cluster_bpms
@@ -32,8 +30,9 @@ from ..db import (
     paginate_jobs,
     set_settings,
     update_job,
+    update_job_if_status,
 )
-from ..session import delete_session_cookie
+from ..session import delete_session_cookie, refresh_session_settings_cache
 from ..utils.template_filters import is_lalala_configured, public_settings
 from ..utils.youtube import (
     empty_info_payload,
@@ -42,7 +41,7 @@ from ..utils.youtube import (
     normalize_info_url,
     validate_youtube_url,
 )
-from ..worker import get_job_queue
+from ..worker import cancel_job as cancel_worker_job, get_job_queue
 from .auth import (
     hash_password,
     require_html_auth,
@@ -63,26 +62,24 @@ router = APIRouter(tags=["api"])
 _ALLOWED_MEDIA_TYPES = frozenset({"audio", "video"})
 _ALLOWED_QUALITIES = frozenset({"max", "medium", "small"})
 _STATS_CACHE_TTL_SECONDS = 60.0
+_TERMINAL_JOB_STATUSES = frozenset({"done", "analysis", "analysis_done", "error", "cancelled"})
+_PERSISTED_CANCELLABLE_JOB_STATUSES = ("queued", "processing")
 
 # Module-level state
 _templates: "Jinja2Templates | None" = None
-_limiter: Limiter | None = None
 _DEFAULT_USER: str = ""
 _stats_cache: dict[str, Any] = {"data": None, "ts": 0.0}
-_stats_lock: asyncio.Lock | None = None
+_stats_locks: "WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock]" = WeakKeyDictionary()
 
 
 def init_api(
     templates: "Jinja2Templates",
-    limiter: Limiter,
     default_user: str,
 ) -> None:
     """Initialize the API module with required dependencies."""
-    global _templates, _limiter, _DEFAULT_USER, _stats_lock
+    global _templates, _DEFAULT_USER
     _templates = templates
-    _limiter = limiter
     _DEFAULT_USER = default_user
-    _stats_lock = asyncio.Lock()
 
 
 async def _get_json(request: Request) -> dict[str, Any]:
@@ -102,6 +99,15 @@ def _require_templates() -> "Jinja2Templates":
     return _templates
 
 
+def _get_stats_lock() -> asyncio.Lock:
+    loop = asyncio.get_running_loop()
+    lock = _stats_locks.get(loop)
+    if lock is None:
+        lock = asyncio.Lock()
+        _stats_locks[loop] = lock
+    return lock
+
+
 def _clamp_int(value: Any, min_value: int, max_value: int, name: str) -> int:
     try:
         int_value = int(value)
@@ -112,7 +118,11 @@ def _clamp_int(value: Any, min_value: int, max_value: int, name: str) -> int:
     return int_value
 
 
-def job_to_dict(job: Any) -> dict[str, object]:
+class JobRecord(Protocol):
+    def __getitem__(self, key: str) -> Any: ...
+
+
+def job_to_dict(job: JobRecord) -> dict[str, object]:
     """Convert a job record to a dictionary for JSON responses."""
     return {
         "id": job["id"],
@@ -144,7 +154,8 @@ async def get_cached_stats() -> dict[str, int]:
     if cached is not None and (now_ts - cached_ts) < _STATS_CACHE_TTL_SECONDS:
         return cached
 
-    async with _stats_lock:
+    async with _get_stats_lock():
+        now_ts = time()
         cached = _stats_cache.get("data")
         cached_ts = float(_stats_cache.get("ts", 0.0) or 0.0)
         if cached is not None and (now_ts - cached_ts) < _STATS_CACHE_TTL_SECONDS:
@@ -152,7 +163,7 @@ async def get_cached_stats() -> dict[str, int]:
 
         stats = await asyncio.to_thread(get_stats)
         _stats_cache["data"] = stats
-        _stats_cache["ts"] = now_ts
+        _stats_cache["ts"] = time()
         return stats
 
 
@@ -167,6 +178,14 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@router.get("/api/stats")
+@limiter.limit("30/minute")
+async def api_stats(request: Request, _: str = Depends(require_user_json)) -> dict[str, int]:
+    """Return fresh dashboard stats for live UI updates."""
+    _ = request
+    return await asyncio.to_thread(get_stats)
+
+
 @router.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     """Dashboard home page."""
@@ -175,7 +194,7 @@ async def index(request: Request):
         return redirect
 
     templates = _require_templates()
-    
+
     jobs = await asyncio.to_thread(paginate_jobs, limit=50, offset=0)
     stats = await get_cached_stats()
     settings = await asyncio.to_thread(get_settings)
@@ -297,14 +316,19 @@ async def api_info(request: Request, url: str, user: str = Depends(require_user)
             "duration": duration if isinstance(duration, int) else None,
             "view_count": views if isinstance(views, int) else None,
             "formats": formats[:20],
+            "formats_total": len(formats),
+            "formats_truncated": len(formats) > 20,
             "unavailable": False,
         }
 
     except asyncio.TimeoutError:
         logger.warning("Video info extraction timed out for URL %s", url)
         return empty_info_payload()
+    except OSError as exc:
+        logger.exception("System error during video info extraction for URL %s", url)
+        raise HTTPException(status_code=503, detail="Metadata extraction temporarily unavailable") from exc
     except Exception as exc:
-        logger.warning("Video info extraction failed for URL %s: %s", url, exc)
+        logger.warning("Video info extraction failed for URL %s: %s", url, exc, exc_info=True)
         return empty_info_payload()
 
 
@@ -356,6 +380,7 @@ async def api_set_settings(request: Request, _user: str = Depends(require_sessio
 
         if settings_to_update:
             await asyncio.to_thread(set_settings, settings_to_update, allow_internal=True)
+            await asyncio.to_thread(refresh_session_settings_cache)
 
         if password_changed:
             response = JSONResponse(
@@ -394,7 +419,7 @@ async def api_submit(
         raise HTTPException(status_code=400, detail=f"Invalid type. Allowed: {', '.join(sorted(_ALLOWED_MEDIA_TYPES))}")
     if quality_value not in _ALLOWED_QUALITIES:
         raise HTTPException(status_code=400, detail=f"Invalid quality. Allowed: {', '.join(sorted(_ALLOWED_QUALITIES))}")
-    
+
     # Validate YouTube URL
     is_valid, error_msg = validate_youtube_url(url)
     if not is_valid:
@@ -406,9 +431,13 @@ async def api_submit(
         meta = await asyncio.wait_for(extract_video_meta_async(url.strip()), timeout=8.0)
     except Exception as exc:
         logger.debug("Metadata extraction skipped for submit (will be fetched by worker): %s", exc)
-    
+
     job_id = str(uuid.uuid4())
     clean_url = url.strip()
+    job_queue = get_job_queue()
+    if job_queue.full():
+        raise HTTPException(status_code=503, detail="Job queue is full, please try again later")
+
     await asyncio.to_thread(
         insert_job,
         job_id,
@@ -419,10 +448,19 @@ async def api_submit(
         video_title=meta["video_title"],
         video_meta_hover=meta["video_meta_hover"],
     )
-    job_queue = get_job_queue()
     try:
         job_queue.put_nowait((job_id, clean_url, media_type, quality_value))
     except Full as exc:
+        try:
+            await asyncio.to_thread(
+                update_job,
+                job_id,
+                status="error",
+                message="Queue full at submission time",
+                finished_at=datetime.now(UTC).isoformat(),
+            )
+        except Exception:
+            logger.exception("Failed to mark job %s as errored after queue overflow", job_id)
         raise HTTPException(status_code=503, detail="Job queue is full, please try again later") from exc
     job = await asyncio.to_thread(get_job, job_id)
     return job_to_dict(job)
@@ -440,24 +478,25 @@ async def cancel_job(request: Request, job_id: uuid.UUID, _user: str = Depends(r
         raise HTTPException(status_code=404, detail="Job not found")
     
     status = job["status"] or ""
-    if status in ("done", "analysis", "analysis_done", "error", "cancelled"):
+    if status in _TERMINAL_JOB_STATUSES:
         raise HTTPException(status_code=400, detail=f"Cannot cancel job with status: {status}")
-    
+
     # Mark job for cancellation
-    from .. import worker
-    worker.cancel_job(job_id_str)
-    
-    # Update status to "cancelled" if currently queued, else let worker handle it
-    if status == "queued":
-        await asyncio.to_thread(
-            update_job,
-            job_id_str,
-            status="cancelled",
-            message="Cancelled by user",
-            finished_at=datetime.now(UTC).isoformat(),
-        )
-    
-    logger.info("Cancellation requested for job %s (status: %s)", job_id_str, status)
-    
+    cancel_worker_job(job_id_str)
+
+    cancelled = await asyncio.to_thread(
+        update_job_if_status,
+        job_id_str,
+        _PERSISTED_CANCELLABLE_JOB_STATUSES,
+        status="cancelled",
+        message="Cancelled by user",
+        finished_at=datetime.now(UTC).isoformat(),
+    )
+
+    if cancelled:
+        logger.info("Cancellation requested for job %s (status: %s)", job_id_str, status)
+    else:
+        logger.info("Cancellation request for job %s lost race to a later status transition", job_id_str)
+
     job = await asyncio.to_thread(get_job, job_id_str)
     return job_to_dict(job)

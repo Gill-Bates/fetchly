@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}Status{% endblock %}
+{% block title %}tubeyou - next-gen Video Downloader{% endblock %}
 
 {% block navbar %}
 {% from "macros/navbar.html" import navbar %}
@@ -47,7 +47,7 @@
                     <dt>Status</dt>
                     <dd>
                         <span id="status" class="status-pill status-pill-{{ job['status'] | status_class }}">
-                            <span id="statusText">{{ ('done' if job['status'] == 'analysis_done' else job['status']) | e }}</span>
+                            <span id="statusText">{{ ('Cancelled' if job['status'] == 'cancelled' else ('done' if job['status'] == 'analysis_done' else job['status'])) | e }}</span>
                         </span>
                     </dd>
 
@@ -114,6 +114,7 @@
                     downloading: { text: "Downloading", icon: "download" },
                     transcoding: { text: "Transcoding", icon: "memory" },
                     analysis: { text: "Analyzing", icon: "analytics" },
+                    cancelled: { text: "Cancelled", icon: "cancel" },
                     done: { text: "Done", icon: "check_circle" },
                     analysis_done: { text: "Done", icon: "check_circle" },
                     error: { text: "Error", icon: "error" },
@@ -125,21 +126,23 @@
                     downloading: "status-pill-primary",
                     transcoding: "status-pill-primary",
                     analysis: "status-pill-primary",
+                    cancelled: "status-pill-secondary",
                     done: "status-pill-success",
                     analysis_done: "status-pill-success",
                     error: "status-pill-danger",
                 };
 
-                const FINAL_STATUSES = new Set(["done", "analysis_done", "error"]);
+                const FINAL_STATUSES = new Set(["done", "analysis_done", "error", "cancelled"]);
 
-                const proto = location.protocol === "https:" ? "wss" : "ws";
-                let ws;
-                let reconnectTimer = null;
                 let shouldReconnect = true;
+                let stream = null;
 
                 function updateStatus(payload) {
                     const meta = STATUS_META[payload.status] || { text: String(payload.status || "unknown") };
-                    statusText.textContent = meta.text;
+                    const progress = Number(payload.progress);
+                    statusText.textContent = payload.status === "transcoding" && Number.isFinite(progress)
+                        ? `${meta.text} ${Math.round(progress)}%`
+                        : meta.text;
                     statusEl.className = `status-pill ${STATUS_PILL[payload.status] || "status-pill-primary"}`;
                 }
 
@@ -181,29 +184,14 @@
 
                     if (payload.status && FINAL_STATUSES.has(payload.status)) {
                         shouldReconnect = false;
-                        if (reconnectTimer != null) {
-                            window.clearTimeout(reconnectTimer);
-                            reconnectTimer = null;
-                        }
-                        try { ws?.close(); } catch (_) {}
+                        try { stream?.close(); } catch (_) {}
                         linkEl.classList.remove("d-none");
                     }
                 }
 
                 function connect() {
-                    ws = new WebSocket(`${proto}://${location.host}/ws`);
-
-                    ws.onopen = () => {
-                        reconnectTimer = null;
-                        ws.send("subscribe");
-                    };
-
-                    ws.onmessage = handleMessage;
-
-                    ws.onclose = () => {
-                        if (!shouldReconnect) return;
-                        reconnectTimer = window.setTimeout(connect, 2000);
-                    };
+                    stream = new EventSource(`/api/jobs/${encodeURIComponent(jobId)}/events`);
+                    stream.onmessage = handleMessage;
                 }
 
                 if (!FINAL_STATUSES.has({{ job['status'] | tojson }})) {
@@ -212,11 +200,7 @@
 
                 window.addEventListener("pagehide", () => {
                     shouldReconnect = false;
-                    if (reconnectTimer != null) {
-                        window.clearTimeout(reconnectTimer);
-                        reconnectTimer = null;
-                    }
-                    try { ws?.close(); } catch (_) {}
+                    try { stream?.close(); } catch (_) {}
                 });
             }
         </script>

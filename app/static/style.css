@@ -676,14 +676,6 @@ button .material-symbols-outlined,
     height: var(--control-height-sm);
 }
 
-.auth-code-input {
-    width: 48px;
-    min-width: 48px;
-    height: 56px;
-    padding: 0;
-    font-size: 1.25rem;
-}
-
 /* Lalal auth CTA button */
 #lalalAuthUseKeyBtn {
     margin-top: 1rem;
@@ -710,8 +702,7 @@ button .material-symbols-outlined,
 
 /* Make Lalal auth suggestions clearly look like placeholders, not typed input. */
 #lalalAuthEmail::placeholder,
-#lalalActivationKey::placeholder,
-#lalalOtpEmail::placeholder {
+#lalalActivationKey::placeholder {
     color: color-mix(in srgb, var(--text-muted) 65%, transparent);
     opacity: 0.45;
 }
@@ -818,6 +809,11 @@ button .material-symbols-outlined,
 
 .settings-form-layout {
     margin-bottom: 2.5rem;
+}
+
+/* Add vertical spacing above Settings page heading */
+.settings-form-layout > h1 {
+    margin-top: var(--space-4);
 }
 
 .ui-card {
@@ -1194,6 +1190,102 @@ button .material-symbols-outlined,
     color: #ffffff;
 }
 
+.meta-value--badges {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
+    align-items: center;
+    gap: 0.45rem;
+    max-width: 70%;
+    white-space: normal;
+}
+
+.meta-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding: 0.28rem 0.6rem;
+    border-radius: var(--radius-pill);
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    color: #ffffff;
+    line-height: 1;
+}
+
+.meta-badge__label {
+    font-weight: 600;
+}
+
+.meta-badge__ext {
+    color: var(--text-muted);
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.meta-badge--more {
+    color: var(--text-muted);
+    background: rgba(255, 255, 255, 0.04);
+}
+
+.video-meta.is-loading .meta-value {
+    position: relative;
+    display: block;
+    width: clamp(7rem, 52%, 16rem);
+    min-height: 0.95rem;
+    color: transparent;
+    user-select: none;
+}
+
+.video-meta.is-loading .meta-value::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: 999px;
+    background: linear-gradient(
+        90deg,
+        rgba(255, 255, 255, 0.08) 0%,
+        rgba(255, 255, 255, 0.24) 50%,
+        rgba(255, 255, 255, 0.08) 100%
+    );
+    background-size: 200% 100%;
+    animation: meta-shimmer 1.2s linear infinite;
+}
+
+.video-meta.is-loading .meta-row:nth-child(1) .meta-value {
+    width: min(100%, 18rem);
+}
+
+.video-meta.is-loading .meta-row:nth-child(2) .meta-value {
+    width: min(100%, 12rem);
+}
+
+.video-meta.is-loading .meta-row:nth-child(3) .meta-value {
+    width: min(100%, 10rem);
+}
+
+.video-meta.is-loading .meta-row:nth-child(4) .meta-value {
+    width: min(100%, 6rem);
+}
+
+.video-meta.is-loading .meta-row:nth-child(5) .meta-value {
+    width: min(100%, 7rem);
+}
+
+.video-meta.is-loading .meta-row:nth-child(6) .meta-value {
+    width: min(100%, 15rem);
+}
+
+@keyframes meta-shimmer {
+    from {
+        background-position: 200% 0;
+    }
+
+    to {
+        background-position: -200% 0;
+    }
+}
+
 /* ── Table ───────────────────────────────────────────────────────────────── */
 
 .table {
@@ -1292,12 +1384,47 @@ td[data-label="Title"] {
 
 .job-title-cell {
     position: relative;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
     cursor: default;
     max-width: 220px;
     min-width: 0;
 }
 
+.job-copy-url-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.75rem;
+    height: 1.75rem;
+    flex: 0 0 auto;
+    padding: 0;
+    border: 1px solid color-mix(in srgb, var(--border) 92%, transparent);
+    border-radius: var(--radius-sm);
+    background: color-mix(in srgb, var(--surface-elevated) 92%, transparent);
+    color: var(--text-muted);
+    transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+}
+
+.job-copy-url-btn:hover,
+.job-copy-url-btn:focus-visible {
+    color: var(--text);
+    border-color: color-mix(in srgb, var(--primary) 45%, var(--border));
+    background: color-mix(in srgb, var(--primary) 14%, var(--surface-elevated));
+}
+
+.job-copy-url-btn:focus-visible {
+    outline: 2px solid color-mix(in srgb, var(--primary) 40%, transparent);
+    outline-offset: 2px;
+}
+
+.job-copy-url-btn .material-symbols-outlined {
+    font-size: 1rem;
+}
+
 .job-title-cell .job-title-text {
+    flex: 1 1 auto;
     transition: color 0.15s ease;
 }
 
@@ -1432,7 +1559,7 @@ td[data-label="Title"] {
 }
 
 .jobs-table .col-status {
-    width: 120px;
+    width: 160px;
 }
 
 .jobs-table .col-date {
@@ -1830,27 +1957,6 @@ td:last-child {
     font-weight: 600;
 }
 
-.auth-otp-details {
-    margin-top: 1.5rem;
-    padding-top: 0.5rem;
-    border-top: 1px dashed var(--border);
-}
-
-.auth-otp-summary {
-    cursor: pointer;
-    user-select: none;
-    padding: 0.5rem 0;
-}
-
-.auth-otp-summary:hover {
-    color: var(--text);
-}
-
-.auth-cooldown-hint {
-    display: block;
-    text-align: center;
-}
-
 .auth-success-panel {
     display: flex;
     flex-direction: column;
@@ -2086,6 +2192,8 @@ td:last-child {
     }
 
     .job-title-cell {
+        display: flex;
+        align-items: center;
         min-width: 0;
         max-width: none;
         width: 100%;

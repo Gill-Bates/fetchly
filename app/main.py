@@ -6,8 +6,6 @@
 
 """TubeYou FastAPI Application - Main entry point."""
 
-from __future__ import annotations
-
 import asyncio
 import logging
 import os
@@ -23,8 +21,9 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from slowapi.errors import RateLimitExceeded
-from slowapi.middleware import SlowAPIMiddleware
-from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.datastructures import MutableHeaders
+from starlette.responses import Response
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from .common.rate_limit import get_trusted_proxy_hosts, limiter
@@ -36,26 +35,28 @@ from .analysis_worker import (
     SubmitResult,
 )
 from .db import (
+    cancel_interrupted_jobs,
     close_db,
     get_settings,
     init_db,
+    list_queued_jobs,
     list_jobs_requiring_audio_analysis,
     purge_old_jobs,
     update_job,
 )
 from .governor import governor
-from .routes import auth_router, api_router, lalal_router, media_router, trim_router, ws_router
+from .routes import auth_router, api_router, events_router, lalal_router, media_router, trim_router
 from .routes.auth import init_auth
 from .routes.api import init_api
 from .routes.lalal import init_lalal
 from .routes.media import init_media, resolve_job_path
 from .routes.trim import init_trim
-from .routes.websocket import broadcast_payload, close_all_connections, connections
-from .session import SESSION_COOKIE, renew_session, set_session_cookie
+from .routes.events import publish_payload
+from .session import SESSION_COOKIE, refresh_session_settings_cache, renew_session, set_session_cookie
 from .utils.housekeeping import cleanup_expired_jobs
 from .utils.template_filters import register_filters
 from .utils.version import BUILD_INFO, VERSION
-from .worker import set_status_callback, signal_shutdown, start_workers, stop_workers
+from .worker import get_job_queue, set_status_callback, signal_shutdown, start_workers, stop_workers
 from middleware.csrf import CSRFMiddleware
 
 logger = logging.getLogger(__name__)
@@ -86,14 +87,16 @@ if not _DEFAULT_PASS:
 _CSRF_COOKIE = "tubeyou_csrf"
 _HOUSEKEEPING_INTERVAL = 3600  # Every hour
 _EVENT_QUEUE_MAXSIZE = 10_000
-_SKIP_RENEW_PATHS = (
-    "/static",
+_SESSION_SETTINGS_REFRESH_INTERVAL = 60.0
+_SKIP_RENEW_EXACT = frozenset({
     "/favicon.ico",
     "/health",
     "/login",
     "/logout",
+})
+_SKIP_RENEW_PREFIXES = (
+    "/static",
     "/thumbnail",
-    "/ws",
     "/download",
 )
 
@@ -113,6 +116,12 @@ templates.env.globals["BUILD_INFO"] = BUILD_INFO
 # them eagerly as well as during lifespan. This keeps TestClient(app) usable for
 # login/logout checks even when startup events have not run yet.
 init_auth(templates, _SECRET_KEY, _DEFAULT_USER, _DEFAULT_PASS)
+
+
+def _should_skip_session_renewal(request_path: str) -> bool:
+    if request_path in _SKIP_RENEW_EXACT:
+        return True
+    return any(request_path.startswith(prefix) for prefix in _SKIP_RENEW_PREFIXES)
 
 
 def _make_event_callbacks(
@@ -153,15 +162,12 @@ def _make_event_callbacks(
 
 
 async def _event_broadcaster(queue: EventQueue) -> None:
-    """Broadcast status events to all connected WebSocket clients."""
+    """Broadcast status events to all connected SSE clients."""
     try:
         while True:
             payload = await queue.get()
-            if not connections:
-                continue
-            sockets = list(connections)
             try:
-                await broadcast_payload(payload, sockets)
+                publish_payload(payload)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -191,6 +197,42 @@ async def _housekeeping_daemon() -> None:
                 log.warning("Housekeeping failed: %s", exc)
     except asyncio.CancelledError:
         log.debug("Housekeeping daemon cancelled")
+
+
+async def _requeue_pending_download_jobs() -> None:
+    """Replay persisted queued jobs into the in-memory worker queue on startup."""
+    pending_jobs = await asyncio.to_thread(list_queued_jobs)
+    if not pending_jobs:
+        return
+
+    job_queue = get_job_queue()
+    for index, row in enumerate(pending_jobs, start=1):
+        job = (
+            str(row["id"]),
+            str(row["url"]),
+            str(row["type"]),
+            str(row["quality"]),
+        )
+        await asyncio.to_thread(job_queue.put, job)
+        if index % 10 == 0:
+            await asyncio.sleep(0)
+
+    logger.info("Re-queued %d persisted download jobs during startup", len(pending_jobs))
+
+
+async def _session_settings_refresh_daemon() -> None:
+    """Refresh cached session settings outside request handling."""
+    try:
+        while True:
+            await asyncio.sleep(_SESSION_SETTINGS_REFRESH_INTERVAL)
+            try:
+                await asyncio.to_thread(refresh_session_settings_cache)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Session settings refresh failed")
+    except asyncio.CancelledError:
+        logger.debug("Session settings refresh daemon cancelled")
 
 
 def _check_dependencies() -> None:
@@ -229,6 +271,16 @@ async def _cancel_background_tasks(tasks: list[asyncio.Task[None]], *, timeout: 
                 logger.warning("Background task %s did not stop within %.1fs", task.get_name(), timeout)
 
 
+def _log_background_task_completion(task: asyncio.Task[None]) -> None:
+    try:
+        exc = task.exception()
+    except asyncio.CancelledError:
+        return
+
+    if exc is not None:
+        logger.critical("Background task %s crashed", task.get_name(), exc_info=exc)
+
+
 # ============================================================================
 # Application Lifecycle
 # ============================================================================
@@ -240,6 +292,10 @@ async def lifespan(app: FastAPI):
     _ = app
     _check_dependencies()
     await asyncio.to_thread(init_db)
+    await asyncio.to_thread(refresh_session_settings_cache)
+    recovered_jobs = await asyncio.to_thread(cancel_interrupted_jobs)
+    if recovered_jobs:
+        logger.warning("Marked %d interrupted in-flight jobs as cancelled during startup", recovered_jobs)
     event_queue: EventQueue = asyncio.Queue(maxsize=_EVENT_QUEUE_MAXSIZE)
     loop = asyncio.get_running_loop()
     enqueue_event, thread_status_callback, disable_event_dispatch = _make_event_callbacks(loop, event_queue)
@@ -248,9 +304,8 @@ async def lifespan(app: FastAPI):
     await asyncio.to_thread(governor.configure)
     
     # Initialize route modules
-    await asyncio.to_thread(init_auth, templates, _SECRET_KEY, _DEFAULT_USER, _DEFAULT_PASS)
-    init_api(templates, limiter, _DEFAULT_USER)
-    init_media(DATA_DIR, BASE_DIR, templates, limiter)
+    init_api(templates, _DEFAULT_USER)
+    init_media(DATA_DIR, BASE_DIR, templates)
     init_lalal(DATA_DIR, enqueue_event)
     init_trim(DATA_DIR, resolve_job_path)
 
@@ -258,6 +313,7 @@ async def lifespan(app: FastAPI):
     set_analysis_status_callback(thread_status_callback)
     start_workers()
     start_analysis_workers()
+    await _requeue_pending_download_jobs()
 
     # Re-queue pending analysis jobs (capped to avoid startup delay)
     _MAX_REPLAY = 100
@@ -293,7 +349,10 @@ async def lifespan(app: FastAPI):
     background_tasks: list[asyncio.Task[None]] = [
         asyncio.create_task(_event_broadcaster(event_queue), name="event_broadcaster"),
         asyncio.create_task(_housekeeping_daemon(), name="housekeeping_daemon"),
+        asyncio.create_task(_session_settings_refresh_daemon(), name="session_settings_refresh_daemon"),
     ]
+    for task in background_tasks:
+        task.add_done_callback(_log_background_task_completion)
 
     try:
         yield
@@ -305,8 +364,6 @@ async def lifespan(app: FastAPI):
         signal_shutdown()
 
         await _cancel_background_tasks(background_tasks, timeout=2.0)
-
-        await close_all_connections()
 
         # Run blocking stop functions in threads to avoid blocking event loop
         await asyncio.to_thread(stop_analysis_workers, 5.0)
@@ -323,38 +380,49 @@ app = FastAPI(lifespan=lifespan)
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 
 
-class SessionRenewalMiddleware(BaseHTTPMiddleware):
-    """Renew session cookie on requests that carry a session cookie (sliding window).
-    
-    Skips renewal for static assets, auth endpoints, and other paths in _SKIP_RENEW_PATHS.
-    """
+class SessionRenewalMiddleware:
+    """Renew session cookies without BaseHTTPMiddleware's streaming-response wrapper."""
 
-    async def dispatch(self, request: Request, call_next):
-        response = await call_next(request)
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
 
-        if response.status_code >= 400:
-            return response
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
 
+        request = Request(scope, receive=receive)
         request_path = request.url.path
-        if any(request_path == prefix or request_path.startswith(f"{prefix}/") for prefix in _SKIP_RENEW_PATHS):
-            return response
-
         old_token = request.cookies.get(SESSION_COOKIE)
-        if old_token:
-            # Offload to thread to avoid blocking event loop (token crypto can be slow)
-            new_token = await asyncio.to_thread(renew_session, old_token)
-            if new_token and new_token != old_token:
-                set_session_cookie(response, new_token, request)
-        return response
+        secure = request.url.scheme == "https"
+        renewed_token: str | None = None
+
+        if old_token and not _should_skip_session_renewal(request_path):
+            renewed_token = await asyncio.to_thread(renew_session, old_token)
+            if renewed_token == old_token:
+                renewed_token = None
+
+        async def send_wrapper(message: Message) -> None:
+            if renewed_token and message.get("type") == "http.response.start":
+                status = int(message.get("status", 200))
+                if status < 400:
+                    headers = MutableHeaders(scope=message)
+                    response = Response()
+                    set_session_cookie(response, renewed_token, request)
+                    for key, value in response.raw_headers:
+                        if key == b"set-cookie":
+                            headers.append("set-cookie", value.decode("latin-1"))
+            await send(message)
+
+        await self.app(scope, receive, send_wrapper)
 
 
 # Add middleware
 app.add_middleware(SessionRenewalMiddleware)
 app.add_middleware(CSRFMiddleware, csrf_cookie_name=_CSRF_COOKIE)
 app.state.limiter = limiter
-app.add_middleware(SlowAPIMiddleware)
-# Proxy headers must wrap SlowAPI so request.client.host reflects the real
-# client address when requests come through trusted reverse proxies like Caddy.
+# Decorator-based SlowAPI checks use request.client.host, so proxy headers must
+# wrap the app before route handlers run when requests come through Caddy.
 app.add_middleware(ProxyHeadersMiddleware, trusted_hosts=get_trusted_proxy_hosts())
 
 
@@ -369,4 +437,4 @@ app.include_router(api_router)
 app.include_router(lalal_router)
 app.include_router(media_router)
 app.include_router(trim_router)
-app.include_router(ws_router)
+app.include_router(events_router)

@@ -111,6 +111,7 @@ if __name__ == "__main__":
     use_colors = _should_use_colors(sys.stdout)
     host = os.environ.get("HOST", "0.0.0.0")
     port = int(os.environ.get("PORT", "8000"))
+    graceful_shutdown_timeout = float(os.environ.get("UVICORN_TIMEOUT_GRACEFUL_SHUTDOWN", "2.0"))
     forwarded_allow_ips = _env_csv(
         "FORWARDED_ALLOW_IPS",
         "127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7",
@@ -167,5 +168,6 @@ if __name__ == "__main__":
         reload=reload_enabled,
         proxy_headers=True,
         forwarded_allow_ips=forwarded_allow_ips,
+        timeout_graceful_shutdown=graceful_shutdown_timeout,
         log_config=log_config,
     )

@@ -126,19 +126,23 @@ class CSRFMiddleware:
             # Check header first (for JS fetch requests)
             sent_token = request.headers.get("X-CSRF-Token")
             
-            # Fall back to form data for traditional HTML form submissions
+            # Fall back to form data for traditional HTML form submissions.
             if not sent_token:
                 content_type = request.headers.get("content-type", "")
-                if "application/x-www-form-urlencoded" in content_type:
-                    # Parse form body to extract csrf_token
-                    body_cache = await request.body()
-                    body_consumed = True
+                if content_type.startswith("application/x-www-form-urlencoded") or content_type.startswith("multipart/form-data"):
                     try:
-                        from urllib.parse import parse_qs
-                        form_data = parse_qs(body_cache.decode("utf-8"))
-                        sent_token = form_data.get("csrf_token", [None])[0]
+                        form_data = await request.form()
+                        sent_token = form_data.get("csrf_token")
+                        body_consumed = True
                     except Exception:
-                        pass
+                        try:
+                            body_cache = await request.body()
+                            body_consumed = True
+                            from urllib.parse import parse_qs
+                            form_data = parse_qs(body_cache.decode("utf-8"))
+                            sent_token = form_data.get("csrf_token", [None])[0]
+                        except Exception:
+                            pass
             
             if not sent_token:
                 await self._reject(

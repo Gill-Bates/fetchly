@@ -36,7 +36,7 @@ def print_banner() -> None:
 """.strip("\n")
 
     text_lines = [
-        f"Use Youtube with ease!  v{VERSION} ({build_short})",
+        f"Use Youtube with ease! v{VERSION} ({build_short})",
         "(C) 2026 by Gill-Bates (https://github.com/Gill-Bates/tubeyou)",
     ]
 

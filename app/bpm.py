@@ -36,7 +36,7 @@ _BPM_MIN: Final[float] = 70.0
 _BPM_MAX: Final[float] = 180.0
 
 # Minimum confidence threshold for valid BPM
-_MIN_CONFIDENCE: Final[float] = 0.1
+_MIN_CONFIDENCE: Final[float] = 0.2
 
 _essentia_local = threading.local()
 
@@ -168,6 +168,7 @@ def _extract_bpm_essentia(audio_path: Path) -> BPMResult:
     from essentia.standard import MonoLoader
 
     loader = MonoLoader(filename=str(audio_path))
+    # Audio already resampled via ffmpeg, keep loader simple
     audio = loader()
 
     bpm, _, confidence, _, _ = _get_rhythm_extractor()(audio)
@@ -212,18 +213,27 @@ def extract_bpm(
 
         # Decode to mono WAV, apply preprocessing, and limit duration in one pass.
         # - highpass=f=40: Remove sub-bass rumble that confuses beat detection
-        # - loudnorm: Normalize loudness for consistent detection
+        # Avoid loudnorm: it can distort transients and harm beat detection
         logger.debug("Decoding and preprocessing %s for BPM analysis", file_path.name)
         _run_ffmpeg(
             file_path,
             clean_wav,
             duration=max_duration,
-            filters="highpass=f=40,loudnorm",
+            filters="highpass=f=40",
         )
 
         # Run Essentia BPM detection
         logger.debug("Running Essentia BPM detection")
         result = _extract_bpm_essentia(clean_wav)
+
+        # Reject clearly implausible BPM values (noise/speech edge cases)
+        if result.bpm < 60 or result.bpm > 200:
+            logger.debug(
+                "Rejecting implausible BPM %.1f for %s",
+                result.bpm,
+                file_path.name,
+            )
+            result = BPMResult(bpm=0.0, confidence=result.confidence)
 
         if result.confidence < _MIN_CONFIDENCE:
             logger.debug(
@@ -280,7 +290,7 @@ def extract_bpm_multi_window(
                 _run_ffmpeg(
                     file_path,
                     segment_wav,
-                    filters="highpass=f=40,loudnorm",
+                    filters="highpass=f=40",
                     duration=window_duration,
                     start_offset=start,
                 )
@@ -290,6 +300,11 @@ def extract_bpm_multi_window(
                     continue
 
                 result = _extract_bpm_essentia(segment_wav)
+
+                # Reject implausible BPM values
+                if result.bpm < 60 or result.bpm > 200:
+                    continue
+
                 if result.confidence >= _MIN_CONFIDENCE and result.bpm > 0:
                     bpms.append(result.bpm)
                     confidences.append(result.confidence)
@@ -314,3 +329,123 @@ def extract_bpm_multi_window(
     )
 
     return BPMResult(bpm=median_bpm, confidence=avg_confidence)
+
+
+def extract_bpm_cascade(
+    file_path: Path,
+    *,
+    max_duration: int = _MAX_ANALYSIS_DURATION,
+) -> BPMResult:
+    """Extract BPM using a cascade of algorithms for maximum accuracy.
+
+    The cascade runs:
+    1. Essentia RhythmExtractor2013 (fast, good baseline)
+    2. beat_this with optional DBN postprocessing (state-of-the-art accuracy)
+
+    Results are combined using confidence-weighted averaging. If both algorithms
+    agree (within 5 BPM), confidence is boosted. If they disagree significantly,
+    the higher-confidence result is preferred.
+
+    Args:
+        file_path: Path to audio file (MP3, WAV, FLAC, etc.)
+        max_duration: Maximum seconds to analyze (default 120s for performance)
+
+    Returns:
+        BPMResult with the best BPM estimate and combined confidence.
+    """
+    _ensure_file_exists(file_path)
+
+    # Step 1: Run Essentia
+    logger.debug("Cascade step 1: Running Essentia BPM detection for %s", file_path.name)
+    essentia_result = extract_bpm(file_path, max_duration=max_duration)
+
+    # Step 2: Run beat_this with optional DBN postprocessing
+    logger.debug("Cascade step 2: Running beat_this for %s", file_path.name)
+    try:
+        from .bpm_beat_this import extract_bpm_beat_this, is_beat_this_available
+
+        if not is_beat_this_available():
+            logger.debug("beat_this not available, using Essentia result only")
+            return essentia_result
+
+        beat_this_result = extract_bpm_beat_this(file_path)
+    except ImportError:
+        logger.debug("beat_this import failed, using Essentia result only")
+        return essentia_result
+    except Exception as exc:
+        logger.warning("beat_this failed: %s, using Essentia result only", exc)
+        return essentia_result
+
+    # Step 3: Combine results
+    essentia_bpm = essentia_result.bpm
+    essentia_conf = essentia_result.confidence
+    beat_this_bpm = beat_this_result.bpm
+    beat_this_conf = beat_this_result.confidence
+
+    # If one algorithm failed, use the other
+    if essentia_bpm <= 0 and beat_this_bpm <= 0:
+        logger.debug("Both algorithms failed for %s", file_path.name)
+        return BPMResult(bpm=0.0, confidence=0.0)
+
+    if essentia_bpm <= 0:
+        logger.debug("Essentia failed, using beat_this result: %.1f BPM", beat_this_bpm)
+        return BPMResult(bpm=beat_this_bpm, confidence=beat_this_conf)
+
+    if beat_this_bpm <= 0:
+        logger.debug("beat_this failed, using Essentia result: %.1f BPM", essentia_bpm)
+        return essentia_result
+
+    # Both algorithms produced results - combine them
+    bpm_diff = abs(essentia_bpm - beat_this_bpm)
+
+    if bpm_diff <= 5.0:
+        # Algorithms agree: use weighted average and boost confidence
+        total_conf = essentia_conf + beat_this_conf
+        if total_conf > 0:
+            combined_bpm = (
+                essentia_bpm * essentia_conf + beat_this_bpm * beat_this_conf
+            ) / total_conf
+        else:
+            combined_bpm = (essentia_bpm + beat_this_bpm) / 2.0
+
+        # Boost confidence when algorithms agree
+        combined_conf = min(1.0, (essentia_conf + beat_this_conf) / 2.0 + 0.1)
+
+        logger.debug(
+            "Cascade: Algorithms agree (diff=%.1f). "
+            "Essentia=%.1f (%.2f), beat_this=%.1f (%.2f) -> Combined=%.1f (%.2f)",
+            bpm_diff,
+            essentia_bpm,
+            essentia_conf,
+            beat_this_bpm,
+            beat_this_conf,
+            combined_bpm,
+            combined_conf,
+        )
+        return BPMResult(bpm=combined_bpm, confidence=combined_conf)
+
+    # Algorithms disagree: use the one with higher confidence
+    if essentia_conf >= beat_this_conf:
+        logger.debug(
+            "Cascade: Algorithms disagree (diff=%.1f). "
+            "Preferring Essentia=%.1f (%.2f) over beat_this=%.1f (%.2f)",
+            bpm_diff,
+            essentia_bpm,
+            essentia_conf,
+            beat_this_bpm,
+            beat_this_conf,
+        )
+        # Reduce confidence due to disagreement
+        return BPMResult(bpm=essentia_bpm, confidence=max(0.0, essentia_conf - 0.1))
+
+    logger.debug(
+        "Cascade: Algorithms disagree (diff=%.1f). "
+        "Preferring beat_this=%.1f (%.2f) over Essentia=%.1f (%.2f)",
+        bpm_diff,
+        beat_this_bpm,
+        beat_this_conf,
+        essentia_bpm,
+        essentia_conf,
+    )
+    # Reduce confidence due to disagreement
+    return BPMResult(bpm=beat_this_bpm, confidence=max(0.0, beat_this_conf - 0.1))

@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import ipaddress
 import os
-from functools import lru_cache
-from typing import Final
+from functools import cache
+from typing import Final, TypeAlias
 
 from fastapi import Request
 from slowapi import Limiter
+
+type TrustedProxySpec = str | ipaddress.IPv4Network | ipaddress.IPv6Network
 
 _DEFAULT_TRUSTED_PROXY_IPS: Final = ",".join((
 	"127.0.0.1",
@@ -30,20 +32,23 @@ def get_trusted_proxy_hosts() -> str:
 	FORWARDED_ALLOW_IPS follows Uvicorn's existing environment variable, so the
 	same deployment knob controls both request scope rewriting and rate-limit IP
 	extraction.
+
+	Note: This value is cached on first use for the lifetime of the process.
+	Restart the app to pick up environment changes.
 	"""
 	value = str(os.environ.get("FORWARDED_ALLOW_IPS", _DEFAULT_TRUSTED_PROXY_IPS)).strip()
 	return value or _DEFAULT_TRUSTED_PROXY_IPS
 
 
-@lru_cache(maxsize=1)
-def _trusted_proxy_specs() -> tuple[str | ipaddress._BaseNetwork, ...]:
-	specs: list[str | ipaddress._BaseNetwork] = []
+@cache
+def _trusted_proxy_specs() -> tuple[TrustedProxySpec, ...] | None:
+	specs: list[TrustedProxySpec] = []
 	for raw_item in get_trusted_proxy_hosts().split(","):
 		item = raw_item.strip()
 		if not item:
 			continue
 		if item == "*":
-			return ("*",)
+			return None
 		try:
 			specs.append(ipaddress.ip_network(item, strict=False))
 		except ValueError:
@@ -74,7 +79,7 @@ def _normalize_ip(value: str | None) -> str | None:
 def _is_trusted_proxy(host: str | None) -> bool:
 	normalized = _normalize_ip(host)
 	specs = _trusted_proxy_specs()
-	if specs == ("*",):
+	if specs is None:
 		return True
 	if normalized is None:
 		return bool(host and host.lower() in specs)
@@ -96,10 +101,14 @@ def _forwarded_client_ip(request: Request) -> str | None:
 		return None
 
 	forwarded_for = request.headers.get("x-forwarded-for", "")
-	for part in forwarded_for.split(","):
-		normalized = _normalize_ip(part)
-		if normalized:
-			return normalized
+	if forwarded_for:
+		parts = [_normalize_ip(part) for part in forwarded_for.split(",")]
+		normalized_parts = [part for part in parts if part]
+		for ip in reversed(normalized_parts):
+			if not _is_trusted_proxy(ip):
+				return ip
+		if normalized_parts:
+			return normalized_parts[0]
 
 	return _normalize_ip(request.headers.get("x-real-ip"))
 

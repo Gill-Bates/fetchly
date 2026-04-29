@@ -1,9 +1,10 @@
 {% set status = job["status"] %}
 {% set size = job["filesize_bytes"] %}
+{% set status_label = 'Cancelled' if status == 'cancelled' else ('done' if status == 'analysis_done' else status) %}
 {# Status pill with optional file size badge #}
 <div class="status-inline">
     <span class="status-pill status-pill-{{ status|status_class }} fw-medium px-2 py-1">
-        {{ status }}
+        {{ status_label }}
     </span>
     {% if size is not none %}
     <span class="status-size" title="File size">{{ size|filesize }}</span>

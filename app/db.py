@@ -4,12 +4,11 @@
 # Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 #
 
-from __future__ import annotations
-
 import logging
 import sqlite3
 from collections.abc import Callable, Generator
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final
 
@@ -39,6 +38,7 @@ _UPDATEABLE_COLUMNS: Final[frozenset[str]] = frozenset(
         "bpm",
         "bpm_confidence",
         "audio_hash",
+        "lalal_split_done",
     }
 )
 
@@ -48,7 +48,6 @@ _SETTINGS_DEFAULTS: Final[dict[str, str]] = {
     "session_idle_minutes": "60",
     "lalalaai_email": "",
     "lalalaai_auth_key": "",
-    "lalalaai_auth_requested_at": "0",
     "lalalaai_auth_checked_at": "0",
     "lalalaai_auth_is_valid": "false",
     "lalalaai_auth_last_error": "",
@@ -59,12 +58,16 @@ def _int_parser(default: int) -> Callable[[str], int]:
     return lambda v: int(v) if str(v).isdigit() else default
 
 
-_INTERNAL_SETTINGS_KEYS: Final[frozenset[str]] = frozenset({"admin_password_hash", "session_version"})
+_INTERNAL_SETTINGS_KEYS: Final[frozenset[str]] = frozenset({
+    "admin_password_hash",
+    "session_version",
+})
 # Only user-writable keys.  Internal keys require allow_internal=True in set_settings.
 _ALLOWED_SETTINGS_KEYS: Final[frozenset[str]] = frozenset(_SETTINGS_DEFAULTS)
 
 # Statuses that count as "completed" for audio analysis purposes.
 _COMPLETED_STATUSES: Final[frozenset[str]] = frozenset({"done", "analysis", "analysis_done"})
+_RECOVERABLE_IN_FLIGHT_STATUSES: Final[frozenset[str]] = frozenset({"processing", "downloading", "transcoding"})
 
 _SETTINGS_TYPES: Final[dict[str, Callable[[str], Any]]] = {
     "retention_days": _int_parser(7),
@@ -73,7 +76,6 @@ _SETTINGS_TYPES: Final[dict[str, Callable[[str], Any]]] = {
     "session_version": _int_parser(0),
     "lalalaai_email": str,
     "lalalaai_auth_key": str,
-    "lalalaai_auth_requested_at": _int_parser(0),
     "lalalaai_auth_checked_at": _int_parser(0),
     "lalalaai_auth_is_valid": lambda v: str(v).lower() in ("true", "1", "yes"),
     "lalalaai_auth_last_error": str,
@@ -150,7 +152,8 @@ def init_db() -> None:
                 video_meta_hover TEXT,
                 bpm INTEGER,
                 bpm_confidence REAL,
-                audio_hash TEXT
+                audio_hash TEXT,
+                lalal_split_done INTEGER NOT NULL DEFAULT 0
             )
         """)
 
@@ -163,6 +166,7 @@ def init_db() -> None:
             ("bpm", "INTEGER"),
             ("bpm_confidence", "REAL"),
             ("audio_hash", "TEXT"),
+            ("lalal_split_done", "INTEGER NOT NULL DEFAULT 0"),
         ):
             if col not in existing_cols:
                 con.execute(f"ALTER TABLE jobs ADD COLUMN {col} {dtype}")
@@ -230,6 +234,29 @@ def update_job(job_id: str, **fields: Any) -> None:
         con.commit()
 
 
+def update_job_if_status(job_id: str, expected_statuses: tuple[str, ...], **fields: Any) -> bool:
+    if not expected_statuses:
+        raise ValueError("expected_statuses must not be empty")
+    if not fields:
+        return False
+
+    safe_fields = {k: v for k, v in fields.items() if k in _UPDATEABLE_COLUMNS}
+    if not safe_fields:
+        raise ValueError("No valid fields to update")
+
+    keys = ", ".join(f"{k}=?" for k in safe_fields)
+    placeholders = ", ".join("?" for _ in expected_statuses)
+    values = [*safe_fields.values(), job_id, *expected_statuses]
+
+    with get_db() as con:
+        cursor = con.execute(
+            f"UPDATE jobs SET {keys} WHERE id=? AND status IN ({placeholders})",
+            values,
+        )
+        con.commit()
+        return bool(cursor.rowcount)
+
+
 def get_audio_analysis_cache(hash_value: str) -> sqlite3.Row | None:
     with get_db() as con:
         return con.execute(
@@ -264,17 +291,18 @@ def upsert_audio_analysis_cache(
 
 
 def list_completed_bpms(limit: int = 1000) -> list[int]:
+    placeholders = ",".join("?" for _ in _COMPLETED_STATUSES)
     with get_db() as con:
         rows = con.execute(
-            """
+            f"""
             SELECT bpm
             FROM jobs
             WHERE bpm IS NOT NULL
-              AND status IN ('done', 'analysis', 'analysis_done')
+              AND status IN ({placeholders})
             ORDER BY created_at DESC
             LIMIT ?
             """,
-            (limit,),
+            (*_COMPLETED_STATUSES, limit),
         ).fetchall()
     return [int(row["bpm"]) for row in rows if row["bpm"] is not None]
 
@@ -295,6 +323,39 @@ def list_jobs_requiring_audio_analysis(limit: int = 200) -> list[sqlite3.Row]:
         ).fetchall()
 
 
+def list_queued_jobs() -> list[sqlite3.Row]:
+    with get_db() as con:
+        return con.execute(
+            """
+            SELECT id, url, type, quality
+            FROM jobs
+            WHERE status='queued'
+            ORDER BY created_at ASC
+            """
+        ).fetchall()
+
+
+def cancel_interrupted_jobs() -> int:
+    """Mark stale in-flight jobs as cancelled after an application restart."""
+    placeholders = ",".join("?" for _ in _RECOVERABLE_IN_FLIGHT_STATUSES)
+    message = "Cancelled because the application restarted during processing"
+    finished_at = datetime.now(UTC).isoformat()
+
+    with get_db() as con:
+        cursor = con.execute(
+            f"""
+            UPDATE jobs
+            SET status=?,
+                message=?,
+                finished_at=?
+            WHERE status IN ({placeholders})
+            """,
+            ("cancelled", message, finished_at, *_RECOVERABLE_IN_FLIGHT_STATUSES),
+        )
+        con.commit()
+        return int(cursor.rowcount or 0)
+
+
 def get_job(job_id: str) -> sqlite3.Row | None:
     with get_db() as con:
         return con.execute(
@@ -304,19 +365,11 @@ def get_job(job_id: str) -> sqlite3.Row | None:
 
 def job_exists(job_id: str) -> bool:
     """Check if a job exists in the database."""
-    with get_db() as con:
-        row = con.execute(
-            "SELECT 1 FROM jobs WHERE id=? LIMIT 1", (job_id,)
-        ).fetchone()
-        return row is not None
+    return get_job(job_id) is not None
 
 
 def list_jobs(limit: int = 100) -> list[sqlite3.Row]:
-    with get_db() as con:
-        return con.execute(
-            "SELECT * FROM jobs ORDER BY created_at DESC LIMIT ?",
-            (limit,),
-        ).fetchall()
+    return paginate_jobs(limit=limit, offset=0)
 
 
 def paginate_jobs(limit: int = 50, offset: int = 0) -> list[sqlite3.Row]:
@@ -335,47 +388,20 @@ def get_stats() -> dict[str, int]:
             SELECT
                 COUNT(*)                        AS total_jobs,
                 COALESCE(SUM(duration_seconds) / 60, 0) AS total_minutes,
-                COALESCE(SUM(filesize_bytes), 0) AS total_bytes
+                COALESCE(SUM(filesize_bytes), 0) AS total_bytes,
+                COALESCE(SUM(CASE
+                    WHEN type = 'audio' AND lalal_split_done = 1 THEN duration_seconds
+                    ELSE 0
+                END) / 60, 0) AS total_lalal_minutes
             FROM jobs
             WHERE status = 'done'
         """).fetchone()
-
-        # Only count Lalal minutes for completed audio jobs that have both stems generated.
-        lalal_rows = con.execute(
-            """
-            SELECT id, filename, duration_seconds
-            FROM jobs
-            WHERE status = 'done'
-              AND type = 'audio'
-              AND filename IS NOT NULL
-              AND duration_seconds IS NOT NULL
-            """
-        ).fetchall()
-
-    data_dir = DB_PATH.parent
-    total_lalal_minutes = 0
-    for r in lalal_rows:
-        job_id = str(r["id"] or "").strip()
-        raw_filename = str(r["filename"] or "").strip()
-        duration_seconds = int(r["duration_seconds"] or 0)
-        if not job_id or not raw_filename or duration_seconds <= 0:
-            continue
-
-        base_name = Path(raw_filename).stem
-        if not base_name:
-            continue
-
-        output_dir = data_dir / job_id
-        vocals_path = output_dir / f"{base_name}_vocals.mp3"
-        instrumental_path = output_dir / f"{base_name}_instrumental.mp3"
-        if vocals_path.is_file() and instrumental_path.is_file():
-            total_lalal_minutes += duration_seconds // 60
 
     return {
         "total_jobs": row["total_jobs"] or 0,
         "total_minutes": row["total_minutes"] or 0,
         "total_bytes": row["total_bytes"] or 0,
-        "total_lalal_minutes": total_lalal_minutes,
+        "total_lalal_minutes": row["total_lalal_minutes"] or 0,
     }
 
 

@@ -9,12 +9,19 @@ import { humanSize } from "./utils.js";
 const STATUS_META = {
     analysis: { color: "primary", label: "analysis" },
     analysis_done: { color: "success", label: "done" },
+    cancelled: { color: "secondary", label: "Cancelled" },
     done:  { color: "success", label: "done" },
     error: { color: "danger", label: "error" },
 };
 
-// Requires <html data-lalal-enabled="true|false"> to be set during server render.
-const lalalEnabled = document.documentElement.dataset.lalalEnabled === "true";
+const LALAL_STEMS = Object.freeze([
+    Object.freeze({ icon: "music_off", label: "Instrumental", stem: "instrumental" }),
+    Object.freeze({ icon: "mic", label: "A Cappella", stem: "vocals" }),
+]);
+
+function isLalalEnabled() {
+    return document.documentElement.dataset.lalalEnabled === "true";
+}
 
 /**
  * Create a Material Symbols icon span.
@@ -108,12 +115,13 @@ export function getActionButtonCategory(status) {
 
 /**
  * Build a status pill and optional file-size badge.
- * Returns a <div class="status-inline">, which ws.js relies on for live updates.
+ * Returns a <div class="status-inline">, which events.js relies on for live updates.
  * @param {string} status
  * @param {number | null | undefined} sizeBytes
+ * @param {number | null | undefined} progress
  * @returns {HTMLDivElement} Element with class "status-inline"
  */
-export function createStatusElement(status, sizeBytes) {
+export function createStatusElement(status, sizeBytes, progress = null) {
     const wrapper = document.createElement("div");
     wrapper.className = "status-inline";
 
@@ -122,7 +130,12 @@ export function createStatusElement(status, sizeBytes) {
 
     const pill = document.createElement("span");
     pill.className = `status-pill status-pill-${meta.color}`;
-    pill.textContent = meta.label;
+    const parsedProgress = Number(progress);
+    if (normalizedStatus === "transcoding" && Number.isFinite(parsedProgress) && parsedProgress >= 0) {
+        pill.textContent = `${meta.label} ${Math.round(parsedProgress)}%`;
+    } else {
+        pill.textContent = meta.label;
+    }
 
     wrapper.appendChild(pill);
 
@@ -160,6 +173,8 @@ export function createActionButton(jobId, status, jobType) {
     wrapper.className = "action-buttons";
 
     const actionCategory = getActionButtonCategory(status);
+    const lalalEnabled = isLalalEnabled();
+    wrapper.dataset.actionCategory = actionCategory;
     const downloadHref = `/download/${encodeURIComponent(jobId)}`;
 
     if (actionCategory === "download") {
@@ -181,7 +196,6 @@ export function createActionButton(jobId, status, jobType) {
         toggle.type = "button";
         toggle.className = "btn btn-primary btn-sm dropdown-toggle dropdown-toggle-split";
         toggle.dataset.bsToggle = "dropdown";
-        toggle.dataset.bsBoundary = "viewport";
         toggle.setAttribute("aria-haspopup", "true");
         toggle.setAttribute("aria-expanded", "false");
         const srText = document.createElement("span");
@@ -201,26 +215,18 @@ export function createActionButton(jobId, status, jobType) {
             menu.appendChild(createDropdownButton("content_cut", "Trim", { action: "open-trim", jobId }));
 
             menu.appendChild(createDivider());
-            menu.appendChild(createDropdownButton(
-                "music_off",
-                "Instrumental",
-                { action: "lalal-split", jobId, stem: "instrumental" },
-                {
-                    trailingNode: createProviderLogo(),
-                    disabled: !lalalEnabled,
-                    title: lalalEnabled ? "" : "Lalal.ai is not connected",
-                },
-            ));
-            menu.appendChild(createDropdownButton(
-                "mic",
-                "A Cappella",
-                { action: "lalal-split", jobId, stem: "vocals" },
-                {
-                    trailingNode: createProviderLogo(),
-                    disabled: !lalalEnabled,
-                    title: lalalEnabled ? "" : "Lalal.ai is not connected",
-                },
-            ));
+            for (const { icon, label, stem } of LALAL_STEMS) {
+                menu.appendChild(createDropdownButton(
+                    icon,
+                    label,
+                    { action: "lalal-split", jobId, stem },
+                    {
+                        trailingNode: createProviderLogo(),
+                        disabled: !lalalEnabled,
+                        title: lalalEnabled ? "" : "Lalal.ai is not connected",
+                    },
+                ));
+            }
         }
 
         btnGroup.append(downloadBtn, toggle, menu);
@@ -231,7 +237,7 @@ export function createActionButton(jobId, status, jobType) {
     if (actionCategory === "cancel") {
         const button = document.createElement("button");
         button.type = "button";
-        button.className = "btn btn-danger btn-sm btn-icon";
+        button.className = "btn btn-secondary btn-sm btn-icon";
         button.dataset.action = "cancel-job";
         button.dataset.jobId = jobId;
         button.setAttribute("aria-label", "Cancel");

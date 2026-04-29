@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import queue
 import re
 import threading
@@ -54,7 +55,7 @@ _SHUTDOWN_SENTINEL: object = object()
 # Maximum number of pending analysis jobs kept in memory.
 _QUEUE_MAXSIZE = 50
 # Tracks longer than 15 minutes are skipped to bound worst-case analysis time.
-_MAX_ANALYSIS_DURATION_SECONDS = 900
+_MAX_ANALYSIS_DURATION_SECONDS = max(0, int(os.environ.get("TUBEYOU_MAX_ANALYSIS_SECONDS", "900")))
 _analysis_queue: queue.Queue[AnalysisJob] | None = None
 _queue_lock = threading.Lock()
 _worker_lock = threading.Lock()
@@ -98,6 +99,12 @@ def set_status_callback(callback: Callable[[dict[str, Any]], None] | None) -> No
     global _status_callback
     with _status_callback_lock:
         _status_callback = callback
+
+
+def _finalize_job(job_id: str, status: JobStatus, message: str, **extra: Any) -> None:
+    """Update DB and emit WebSocket event with identical status/message (DRY helper)."""
+    update_job(job_id, status=status, message=message)
+    _emit(job_id, status, message, **extra)
 
 
 def get_analysis_queue() -> queue.Queue[AnalysisJob]:
@@ -224,7 +231,7 @@ def _apply_analysis(job: AnalysisJob) -> None:
         logger.info("Audio analysis cache hit for %s: bpm=%s", job.job_id, bpm)
         return
 
-    with governor.transcode_semaphore_sync:
+    with governor.analysis_semaphore_sync:
         result = extract_analysis(job.file_path)
 
     final_path = _rename_with_bpm(job.file_path, result.bpm)
@@ -260,17 +267,19 @@ def _handle_analysis_job(job: AnalysisJob) -> None:
     has disappeared since the job was enqueued.
     """
     if job.duration_seconds is not None and job.duration_seconds > _MAX_ANALYSIS_DURATION_SECONDS:
-        update_job(
+        _finalize_job(
             job.job_id,
-            status=JobStatus.DONE,
-            message="Finished (audio analysis skipped for long track)",
+            JobStatus.DONE,
+            "Finished (audio analysis skipped for long track)",
         )
-        _emit(job.job_id, JobStatus.DONE, "Finished (audio analysis skipped for long track)")
         return
 
     if not job.file_path.is_file():
-        update_job(job.job_id, status=JobStatus.DONE, message="Finished (audio file missing for analysis)")
-        _emit(job.job_id, JobStatus.DONE, "Finished (audio file missing for analysis)")
+        _finalize_job(
+            job.job_id,
+            JobStatus.DONE,
+            "Finished (audio file missing for analysis)",
+        )
         return
 
     _emit(job.job_id, JobStatus.ANALYSIS, "Analyzing audio...")
@@ -296,13 +305,21 @@ def _worker_loop() -> None:
                 queue_obj.task_done()
                 break
 
-            job: AnalysisJob = item  # type: ignore[assignment]
+            if not isinstance(item, AnalysisJob):
+                logger.error("Invalid item type in analysis queue: %s", type(item).__name__)
+                queue_obj.task_done()
+                continue
+
+            job = item
             try:
                 _handle_analysis_job(job)
-            except Exception as exc:
-                logger.warning("Audio analysis failed for %s: %s", job.job_id, exc)
-                update_job(job.job_id, status=JobStatus.DONE, message="Finished (audio analysis unavailable)")
-                _emit(job.job_id, JobStatus.DONE, "Finished (audio analysis unavailable)")
+            except Exception:
+                logger.exception("Audio analysis failed for %s", job.job_id)
+                _finalize_job(
+                    job.job_id,
+                    JobStatus.ERROR,
+                    "Audio analysis failed",
+                )
             finally:
                 queue_obj.task_done()
     finally:
@@ -312,9 +329,14 @@ def _worker_loop() -> None:
 
 
 def start_analysis_workers(n: int | None = None) -> None:
+    """Start background audio analysis worker threads.
+
+    Args:
+        n: Number of workers. Defaults to the configured analysis limit.
+    """
     global _workers_started
     if n is None:
-        n = max(1, min(2, governor.transcode_limit))
+        n = governor.analysis_limit
 
     with _worker_lock:
         if _workers_started:

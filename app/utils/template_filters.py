@@ -46,9 +46,11 @@ LOCAL_TZ = _resolve_local_tz()
 
 _TERMINAL_STATUSES: frozenset[str] = frozenset({"done", "analysis_done"})
 _STATUS_CLASS_MAP: dict[str, str] = {
+    "cancelled": "secondary",
     "error": "danger",
 }
 _STATUS_ICON_MAP: dict[str, str] = {
+    "cancelled": "cancel",
     "error": "error",
     "analysis": "graphic_eq",
 }
@@ -66,8 +68,12 @@ _SENSITIVE_KEY_SUFFIXES: tuple[str, ...] = (
     "_hash",
     "_token",
 )
+_SENSITIVE_KEY_SUBSTRINGS: tuple[str, ...] = ("secret", "password", "token")
 
-_INTERNAL_PUBLIC_EXCLUDE: frozenset[str] = frozenset({"admin_password_hash", "session_version"})
+_INTERNAL_PUBLIC_EXCLUDE: frozenset[str] = frozenset({
+    "admin_password_hash",
+    "session_version",
+})
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,9 +110,11 @@ def localtime(value: str | None) -> Markup:
         else:
             dt = dt.astimezone(UTC)
         local_dt = dt.astimezone(LOCAL_TZ)
+        date_str = escape(f"{local_dt:%d.%m.%Y}")
+        time_str = escape(f"{local_dt:%H:%M}")
         return Markup(
-            f'<span class="date-part">{local_dt:%d.%m.%Y}</span> '
-            f'<span class="time-part">{local_dt:%H:%M}</span>'
+            f'<span class="date-part">{date_str}</span> '
+            f'<span class="time-part">{time_str}</span>'
         )
     except (ValueError, TypeError):
         return escape(str(value))
@@ -132,16 +140,31 @@ def status_icon(status: str | None) -> str:
 
 
 def mask_secret(value: str | None) -> str:
-    """Mask a sensitive credential value."""
-    if not value or not str(value).strip():
+    """Mask a sensitive credential value.
+
+    Values longer than 8 characters keep the first and last 4 characters.
+    """
+    if not value:
         return ""
     secret = str(value).strip()
+    if not secret:
+        return ""
     if len(secret) <= 8:
         return "****"
     return f"{secret[:4]}...{secret[-4:]}"
 
 
-mask_api_key = mask_secret
+def mask_api_key(value: str | None) -> str:
+    """Mask an API key value."""
+    return mask_secret(value)
+
+
+def _is_sensitive_key(key: str) -> bool:
+    lowered = key.lower()
+    return (
+        lowered.endswith(_SENSITIVE_KEY_SUFFIXES)
+        or any(token in lowered for token in _SENSITIVE_KEY_SUBSTRINGS)
+    )
 
 
 def public_settings(settings: dict[str, Any]) -> dict[str, Any]:
@@ -150,9 +173,10 @@ def public_settings(settings: dict[str, Any]) -> dict[str, Any]:
     for key in _INTERNAL_PUBLIC_EXCLUDE:
         public.pop(key, None)
     for key, value in list(public.items()):
-        lowered = key.lower()
-        if lowered.endswith(_SENSITIVE_KEY_SUFFIXES) or any(token in lowered for token in ("secret", "password", "token")):
+        if _is_sensitive_key(key):
             public[key] = mask_secret(value)
+    # Use the original settings so the configured flag is based on the real
+    # auth key, not the masked copy in `public`.
     public["lalalaai_configured"] = is_lalala_configured(settings)
     return public
 
@@ -165,8 +189,9 @@ def is_lalala_configured(settings: dict[str, Any]) -> bool:
     )
 
 
-# Backward-compatible alias for legacy templates/routes.
-is_lalal_configured = is_lalala_configured
+def is_lalal_configured(settings: dict[str, Any]) -> bool:
+    """Backward-compatible wrapper for legacy templates and routes."""
+    return is_lalala_configured(settings)
 
 
 def register_filters(templates: Jinja2Templates) -> None:

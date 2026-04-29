@@ -14,8 +14,8 @@ import os
 import secrets
 import threading
 from dataclasses import dataclass
-from time import monotonic, time
-from typing import Final, TypedDict
+from time import time
+from typing import Any, Final, TypedDict
 
 from fastapi import Request, Response
 
@@ -36,11 +36,13 @@ _SECRET_KEY = os.environ.get("TUBEYOU_SECRET_KEY", "")
 if not _SECRET_KEY:
     raise RuntimeError("TUBEYOU_SECRET_KEY is not set. Cannot start with an empty session signing key.")
 _SECRET_KEY_BYTES = _SECRET_KEY.encode("utf-8")
-_IDLE_TIMEOUT_CACHE_TTL: Final = 60.0
-type _IdleTimeoutCacheEntry = tuple[float, int]
-
-_IDLE_TIMEOUT_CACHE: _IdleTimeoutCacheEntry | None = None
-_IDLE_TIMEOUT_CACHE_LOCK = threading.Lock()
+_COOKIE_SECURE_ENV: Final = "TUBEYOU_BEHIND_HTTPS"
+_SESSION_SETTINGS_DEFAULTS: Final[dict[str, Any]] = {
+    "session_idle_minutes": _DEFAULT_IDLE_MINUTES,
+    "session_version": 0,
+}
+_SESSION_SETTINGS_CACHE: dict[str, Any] = dict(_SESSION_SETTINGS_DEFAULTS)
+_SESSION_SETTINGS_LOCK = threading.Lock()
 
 logger = logging.getLogger(__name__)
 
@@ -83,34 +85,44 @@ def _is_session_expired(session: SessionData, now: int) -> bool:
     return now - session.last_activity > _get_idle_timeout_seconds()
 
 
+def refresh_session_settings_cache() -> None:
+    """Refresh the small session-related settings snapshot from the database."""
+    try:
+        settings = get_settings()
+    except Exception as exc:
+        logger.warning("Failed to refresh session settings cache: %s", exc)
+        settings = {}
+
+    refreshed = {
+        "session_idle_minutes": settings.get("session_idle_minutes", _DEFAULT_IDLE_MINUTES),
+        "session_version": settings.get("session_version", 0),
+    }
+    with _SESSION_SETTINGS_LOCK:
+        _SESSION_SETTINGS_CACHE.clear()
+        _SESSION_SETTINGS_CACHE.update(refreshed)
+
+
+def _get_cached_session_setting(key: str, default: Any) -> Any:
+    with _SESSION_SETTINGS_LOCK:
+        return _SESSION_SETTINGS_CACHE.get(key, default)
+
+
 def _get_idle_timeout_seconds() -> int:
-    """Get idle timeout from settings (in seconds)."""
-    global _IDLE_TIMEOUT_CACHE
-
-    now = monotonic()
-    with _IDLE_TIMEOUT_CACHE_LOCK:
-        if _IDLE_TIMEOUT_CACHE is not None:
-            cached_at, cached_value = _IDLE_TIMEOUT_CACHE
-            if now - cached_at < _IDLE_TIMEOUT_CACHE_TTL:
-                return cached_value
-
-        try:
-            minutes = int(get_settings().get("session_idle_minutes", _DEFAULT_IDLE_MINUTES))
-            result = max(5, min(minutes, 1440)) * 60
-        except Exception as exc:
-            logger.warning("Failed to read session_idle_minutes from settings: %s", exc)
-            result = _DEFAULT_IDLE_MINUTES * 60
-
-        _IDLE_TIMEOUT_CACHE = (now, result)
-        return result
+    """Get idle timeout from the cached session settings snapshot."""
+    try:
+        minutes = int(_get_cached_session_setting("session_idle_minutes", _DEFAULT_IDLE_MINUTES))
+    except Exception as exc:
+        logger.warning("Failed to parse cached session_idle_minutes: %s", exc)
+        minutes = _DEFAULT_IDLE_MINUTES
+    return max(5, min(minutes, 1440)) * 60
 
 
 def _get_session_version() -> int:
-    """Return the current session version used for global session invalidation."""
+    """Return the cached session version used for global session invalidation."""
     try:
-        version = int(get_settings().get("session_version", 0) or 0)
+        version = int(_get_cached_session_setting("session_version", 0) or 0)
     except Exception as exc:
-        logger.warning("Failed to read session_version from settings: %s", exc)
+        logger.warning("Failed to parse cached session_version: %s", exc)
         return 0
     return max(0, version)
 
@@ -176,6 +188,7 @@ def parse_session(token: str | None) -> SessionData | None:
             session_version=session_version,
         )
     except Exception:
+        logger.debug("Session parsing failed", exc_info=True)
         return None
 
 
@@ -253,12 +266,28 @@ def set_session_cookie(response: Response, token: str, request: Request) -> None
     )
 
 
-def delete_session_cookie(response: Response, request: Request) -> None:
+def _resolve_cookie_secure(request: Request | None = None, *, secure: bool | None = None) -> bool:
+    if secure is not None:
+        return secure
+    if request is not None:
+        return request.url.scheme == "https"
+    return str(os.environ.get(_COOKIE_SECURE_ENV, "")).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def delete_session_cookie(
+    response: Response,
+    request: Request | None = None,
+    *,
+    secure: bool | None = None,
+) -> None:
     """Delete session cookie from response."""
     response.delete_cookie(
         SESSION_COOKIE,
         path="/",
-        secure=request.url.scheme == "https",
+        secure=_resolve_cookie_secure(request, secure=secure),
         httponly=True,
         samesite="lax",
     )
+
+
+refresh_session_settings_cache()

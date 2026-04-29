@@ -8,6 +8,7 @@ import { CONFIG } from "./config.js";
 const TIMEOUT_DEFAULT_MS = 10_000;
 // Kept separate so the jobs polling budget can diverge later without changing all calls.
 const TIMEOUT_FETCH_JOBS_MS = 10_000;
+const TIMEOUT_FETCH_STATS_MS = 10_000;
 const TIMEOUT_VIDEO_INFO_MS = 15_000;
 const TIMEOUT_SUBMIT_JOB_MS = 60_000;
 const RETRYABLE_STATUS_CODES = new Set([502, 503, 504]);
@@ -377,6 +378,18 @@ export async function fetchJobs(offset, options = {}) {
         `/api/jobs?offset=${encodeURIComponent(String(offset))}&limit=${CONFIG.PAGE_SIZE}`,
         options,
         TIMEOUT_FETCH_JOBS_MS,
+    );
+}
+
+/**
+ * Fetch fresh dashboard hero stats.
+ * @param {ApiOptions} [options]
+ */
+export async function fetchStats(options = {}) {
+    return _apiCallDeduped(
+        "/api/stats",
+        options,
+        TIMEOUT_FETCH_STATS_MS,
     );
 }
 

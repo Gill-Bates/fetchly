@@ -16,7 +16,9 @@ readonly PORT="${PORT:-${UVICORN_PORT:-8000}}"
 readonly WORKERS="${WORKERS:-${UVICORN_WORKERS:-auto}}"
 readonly TIMEOUT="${TIMEOUT:-60}"
 readonly MAX_WORKERS="${MAX_WORKERS:-8}"
+readonly LOG_LEVEL="$(printf '%s' "${LOG_LEVEL:-info}" | tr '[:upper:]' '[:lower:]')"
 readonly FORWARDED_ALLOW_IPS="${FORWARDED_ALLOW_IPS:-127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7}"
+readonly ACCESS_LOG_FORMAT="${ACCESS_LOG_FORMAT:-[%(t)s] %(h)s \"%(r)s\" %(s)s %(b)s}"
 
 export FORWARDED_ALLOW_IPS
 
@@ -185,6 +187,8 @@ exec gunicorn app.main:app \
     --bind "${HOST}:${PORT}" \
     --workers "${resolved_workers}" \
     --worker-class uvicorn.workers.UvicornWorker \
+    --log-level "${LOG_LEVEL}" \
     --timeout "${TIMEOUT}" \
     --access-logfile - \
+    --access-logformat "${ACCESS_LOG_FORMAT}" \
     --error-logfile -

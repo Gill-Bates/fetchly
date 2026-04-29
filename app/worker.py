@@ -19,7 +19,7 @@ from typing import Any, Final
 from urllib.parse import parse_qs, urlparse
 
 from .analysis_worker import SubmitResult, submit_analysis
-from .db import update_job
+from .db import update_job, update_job_if_status
 from .governor import governor
 
 logger = logging.getLogger(__name__)
@@ -205,6 +205,17 @@ def _transition(job_id: str, status: str, message: str = "", **extra: Any) -> No
     _emit(job_id, status, message, **extra)
 
 
+def _transition_if_processing(job_id: str, status: str, message: str = "", **extra: Any) -> bool:
+    """Persist a terminal update only if the job is still in worker-owned processing state."""
+    updated = update_job_if_status(job_id, ("processing",), status=status, message=message, **extra)
+    if updated:
+        _emit(job_id, status, message, **extra)
+        return True
+
+    logger.info("Skipping %s transition for %s because the job state changed before writeback", status, job_id)
+    return False
+
+
 def _terminate_process(proc: subprocess.Popen[str], *, grace_seconds: float = 2.0) -> None:
     """Terminate a subprocess and force-kill if it does not exit in time."""
     if proc.poll() is not None:
@@ -288,6 +299,175 @@ def _run_cmd(
                 _active_processes.pop(job_id, None)
 
     return stdout_value if capture_stdout else ""
+
+
+def _parse_ffmpeg_timecode(value: str) -> float | None:
+    try:
+        hours, minutes, seconds = value.split(":", 2)
+        return (int(hours) * 3600) + (int(minutes) * 60) + float(seconds)
+    except (TypeError, ValueError):
+        return None
+
+
+def _ffmpeg_out_seconds(progress_state: dict[str, str]) -> float | None:
+    timecode = str(progress_state.get("out_time") or "").strip()
+    if timecode:
+        parsed = _parse_ffmpeg_timecode(timecode)
+        if parsed is not None:
+            return parsed
+
+    for key in ("out_time_us", "out_time_ms"):
+        raw = str(progress_state.get(key) or "").strip()
+        if not raw:
+            continue
+        try:
+            return float(raw) / 1_000_000.0
+        except ValueError:
+            continue
+
+    return None
+
+
+def _read_progress_lines(pipe: Any, target_queue: queue.Queue[str | None]) -> None:
+    try:
+        for raw_line in iter(pipe.readline, ""):
+            target_queue.put(raw_line.rstrip())
+    finally:
+        target_queue.put(None)
+
+
+def _emit_ffmpeg_progress(
+    job_id: str,
+    *,
+    message: str,
+    out_seconds: float,
+    duration_seconds: int | None,
+    started_at: float,
+    last_progress: int,
+) -> int:
+    if duration_seconds is None or duration_seconds <= 0:
+        return last_progress
+
+    pct = max(0, min(100, int(round((out_seconds / duration_seconds) * 100))))
+    if pct <= last_progress:
+        return last_progress
+
+    eta_seconds: int | None = None
+    if 0 < pct < 100:
+        elapsed = max(0.0, time.monotonic() - started_at)
+        total_estimate = elapsed / (pct / 100.0)
+        eta_seconds = max(0, int(round(total_estimate - elapsed)))
+
+    _emit(job_id, "transcoding", message, progress=pct, eta_seconds=eta_seconds)
+    return pct
+
+
+def _run_ffmpeg_transcode(
+    cmd: list[str],
+    *,
+    timeout: int,
+    job_id: str,
+    message: str,
+    duration_seconds: int | None,
+) -> None:
+    logger.debug("Executing ffmpeg with progress: %s", " ".join(cmd))
+    started = time.monotonic()
+    proc: subprocess.Popen[str] | None = None
+    progress_lines: queue.Queue[str | None] = queue.Queue()
+    reader_thread: threading.Thread | None = None
+    progress_state: dict[str, str] = {}
+    last_progress = -1
+
+    try:
+        with subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            bufsize=1,
+        ) as process:
+            proc = process
+            with _active_lock:
+                _active_processes[job_id] = proc
+
+            if proc.stdout is not None:
+                reader_thread = threading.Thread(
+                    target=_read_progress_lines,
+                    args=(proc.stdout, progress_lines),
+                    daemon=True,
+                )
+                reader_thread.start()
+
+            while proc.poll() is None:
+                if is_job_cancelled(job_id):
+                    _terminate_process(proc)
+                    raise JobCancelledError(f"Job {job_id} was cancelled")
+                if _shutdown_event.is_set():
+                    _terminate_process(proc)
+                    raise ShutdownError("Shutdown requested")
+
+                elapsed = time.monotonic() - started
+                remaining = timeout - elapsed
+                if remaining <= 0:
+                    _terminate_process(proc)
+                    raise RuntimeError(f"Command timed out after {timeout}s")
+
+                try:
+                    line = progress_lines.get(timeout=min(_COMMAND_POLL_INTERVAL, remaining))
+                except queue.Empty:
+                    continue
+
+                if line is None:
+                    continue
+                if "=" not in line:
+                    continue
+
+                key, value = line.split("=", 1)
+                progress_state[key] = value
+                if key != "progress":
+                    continue
+
+                out_seconds = _ffmpeg_out_seconds(progress_state)
+                if out_seconds is not None:
+                    last_progress = _emit_ffmpeg_progress(
+                        job_id,
+                        message=message,
+                        out_seconds=out_seconds,
+                        duration_seconds=duration_seconds,
+                        started_at=started,
+                        last_progress=last_progress,
+                    )
+
+                if value == "end":
+                    last_progress = _emit_ffmpeg_progress(
+                        job_id,
+                        message=message,
+                        out_seconds=float(duration_seconds or 0),
+                        duration_seconds=duration_seconds,
+                        started_at=started,
+                        last_progress=last_progress,
+                    )
+                progress_state.clear()
+
+            if proc.returncode != 0:
+                raise RuntimeError(f"Command failed: {proc.returncode}")
+
+            if duration_seconds and last_progress < 100:
+                _emit(job_id, "transcoding", message, progress=100, eta_seconds=0)
+    except (JobCancelledError, ShutdownError, RuntimeError):
+        raise
+    except Exception as exc:
+        if _shutdown_event.is_set():
+            raise ShutdownError("Shutdown requested") from exc
+        logger.error("Command failed: %s", " ".join(cmd), exc_info=True)
+        raise RuntimeError("Command execution failed") from exc
+    finally:
+        if proc is not None and proc.poll() is None:
+            _terminate_process(proc)
+        if reader_thread is not None:
+            reader_thread.join(timeout=0.2)
+        with _active_lock:
+            _active_processes.pop(job_id, None)
 
 
 def _sanitize_filename(name: str, max_len: int = 120) -> str:
@@ -443,11 +623,13 @@ def _download_media(job_id: str, url: str, *, quality: str, media_type: str) -> 
     # Cap resolution without upscaling: min(target, input_height)
     target_height = 720 if quality == "medium" else 480
     scale = f"scale=-2:'min({target_height},ih)'"
-    _emit(job_id, "transcoding", f"Transcoding to {quality}")
+    transcode_message = f"Transcoding to {quality}"
+    _emit(job_id, "transcoding", transcode_message, progress=0, eta_seconds=None)
+    _, _, source_duration_seconds = _probe_media(temp, media_type)
     
     # Use Governor semaphore to limit concurrent transcoding (CPU/memory protection)
     with governor.transcode_semaphore_sync:
-        _run_cmd(
+        _run_ffmpeg_transcode(
             [
                 "ffmpeg",
                 "-y",
@@ -465,10 +647,15 @@ def _download_media(job_id: str, url: str, *, quality: str, media_type: str) -> 
                 "aac",
                 "-b:a",
                 "128k",
+                "-progress",
+                "pipe:1",
+                "-nostats",
                 str(out),
             ],
             timeout=_TIMEOUT_TRANSCODE,
             job_id=job_id,
+            message=transcode_message,
+            duration_seconds=source_duration_seconds,
         )
     _check_cancellation(job_id)
 
@@ -581,7 +768,8 @@ def process_job(job: Job) -> None:
             else:
                 message = "Finished (audio analysis queue full)"
 
-        _transition(
+        _check_cancellation(job_id)
+        _transition_if_processing(
             job_id,
             status,
             message,
@@ -605,7 +793,7 @@ def process_job(job: Job) -> None:
     except Exception as exc:
         err_msg = f"Job failed: {exc}"
         logger.exception("Job %s failed", job_id)
-        _transition(job_id, "error", err_msg, finished_at=_now_iso())
+        _transition_if_processing(job_id, "error", err_msg, finished_at=_now_iso())
     finally:
         with _cancel_lock:
             _cancelled_jobs.discard(job_id)
@@ -631,7 +819,12 @@ def worker() -> None:
         job: Job = item
         job_id = job[0]
         try:
-            update_job(job_id, status="processing")
+            if is_job_cancelled(job_id):
+                _transition(job_id, "cancelled", "Job was cancelled by user", finished_at=_now_iso())
+                continue
+            if not update_job_if_status(job_id, ("queued",), status="processing"):
+                logger.info("Skipping job %s because its state changed before worker pickup", job_id)
+                continue
             _emit(job_id, "processing", "Worker picked up job")
             process_job(job)
         except ShutdownError:
@@ -640,7 +833,12 @@ def worker() -> None:
                 q.put(job, timeout=5.0)
             except queue.Full:
                 logger.critical("Queue full, cannot requeue %s", job_id)
-                update_job(job_id, status="queued", message="Requeue on shutdown failed; restart will be required")
+                update_job_if_status(
+                    job_id,
+                    ("processing",),
+                    status="queued",
+                    message="Requeue on shutdown failed; restart will be required",
+                )
             return
         except Exception:
             logger.exception("Unhandled worker error for job %s", job_id)

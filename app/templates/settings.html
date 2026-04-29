@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}tubeyou Settings{% endblock %}
+{% block title %}tubeyou - next-gen Video Downloader{% endblock %}
 
 {% block head_preconnect %}
 <link rel="preconnect" href="https://cdn.jsdelivr.net">
@@ -163,16 +163,18 @@
                 <div id="lalalAuthStep1">
                     <div class="auth-step-header mb-3">
                         <span class="badge auth-step-badge">Step 1</span>
-                        <h6 class="mb-0">Choose authentication method</h6>
-                        <p class="text-muted mb-0">Request OTP or use an existing activation key.</p>
+                        <h6 class="mb-0">Connect with activation key</h6>
                     </div>
 
-                    <div class="auth-method-panel auth-method-panel--alt mb-3">
+                    <div class="auth-method-panel auth-method-panel--alt">
                         <div class="auth-method-title mb-2">
                             <span class="material-symbols-outlined icon-inline text-success" aria-hidden="true">verified</span>
-                            Recommended: Activation Key (captcha-free)
+                            Activation Key
                         </div>
-                        <p class="small text-muted mb-3">Get your activation key from your <a href="https://www.lalal.ai/api/" target="_blank" rel="noopener">Lalal.ai profile</a> (log in → scroll down → copy key).</p>
+                        <p class="small text-muted mb-2">Get your activation key from your <a href="https://www.lalal.ai/api/" target="_blank" rel="noopener">Lalal.ai profile</a> (log in, open profile settings, copy the key).</p>
+                        <div class="d-flex justify-content-end">
+                            <a href="https://www.lalal.ai/api/" target="_blank" rel="noopener noreferrer" class="btn btn-sm btn-outline-light">Open Lalal.ai</a>
+                        </div>
                         <div class="row g-3 mb-3">
                             <div class="col-md-6">
                                 <label for="lalalAuthEmail" class="form-label">Email Address</label>
@@ -186,61 +188,6 @@
                         <button type="button" class="btn btn-primary w-100" id="lalalAuthUseKeyBtn">
                             <span class="spinner-border spinner-border-sm d-none me-2" id="lalalAuthUseKeySpinner" aria-hidden="true"></span>
                             Connect Account
-                        </button>
-                    </div>
-
-                    <details class="auth-otp-details">
-                        <summary class="small text-muted auth-otp-summary">Alternative: OTP via email (may require captcha)</summary>
-                        <div class="auth-method-panel">
-                            <p class="small text-warning mb-2">
-                                <span class="material-symbols-outlined icon-inline" aria-hidden="true">warning</span>
-                                Lalal.ai uses Cloudflare captcha. OTP emails may not be sent without solving it on their website.
-                            </p>
-                            <div class="mb-2">
-                                <label for="lalalOtpEmail" class="form-label">Email Address</label>
-                                <input type="email" class="form-control ui-input" id="lalalOtpEmail" placeholder="your@lalal.ai-email.com" autocomplete="email">
-                            </div>
-                            <button type="button" class="btn btn-outline-secondary w-100" id="lalalAuthRequestBtn">
-                                <span class="spinner-border spinner-border-sm d-none me-2" id="lalalAuthRequestSpinner" aria-hidden="true"></span>
-                                <span id="lalalAuthRequestLabel">Request OTP Code</span>
-                            </button>
-                            <small class="setting-hint auth-cooldown-hint text-center" id="lalalAuthCooldownText"></small>
-                        </div>
-                    </details>
-                </div>
-                
-                <!-- Step 2: Code -->
-                <div id="lalalAuthStep2" class="d-none">
-                    <div class="auth-step-header mb-3">
-                        <span class="badge auth-step-badge">Step 2</span>
-                        <h6 class="mb-0">Enter verification code</h6>
-                        <p class="text-muted mb-0">Use the 6-digit code sent to <strong id="lalalAuthEmailDisplay"></strong>.</p>
-                    </div>
-
-                    <div class="auth-method-panel">
-                        <div class="mb-3">
-                            <label class="form-label">Authentication Code</label>
-                            <div id="lalalAuthCodeBlocks" class="d-flex justify-content-center gap-2">
-                                <label class="visually-hidden" for="lalalAuthDigit0">Authentication digit 1</label>
-                                <input id="lalalAuthDigit0" type="text" class="form-control ui-input text-center fs-4 auth-code-input" data-auth-digit="0" maxlength="1" inputmode="numeric" pattern="[0-9]" autocomplete="one-time-code">
-                                <label class="visually-hidden" for="lalalAuthDigit1">Authentication digit 2</label>
-                                <input id="lalalAuthDigit1" type="text" class="form-control ui-input text-center fs-4 auth-code-input" data-auth-digit="1" maxlength="1" inputmode="numeric" pattern="[0-9]" autocomplete="one-time-code">
-                                <label class="visually-hidden" for="lalalAuthDigit2">Authentication digit 3</label>
-                                <input id="lalalAuthDigit2" type="text" class="form-control ui-input text-center fs-4 auth-code-input" data-auth-digit="2" maxlength="1" inputmode="numeric" pattern="[0-9]" autocomplete="one-time-code">
-                                <label class="visually-hidden" for="lalalAuthDigit3">Authentication digit 4</label>
-                                <input id="lalalAuthDigit3" type="text" class="form-control ui-input text-center fs-4 auth-code-input" data-auth-digit="3" maxlength="1" inputmode="numeric" pattern="[0-9]" autocomplete="one-time-code">
-                                <label class="visually-hidden" for="lalalAuthDigit4">Authentication digit 5</label>
-                                <input id="lalalAuthDigit4" type="text" class="form-control ui-input text-center fs-4 auth-code-input" data-auth-digit="4" maxlength="1" inputmode="numeric" pattern="[0-9]" autocomplete="one-time-code">
-                                <label class="visually-hidden" for="lalalAuthDigit5">Authentication digit 6</label>
-                                <input id="lalalAuthDigit5" type="text" class="form-control ui-input text-center fs-4 auth-code-input" data-auth-digit="5" maxlength="1" inputmode="numeric" pattern="[0-9]" autocomplete="one-time-code">
-                            </div>
-                        </div>
-                        <button type="button" class="btn btn-primary w-100 mb-2" id="lalalAuthVerifyBtn">
-                            <span class="spinner-border spinner-border-sm d-none me-2" id="lalalAuthVerifySpinner" aria-hidden="true"></span>
-                            Verify Code
-                        </button>
-                        <button type="button" class="btn btn-link btn-sm w-100 text-muted" id="lalalAuthBackBtn">
-                            ← Use different email
                         </button>
                     </div>
                 </div>
@@ -299,69 +246,12 @@ const lalalDisconnectBtn = document.getElementById("lalalDisconnectBtn");
 const lalalAuthModal = document.getElementById("lalalAuthModal");
 const lalalAuthAlert = document.getElementById("lalalAuthAlert");
 const lalalAuthStep1 = document.getElementById("lalalAuthStep1");
-const lalalAuthStep2 = document.getElementById("lalalAuthStep2");
 const lalalAuthStep3 = document.getElementById("lalalAuthStep3");
 const lalalAuthEmail = document.getElementById("lalalAuthEmail");
-const lalalAuthEmailDisplay = document.getElementById("lalalAuthEmailDisplay");
-const lalalAuthCodeBlocks = Array.from(document.querySelectorAll("[data-auth-digit]"));
-const lalalAuthRequestBtn = document.getElementById("lalalAuthRequestBtn");
 const lalalAuthUseKeyBtn = document.getElementById("lalalAuthUseKeyBtn");
-const lalalAuthVerifyBtn = document.getElementById("lalalAuthVerifyBtn");
-const lalalAuthBackBtn = document.getElementById("lalalAuthBackBtn");
-const lalalAuthRequestSpinner = document.getElementById("lalalAuthRequestSpinner");
 const lalalAuthUseKeySpinner = document.getElementById("lalalAuthUseKeySpinner");
-const lalalAuthRequestLabel = document.getElementById("lalalAuthRequestLabel");
-const lalalAuthCooldownText = document.getElementById("lalalAuthCooldownText");
-const lalalAuthVerifySpinner = document.getElementById("lalalAuthVerifySpinner");
 const lalalActivationKey = document.getElementById("lalalActivationKey");
-let authCooldownInterval = null;
-let authCooldownRemaining = 0;
-let isAuthRequestBusy = false;
 let isAuthUseKeyBusy = false;
-let otpEmailForVerify = ""; // Store email used for OTP request
-
-function getAuthCodeFromBlocks() {
-    return lalalAuthCodeBlocks.map((input) => input.value.trim()).join("");
-}
-
-function clearAuthCodeBlocks() {
-    for (const input of lalalAuthCodeBlocks) {
-        input.value = "";
-    }
-}
-
-function stopAuthCooldownTimer() {
-    if (authCooldownInterval) {
-        clearInterval(authCooldownInterval);
-        authCooldownInterval = null;
-    }
-}
-
-function renderAuthRequestButton() {
-    if (!lalalAuthRequestBtn || !lalalAuthRequestLabel) return;
-
-    lalalAuthRequestBtn.disabled = isAuthRequestBusy || authCooldownRemaining > 0;
-    if (lalalAuthUseKeyBtn) {
-        lalalAuthUseKeyBtn.disabled = isAuthUseKeyBusy;
-    }
-    lalalAuthRequestLabel.textContent = "Continue";
-
-    if (lalalAuthCooldownText) {
-        if (authCooldownRemaining > 0) {
-            lalalAuthCooldownText.textContent = `Neuer Token in ${authCooldownRemaining} Sekunden anforderbar`;
-        } else {
-            lalalAuthCooldownText.textContent = "";
-        }
-    }
-
-    if (lalalAuthRequestSpinner) {
-        if (isAuthRequestBusy) {
-            lalalAuthRequestSpinner.classList.remove("d-none");
-        } else {
-            lalalAuthRequestSpinner.classList.add("d-none");
-        }
-    }
-}
 
 function renderAuthUseKeyButton() {
     if (!lalalAuthUseKeyBtn || !lalalAuthUseKeySpinner) return;
@@ -370,36 +260,6 @@ function renderAuthUseKeyButton() {
         lalalAuthUseKeySpinner.classList.remove("d-none");
     } else {
         lalalAuthUseKeySpinner.classList.add("d-none");
-    }
-}
-
-function startAuthCooldown(seconds) {
-    authCooldownRemaining = Math.max(0, Number(seconds) || 0);
-    stopAuthCooldownTimer();
-    renderAuthRequestButton();
-
-    if (authCooldownRemaining <= 0) {
-        return;
-    }
-
-    authCooldownInterval = setInterval(() => {
-        authCooldownRemaining = Math.max(0, authCooldownRemaining - 1);
-        renderAuthRequestButton();
-        if (authCooldownRemaining <= 0) {
-            stopAuthCooldownTimer();
-        }
-    }, 1000);
-}
-
-async function syncAuthCooldown() {
-    try {
-        const res = await fetch("/api/lalal/auth/cooldown", { credentials: "same-origin" });
-        const payload = await res.json().catch(() => ({}));
-        if (res.ok) {
-            startAuthCooldown(payload.remaining_seconds || 0);
-        }
-    } catch {
-        // Keep current button state if cooldown status is unavailable.
     }
 }
 
@@ -432,7 +292,6 @@ function setLalalStatusLine(text) {
 
 function showAuthStep(step) {
     lalalAuthStep1.classList.toggle("d-none", step !== 1);
-    lalalAuthStep2.classList.toggle("d-none", step !== 2);
     lalalAuthStep3.classList.toggle("d-none", step !== 3);
     clearAlert(lalalAuthAlert);
 }
@@ -512,63 +371,6 @@ lalalDisconnectBtn?.addEventListener("click", async () => {
     }
 });
 
-// Auth flow: Step 1 - Request code (OTP)
-lalalAuthRequestBtn?.addEventListener("click", async () => {
-    if (isAuthRequestBusy || authCooldownRemaining > 0) {
-        return;
-    }
-
-    const otpEmailInput = document.getElementById("lalalOtpEmail");
-    const email = otpEmailInput?.value.trim() || "";
-    if (!email || !email.includes("@")) {
-        setAuthAlert("danger", "Please enter a valid email address in the OTP section");
-        return;
-    }
-
-    const googleCid = `blocked_${Math.floor(Math.random() * 1_000_000_000)}.${Date.now()}`;
-
-    isAuthRequestBusy = true;
-    renderAuthRequestButton();
-    clearAlert(lalalAuthAlert);
-
-    try {
-        const res = await fetch("/api/lalal/auth/request", {
-            method: "POST",
-            credentials: "same-origin",
-            headers: {
-                "Content-Type": "application/json",
-                "X-CSRF-Token": getCsrfToken(),
-            },
-            body: JSON.stringify({
-                email,
-                google_cid: googleCid,
-            }),
-        });
-
-        const payload = await res.json().catch(() => ({}));
-
-        if (!res.ok) {
-            if (res.status === 429 && payload.retry_after_seconds != null) {
-                startAuthCooldown(payload.retry_after_seconds);
-            }
-            throw new Error(payload.detail || `HTTP ${res.status}`);
-        }
-
-        startAuthCooldown(30);
-
-        otpEmailForVerify = email; // Store for verification step
-        lalalAuthEmailDisplay.textContent = email;
-        showAuthStep(2);
-        clearAuthCodeBlocks();
-        lalalAuthCodeBlocks[0]?.focus();
-    } catch (err) {
-        setAuthAlert("danger", err.message || "Failed to continue to step 2");
-    } finally {
-        isAuthRequestBusy = false;
-        renderAuthRequestButton();
-    }
-});
-
 // Auth flow fallback: direct activation key (captcha-free)
 lalalAuthUseKeyBtn?.addEventListener("click", async () => {
     if (isAuthUseKeyBusy) {
@@ -623,65 +425,6 @@ lalalAuthUseKeyBtn?.addEventListener("click", async () => {
     }
 });
 
-// Auth flow: Step 2 - Verify code
-lalalAuthVerifyBtn?.addEventListener("click", async () => {
-    const email = otpEmailForVerify; // Use stored OTP email
-    const code = getAuthCodeFromBlocks();
-
-    if (!email) {
-        setAuthAlert("danger", "Session expired. Please start over.");
-        showAuthStep(1);
-        return;
-    }
-
-    if (!code || code.length !== 6 || !/^\d{6}$/.test(code)) {
-        setAuthAlert("danger", "Please enter a valid 6-digit code");
-        lalalAuthCodeBlocks[0]?.focus();
-        return;
-    }
-
-    lalalAuthVerifyBtn.disabled = true;
-    lalalAuthVerifySpinner.classList.remove("d-none");
-    clearAlert(lalalAuthAlert);
-
-    try {
-        const res = await fetch("/api/lalal/auth/verify", {
-            method: "POST",
-            credentials: "same-origin",
-            headers: {
-                "Content-Type": "application/json",
-                "X-CSRF-Token": getCsrfToken(),
-            },
-            body: JSON.stringify({ email, code }),
-        });
-
-        const payload = await res.json().catch(() => ({}));
-
-        if (!res.ok) {
-            throw new Error(payload.detail || `HTTP ${res.status}`);
-        }
-
-        showAuthStep(3);
-        void loadLalalStatus();
-
-        // Auto-close modal after success
-        setTimeout(() => {
-            bootstrap.Modal.getInstance(lalalAuthModal)?.hide();
-        }, 2000);
-    } catch (err) {
-        setAuthAlert("danger", err.message || "Invalid authentication code");
-    } finally {
-        lalalAuthVerifyBtn.disabled = false;
-        lalalAuthVerifySpinner.classList.add("d-none");
-    }
-});
-
-// Auth flow: Back button
-lalalAuthBackBtn?.addEventListener("click", () => {
-    showAuthStep(1);
-    lalalAuthEmail.focus();
-});
-
 // Reset modal state when opened
 lalalAuthModal?.addEventListener("show.bs.modal", () => {
     showAuthStep(1);
@@ -693,61 +436,22 @@ lalalAuthModal?.addEventListener("show.bs.modal", () => {
             .map((b) => b.toString(16).padStart(2, "0")).join("");
         lalalActivationKey.placeholder = rndHex();
     }
-    clearAuthCodeBlocks();
-    renderAuthRequestButton();
     renderAuthUseKeyButton();
-    void syncAuthCooldown();
-});
-
-// Auto-format and navigation for code blocks
-lalalAuthCodeBlocks.forEach((input, index) => {
-    input.addEventListener("input", () => {
-        const digit = input.value.replace(/\D/g, "").slice(0, 1);
-        input.value = digit;
-        if (digit && index < lalalAuthCodeBlocks.length - 1) {
-            lalalAuthCodeBlocks[index + 1]?.focus();
-            lalalAuthCodeBlocks[index + 1]?.select();
-        }
-    });
-
-    input.addEventListener("keydown", (e) => {
-        if (e.key === "Backspace" && !input.value && index > 0) {
-            lalalAuthCodeBlocks[index - 1]?.focus();
-        }
-        if (e.key === "ArrowLeft" && index > 0) {
-            e.preventDefault();
-            lalalAuthCodeBlocks[index - 1]?.focus();
-        }
-        if (e.key === "ArrowRight" && index < lalalAuthCodeBlocks.length - 1) {
-            e.preventDefault();
-            lalalAuthCodeBlocks[index + 1]?.focus();
-        }
-    });
-
-    input.addEventListener("paste", (e) => {
-        e.preventDefault();
-        const pasted = (e.clipboardData?.getData("text") || "").replace(/\D/g, "").slice(0, 6);
-        if (!pasted) return;
-        for (let i = 0; i < lalalAuthCodeBlocks.length; i += 1) {
-            lalalAuthCodeBlocks[i].value = pasted[i] || "";
-        }
-        const focusIndex = Math.min(pasted.length, lalalAuthCodeBlocks.length - 1);
-        lalalAuthCodeBlocks[focusIndex]?.focus();
-    });
+    lalalAuthEmail.focus();
 });
 
 // Enter key handling
 lalalAuthEmail?.addEventListener("keydown", (e) => {
     if (e.key === "Enter") {
         e.preventDefault();
-        lalalAuthRequestBtn?.click();
+        lalalAuthUseKeyBtn?.click();
     }
 });
 
-document.getElementById("lalalAuthCodeBlocks")?.addEventListener("keydown", (e) => {
+lalalActivationKey?.addEventListener("keydown", (e) => {
     if (e.key === "Enter") {
         e.preventDefault();
-        lalalAuthVerifyBtn?.click();
+        lalalAuthUseKeyBtn?.click();
     }
 });
 

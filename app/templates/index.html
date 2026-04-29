@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}tubeyou{% endblock %}
+{% block title %}tubeyou - next-gen Video Downloader{% endblock %}
 
 {% block body_class %} app-root--dashboard{% endblock %}
 
@@ -12,15 +12,15 @@
 {% block content %}
 {% import "macros/status.html" as status %}
 
-{% macro stat_card(value, label, icon) %}
+{% macro stat_card(value, label, icon, stat_key) %}
 <div class="col-6 col-md-3">
-    <div class="ui-card ui-card--stat stat-card" role="group">
+    <div class="ui-card ui-card--stat stat-card" role="group" data-stat-key="{{ stat_key }}">
         <div class="stat-value">
             <span class="material-symbols-outlined stat-icon" aria-hidden="true">{{ icon }}</span>
             {%- if value.value is defined and value.unit is defined -%}
-                <span>{{ value.value }}</span><span class="stat-unit">{{ value.unit }}</span>
+                <span data-stat-value>{{ value.value }}</span><span class="stat-unit" data-stat-unit>{{ value.unit }}</span>
             {%- else -%}
-                <span>{{ value }}</span>
+                <span data-stat-value>{{ value }}</span><span class="stat-unit" data-stat-unit hidden></span>
             {%- endif %}
         </div>
         <div class="stat-label">{{ label }}</div>
@@ -30,10 +30,10 @@
 
 <div class="dashboard-layout">
     <div class="row g-3 mb-4 stats-row">
-        {{ stat_card(stats.total_jobs, "Videos processed", "video_library") }}
-        {{ stat_card(stats.total_minutes, "Minutes processed", "schedule") }}
-        {{ stat_card(stats.total_bytes | filesize, "Download traffic", "download") }}
-        {{ stat_card(stats.total_lalal_minutes or 0, "Lalal stems minutes", "graphic_eq") }}
+        {{ stat_card(stats.total_jobs, "Videos processed", "video_library", "total_jobs") }}
+        {{ stat_card(stats.total_minutes, "Minutes processed", "schedule", "total_minutes") }}
+        {{ stat_card(stats.total_bytes | filesize, "Download traffic", "download", "total_bytes") }}
+        {{ stat_card(stats.total_lalal_minutes or 0, "Lalal stems minutes", "graphic_eq", "total_lalal_minutes") }}
     </div>
 
     <div class="ui-card mb-4" id="submitCard">
@@ -168,7 +168,18 @@
                             <td data-label="Title"
                                 class="job-title-cell job-title-cell--wide col-title"
                                     data-popover-text="{{ (job['video_meta_hover'] or job['url'] or '') | e }}"
-                            ><span class="job-title-text">{{ (job['video_title'] or job['url']) | e }}</span></td>
+                            >
+                                <button
+                                    type="button"
+                                    class="job-copy-url-btn"
+                                    data-copy-url="{{ (job['url'] or '') | e }}"
+                                    aria-label="Copy source URL"
+                                    title="Copy source URL"
+                                >
+                                    <span class="material-symbols-outlined" aria-hidden="true">content_copy</span>
+                                </button>
+                                <span class="job-title-text">{{ (job['video_title'] or job['url']) | e }}</span>
+                            </td>
                             <td data-label="Format" class="td-mono job-meta-cell col-compact">{{ job['type'] | e }}<div class="meta-sub">{{ (job['codec'] or '–') | e }}</div></td>
                             <td data-label="Quality" class="td-mono job-meta-cell col-compact">{% if job['type'] == 'audio' %}MP3{% else %}{{ job['quality'] | e }}{% endif %}</td>
                             <td data-label="BPM" class="td-mono job-meta-cell col-compact">{{ (job['bpm'] if job['bpm'] is not none else '–') | e }}</td>
@@ -307,5 +318,5 @@
 {% endblock %}
 
 {% block page_scripts %}
-<script type="module" src="/static/js/main.js?v=20260429w"></script>
+<script type="module" src="/static/js/main.js?v=20260429x"></script>
 {% endblock %}

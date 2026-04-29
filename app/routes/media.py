@@ -17,7 +17,6 @@ from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
-from slowapi import Limiter
 
 from ..common.rate_limit import limiter
 from ..db import get_job
@@ -38,21 +37,18 @@ _LOSSLESS_AUDIO_EXTENSIONS = frozenset({".opus", ".m4a", ".webm", ".ogg", ".aac"
 _DATA_DIR: Path | None = None
 _BASE_DIR: Path | None = None
 _templates: "Jinja2Templates | None" = None
-_limiter: Limiter | None = None
 
 
 def init_media(
     data_dir: Path,
     base_dir: Path,
     templates: "Jinja2Templates",
-    limiter: Limiter,
 ) -> None:
     """Initialize the media module with required dependencies."""
-    global _DATA_DIR, _BASE_DIR, _templates, _limiter
+    global _DATA_DIR, _BASE_DIR, _templates
     _DATA_DIR = data_dir
     _BASE_DIR = base_dir
     _templates = templates
-    _limiter = limiter
 
 
 def _require_data_dir() -> Path:
@@ -121,11 +117,15 @@ def resolve_job_path(raw_filename: str | None) -> Path:
     Raises:
         HTTPException: If path is invalid or outside DATA_DIR
     """
-    data_dir = _require_data_dir()
+    data_dir = _require_data_dir().resolve()
 
     if not raw_filename:
         raise HTTPException(status_code=404, detail="not ready")
-    file_path = Path(str(raw_filename)).resolve()
+
+    file_path = Path(str(raw_filename).strip())
+    if not file_path.is_absolute():
+        file_path = data_dir / file_path
+    file_path = file_path.resolve()
     try:
         file_path.relative_to(data_dir)
     except ValueError as exc:
@@ -136,9 +136,9 @@ def resolve_job_path(raw_filename: str | None) -> Path:
 def is_lossless_audio_source(file_path: Path) -> bool:
     """Check if the file is a lossless audio source (internal format).
 
-    Lossless source files are stored with '.source.' in the filename.
+    Lossless source files are stored as '<stem>.source.<ext>'.
     """
-    return ".source." in file_path.name and file_path.suffix.lower() in _LOSSLESS_AUDIO_EXTENSIONS
+    return file_path.stem.endswith(".source") and file_path.suffix.lower() in _LOSSLESS_AUDIO_EXTENSIONS
 
 
 def get_mp3_cache_path(source_path: Path) -> Path:
@@ -169,7 +169,7 @@ async def transcode_to_mp3(source_path: Path, output_path: Path) -> Path:
     if await _path_is_file(output_path):
         return output_path
 
-    temp_path = output_path.with_suffix(".mp3.tmp")
+    temp_path = output_path.with_name(f"{output_path.name}.tmp.{uuid.uuid4().hex[:8]}")
 
     cmd = [
         "ffmpeg",
@@ -185,6 +185,9 @@ async def transcode_to_mp3(source_path: Path, output_path: Path) -> Path:
 
     try:
         async with governor.transcode_semaphore:
+            if await _path_is_file(output_path):
+                return output_path
+
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.DEVNULL,
@@ -196,18 +199,17 @@ async def transcode_to_mp3(source_path: Path, output_path: Path) -> Path:
                 logger.error("FFmpeg transcode failed: %s", stderr.decode() if stderr else "unknown error")
                 raise RuntimeError("Audio transcoding failed")
 
-        await asyncio.to_thread(temp_path.rename, output_path)
+            await asyncio.to_thread(temp_path.replace, output_path)
         logger.info("Transcoded audio to MP3: %s", output_path.name)
         return output_path
 
     except asyncio.TimeoutError:
-        if await _path_is_file(temp_path):
-            await asyncio.to_thread(temp_path.unlink, missing_ok=True)
         raise RuntimeError("Audio transcoding timed out")
     except Exception:
+        raise
+    finally:
         if await _path_is_file(temp_path):
             await asyncio.to_thread(temp_path.unlink, missing_ok=True)
-        raise
 
 
 # ============================================================================
@@ -216,6 +218,7 @@ async def transcode_to_mp3(source_path: Path, output_path: Path) -> Path:
 
 
 @router.get("/job/{job_id}", response_class=HTMLResponse)
+@limiter.limit("120/minute")
 async def job_page(request: Request, job_id: uuid.UUID):
     """Job detail page."""
     redirect = require_html_auth(request)
@@ -271,13 +274,10 @@ async def download(request: Request, job_id: uuid.UUID):
 @router.get("/audio-source/{job_id}")
 @limiter.limit("60/minute")
 async def audio_source(request: Request, job_id: uuid.UUID):
-    """Serve audio source for trimming.
+    """Serve the job's stored audio file for trimming.
 
-    Prefers lossless source file (e.g., .source.opus) but falls back
-    to MP3 if no lossless source exists (for older jobs or direct
-    MP3 downloads). The X-Audio-Quality header indicates which:
-    - "lossless": Original source file served
-    - "lossy": MP3 fallback used
+    The X-Audio-Quality header indicates whether the served file matches
+    the internal lossless source naming scheme or a lossy audio file.
     """
     if not current_user(request):
         return JSONResponse(status_code=401, content={"error": "unauthorized"})
