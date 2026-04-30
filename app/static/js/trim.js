@@ -16,8 +16,6 @@ import {
     clamp,
     getCookie,
     isSafeRedirect,
-    normalizeTimeRange,
-    snapTime,
     subscribeToLalalProgress,
     SNAP_INTERVAL_SECONDS,
 } from "./utils.js";
@@ -49,6 +47,10 @@ let movedDuringPan = false;
 let trimOverlayLeft = null;
 let trimOverlayRight = null;
 let lastFocusedBeforeTrimModal = null;
+let bpm = null;
+let beatOffset = 0;
+let beatInterval = null;
+let beatGridEl = null;
 
 const ZOOM_BASE = 1.2;
 const JOB_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -74,6 +76,7 @@ let btnApply = null;
 let btnDownload = null;
 let btnVocals = null;
 let btnInstr = null;
+let btnLoop = null;
 let loaderEl = null;
 
 
@@ -127,6 +130,9 @@ function resetButtons() {
     setButtonState(btnVocals, { disabled: true });
     setButtonState(btnInstr, { disabled: true });
 
+    isLooping = false;
+    syncLoopButton();
+
     if (btnDownload) {
         btnDownload.classList.add("d-none");
         btnDownload.href = "#";
@@ -162,6 +168,116 @@ function destroyWaveSurfer() {
     trimWaveEl?.replaceChildren();
     trimOverlayLeft = null;
     trimOverlayRight = null;
+    beatGridEl = null;
+}
+
+
+function resetBeatGridState() {
+    bpm = null;
+    beatOffset = 0;
+    beatInterval = null;
+    beatGridEl = null;
+}
+
+
+function applyBeatOptions(options = {}) {
+    const rawBpm = Number(options.bpm);
+    bpm = Number.isFinite(rawBpm) && rawBpm > 0 ? rawBpm : null;
+
+    const rawBeatOffset = Number(options.beatOffset);
+    beatOffset = Number.isFinite(rawBeatOffset) ? rawBeatOffset : 0;
+    beatInterval = bpm !== null ? 60 / bpm : null;
+}
+
+function normalizeSelectionRange(start, end, duration) {
+    if (!Number.isFinite(duration) || duration <= 0) {
+        return { start: 0, end: 0 };
+    }
+
+    let selectionStart = clamp(start, 0, duration);
+    let selectionEnd = clamp(end, 0, duration);
+
+    if (selectionEnd < selectionStart) {
+        [selectionStart, selectionEnd] = [selectionEnd, selectionStart];
+    }
+
+    return { start: selectionStart, end: selectionEnd };
+}
+
+
+function ensureBeatGrid() {
+    if (!trimWaveEl) return;
+
+    if (!(beatGridEl instanceof HTMLElement)) {
+        beatGridEl = document.createElement("div");
+        beatGridEl.className = "beat-grid";
+        trimWaveEl.appendChild(beatGridEl);
+    }
+}
+
+
+function drawBeatGrid() {
+    if (!trimWs || !beatInterval || !trimWaveEl) return;
+
+    const duration = trimWs.getDuration();
+    const wrapper = typeof trimWs.getWrapper === "function" ? trimWs.getWrapper() : null;
+    const scrollContainer = getWaveScrollContainer();
+    if (!(wrapper instanceof HTMLElement) || !(scrollContainer instanceof HTMLElement) || !(duration > 0)) {
+        return;
+    }
+
+    ensureBeatGrid();
+    if (!(beatGridEl instanceof HTMLElement)) return;
+
+    beatGridEl.replaceChildren();
+
+    const totalWidth = wrapper.scrollWidth;
+    const viewportWidth = scrollContainer.clientWidth || trimWaveEl.clientWidth;
+    if (!(totalWidth > 0) || !(viewportWidth > 0)) {
+        return;
+    }
+
+    const scrollLeft = scrollContainer.scrollLeft;
+    const startTime = (scrollLeft / totalWidth) * duration;
+    const endTime = ((scrollLeft + viewportWidth) / totalWidth) * duration;
+    let firstBeatIndex = Math.floor((startTime - beatOffset) / beatInterval);
+    if (firstBeatIndex < 0) {
+        firstBeatIndex = 0;
+    }
+
+    const fragment = document.createDocumentFragment();
+
+    for (let beatIndex = firstBeatIndex; ; beatIndex += 1) {
+        const time = beatOffset + beatIndex * beatInterval;
+        if (time > endTime) {
+            break;
+        }
+
+        const x = ((time / duration) * totalWidth) - scrollLeft;
+        if (x < -2 || x > viewportWidth + 2) {
+            continue;
+        }
+
+        const line = document.createElement("div");
+        line.className = "beat-line";
+        if (beatIndex % 4 === 0) {
+            line.classList.add("beat-line-strong");
+        }
+        line.style.left = "0";
+        line.style.transform = `translateX(${x}px)`;
+        fragment.appendChild(line);
+    }
+
+    beatGridEl.appendChild(fragment);
+}
+
+
+function syncLoopButton() {
+    if (!btnLoop) return;
+
+    btnLoop.classList.toggle("active", isLooping);
+    btnLoop.setAttribute("aria-pressed", isLooping ? "true" : "false");
+    btnLoop.textContent = isLooping ? "Loop ✓" : "Loop";
 }
 
 
@@ -181,6 +297,7 @@ function handleKeydown(e) {
         case "l":
         case "L":
             isLooping = !isLooping;
+            syncLoopButton();
             showToast(`Loop ${isLooping ? "enabled" : "disabled"}`, "info");
             break;
 
@@ -215,7 +332,9 @@ function handleWheelZoom(e) {
 
 /**
  * Dynamically load WaveSurfer and RegionsPlugin into module-level globals.
- * Idempotent and returns false after logging when a module import fails.
+ * Idempotent: returns true immediately if both modules are already loaded.
+ * On failure, resets both globals to null, logs the error, and returns false.
+ * @returns {Promise<boolean>}
  */
 async function loadWaveSurfer() {
     if (WaveSurfer && RegionsPlugin) return true;
@@ -249,7 +368,10 @@ function initElements() {
     btnDownload ??= document.getElementById("trimDownload");
     btnVocals ??= document.getElementById("trimVocals");
     btnInstr ??= document.getElementById("trimInstr");
+    btnLoop ??= document.getElementById("trimLoop");
     loaderEl ??= document.getElementById("trimLoader");
+
+    syncLoopButton();
     
     if (trimModalEl && !trimModal && typeof bootstrap !== "undefined") {
         trimModal = new bootstrap.Modal(trimModalEl);
@@ -266,6 +388,16 @@ function handleVocalsClick() {
 
 function handleInstrumentalClick() {
     void runLalal("instrumental");
+}
+
+
+function handleLoopToggle() {
+    isLooping = !isLooping;
+    syncLoopButton();
+
+    if (isLooping && trimRegion && trimWs) {
+        trimWs.play(trimRegion.start, trimRegion.end);
+    }
 }
 
 
@@ -391,6 +523,8 @@ function fitSelectionIntoView(start, end) {
 
     requestAnimationFrame(() => {
         trimWs?.setScrollTime(viewStart);
+        // Two extra frames give WaveSurfer time to apply its internal
+        // scroll/canvas updates before the overlay positions are recalculated.
         requestAnimationFrame(() => {
             requestAnimationFrame(() => {
                 updateSelectionOverlays(start, end);
@@ -412,6 +546,7 @@ function handleWaveReset(event) {
     trimId = null;
     setSelectionVisualState(false);
     zoomLevel = DEFAULT_ZOOM_LEVEL;
+    isLooping = false;
     trimWs.pause();
     trimWs.zoom(DEFAULT_ZOOM_LEVEL);
     trimWs.setTime(0);
@@ -477,7 +612,7 @@ function handleWaveClick(e) {
     const duration = trimWs.getDuration();
 
     if (pendingStart === null) {
-        pendingStart = snapTime(time);
+        pendingStart = time;
         trimId = null;
         trimRegion?.remove();
         trimRegion = null;
@@ -491,17 +626,17 @@ function handleWaveClick(e) {
         return;
     }
 
-    const { start, end } = normalizeTimeRange(pendingStart, time, duration);
+    const { start, end } = normalizeSelectionRange(pendingStart, time, duration);
     pendingStart = null;
 
     if (!Number.isFinite(start) || !Number.isFinite(end)) {
         return;
     }
 
-    const snappedStart = snapTime(start);
-    const snappedEnd = snapTime(end);
+    const selectedStart = start;
+    const selectedEnd = end;
 
-    if (snappedEnd - snappedStart < MIN_SELECTION_SECONDS) {
+    if (selectedEnd - selectedStart < MIN_SELECTION_SECONDS) {
         trimRegion?.remove();
         trimRegion = null;
         setSelectionVisualState(false);
@@ -514,14 +649,14 @@ function handleWaveClick(e) {
 
     trimRegion?.remove();
     trimRegion = regionPlugin.addRegion({
-        start: snappedStart,
-        end: snappedEnd,
+        start: selectedStart,
+        end: selectedEnd,
         color: SELECTION_REGION_COLOR,
         drag: true,
         resize: true,
     });
 
-    fitSelectionIntoView(snappedStart, snappedEnd);
+    fitSelectionIntoView(selectedStart, selectedEnd);
 
     updateInfo();
 }
@@ -563,6 +698,7 @@ function setupEventListeners() {
     btnApply?.addEventListener("click", handleApplyTrim);
     btnVocals?.addEventListener("click", handleVocalsClick);
     btnInstr?.addEventListener("click", handleInstrumentalClick);
+    btnLoop?.addEventListener("click", handleLoopToggle);
 
     trimWaveEl?.addEventListener("wheel", handleWheelZoom, { passive: false });
     trimWaveEl?.addEventListener("click", handleWaveClick);
@@ -578,7 +714,10 @@ function setupEventListeners() {
 }
 
 /**
- * Format seconds to mm:ss.ms format
+ * Format seconds into m:ss.cc display format (for example 1:05.30).
+ * Minutes are not zero-padded; seconds are padded to five characters.
+ * @param {number} seconds
+ * @returns {string}
  */
 function formatTime(seconds) {
     const mins = Math.floor(seconds / 60);
@@ -605,8 +744,11 @@ function setLoading(loading) {
 
 /**
  * Open the trim modal for a specific job.
+ * @param {string} jobId - UUID of the job whose audio is loaded.
+ * @param {{ bpm?: number, beatOffset?: number }} [options]
+ * @returns {Promise<void>}
  */
-export async function openTrimModal(jobId) {
+export async function openTrimModal(jobId, options = {}) {
     if (!isValidJobId(jobId)) {
         showToast("Invalid job ID", "danger");
         return;
@@ -645,6 +787,8 @@ export async function openTrimModal(jobId) {
     
     // Destroy previous instance
     destroyWaveSurfer();
+    resetBeatGridState();
+    applyBeatOptions(options);
     regionPlugin = null;
     trimRegion = null;
     
@@ -686,6 +830,7 @@ export async function openTrimModal(jobId) {
             minPxPerSec: DEFAULT_ZOOM_LEVEL,
             autoScroll: false,
             autoCenter: false,
+            fetchParams: { credentials: "include" },
             plugins: [regionPlugin]
         });
         
@@ -700,6 +845,7 @@ export async function openTrimModal(jobId) {
 
             setLoading(false);
             trimReady = true;
+            drawBeatGrid();
             
             // No default selection - user must click once for start and again for end
             // Buttons stay disabled until selection is made
@@ -728,11 +874,6 @@ export async function openTrimModal(jobId) {
             if (session !== trimSession) return;
             if (region !== trimRegion) return;
 
-            region.setOptions({
-                start: snapTime(region.start),
-                end: snapTime(region.end),
-            });
-
             updateSelectionOverlays(region.start, region.end);
             updateInfo();
         });
@@ -749,11 +890,13 @@ export async function openTrimModal(jobId) {
         trimWs.on("scroll", () => {
             if (session !== trimSession) return;
             if (trimRegion) updateSelectionOverlays(trimRegion.start, trimRegion.end);
+            drawBeatGrid();
         });
 
         trimWs.on("redrawcomplete", () => {
             if (session !== trimSession) return;
             if (trimRegion) updateSelectionOverlays(trimRegion.start, trimRegion.end);
+            drawBeatGrid();
         });
 
         trimWs.on("timeupdate", () => {
@@ -789,6 +932,7 @@ export async function openTrimModal(jobId) {
  */
 function handlePlay() {
     if (!trimReady || !trimWs || !trimRegion) return;
+
     trimWs.play(trimRegion.start, trimRegion.end);
 }
 
@@ -889,6 +1033,7 @@ async function runLalal(stem) {
 
     const session = trimSession;
     const abortController = trimAbortController;
+    const progressController = new AbortController();
     
     const btn = stem === "vocals" ? btnVocals : btnInstr;
     if (!btn) return;
@@ -908,14 +1053,14 @@ async function runLalal(stem) {
     subscribeToLalalProgress(trimJobId, stem, (stage, progress) => {
         if (session !== trimSession) return;
         btn.textContent = `${stage} ${progress}%`;
-    }, abortController.signal);
+    }, progressController.signal);
     
     try {
         // Build URL with trim_id parameter
         const url = new URL(`/api/lalal/${encodeURIComponent(trimJobId)}`, window.location.origin);
         url.searchParams.set("stem", stem);
         url.searchParams.set("trimmed", "true");
-        if (trimId) url.searchParams.set("trim_id", trimId);
+        url.searchParams.set("trim_id", trimId);
         
         const res = await fetch(
             url.toString(),
@@ -944,6 +1089,8 @@ async function runLalal(stem) {
         if (session !== trimSession) return;
         showToast(`Lalal failed: ${err.message}`, "danger");
         setButtonState(btn, { text: originalText, disabled: false });
+    } finally {
+        progressController.abort();
     }
 }
 
@@ -969,9 +1116,11 @@ function cleanup() {
     trimReady = false;
     regionPlugin = null;
     pendingStart = null;
+    resetBeatGridState();
     setSelectionVisualState(false);
     zoomLevel = DEFAULT_ZOOM_LEVEL;
     isLooping = false;
+    syncLoopButton();
     setLoading(false);
 
     resetButtons();
@@ -979,7 +1128,9 @@ function cleanup() {
 }
 
 /**
- * Initialize trim module - called once on page load
+ * Initialize the trim module by attaching a delegated click listener
+ * for all `[data-action="open-trim"]` triggers on the document.
+ * Safe to call once on page load.
  */
 export function initTrim() {
     // Listen for trim button clicks
@@ -990,7 +1141,10 @@ export function initTrim() {
         e.preventDefault();
         const jobId = btn.dataset.jobId;
         if (jobId) {
-            await openTrimModal(jobId);
+            const row = btn.closest("tr[data-job-id]");
+            const bpmValue = row?.dataset?.bpm ? Number(row.dataset.bpm) : null;
+            const beatOffsetValue = btn.dataset.beatOffset ? Number(btn.dataset.beatOffset) : 0;
+            await openTrimModal(jobId, { bpm: bpmValue, beatOffset: beatOffsetValue });
         }
     });
 }

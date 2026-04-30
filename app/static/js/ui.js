@@ -6,22 +6,24 @@
 import { CANCELLABLE_STATUSES, DOWNLOADABLE_STATUSES } from "./config.js";
 import { humanSize } from "./utils.js";
 
-const STATUS_META = {
-    analysis: { color: "primary", label: "analysis" },
-    analysis_done: { color: "success", label: "done" },
-    cancelled: { color: "secondary", label: "Cancelled" },
-    done:  { color: "success", label: "done" },
-    error: { color: "danger", label: "error" },
-};
+const STATUS_META = Object.freeze({
+    analysis: { color: "primary", label: "ANALYSIS" },
+    analysis_done: { color: "success", label: "DONE" },
+    cancelled: { color: "secondary", label: "CANCELLED" },
+    done:  { color: "success", label: "DONE" },
+    downloading: { color: "primary", label: "DOWNLOADING" },
+    error: { color: "danger", label: "ERROR" },
+    processing: { color: "primary", label: "PROCESSING" },
+    queued: { color: "primary", label: "QUEUED" },
+    transcoding: { color: "primary", label: "TRANSCODING" },
+});
 
 const LALAL_STEMS = Object.freeze([
     Object.freeze({ icon: "music_off", label: "Instrumental", stem: "instrumental" }),
     Object.freeze({ icon: "mic", label: "A Cappella", stem: "vocals" }),
 ]);
 
-function isLalalEnabled() {
-    return document.documentElement.dataset.lalalEnabled === "true";
-}
+const LALAL_ENABLED = document.documentElement.dataset.lalalEnabled === "true";
 
 /**
  * Create a Material Symbols icon span.
@@ -60,10 +62,12 @@ function createDivider() {
 function appendDropdownContent(element, iconName, label, trailingNode = null) {
     const labelEl = document.createElement("span");
     labelEl.textContent = label;
-    element.append(icon(iconName), labelEl);
     if (trailingNode) {
-        element.appendChild(trailingNode);
+        element.append(icon(iconName), labelEl, trailingNode);
+        return;
     }
+
+    element.append(icon(iconName), labelEl);
 }
 
 function createDropdownLink(iconName, label, href, { download = false } = {}) {
@@ -102,6 +106,11 @@ function createDropdownButton(iconName, label, dataset, {
     return item;
 }
 
+/**
+ * Resolve the action button category for a given job status.
+ * @param {string} status
+ * @returns {"download" | "cancel" | "detail"}
+ */
 export function getActionButtonCategory(status) {
     const normalizedStatus = status || "";
     if (DOWNLOADABLE_STATUSES.has(normalizedStatus)) {
@@ -126,7 +135,7 @@ export function createStatusElement(status, sizeBytes, progress = null) {
     wrapper.className = "status-inline";
 
     const normalizedStatus = status || "queued";
-    const meta = STATUS_META[normalizedStatus] || { color: "primary", label: normalizedStatus };
+    const meta = STATUS_META[normalizedStatus] || { color: "primary", label: normalizedStatus.toUpperCase() };
 
     const pill = document.createElement("span");
     pill.className = `status-pill status-pill-${meta.color}`;
@@ -162,10 +171,11 @@ export function createStatusElement(status, sizeBytes, progress = null) {
  * Audio downloads add Trim plus Lalal stem-split actions.
  * Lalal entries remain visible when unavailable and are rendered disabled
  * based on <html data-lalal-enabled>.
+ * Sets `data-action-category` on the wrapper for live-update handlers.
  *
  * @param {string} jobId
  * @param {string} status
- * @param {string | undefined} jobType
+ * @param {string} [jobType]
  * @returns {HTMLDivElement} Wrapper containing the appropriate action controls
  */
 export function createActionButton(jobId, status, jobType) {
@@ -173,7 +183,6 @@ export function createActionButton(jobId, status, jobType) {
     wrapper.className = "action-buttons";
 
     const actionCategory = getActionButtonCategory(status);
-    const lalalEnabled = isLalalEnabled();
     wrapper.dataset.actionCategory = actionCategory;
     const downloadHref = `/download/${encodeURIComponent(jobId)}`;
 
@@ -196,7 +205,7 @@ export function createActionButton(jobId, status, jobType) {
         toggle.type = "button";
         toggle.className = "btn btn-primary btn-sm dropdown-toggle dropdown-toggle-split";
         toggle.dataset.bsToggle = "dropdown";
-        toggle.setAttribute("aria-haspopup", "true");
+        toggle.setAttribute("aria-haspopup", "menu");
         toggle.setAttribute("aria-expanded", "false");
         const srText = document.createElement("span");
         srText.className = "visually-hidden";
@@ -215,15 +224,15 @@ export function createActionButton(jobId, status, jobType) {
             menu.appendChild(createDropdownButton("content_cut", "Trim", { action: "open-trim", jobId }));
 
             menu.appendChild(createDivider());
-            for (const { icon, label, stem } of LALAL_STEMS) {
+            for (const { icon: iconName, label, stem } of LALAL_STEMS) {
                 menu.appendChild(createDropdownButton(
-                    icon,
+                    iconName,
                     label,
                     { action: "lalal-split", jobId, stem },
                     {
                         trailingNode: createProviderLogo(),
-                        disabled: !lalalEnabled,
-                        title: lalalEnabled ? "" : "Lalal.ai is not connected",
+                        disabled: !LALAL_ENABLED,
+                        title: LALAL_ENABLED ? "" : "Lalal.ai is not connected",
                     },
                 ));
             }

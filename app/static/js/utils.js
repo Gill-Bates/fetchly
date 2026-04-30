@@ -41,6 +41,16 @@ export function snapTime(seconds, interval = SNAP_INTERVAL_SECONDS) {
     return Math.round(ms / step) * step / 1000;
 }
 
+/**
+ * Normalize a [start, end] range so it stays within [0, duration].
+ * If start > end, the values are swapped before snapping.
+ * The result is snapped to SNAP_INTERVAL_SECONDS and expanded to a minimal
+ * non-zero span when possible.
+ * @param {number} start
+ * @param {number} end
+ * @param {number} duration
+ * @returns {{ start: number, end: number }}
+ */
 export function normalizeTimeRange(start, end, duration) {
     if (!Number.isFinite(duration) || duration <= 0) {
         return { start: 0, end: 0 };
@@ -77,12 +87,21 @@ export function buildTrimId(start, end) {
 export const YOUTUBE_URL_REGEX = /^https?:\/\/(?:www\.|m\.)?(?:youtube\.com\/(?:watch\?(?:[^#]*&)?v=|embed\/|v\/|shorts\/)|youtu\.be\/)[\w-]{11}(?:[?#&][^\s]*)?$/i;
 
 const SIZE_UNITS = Object.freeze([
-    { unit: "TB", divisor: 1_099_511_627_776, precision: 2 },
-    { unit: "GB", divisor: 1_073_741_824, precision: 2 },
-    { unit: "MB", divisor: 1_048_576, precision: 1 },
-    { unit: "KB", divisor: 1_024, precision: 1 },
+    { unit: "TiB", divisor: 1_099_511_627_776, precision: 2 },
+    { unit: "GiB", divisor: 1_073_741_824, precision: 2 },
+    { unit: "MiB", divisor: 1_048_576, precision: 1 },
+    { unit: "KiB", divisor: 1_024, precision: 1 },
     { unit: "B", divisor: 1, precision: 0 },
 ]);
+
+const YOUTUBE_PATH_PREFIXES = new Set(["embed", "v", "shorts"]);
+
+const LALAL_STAGE_SYMBOLS = Object.freeze({
+    upload: "↑",
+    processing: "⚙",
+    download_stem: "↓",
+    download_backing: "↓",
+});
 
 /**
  * Format a byte count as a human-readable string.
@@ -103,9 +122,6 @@ export function humanSize(bytes) {
                 : `${(value / divisor).toFixed(precision)} ${unit}`;
         }
     }
-
-    console.assert(false, "humanSize: SIZE_UNITS exhausted without match", value);
-    return EMPTY_VALUE;
 }
 
 /**
@@ -116,7 +132,6 @@ export function humanSize(bytes) {
  * @returns {string}
  */
 export function formatDuration(sec) {
-    if (sec === null || sec === undefined) return EMPTY_VALUE;
     const value = Number(sec);
     if (!Number.isFinite(value) || value < 0) return EMPTY_VALUE;
 
@@ -143,7 +158,6 @@ export function formatDuration(sec) {
  * not handled specially.
  * @param {string} name
  * @returns {string}
- * @throws {ReferenceError} If called outside a browser context.
  */
 export function getCookie(name) {
     // simple name=value parser (not full RFC 6265 compliant)
@@ -179,12 +193,12 @@ const VIDEO_ID_REGEX = /^[\w-]{11}$/;
 function normalizeYouTubeUrl(url) {
     if (!url || typeof url !== "string") return null;
     let value = url.trim();
-    
+
     // Normalize common copy/paste issues
-    value = value.replace(/&amp;/g, "&");
-    // Remove zero-width characters (common from mobile copy/paste)
-    value = value.replace(/[\u200B-\u200D\uFEFF]/g, "");
-    
+    value = value
+        .replace(/&amp;/g, "&")
+        .replace(/[\u200B-\u200D\uFEFF]/g, "");
+
     if (!value || value.length > 2048) return null;
     // Test with case-insensitive check (video IDs are case-sensitive but host is not)
     if (!YOUTUBE_URL_REGEX.test(value)) return null;
@@ -234,9 +248,8 @@ export function extractYouTubeVideoId(url) {
         if (directId && VIDEO_ID_REGEX.test(directId)) return directId;
 
         const segments = parsed.pathname.split("/").filter(Boolean);
-        const knownPrefixes = new Set(["embed", "v", "shorts"]);
         for (let i = 0; i < segments.length - 1; i++) {
-            if (knownPrefixes.has(segments[i])) {
+            if (YOUTUBE_PATH_PREFIXES.has(segments[i])) {
                 const candidate = segments[i + 1];
                 if (VIDEO_ID_REGEX.test(candidate)) return candidate;
             }
@@ -253,7 +266,6 @@ export function extractYouTubeVideoId(url) {
  * Prevents open-redirect attacks by only allowing trusted paths.
  * @param {unknown} url
  * @returns {boolean}
- * @throws {ReferenceError} If called outside a browser context.
  */
 export function isSafeRedirect(url) {
     if (typeof url !== "string") return false;
@@ -272,6 +284,7 @@ export function isSafeRedirect(url) {
 /**
  * Subscribe to Lalal progress events for a specific job/stem pair.
  * Automatically unsubscribes when the provided AbortSignal is aborted.
+ * Unknown server stage names fall back to the generic processing symbol.
  * @param {string} jobId
  * @param {string} stem
  * @param {(stageSymbol: string, progress: number) => void} onProgress
@@ -283,7 +296,8 @@ export function subscribeToLalalProgress(jobId, stem, onProgress, signal) {
         (event) => {
             const detail = event.detail ?? {};
             if (detail.job_id !== jobId || detail.stem !== stem) return;
-            onProgress(detail.stage === "upload" ? "↑" : "⚙", detail.progress);
+            const stageSymbol = LALAL_STAGE_SYMBOLS[detail.stage] ?? "⚙";
+            onProgress(stageSymbol, detail.progress);
         },
         { signal },
     );

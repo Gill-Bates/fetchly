@@ -46,16 +46,22 @@ async function getJobsScrollContractMetrics() {
             const localScrollFallback = /jobsScrollContainer\.addEventListener\(\s*['"]scroll['"]\s*,\s*onScroll/.test(mainJsSource);
             const windowScrollLoadsMore = /window\.addEventListener\(\s*['"]scroll['"][\s\S]{0,400}?maybeLoadMoreJobs/.test(mainJsSource);
 
+            const renderedCountAssignments = [...jobsJsSource.matchAll(/state\.nextOffset\s*=\s*getRenderedJobCount\(\)/g)].length;
+            const initSeedsFromRenderedCount = /function init\(\)\s*\{[\s\S]*?state\.nextOffset\s*=\s*getRenderedJobCount\(\)/.test(jobsJsSource);
+            const usesLegacyDomSyncHelper = /function\s+syncNextOffset\s*\(/.test(jobsJsSource)
+                || /\bsyncNextOffset\(\)/.test(jobsJsSource);
+
             const tracksMonotonicOffset = /nextOffset:\s*0/.test(jobsJsSource)
                 && /const currentOffset = state\.nextOffset/.test(jobsJsSource)
                 && /await fetchFn\(currentOffset\)/.test(jobsJsSource)
-                && /state\.nextOffset \+= jobs\.length/.test(jobsJsSource)
-                && /if \(!existing\) \{\s*state\.nextOffset \+= 1;\s*\}/.test(jobsJsSource);
+                && /const expectedNextOffset = currentOffset \+ jobs\.length/.test(jobsJsSource)
+                && /(state\.nextOffset\s*=\s*expectedNextOffset|state\.nextOffset\s*=\s*Math\.max\(state\.nextOffset,\s*expectedNextOffset\))/.test(jobsJsSource);
             const usesRenderedCountAsFetchOffset = /fetchFn\(\s*(?:getRenderedJobCount\(|tbody\s*\.\s*querySelectorAll\(|document\s*\.\s*querySelectorAll\()[\s\S]*?\)/.test(jobsJsSource);
+            const hasUnexpectedRenderedCountResync = renderedCountAssignments > (initSeedsFromRenderedCount ? 1 : 0);
 
             return {
                 jobsInfiniteScrollNotObserverBased: !(observerBoundToScroller && localScrollFallback) || windowScrollLoadsMore,
-                jobsPagingOffsetContractBroken: !tracksMonotonicOffset || usesRenderedCountAsFetchOffset,
+                jobsPagingOffsetContractBroken: !tracksMonotonicOffset || usesRenderedCountAsFetchOffset || usesLegacyDomSyncHelper || hasUnexpectedRenderedCountResync,
             };
         })();
     }
@@ -258,6 +264,7 @@ function formatResultSummary(result) {
     if (metrics.noVisibleFocusIndicators) parts.push(`noFocusRing=${metrics.noVisibleFocusIndicators}`);
     if (metrics.unguardedAnimations) parts.push(`unguardedAnimations=${metrics.unguardedAnimations}`);
     if (metrics.clippedDropdowns) parts.push(`clippedDropdowns=${metrics.clippedDropdowns}`);
+    if (metrics.jobsActionRightEdgeSpacing) parts.push(`jobsActionRightEdgeSpacing=${metrics.jobsActionRightEdgeSpacing}`);
     if (metrics.escapedHtmlElements) parts.push(`escapedHtml=${metrics.escapedHtmlElements}`);
     if (metrics.importantAbuse) parts.push(`importantAbuse=${metrics.importantAbuse}`);
     if (metrics.tightlyPackedTargets) parts.push(`tightTargets=${metrics.tightlyPackedTargets}`);
@@ -301,8 +308,21 @@ function formatResultSummary(result) {
     if (metrics.jobsInfiniteScrollNotObserverBased) parts.push('jobsInfiniteScrollNotObserverBased=true');
     if (metrics.jobsPagingOffsetContractBroken) parts.push('jobsPagingOffsetContractBroken=true');
     if (metrics.trimWaveformMissingStyle) parts.push('trimWaveformMissingStyle=true');
+    if (metrics.videoPreviewContractBroken) parts.push('videoPreviewContractBroken=true');
+    if (metrics.settingsFieldStackContractBroken) parts.push('settingsFieldStackContractBroken=true');
     if (metrics.trimDefaultRegionPresent) parts.push('trimDefaultRegion=true');
     if (metrics.uiCardChildExpands) parts.push(`uiCardChildExpands=${metrics.uiCardChildExpands}`);
+    // CSS hardening (2026-04-29)
+    if (metrics.webkitOnlyRules > 10) parts.push(`webkitOnlyRules=${metrics.webkitOnlyRules}`);
+    if (metrics.colorMixWithoutFallback > 0) parts.push(`colorMixNoFallback=${metrics.colorMixWithoutFallback}`);
+    if (metrics.willChangeAbuse > 0) parts.push(`willChangeAbuse=${metrics.willChangeAbuse}`);
+    if (metrics.zIndexAbuse > 0) parts.push(`zIndexAbuse=${metrics.zIndexAbuse}`);
+    if (metrics.nestedOverflowHidden > 0) parts.push(`nestedOverflowHidden=${metrics.nestedOverflowHidden}`);
+    if (metrics.mobileTitleCellFlexRegression) parts.push('mobileTitleCellFlexRegression=true');
+    if (metrics.mobileJobsPageScrollTrap) parts.push('mobileJobsPageScrollTrap=true');
+    if (metrics.flexMinHeightOverflowHidden?.length > 0) {
+        parts.push(`flexMinHeightOverflowHidden=${metrics.flexMinHeightOverflowHidden.length}`);
+    }
     return parts.join(' ');
 }
 
@@ -359,6 +379,7 @@ const BASE_METRICS = Object.freeze({
     noVisibleFocusIndicators: 0,
     unguardedAnimations: 0,
     clippedDropdowns: 0,
+    jobsActionRightEdgeSpacing: 0,
     escapedHtmlElements: 0,
     importantAbuse: 0,
     localOverflowIssues: 0,
@@ -399,8 +420,19 @@ const BASE_METRICS = Object.freeze({
     jobsInfiniteScrollNotObserverBased: false,
     jobsPagingOffsetContractBroken: false,
     trimWaveformMissingStyle: false,
+    videoPreviewContractBroken: false,
+    settingsFieldStackContractBroken: false,
     trimDefaultRegionPresent: false,
     uiCardChildExpands: 0,
+    // CSS hardening checks (2026-04-29)
+    webkitOnlyRules: 0,
+    colorMixWithoutFallback: 0,
+    willChangeAbuse: 0,
+    zIndexAbuse: 0,
+    nestedOverflowHidden: 0,
+    mobileTitleCellFlexRegression: false,
+    mobileJobsPageScrollTrap: false,
+    flexMinHeightOverflowHidden: 0,
 });
 
 /**
@@ -1086,6 +1118,34 @@ async function collectMetrics(page, view) {
             }
         }
 
+        const flexMinHeightOverflowHidden = Array.from(document.querySelectorAll('*'))
+            .filter((el) => {
+                if (!isLayoutVisible(el)) return false;
+                const style = window.getComputedStyle(el);
+                const isFlex = style.display.includes('flex');
+                const minHeightZero = style.minHeight === '0px' || style.minHeight === '0';
+                const overflowHidden = style.overflow === 'hidden' || style.overflowY === 'hidden';
+
+                if (!(isFlex && minHeightZero && overflowHidden)) return false;
+
+                const clipsContent = el.scrollHeight > el.clientHeight + 2;
+                if (!clipsContent) return false;
+
+                const hasDescendantScroller = Array.from(el.querySelectorAll('*')).some((child) => {
+                    const childStyle = window.getComputedStyle(child);
+                    const childCanScroll = childStyle.overflowY === 'auto' || childStyle.overflowY === 'scroll';
+                    return childCanScroll && child.scrollHeight > child.clientHeight + 2;
+                });
+
+                return !hasDescendantScroller;
+            })
+            .map((el) => ({
+                tag: el.tagName.toLowerCase(),
+                id: el.id || null,
+                className: typeof el.className === 'string' ? el.className : '',
+            }))
+            .slice(0, 20);
+
         // 2. Dangerous usage of :has() with layout-critical properties
         const hasSelectorLayoutUsage = [];
         const hasSelectorSeen = new Set();
@@ -1536,8 +1596,19 @@ async function collectMetrics(page, view) {
 
         let insufficientFixedTopOffset = false;
         if (document.querySelector('.fixed-top')) {
-            const bodyPaddingTop = parseInt(window.getComputedStyle(document.body).paddingTop || '0', 10);
-            insufficientFixedTopOffset = Number.isFinite(bodyPaddingTop) && bodyPaddingTop < 40;
+            const offsetCandidates = [
+                document.body,
+                document.querySelector('.app-root'),
+                document.querySelector('.app-shell'),
+                document.querySelector('.app-main'),
+            ].filter(Boolean);
+
+            const maxTopOffset = offsetCandidates.reduce((maxOffset, el) => {
+                const paddingTop = parseInt(window.getComputedStyle(el).paddingTop || '0', 10);
+                return Number.isFinite(paddingTop) ? Math.max(maxOffset, paddingTop) : maxOffset;
+            }, 0);
+
+            insufficientFixedTopOffset = maxTopOffset < 40;
         }
 
         const footer = document.querySelector('.wb-footer-content');
@@ -1736,6 +1807,42 @@ async function collectMetrics(page, view) {
             id: el.id || null,
         }));
 
+        // 6b. Jobs action buttons should not sit flush against the right edge.
+        const jobsActionRightEdgeSpacing = Array.from(
+            document.querySelectorAll('#jobsTable tbody td.col-actions, #jobsTable tbody td[data-label="Action"]')
+        ).flatMap((cell) => {
+            const cellStyle = window.getComputedStyle(cell);
+            if (cellStyle.display === 'none' || cellStyle.visibility === 'hidden') {
+                return [];
+            }
+
+            const lastButton = cell.querySelector('.btn-group > .btn:last-of-type, .action-buttons .btn:last-of-type');
+            if (!lastButton) {
+                return [];
+            }
+
+            const cellRect = cell.getBoundingClientRect();
+            const buttonRect = lastButton.getBoundingClientRect();
+            if (cellRect.width <= 0 || buttonRect.width <= 0) {
+                return [];
+            }
+
+            const rightGap = Math.round((cellRect.right - buttonRect.right) * 10) / 10;
+            const minGapPx = 8;
+            if (rightGap >= minGapPx) {
+                return [];
+            }
+
+            const row = cell.closest('tr');
+            return [{
+                rowId: row?.dataset?.jobId || null,
+                rightGap,
+                minGapPx,
+                cellWidth: Math.round(cellRect.width * 10) / 10,
+                buttonWidth: Math.round(buttonRect.width * 10) / 10,
+            }];
+        }).slice(0, 20);
+
         // 7. !important abuse check (app stylesheets only – Bootstrap has ~800 legitimate ones)
         const importantAbuse = (() => {
             let count = 0;
@@ -1762,6 +1869,106 @@ async function collectMetrics(page, view) {
                 } catch { /* cross-origin */ }
             }
             return { count, violations: violations.slice(0, 20) };
+        })();
+
+        // CSS advanced lint checks (2026-04-29)
+        const cssAdvancedLint = (() => {
+            let webkitOnlyRules = 0;
+            let colorMixTotal = 0;
+            let colorMixWithFallback = 0;
+            let willChangeAbuse = 0;
+            let zIndexAbuse = 0;
+            let nestedOverflowHidden = 0;
+
+            for (const sheet of document.styleSheets) {
+                try {
+                    const href = sheet.href ? new URL(sheet.href).pathname : '';
+                    if (href.includes('/vendor/') || href.includes('bootstrap')) continue;
+
+                    for (const rule of sheet.cssRules) {
+                        if (!rule.cssText) continue;
+                        const text = rule.cssText;
+
+                        // WebKit-only prefixes (excluding standard -webkit-overflow-scrolling)
+                        const webkitMatches = text.match(/-webkit-(?!overflow-scrolling|font-smoothing|text-size-adjust|backdrop-filter)/g);
+                        if (webkitMatches) webkitOnlyRules += webkitMatches.length;
+
+                        // color-mix() without fallback
+                        if (text.includes('color-mix(')) {
+                            colorMixTotal++;
+                            // Check for fallback pattern (same property defined twice, first as solid)
+                            const propMatch = text.match(/:\s*(#[0-9a-fA-F]{3,8}|rgb[^;]*)[;\s].*?:\s*color-mix/);
+                            if (propMatch) colorMixWithFallback++;
+                        }
+
+                        // will-change abuse (not in animation/transition context)
+                        if (text.includes('will-change') && !text.includes('opacity') && !text.includes('animation')) {
+                            willChangeAbuse++;
+                        }
+
+                        // z-index abuse (values > 1000)
+                        const zMatches = text.match(/z-index:\s*(\d+)/g);
+                        if (zMatches) {
+                            for (const m of zMatches) {
+                                const val = parseInt(m.replace(/z-index:\s*/, ''), 10);
+                                if (val > 1200) zIndexAbuse++;
+                            }
+                        }
+                    }
+                } catch { /* cross-origin */ }
+            }
+
+            // Check for nested overflow:hidden (scroll trap pattern)
+            const checkOverflowNesting = (el, depth = 0) => {
+                if (depth > 5) return 0;
+                const style = window.getComputedStyle(el);
+                const isHidden = style.overflow === 'hidden' || style.overflowY === 'hidden';
+                let count = 0;
+                if (isHidden) {
+                    for (const child of el.children) {
+                        const childStyle = window.getComputedStyle(child);
+                        if (childStyle.overflow === 'hidden' || childStyle.overflowY === 'hidden') {
+                            count++;
+                        }
+                        count += checkOverflowNesting(child, depth + 1);
+                    }
+                }
+                return count;
+            };
+
+            const appRoot = document.querySelector('.app-root');
+            if (appRoot) {
+                nestedOverflowHidden = checkOverflowNesting(appRoot);
+            }
+
+            return {
+                webkitOnlyRules,
+                colorMixWithoutFallback: colorMixTotal - colorMixWithFallback,
+                willChangeAbuse,
+                zIndexAbuse,
+                nestedOverflowHidden,
+            };
+        })();
+
+        const mobileTitleCellFlexRegression = (() => {
+            if (!isMobile) return false;
+
+            const titleCell = document.querySelector('td.job-title-cell[data-label="Title"]');
+            if (!titleCell) return false;
+
+            const titleText = titleCell.querySelector('.job-title-text');
+            const copyButton = titleCell.querySelector('.job-copy-url-btn');
+            if (!titleText || !copyButton) return false;
+
+            const cellStyle = window.getComputedStyle(titleCell);
+            const textStyle = window.getComputedStyle(titleText);
+            const buttonStyle = window.getComputedStyle(copyButton);
+
+            return cellStyle.display !== 'flex'
+                || cellStyle.flexWrap !== 'nowrap'
+                || textStyle.whiteSpace !== 'nowrap'
+                || textStyle.overflow !== 'hidden'
+                || buttonStyle.flexShrink !== '0';
         })();
 
         // 8. Tightly packed touch targets (WCAG 2.5.8)
@@ -2024,30 +2231,36 @@ async function collectMetrics(page, view) {
 
         // 17. Dashboard shell must own the viewport and delegate scrolling locally
         const dashboardViewportContractBroken = (() => {
+            if (isMobile) return false;
             if (!isDashboardViewportLayout) return false;
             const shell = document.querySelector('.app-shell');
             const main = document.querySelector('.app-main');
             const layout = document.querySelector('.dashboard-layout');
             if (!shell || !main || !layout) return true;
 
-            const bodyStyle = window.getComputedStyle(document.body);
+            const viewportOwner = document.body.classList.contains('app-root--dashboard')
+                ? document.body
+                : shell.parentElement;
+            if (!(viewportOwner instanceof HTMLElement)) return true;
+
+            const viewportStyle = window.getComputedStyle(viewportOwner);
             const shellStyle = window.getComputedStyle(shell);
             const mainStyle = window.getComputedStyle(main);
-            const layoutStyle = window.getComputedStyle(layout);
             const shellRect = shell.getBoundingClientRect();
 
-            const bodyLocksViewport = bodyStyle.overflow === 'hidden' || bodyStyle.overflowY === 'hidden';
+            const viewportLocked = ['hidden', 'clip'].includes(viewportStyle.overflow)
+                || ['hidden', 'clip'].includes(viewportStyle.overflowY);
             const shellFitsViewport = Math.abs(shellRect.height - window.innerHeight) <= 4;
             const shellIsColumn = shellStyle.display.includes('flex') && shellStyle.flexDirection === 'column';
             const mainIsFlexColumn = mainStyle.display.includes('flex') && mainStyle.flexDirection === 'column';
-            const mainLocksScroll = mainStyle.overflowX === 'hidden' && mainStyle.overflowY === 'hidden';
-            const layoutLocksScroll = layoutStyle.overflowX === 'hidden' && layoutStyle.overflowY === 'hidden';
+            const hasLocalJobsScroller = Boolean(document.querySelector('#jobsCard .table-responsive'));
 
-            return !(bodyLocksViewport && shellFitsViewport && shellIsColumn && mainIsFlexColumn && mainLocksScroll && layoutLocksScroll);
+            return !(viewportLocked && shellFitsViewport && shellIsColumn && mainIsFlexColumn && hasLocalJobsScroller);
         })();
 
         // 18. Jobs card must fill the remaining viewport height
         const jobsCardNotFillingHeight = (() => {
+            if (isMobile) return false;
             if (!isDashboardViewportLayout) return false;
             const card = document.querySelector('#jobsCard');
             const body = document.querySelector('#jobsCard .ui-card-body');
@@ -2070,6 +2283,7 @@ async function collectMetrics(page, view) {
 
         // 19. Jobs table scroller must be the only vertical scroll owner
         const tableResponsiveGhostScroll = (() => {
+            if (isMobile) return false;
             const container = document.querySelector('#jobsCard .table-responsive');
             if (!container || !isLayoutVisible(container)) return isDashboardViewportLayout;
             const style = window.getComputedStyle(container);
@@ -2080,6 +2294,29 @@ async function collectMetrics(page, view) {
 
             return isDashboardViewportLayout
                 && (!(overflowYOk && overflowXOk && flexes && minHeightZero) || pageScrollable);
+        })();
+
+        // 19a. Mobile dashboard must not trap scrolling inside the jobs card subtree
+        const mobileJobsPageScrollTrap = (() => {
+            if (!isMobile) return false;
+
+            const card = document.querySelector('#jobsCard');
+            const body = document.querySelector('#jobsCard .ui-card-body');
+            const scroller = document.querySelector('#jobsCard .table-responsive');
+            if (!card || !body || !scroller) return false;
+
+            const cardStyle = window.getComputedStyle(card);
+            const bodyStyle = window.getComputedStyle(body);
+            const scrollerStyle = window.getComputedStyle(scroller);
+
+            return [[card, cardStyle], [body, bodyStyle], [scroller, scrollerStyle]].some(([el, style]) => {
+                const trapsScroll = style.overflow === 'hidden'
+                    || style.overflowY === 'hidden'
+                    || style.overflowY === 'auto'
+                    || style.overflowY === 'scroll';
+                const actuallyScrolls = el.scrollHeight > el.clientHeight + 2;
+                return trapsScroll && actuallyScrolls;
+            });
         })();
 
         // 19b. The sentinel must live inside the local jobs scroll container
@@ -2093,6 +2330,7 @@ async function collectMetrics(page, view) {
 
         // 20. Footer must stay pinned inside the viewport shell
         const stickyFooterDetached = (() => {
+            if (isMobile) return false;
             if (!isDashboardViewportLayout) return false;
             const footer = document.querySelector('.wb-footer');
             if (!footer || !isLayoutVisible(footer)) return true;
@@ -2149,7 +2387,77 @@ async function collectMetrics(page, view) {
             return !hasBg || !hasBorder || !hasRadius;
         })();
 
-        // 23. Trim modal should not have default region on open (user must select)
+        const hasDeclaration = (selector, property, expected) => {
+            const matchesExpected = (value) => {
+                if (typeof expected === 'function') return expected(value);
+                return value === expected;
+            };
+
+            const visitRules = (rules) => {
+                for (const rule of rules) {
+                    if (rule.cssRules?.length) {
+                        if (visitRules(rule.cssRules)) return true;
+                    }
+                    if (!rule.selectorText || !rule.style) continue;
+                    const matchesSelector = rule.selectorText
+                        .split(',')
+                        .map((part) => part.trim())
+                        .includes(selector);
+                    if (!matchesSelector) continue;
+                    const value = rule.style.getPropertyValue(property)?.trim();
+                    if (value && matchesExpected(value)) return true;
+                }
+                return false;
+            };
+
+            for (const sheet of document.styleSheets) {
+                try {
+                    if (visitRules(sheet.cssRules)) return true;
+                } catch {
+                    // Ignore cross-origin stylesheets.
+                }
+            }
+            return false;
+        };
+
+        // 23. Video preview must include shrink-safe grid and thumbnail rules
+        const videoPreviewContractBroken = (() => {
+            const previewGrid = document.querySelector('#videoPreviewGrid');
+            const thumb = document.querySelector('.video-thumb');
+            const meta = document.querySelector('#videoMeta');
+            if (!previewGrid || !thumb || !meta) return false;
+
+            const isZero = (value) => value === '0' || value === '0px';
+            const isHundredPercent = (value) => value === '100%';
+
+            return !(
+                hasDeclaration('.video-preview-grid', 'min-width', isZero)
+                && hasDeclaration('.video-preview-grid > *', 'min-width', isZero)
+                && hasDeclaration('.video-thumb', 'min-width', isZero)
+                && hasDeclaration('.video-thumb', 'max-width', isHundredPercent)
+                && hasDeclaration('.video-thumb', 'overflow', 'hidden')
+                && hasDeclaration('.video-thumb img', 'width', isHundredPercent)
+                && hasDeclaration('.video-thumb img', 'max-width', isHundredPercent)
+                && hasDeclaration('.video-thumb img', 'display', 'block')
+                && hasDeclaration('.video-thumb img', 'height', 'auto')
+            );
+        })();
+
+        // 24. Settings password stack must include shrink-safe min-width rules
+        const settingsFieldStackContractBroken = (() => {
+            const fieldStack = document.querySelector('.settings-field-stack');
+            if (!fieldStack) return false;
+
+            const isZero = (value) => value === '0' || value === '0px';
+
+            return !(
+                hasDeclaration('.settings-field-stack', 'min-width', isZero)
+                && hasDeclaration('.settings-field-stack > *', 'min-width', isZero)
+                && hasDeclaration('.settings-field-stack .d-flex', 'min-width', isZero)
+            );
+        })();
+
+        // 25. Trim modal should not have default region on open (user must select)
         const trimDefaultRegionPresent = (() => {
             const trimModal = document.querySelector('#trimModal');
             if (!trimModal || !trimModal.classList.contains('show')) return false;
@@ -2169,7 +2477,7 @@ async function collectMetrics(page, view) {
             return false;
         })();
 
-        // 24. UI card children should not expand unless explicitly needed
+        // 26. UI card children should not expand unless explicitly needed
         const uiCardChildExpands = (() => {
             let count = 0;
             // Check generic .ui-card > div children (not header/body)
@@ -2318,6 +2626,7 @@ async function collectMetrics(page, view) {
             focusVisibleCheck,
             unguardedAnimations,
             clippedDropdowns,
+            jobsActionRightEdgeSpacing,
             escapedHtmlElements,
             importantAbuse,
             tightlyPackedTargets,
@@ -2329,6 +2638,7 @@ async function collectMetrics(page, view) {
             doubleScrollRisk,
             viewportScrollLeak,
             overflowHiddenScrollBlockers,
+            flexMinHeightOverflowHidden,
             hasSelectorLayoutUsage,
             viewportLockingIssues,
             badgeInconsistencies,
@@ -2363,6 +2673,8 @@ async function collectMetrics(page, view) {
             stickyFooterDetached,
             stickyTableHeaderBroken,
             trimWaveformMissingStyle,
+            videoPreviewContractBroken,
+            settingsFieldStackContractBroken,
             trimDefaultRegionPresent,
             uiCardChildExpands,
             trimInvalidRanges,
@@ -2374,6 +2686,14 @@ async function collectMetrics(page, view) {
             trimKeyboardConflicts,
             trimInstanceLeaks,
             trimUiAudioMismatchMs,
+            // CSS hardening (2026-04-29)
+            webkitOnlyRules: cssAdvancedLint.webkitOnlyRules,
+            colorMixWithoutFallback: cssAdvancedLint.colorMixWithoutFallback,
+            willChangeAbuse: cssAdvancedLint.willChangeAbuse,
+            zIndexAbuse: cssAdvancedLint.zIndexAbuse,
+            nestedOverflowHidden: cssAdvancedLint.nestedOverflowHidden,
+            mobileTitleCellFlexRegression,
+            mobileJobsPageScrollTrap,
         };
     }, {
         requiredSelectors: view.requiredSelectors,
@@ -2686,6 +3006,9 @@ async function runView(browser, storageState, view, replacements = {}) {
         if (metrics.clippedDropdowns?.length) {
             warnings.push(`dropdowns inside overflow:hidden containers: ${metrics.clippedDropdowns.length}`);
         }
+        if (metrics.jobsActionRightEdgeSpacing?.length) {
+            failures.push(`jobs action buttons too close to the right edge: ${metrics.jobsActionRightEdgeSpacing.length}`);
+        }
         if (metrics.escapedHtmlElements?.length) {
             failures.push(`escaped HTML detected: ${metrics.escapedHtmlElements.length}`);
         }
@@ -2767,6 +3090,12 @@ async function runView(browser, storageState, view, replacements = {}) {
         if (metrics.tableResponsiveGhostScroll) {
             failures.push('jobs table scroller is misconfigured or page scroll is leaking');
         }
+        if (metrics.mobileJobsPageScrollTrap) {
+            failures.push('mobile jobs card still traps vertical scrolling inside nested containers');
+        }
+        if (metrics.flexMinHeightOverflowHidden?.length) {
+            failures.push(`flex containers using min-height:0 with overflow:hidden: ${metrics.flexMinHeightOverflowHidden.length}`);
+        }
         if (metrics.stickyFooterDetached) {
             failures.push('dashboard footer is outside the viewport');
         }
@@ -2784,6 +3113,12 @@ async function runView(browser, storageState, view, replacements = {}) {
         }
         if (metrics.trimWaveformMissingStyle) {
             failures.push('trim waveform container styling is incomplete');
+        }
+        if (metrics.videoPreviewContractBroken) {
+            failures.push('video preview grid is missing shrink-safe thumbnail layout rules');
+        }
+        if (metrics.settingsFieldStackContractBroken) {
+            failures.push('settings field stack is missing shrink-safe flex min-width rules');
         }
         if (metrics.trimDefaultRegionPresent) {
             failures.push('trim modal opens with a preselected region');
@@ -2848,6 +3183,7 @@ async function runView(browser, storageState, view, replacements = {}) {
                 noVisibleFocusIndicators: metrics.focusVisibleCheck?.noVisibleFocus?.length || 0,
                 unguardedAnimations: metrics.unguardedAnimations?.unguarded?.length || 0,
                 clippedDropdowns: metrics.clippedDropdowns?.length || 0,
+                jobsActionRightEdgeSpacing: metrics.jobsActionRightEdgeSpacing?.length || 0,
                 escapedHtmlElements: metrics.escapedHtmlElements?.length || 0,
                 importantAbuse: metrics.importantAbuse?.count || 0,
                 localOverflowIssues: metrics.localOverflowIssues?.length || 0,
@@ -2880,6 +3216,7 @@ async function runView(browser, storageState, view, replacements = {}) {
                 backgroundAttachmentFixedWithoutFallback: metrics.backgroundAttachmentFixedWithoutFallback || false,
                 loginShellAlignmentIssue: metrics.loginShellAlignmentIssue || false,
                 overflowHiddenScrollBlockers: metrics.overflowHiddenScrollBlockers?.length || 0,
+                flexMinHeightOverflowHidden: metrics.flexMinHeightOverflowHidden?.length || 0,
                 hasSelectorLayoutUsage: metrics.hasSelectorLayoutUsage?.length || 0,
                 viewportLockingIssues: metrics.viewportLockingIssues?.length || 0,
                 submitCardNotShrinking: metrics.submitCardNotShrinking || false,
@@ -2893,6 +3230,8 @@ async function runView(browser, storageState, view, replacements = {}) {
                 jobsInfiniteScrollNotObserverBased: metrics.jobsInfiniteScrollNotObserverBased || false,
                 jobsPagingOffsetContractBroken: metrics.jobsPagingOffsetContractBroken || false,
                 trimWaveformMissingStyle: metrics.trimWaveformMissingStyle || false,
+                videoPreviewContractBroken: metrics.videoPreviewContractBroken || false,
+                settingsFieldStackContractBroken: metrics.settingsFieldStackContractBroken || false,
                 trimDefaultRegionPresent: metrics.trimDefaultRegionPresent || false,
                 uiCardChildExpands: metrics.uiCardChildExpands || 0,
             },

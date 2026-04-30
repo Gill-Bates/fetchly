@@ -10,19 +10,22 @@ This module provides functions for cleaning up job artifacts,
 including database records and filesystem directories.
 """
 
-from collections.abc import Callable
 import logging
 import re
 import shutil
+from collections.abc import Callable
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+# Callable(keep_days: int) -> deleted job IDs.
 type PurgeDbFunc = Callable[[int], list[str]]
+
+# Callable(job_id: str) -> True if the job exists in the database.
 type JobExistsFunc = Callable[[str], bool]
 
 _UUID_RE = re.compile(
-    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
     re.IGNORECASE,
 )
 
@@ -42,6 +45,10 @@ def cleanup_job_directory(job_id: str, data_dir: Path) -> bool:
     Returns:
         True if the directory was deleted or already absent, False on error.
     """
+    if not _is_job_uuid(job_id):
+        logger.error("Refusing to delete invalid job_id: %r", job_id)
+        return False
+
     data_dir_resolved = data_dir.resolve()
     job_dir = (data_dir_resolved / job_id).resolve()
 
@@ -82,9 +89,9 @@ def cleanup_expired_jobs(
         purge_db_func: Callable that purges DB records and returns deleted IDs.
 
     Returns:
-        Tuple of `(db_records_deleted, directories_cleaned)`.
-        The second count includes successful cleanup outcomes for returned job IDs,
-        including directories that were already absent.
+        Tuple of `(db_records_deleted, filesystem_cleanup_ok)`.
+        The second count includes job IDs for which `cleanup_job_directory()`
+        returned True, including directories that were already absent.
 
     Raises:
         ValueError: If keep_days is negative.
@@ -98,19 +105,19 @@ def cleanup_expired_jobs(
         return (0, 0)
 
     # Clean up filesystem artifacts
-    dirs_deleted = 0
+    dirs_ok = 0
     for job_id in deleted_ids:
         if cleanup_job_directory(job_id, data_dir):
-            dirs_deleted += 1
+            dirs_ok += 1
 
     logger.info(
-        "Housekeeping: %d job(s) older than %d days removed (%d directories cleaned)",
+        "Housekeeping: %d job(s) older than %d days removed (%d filesystem cleanup outcomes ok)",
         len(deleted_ids),
         keep_days,
-        dirs_deleted,
+        dirs_ok,
     )
 
-    return (len(deleted_ids), dirs_deleted)
+    return (len(deleted_ids), dirs_ok)
 
 
 def cleanup_orphaned_directories(
@@ -127,11 +134,13 @@ def cleanup_orphaned_directories(
         dry_run: If True, only report orphans without deleting them.
 
     Returns:
-        List of directory names identified as orphans. All detected orphans are
-        returned regardless of `dry_run`. When `dry_run` is False, deletion is
-        attempted for each orphan; failures are logged and still included.
+        Names of all UUID directories without a matching DB record.
+        Returned regardless of whether deletion succeeded or was skipped via
+        `dry_run=True`. Callers cannot distinguish deleted from failed entries
+        from the return value alone.
     """
     orphans: list[str] = []
+    cleaned = 0
 
     if not data_dir.exists():
         return orphans
@@ -147,11 +156,31 @@ def cleanup_orphaned_directories(
         name = entry.name
         if not job_exists_func(name):
             orphans.append(name)
-            if not dry_run and cleanup_job_directory(name, data_dir):
+            if dry_run:
+                continue
+
+            # Re-check right before deletion to narrow the race window with
+            # concurrent job creation after the snapshot/orphan decision.
+            if job_exists_func(name):
+                logger.debug(
+                    "Skipping orphan cleanup for %s because it appeared in the DB before deletion",
+                    name,
+                )
+                continue
+
+            if cleanup_job_directory(name, data_dir):
+                cleaned += 1
                 logger.info("Cleaned orphaned directory: %s", name)
 
     if orphans:
-        action = "Found" if dry_run else "Cleaned"
-        logger.info("%s %d orphaned directories", action, len(orphans))
+        if dry_run:
+            logger.info("Found %d orphaned directories (dry run, not deleted)", len(orphans))
+        else:
+            logger.info(
+                "Orphan cleanup: %d found, %d deleted, %d failed or skipped",
+                len(orphans),
+                cleaned,
+                len(orphans) - cleaned,
+            )
 
     return orphans

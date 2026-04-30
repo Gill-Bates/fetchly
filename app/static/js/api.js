@@ -7,13 +7,14 @@ import { CONFIG } from "./config.js";
 
 const TIMEOUT_DEFAULT_MS = 10_000;
 // Kept separate so the jobs polling budget can diverge later without changing all calls.
-const TIMEOUT_FETCH_JOBS_MS = 10_000;
-const TIMEOUT_FETCH_STATS_MS = 10_000;
+const TIMEOUT_FETCH_JOBS_MS = TIMEOUT_DEFAULT_MS;
+const TIMEOUT_FETCH_STATS_MS = TIMEOUT_DEFAULT_MS;
 const TIMEOUT_VIDEO_INFO_MS = 15_000;
 const TIMEOUT_SUBMIT_JOB_MS = 60_000;
 const RETRYABLE_STATUS_CODES = new Set([502, 503, 504]);
 const MAX_ERROR_TEXT_BYTES = 2_048;
 const DEFAULT_RETRY_COUNT = 2;
+const _TEXT_DECODER = new TextDecoder();
 const _inFlightRequests = new Map();
 
 /**
@@ -64,7 +65,7 @@ function _formatRetryAfter(retryAfter) {
     }
 
     const retryAt = Date.parse(retryAfter);
-    if (Number.isFinite(retryAt)) {
+    if (!Number.isNaN(retryAt)) {
         const seconds = Math.max(1, Math.ceil((retryAt - Date.now()) / 1000));
         return `${seconds}s`;
     }
@@ -111,7 +112,6 @@ function _waitForAbort(signal) {
         }
 
         onAbort = () => {
-            signal.removeEventListener("abort", onAbort);
             reject(new DOMException("Request aborted", "AbortError"));
         };
 
@@ -207,7 +207,7 @@ async function _readResponseSnippet(response, maxBytes = MAX_ERROR_TEXT_BYTES) {
             offset += chunk.byteLength;
         }
 
-        return new TextDecoder().decode(collected.subarray(0, offset));
+        return _TEXT_DECODER.decode(collected.subarray(0, offset));
     } catch {
         return "";
     } finally {
@@ -243,7 +243,7 @@ function _cancelResponseBody(response) {
  * @throws {DOMException} When `options.signal` aborts the request.
  */
 async function fetchWithTimeout(url, options = {}, timeoutMs = TIMEOUT_DEFAULT_MS) {
-    const externalSignal = options?.signal;
+    const externalSignal = options.signal;
 
     // Bail out immediately — avoids opening a connection for an already-cancelled request.
     if (externalSignal?.aborted) {
@@ -280,7 +280,8 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = TIMEOUT_DEFAULT_M
  * @param {string} url
  * @param {ApiOptions} [options]
  * @param {number} [timeoutMs] - Per-attempt timeout in milliseconds.
- * @param {number} [retries] - Retry attempts for network failures or 502/503/504 responses.
+ * @param {number} [retries] - Maximum number of additional attempts after the
+ *   first failure. Total attempts = retries + 1.
  * @returns {Promise<T>} Parsed JSON response body.
  * @throws {ApiHttpError} On non-retryable HTTP errors.
  * @throws {ApiTimeoutError} When a request attempt exceeds timeoutMs.
@@ -305,7 +306,7 @@ async function _apiCall(url, options = {}, timeoutMs = TIMEOUT_DEFAULT_MS, retri
                 );
             }
 
-            if (_isRetryableStatus(res.status) && attempt < retries && !options?.signal?.aborted) {
+            if (_isRetryableStatus(res.status) && attempt < retries && !options.signal?.aborted) {
                 _cancelResponseBody(res);
                 await _sleep(_retryDelayMs(attempt));
                 continue;
@@ -314,7 +315,7 @@ async function _apiCall(url, options = {}, timeoutMs = TIMEOUT_DEFAULT_MS, retri
             throw new ApiHttpError(res.status, await parseError(res));
         } catch (error) {
             lastError = error;
-            if (_isRetryableFetchError(error) && attempt < retries && !options?.signal?.aborted) {
+            if (_isRetryableFetchError(error) && attempt < retries && !options.signal?.aborted) {
                 await _sleep(_retryDelayMs(attempt));
                 continue;
             }
@@ -325,10 +326,26 @@ async function _apiCall(url, options = {}, timeoutMs = TIMEOUT_DEFAULT_MS, retri
     throw lastError;
 }
 
+/**
+ * Single-attempt API call without automatic retry.
+ * Use for non-idempotent requests where retry would be unsafe.
+ * @param {string} url
+ * @param {ApiOptions} [options]
+ * @param {number} [timeoutMs]
+ * @returns {Promise<unknown>}
+ */
 async function apiCall(url, options = {}, timeoutMs = TIMEOUT_DEFAULT_MS) {
     return _apiCall(url, options, timeoutMs, 0);
 }
 
+/**
+ * Retrying API call helper for idempotent requests.
+ * Uses the module default retry budget.
+ * @param {string} url
+ * @param {ApiOptions} [options]
+ * @param {number} [timeoutMs]
+ * @returns {Promise<unknown>}
+ */
 async function _apiCallWithRetry(url, options = {}, timeoutMs = TIMEOUT_DEFAULT_MS) {
     return _apiCall(url, options, timeoutMs, DEFAULT_RETRY_COUNT);
 }
@@ -346,11 +363,20 @@ async function _raceWithAbort(promise, signal) {
     }
 }
 
+/**
+ * Deduplicate concurrent GET/HEAD requests by sharing the same underlying
+ * network promise. Caller abort signals only short-circuit the local await;
+ * they do not cancel the shared request for other callers.
+ * @param {string} url
+ * @param {ApiOptions} [options]
+ * @param {number} [timeoutMs]
+ * @returns {Promise<unknown>}
+ */
 async function _apiCallDeduped(url, options = {}, timeoutMs = TIMEOUT_DEFAULT_MS) {
     const key = _requestKey(url, options);
     const cachedPromise = _inFlightRequests.get(key);
     if (cachedPromise) {
-        return _raceWithAbort(cachedPromise, options?.signal);
+        return _raceWithAbort(cachedPromise, options.signal);
     }
 
     const sharedPromise = _apiCallWithRetry(url, options, timeoutMs).then(
@@ -365,7 +391,7 @@ async function _apiCallDeduped(url, options = {}, timeoutMs = TIMEOUT_DEFAULT_MS
     );
     _inFlightRequests.set(key, sharedPromise);
 
-    return _raceWithAbort(sharedPromise, options?.signal);
+    return _raceWithAbort(sharedPromise, options.signal);
 }
 
 /**

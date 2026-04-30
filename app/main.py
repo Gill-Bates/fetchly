@@ -9,6 +9,7 @@
 import asyncio
 import logging
 import os
+import signal
 import shutil
 from collections.abc import Callable
 from contextlib import asynccontextmanager
@@ -51,7 +52,11 @@ from .routes.api import init_api
 from .routes.lalal import init_lalal
 from .routes.media import init_media, resolve_job_path
 from .routes.trim import init_trim
-from .routes.events import publish_payload
+from .routes.events import (
+    init_sse_shutdown_event,
+    publish_payload,
+    signal_sse_shutdown,
+)
 from .session import SESSION_COOKIE, refresh_session_settings_cache, renew_session, set_session_cookie
 from .utils.housekeeping import cleanup_expired_jobs
 from .utils.template_filters import register_filters
@@ -292,6 +297,7 @@ async def lifespan(app: FastAPI):
     _ = app
     _check_dependencies()
     await asyncio.to_thread(init_db)
+    init_sse_shutdown_event()
     await asyncio.to_thread(refresh_session_settings_cache)
     recovered_jobs = await asyncio.to_thread(cancel_interrupted_jobs)
     if recovered_jobs:
@@ -353,6 +359,25 @@ async def lifespan(app: FastAPI):
     ]
     for task in background_tasks:
         task.add_done_callback(_log_background_task_completion)
+
+    # Register signal handlers to trigger SSE shutdown immediately on SIGINT/SIGTERM.
+    # These handlers set the shutdown flag, then restore the original handler and re-raise
+    # so uvicorn also receives the signal and initiates its shutdown sequence.
+    _original_handlers: dict[int, signal.Handlers] = {}
+
+    def _make_signal_handler(signum: int):
+        def _handler(sig: int, frame: object) -> None:
+            _ = frame
+            logger.debug("Shutdown signal received, closing SSE streams")
+            signal_sse_shutdown()
+            # Restore original handler and re-raise so uvicorn can handle it
+            original = _original_handlers.get(signum, signal.SIG_DFL)
+            signal.signal(signum, original)
+            signal.raise_signal(signum)
+        return _handler
+
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        _original_handlers[sig] = signal.signal(sig, _make_signal_handler(sig))
 
     try:
         yield

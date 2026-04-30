@@ -3,11 +3,11 @@
 // Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 //
 
-import { AUDIO_TYPE, CONFIG, DOWNLOADABLE_STATUSES, VIDEO_QUALITY_OPTIONS } from "./config.js";
+import { AUDIO_TYPE, CONFIG, DOWNLOADABLE_STATUSES, TERMINAL_STATUSES, VIDEO_QUALITY_OPTIONS } from "./config.js";
 import { fetchJobs, fetchStats, submitJob, fetchVideoInfo, toErrorMessage } from "./api.js";
 import { getCookie, humanSize, isValidYouTubeUrl, extractYouTubeVideoId, formatDuration, isSafeRedirect, subscribeToLalalProgress } from "./utils.js";
 import { prependJob, loadMore, applyRowStatusClasses } from "./jobs.js?v=20260429m";
-import { connectEventStream } from "./events.js?v=20260429m";
+import { setEventStreamEnabled } from "./events.js?v=20260429m";
 import { showToast, toast } from "./toast.js";
 import { initTrim } from "./trim.js?v=20260429v";
 
@@ -66,6 +66,16 @@ async function copyTextToClipboard(text) {
     }
 
     await navigator.clipboard.writeText(text);
+}
+
+function triggerDownload(url) {
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = "";
+    anchor.rel = "noopener";
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
 }
 
 function getCsrfToken() {
@@ -192,6 +202,21 @@ function scheduleDashboardStatsRefresh() {
         statsRefreshTimer = null;
         void refreshDashboardStats();
     }, 250);
+}
+
+function hasNonTerminalJobs() {
+    if (!jobsTbody) {
+        return false;
+    }
+
+    return [...jobsTbody.querySelectorAll("tr[data-job-id]")].some((row) => {
+        const status = row instanceof HTMLElement ? row.dataset.status || "" : "";
+        return status !== "" && !TERMINAL_STATUSES.has(status);
+    });
+}
+
+function syncDashboardEventStream() {
+    setEventStreamEnabled(hasNonTerminalJobs());
 }
 
 jobsTbody?.addEventListener("mouseover", (event) => {
@@ -392,6 +417,7 @@ async function maybeLoadMoreJobs() {
     isLoadingMore = true;
     try {
         await loadMore(fetchJobs);
+        syncDashboardEventStream();
         scheduleJobTitleFilter();
     } catch (err) {
         console.warn("loadMore failed:", err);
@@ -663,8 +689,8 @@ async function updateVideoPreview() {
 
     try {
         const info = await fetchVideoInfo(url, { signal: controller.signal });
-        // Stale-check: was a new controller created after this request started?
-        if (controller.signal.aborted) {
+        const currentUrl = urlInput?.value.trim() || "";
+        if (controller.signal.aborted || currentUrl !== url) {
             return;
         }
         setText(metaTitle, info.title);
@@ -723,8 +749,7 @@ function openDetail(jobId) {
         return cell?.textContent?.trim() || "–";
     };
 
-    const statusValue = row.dataset.status ||
-        row.querySelector("td[data-label='Status'] .status-pill, td[data-label='Status'] .status-inline")?.textContent?.trim() || "–";
+    const statusValue = row.dataset.status || "–";
 
     activeDetailId = jobId;
     setText(document.getElementById("mId"), jobId);
@@ -768,8 +793,19 @@ async function handleLalalSplit(btn) {
             btn,
             `/api/lalal/${encodeURIComponent(jobId)}?stem=${encodeURIComponent(stem)}`,
         );
-        if (data.download_url && isSafeRedirect(data.download_url)) {
-            window.location.assign(data.download_url);
+        if (!data.download_url) {
+            showToast("No download URL returned", "warning");
+            return;
+        }
+
+        if (!isSafeRedirect(data.download_url)) {
+            showToast("Download URL rejected as unsafe", "danger");
+            return;
+        }
+
+        if (typeof data.download_url === "string") {
+            triggerDownload(data.download_url);
+            showToast("Download started", "success", 2200);
             return;
         }
     } catch (err) {
@@ -867,6 +903,7 @@ document.addEventListener("tubeyou:job-update", (event) => {
         update("bpm_confidence", payload.bpm_confidence);
     }
 
+    syncDashboardEventStream();
     scheduleJobTitleFilter();
 });
 
@@ -922,6 +959,7 @@ submitForm?.addEventListener("submit", async (event) => {
         const job = await submitJob(formData, getCsrfToken());
         document.getElementById("emptyRow")?.remove();
         prependJob(job);
+        syncDashboardEventStream();
         scheduleJobTitleFilter();
         showToast("Download job started", "success", 2500);
 
@@ -978,17 +1016,38 @@ window.addEventListener("jobs-load-error", (event) => {
     showToast(`Jobs load failed: ${message}`, "warning", 3500);
 });
 
+window.addEventListener("pagehide", () => {
+    if (statsRefreshTimer) {
+        clearTimeout(statsRefreshTimer);
+        statsRefreshTimer = null;
+    }
+
+    if (filterRafId != null) {
+        cancelAnimationFrame(filterRafId);
+        filterRafId = null;
+    }
+
+    if (previewDebounceId) {
+        clearTimeout(previewDebounceId);
+        previewDebounceId = null;
+    }
+
+    abortPreviewRequest();
+});
+
 /**
  * POST to an action endpoint with CSRF protection, inflight deduplication,
  * and inline button feedback.
  *
- * Shows a spinner while the request is active and a temporary success icon on
- * completion. Concurrent calls for the same button are rejected.
+ * Disables the button while the request is active and shows a spinner.
+ * On success, briefly shows a checkmark icon before restoring the button state.
+ * Throws if the same button already has an in-flight request.
  *
- * @param {HTMLElement} btn
- * @param {string} url
+ * @param {HTMLElement} btn - Triggering button used as the inflight lock key.
+ * @param {string} url - Endpoint URL for the POST request.
  * @param {{ headers?: Record<string, string>, body?: BodyInit }} [options]
- * @returns {Promise<object>}
+ * @returns {Promise<object>} Parsed JSON response body.
+ * @throws {Error} If the button is missing, already busy, or the request fails.
  */
 async function handleActionPost(btn, url, options = {}) {
     if (!btn || inflightActions.has(btn)) {
@@ -1026,7 +1085,7 @@ async function handleActionPost(btn, url, options = {}) {
 
         const data = await response.json().catch(() => ({}));
         if (!response.ok) {
-            throw new Error(toErrorMessage(data.error || data.detail) || `HTTP ${response.status}`);
+            throw new Error(toErrorMessage(data) || `HTTP ${response.status}`);
         }
 
         const successIcon = document.createElement("span");
@@ -1061,7 +1120,7 @@ async function handleActionPost(btn, url, options = {}) {
     }
 }
 
-connectEventStream();
+syncDashboardEventStream();
 applyJobTitleFilter();
 setupInfiniteJobsScroll();
 observeJobDropdowns();

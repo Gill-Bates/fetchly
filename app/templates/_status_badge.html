@@ -4,7 +4,7 @@
 {# Status pill with optional file size badge #}
 <div class="status-inline">
     <span class="status-pill status-pill-{{ status|status_class }} fw-medium px-2 py-1">
-        {{ status_label }}
+        {{ status_label | upper }}
     </span>
     {% if size is not none %}
     <span class="status-size" title="File size">{{ size|filesize }}</span>

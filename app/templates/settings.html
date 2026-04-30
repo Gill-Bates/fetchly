@@ -50,20 +50,17 @@
                 </div>
             </div>
 
-            <!-- Security Card -->
-            <div class="settings-grid-item">
-                <div class="ui-card h-100">
+            <div class="settings-grid-item settings-grid-stack">
+                <!-- Session Card -->
+                <div class="ui-card">
                     <div>
                         <div class="settings-section">
                             <h6 class="fw-semibold mb-1 d-flex align-items-center gap-1">
                                 <span class="material-symbols-outlined icon-inline" aria-hidden="true">security</span>
-                                Security
+                                Session
                             </h6>
-                            <small class="text-muted d-block mb-3">Access and authentication</small>
-                        </div>
+                            <small class="text-muted d-block mb-3">Session lifetime and inactivity timeout</small>
 
-                        <div class="settings-section">
-                            <h6 class="settings-section-title">Session</h6>
                             <div class="mb-3">
                                 <label for="sessionIdleMinutes" class="form-label">Session idle timeout (minutes)</label>
                                 <input type="number" class="form-control ui-input" id="sessionIdleMinutes" name="session_idle_minutes" min="5" max="1440" value="{{ settings.session_idle_minutes | default(60) }}">
@@ -73,27 +70,38 @@
                                 </small>
                             </div>
                         </div>
+                    </div>
+                </div>
 
+                <!-- Password Card -->
+                <div class="ui-card">
+                    <div>
                         <div class="settings-section">
-                            <h6 class="settings-section-title">Password</h6>
+                            <h6 class="fw-semibold mb-1 d-flex align-items-center gap-1">
+                                <span class="material-symbols-outlined icon-inline" aria-hidden="true">password</span>
+                                Password
+                            </h6>
+                            <small class="text-muted d-block mb-3">Change the administrator login password</small>
 
-                            <div class="mb-2">
-                                <label class="visually-hidden" for="currentPassword">Current password</label>
-                                <input type="password" class="form-control ui-input" id="currentPassword" value="" placeholder="Current password" autocomplete="current-password">
-                            </div>
-                            <div class="mb-2">
-                                <label class="visually-hidden" for="adminPassword">New password</label>
-                                <input type="password" class="form-control ui-input" id="adminPassword" value="" placeholder="New password" autocomplete="new-password">
-                            </div>
-                            <div class="mb-2">
-                                <label class="visually-hidden" for="adminPasswordConfirm">Repeat password</label>
-                                <input type="password" class="form-control ui-input" id="adminPasswordConfirm" value="" placeholder="Repeat password" autocomplete="new-password">
-                            </div>
-                            <div id="passwordError" class="invalid-feedback d-none"></div>
-                            <div class="d-flex justify-content-end mt-2">
-                                <button id="passwordSaveBtn" class="btn btn-primary btn-sm" type="button">
-                                    Change Password
-                                </button>
+                            <div class="settings-field-stack">
+                                <div>
+                                    <label class="visually-hidden" for="currentPassword">Current password</label>
+                                    <input type="password" class="form-control ui-input" id="currentPassword" value="" placeholder="Current password" autocomplete="current-password">
+                                </div>
+                                <div>
+                                    <label class="visually-hidden" for="adminPassword">New password</label>
+                                    <input type="password" class="form-control ui-input" id="adminPassword" value="" placeholder="New password" autocomplete="new-password">
+                                </div>
+                                <div>
+                                    <label class="visually-hidden" for="adminPasswordConfirm">Repeat password</label>
+                                    <input type="password" class="form-control ui-input" id="adminPasswordConfirm" value="" placeholder="Repeat password" autocomplete="new-password">
+                                </div>
+                                <div id="passwordError" class="invalid-feedback d-none"></div>
+                                <div class="d-flex justify-content-end">
+                                    <button id="passwordSaveBtn" class="btn btn-primary btn-sm" type="button">
+                                        Change Password
+                                    </button>
+                                </div>
                             </div>
                         </div>
                     </div>

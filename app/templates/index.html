@@ -252,6 +252,9 @@
                         <span class="material-symbols-outlined icon-inline">pause</span>
                         Pause
                     </button>
+                    <button class="btn btn-outline-secondary btn-sm" id="trimLoop" type="button" aria-pressed="false">
+                        Loop
+                    </button>
                     <button class="btn btn-primary btn-sm ms-auto" id="trimApply" type="button" disabled>
                         Use Selection
                     </button>
@@ -263,7 +266,6 @@
                 
                 <!-- Lalal actions -->
                 <div class="d-flex gap-2 pt-3 border-top">
-                    <span class="small text-muted me-2 align-self-center">Send to Lalal:</span>
                     <button class="btn btn-outline-secondary btn-sm trim-provider-button" id="trimVocals" type="button" disabled{% if not lalal_enabled %} title="Lalal.ai is not connected"{% endif %}>
                         <span class="material-symbols-outlined icon-inline">mic</span>
                         A Cappella

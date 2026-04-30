@@ -23,7 +23,8 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["events"])
 
-_SSE_KEEPALIVE_SECONDS = 15.0
+_shutdown_event: asyncio.Event | None = None
+_SSE_KEEPALIVE_SECONDS = 5.0
 _SSE_QUEUE_MAXSIZE = 32
 # NOTE: This broker is in-memory and process-local. Connected clients only
 # receive events published by the same Python process. If deployment ever moves
@@ -45,6 +46,16 @@ class SSEStreamingResponse(StreamingResponse):
 def publish_payload(payload: dict[str, Any]) -> None:
     """Broadcast a payload to all current SSE subscribers."""
     _publish_sse_payload(payload)
+
+
+def broadcast_shutdown() -> None:
+    """Signal all SSE clients to close their connections gracefully."""
+    shutdown_payload = {"type": "shutdown"}
+    for subscriber in set(_sse_connections):
+        _enqueue_sse_payload(subscriber, shutdown_payload)
+    for subscribers in _job_sse_connections.values():
+        for subscriber in set(subscribers):
+            _enqueue_sse_payload(subscriber, shutdown_payload)
 
 
 def _enqueue_sse_payload(subscriber: asyncio.Queue[dict[str, Any]], payload: dict[str, Any]) -> None:
@@ -103,16 +114,66 @@ async def _sse_stream(request: Request, subscriber: asyncio.Queue[dict[str, Any]
     yield "retry: 2000\n\n"
     try:
         while True:
+            if _shutdown_event is not None and _shutdown_event.is_set():
+                yield _format_sse({"type": "shutdown"})
+                return
             if await request.is_disconnected():
                 return
+
+            # Race queue.get() against shutdown event
+            get_task = asyncio.create_task(subscriber.get())
+            wait_tasks: list[asyncio.Task[Any]] = [get_task]
+            if _shutdown_event is not None:
+                shutdown_task = asyncio.create_task(_shutdown_event.wait())
+                wait_tasks.append(shutdown_task)
+            else:
+                shutdown_task = None
+
             try:
-                async with asyncio.timeout(_SSE_KEEPALIVE_SECONDS):
-                    payload = await subscriber.get()
-            except TimeoutError:
+                done, _ = await asyncio.wait(
+                    wait_tasks,
+                    timeout=_SSE_KEEPALIVE_SECONDS,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+            except asyncio.CancelledError:
+                get_task.cancel()
+                if shutdown_task:
+                    shutdown_task.cancel()
+                raise
+
+            # Cleanup pending tasks
+            if shutdown_task and not shutdown_task.done():
+                shutdown_task.cancel()
+                try:
+                    await shutdown_task
+                except asyncio.CancelledError:
+                    pass
+
+            # Check what completed
+            if not done:
+                # Timeout - send keepalive
+                get_task.cancel()
+                try:
+                    await get_task
+                except asyncio.CancelledError:
+                    pass
                 yield ": keepalive\n\n"
                 continue
 
-            yield _format_sse(payload)
+            if shutdown_task in done:
+                # Shutdown signaled
+                get_task.cancel()
+                try:
+                    await get_task
+                except asyncio.CancelledError:
+                    pass
+                yield _format_sse({"type": "shutdown"})
+                return
+
+            if get_task in done:
+                # Got a message
+                payload = get_task.result()
+                yield _format_sse(payload)
     except asyncio.CancelledError:
         logger.debug("SSE stream cancelled during shutdown")
         return
@@ -169,3 +230,16 @@ async def sse_job_events(job_id: str, request: Request, _user: str = Depends(req
         subscriber,
         _cleanup,
     )
+
+
+def init_sse_shutdown_event() -> None:
+    """Initialize the SSE shutdown event. Call once at startup."""
+    global _shutdown_event
+    _shutdown_event = asyncio.Event()
+
+
+def signal_sse_shutdown() -> None:
+    """Signal all SSE streams to exit gracefully."""
+    if _shutdown_event is not None:
+        _shutdown_event.set()
+    broadcast_shutdown()

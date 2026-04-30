@@ -3,14 +3,34 @@
 // Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 //
 
-// Server-sent event client for real-time job updates.
-// Requires the server-rendered jobs table to use English data-label values:
-// Title, Format, Quality, Bitrate, BPM, Status, Created, Action.
-//
-
-import { CONFIG } from "./config.js";
-import { TERMINAL_STATUSES } from "./config.js";
+import { CONFIG, TERMINAL_STATUSES } from "./config.js";
 import { createStatusElement, createActionButton, getActionButtonCategory } from "./ui.js?v=20260429m";
+
+const DATA_LABELS = Object.freeze({
+    TITLE: "Title",
+    FORMAT: "Format",
+    BITRATE: "Bitrate",
+    BPM: "BPM",
+    STATUS: "Status",
+    ACTION: "Action",
+});
+
+/**
+ * @typedef {object} JobUpdatePayload
+ * @property {string} id
+ * @property {string} [type]
+ * @property {string} [status]
+ * @property {string} [message]
+ * @property {string} [url]
+ * @property {string} [video_title]
+ * @property {string} [video_meta_hover]
+ * @property {string} [codec]
+ * @property {number} [bitrate_kbps]
+ * @property {number} [bpm]
+ * @property {number} [bpm_confidence]
+ * @property {number} [filesize_bytes]
+ * @property {number} [progress]
+ */
 
 /** @type {number | null} */
 let reconnectTimer = null;
@@ -21,16 +41,13 @@ let activeStream = null;
 /** @type {number} */
 let reconnectAttempt = 0;
 let shouldReconnect = true;
+let streamEnabled = true;
 
 function clearReconnectTimer() {
     if (reconnectTimer) {
         clearTimeout(reconnectTimer);
         reconnectTimer = null;
     }
-}
-
-function escapeSelectorValue(value) {
-    return CSS.escape(String(value));
 }
 
 /**
@@ -63,7 +80,7 @@ function setIndicator(indicator, online) {
  * @returns {HTMLElement | null}
  */
 function getCell(row, label) {
-    return row.querySelector(`td[data-label="${escapeSelectorValue(label)}"]`);
+    return row.querySelector(`td[data-label="${CSS.escape(String(label))}"]`);
 }
 
 function getRenderedActionCategory(root) {
@@ -100,7 +117,7 @@ function teardown(stream) {
  * Schedule a reconnect attempt using exponential backoff and jitter.
  */
 function scheduleReconnect() {
-    if (!shouldReconnect) {
+    if (!shouldReconnect || !streamEnabled) {
         return;
     }
 
@@ -119,7 +136,7 @@ function scheduleReconnect() {
 
 /**
  * Apply a job status update to the DOM.
- * @param {object} payload - The job update payload from the server
+ * @param {JobUpdatePayload} payload - The job update payload from the server
  */
 function applyUpdate(payload) {
     if (!payload?.id) {
@@ -127,7 +144,7 @@ function applyUpdate(payload) {
         return;
     }
 
-    const row = document.querySelector(`tr[data-job-id="${escapeSelectorValue(payload.id)}"]`);
+    const row = document.querySelector(`tr[data-job-id="${CSS.escape(String(payload.id))}"]`);
     if (!row) return;
 
     // Update cached row state first so detail modals and follow-up renders stay in sync.
@@ -169,13 +186,13 @@ function applyUpdate(payload) {
     }
 
     const titleCell = (payload.video_title != null || payload.video_meta_hover != null || payload.url != null)
-        ? getCell(row, "Title")
+        ? getCell(row, DATA_LABELS.TITLE)
         : null;
-    const formatCell = payload.codec != null ? getCell(row, "Format") : null;
-    const bitrateCell = payload.bitrate_kbps != null ? getCell(row, "Bitrate") : null;
-    const bpmCell = payload.bpm != null ? getCell(row, "BPM") : null;
-    const statusCell = getCell(row, "Status");
-    const actionCell = getCell(row, "Action");
+    const formatCell = payload.codec != null ? getCell(row, DATA_LABELS.FORMAT) : null;
+    const bitrateCell = payload.bitrate_kbps != null ? getCell(row, DATA_LABELS.BITRATE) : null;
+    const bpmCell = payload.bpm != null ? getCell(row, DATA_LABELS.BPM) : null;
+    const statusCell = getCell(row, DATA_LABELS.STATUS);
+    const actionCell = getCell(row, DATA_LABELS.ACTION);
 
     const jobType = row.dataset.type || payload.type || "";
     const nextActionCategory = getActionButtonCategory(status);
@@ -205,7 +222,7 @@ function applyUpdate(payload) {
         titleCell.removeAttribute("title");
     }
 
-    if (formatCell && payload.codec != null) {
+    if (formatCell) {
         const codecText = formatCell.querySelector(".meta-sub");
         if (codecText) {
             codecText.textContent = payload.codec || "–";
@@ -272,13 +289,22 @@ function applyUpdate(payload) {
 function handleMessage(data) {
     try {
         const payload = JSON.parse(data);
-        
+
+        // Server shutdown signal - close connection gracefully
+        if (payload.type === "shutdown") {
+            shouldReconnect = false;
+            if (activeStream) {
+                teardown(activeStream);
+            }
+            return;
+        }
+
         // Handle Lalal.ai progress updates
         if (payload.type === "lalal_progress") {
             document.dispatchEvent(new CustomEvent("tubeyou:lalal-progress", { detail: payload }));
             return;
         }
-        
+
         // Regular job update
         applyUpdate(payload);
     } catch (err) {
@@ -288,11 +314,15 @@ function handleMessage(data) {
 
 /**
  * Establish an SSE connection for real-time job updates.
- * @returns {EventSource} The active or newly created event stream
+ * Reuses the active stream when it is already open or connecting.
+ * @returns {EventSource | null} The active or newly created event stream
  */
 export function connectEventStream() {
+    if (!streamEnabled) {
+        return null;
+    }
+
     clearReconnectTimer();
-    shouldReconnect = true;
 
     const indicator = document.getElementById("wsIndicator");
 
@@ -304,7 +334,7 @@ export function connectEventStream() {
         teardown(activeStream);
     }
 
-    const stream = new EventSource("/events");
+    const stream = new EventSource("/events", { withCredentials: true });
     activeStream = stream;
 
     stream.onopen = () => {
@@ -330,6 +360,27 @@ export function connectEventStream() {
 }
 
 /**
+ * Enable or disable the dashboard SSE connection.
+ * When disabled, any active stream is closed and reconnects are suppressed.
+ * @param {boolean} enabled
+ */
+export function setEventStreamEnabled(enabled) {
+    streamEnabled = enabled;
+    if (!enabled) {
+        clearReconnectTimer();
+        if (activeStream) {
+            teardown(activeStream);
+        }
+        setIndicator(document.getElementById("wsIndicator"), false);
+        return;
+    }
+
+    if (shouldReconnect) {
+        connectEventStream();
+    }
+}
+
+/**
  * Tear down the active SSE stream when the page is being hidden or unloaded.
  */
 function handlePageHide() {
@@ -341,7 +392,10 @@ function handlePageHide() {
 
 function handlePageShow(event) {
     if (event.persisted) {
-        connectEventStream();
+        shouldReconnect = true;
+        if (streamEnabled) {
+            connectEventStream();
+        }
     }
 }
 

@@ -47,7 +47,7 @@
                     <dt>Status</dt>
                     <dd>
                         <span id="status" class="status-pill status-pill-{{ job['status'] | status_class }}">
-                            <span id="statusText">{{ ('Cancelled' if job['status'] == 'cancelled' else ('done' if job['status'] == 'analysis_done' else job['status'])) | e }}</span>
+                            <span id="statusText">{{ (('Cancelled' if job['status'] == 'cancelled' else ('done' if job['status'] == 'analysis_done' else job['status'])) | upper) | e }}</span>
                         </span>
                     </dd>
 
@@ -109,15 +109,15 @@
                 const statusText = document.getElementById("statusText");
 
                 const STATUS_META = {
-                    queued: { text: "Queued", icon: "schedule" },
-                    processing: { text: "Processing", icon: "sync" },
-                    downloading: { text: "Downloading", icon: "download" },
-                    transcoding: { text: "Transcoding", icon: "memory" },
-                    analysis: { text: "Analyzing", icon: "analytics" },
-                    cancelled: { text: "Cancelled", icon: "cancel" },
-                    done: { text: "Done", icon: "check_circle" },
-                    analysis_done: { text: "Done", icon: "check_circle" },
-                    error: { text: "Error", icon: "error" },
+                    queued: { text: "QUEUED", icon: "schedule" },
+                    processing: { text: "PROCESSING", icon: "sync" },
+                    downloading: { text: "DOWNLOADING", icon: "download" },
+                    transcoding: { text: "TRANSCODING", icon: "memory" },
+                    analysis: { text: "ANALYSIS", icon: "analytics" },
+                    cancelled: { text: "CANCELLED", icon: "cancel" },
+                    done: { text: "DONE", icon: "check_circle" },
+                    analysis_done: { text: "DONE", icon: "check_circle" },
+                    error: { text: "ERROR", icon: "error" },
                 };
 
                 const STATUS_PILL = {
@@ -190,7 +190,7 @@
                 }
 
                 function connect() {
-                    stream = new EventSource(`/api/jobs/${encodeURIComponent(jobId)}/events`);
+                    stream = new EventSource(`/api/jobs/${encodeURIComponent(jobId)}/events`, { withCredentials: true });
                     stream.onmessage = handleMessage;
                 }
 

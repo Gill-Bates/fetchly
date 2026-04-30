@@ -72,7 +72,7 @@ RUN useradd -u 1000 -m --no-log-init appuser
 COPY --chown=appuser:appuser app ./app
 COPY --chown=appuser:appuser middleware ./middleware
 COPY --chown=appuser:appuser VERSION BUILD_INFO ./
-COPY --from=builder --chown=appuser:appuser /build/static/vendor/wavesurfer ./static/vendor/wavesurfer
+COPY --from=builder --chown=appuser:appuser /build/static/vendor/wavesurfer ./app/static/vendor/wavesurfer
 COPY --chmod=755 docker/entrypoint.sh /entrypoint.sh
 
 # Python runtime hygiene

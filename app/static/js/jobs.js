@@ -69,10 +69,6 @@ function getRenderedJobCount() {
     return tbody ? tbody.querySelectorAll("tr[data-job-id]").length : 0;
 }
 
-function syncNextOffset() {
-    state.nextOffset = getRenderedJobCount();
-}
-
 function getJobsTableColumnCount() {
     if (cachedTableColumnCount !== null) {
         return cachedTableColumnCount;
@@ -170,12 +166,11 @@ function trimRows() {
     const rows = tbody.querySelectorAll("tr[data-job-id]");
     if (rows.length <= CONFIG.MAX_ROWS) return;
 
-    // Detail row immediately follows its main row in the DOM.
     for (let index = CONFIG.MAX_ROWS; index < rows.length; index += 1) {
         const mainRow = rows[index];
-        const nextSibling = mainRow.nextElementSibling;
-        if (nextSibling?.classList.contains("job-detail-row")) {
-            nextSibling.remove();
+        const jobId = mainRow.dataset.jobId;
+        if (jobId) {
+            document.getElementById(`detail-${jobId}`)?.remove();
         }
         mainRow.remove();
     }
@@ -187,8 +182,9 @@ function trimRows() {
  * @returns {HTMLTableRowElement}
  */
 export function buildRow(job) {
+    const jobId = String(job.id);
     const tr = document.createElement("tr");
-    tr.dataset.jobId = String(job.id);
+    tr.dataset.jobId = jobId;
     tr.dataset.url = job.url || "";
     tr.dataset.status = job.status || STATUS.QUEUED;
     tr.dataset.type = job.type || "";
@@ -215,7 +211,7 @@ export function buildRow(job) {
     const formatCell = document.createElement("td");
     formatCell.dataset.label = "Format";
     formatCell.className = "td-mono job-meta-cell col-compact";
-    formatCell.append(job.type || "");
+    formatCell.textContent = job.type || "";
 
     const metaSub = document.createElement("div");
     metaSub.className = "meta-sub";
@@ -235,9 +231,11 @@ export function buildRow(job) {
     statusActionGroup.className = "status-action-group";
     statusActionGroup.append(createStatusElement(job.status, job.filesize_bytes, job.progress));
 
+    const actionButton = createActionButton(jobId, job.status, job.type);
+
     const mobileActionWrap = document.createElement("div");
     mobileActionWrap.className = "d-mobile-only";
-    mobileActionWrap.append(createActionButton(job.id, job.status, job.type));
+    mobileActionWrap.append(actionButton.cloneNode(true));
     statusActionGroup.append(mobileActionWrap);
 
     statusCell.append(statusActionGroup);
@@ -250,7 +248,7 @@ export function buildRow(job) {
 
     const actionWrap = document.createElement("div");
     actionWrap.className = "action-cell-wrap";
-    actionWrap.append(createActionButton(job.id, job.status, job.type));
+    actionWrap.append(actionButton);
     actionCell.append(actionWrap);
     tr.append(actionCell);
 
@@ -264,9 +262,10 @@ export function buildRow(job) {
  * @returns {HTMLTableRowElement}
  */
 function buildDetailRow(job) {
+    const jobId = String(job.id);
     const tr = document.createElement("tr");
     tr.className = "job-detail-row d-none";
-    tr.id = `detail-${String(job.id)}`;
+    tr.id = `detail-${jobId}`;
 
     const td = document.createElement("td");
     td.colSpan = getJobsTableColumnCount();
@@ -282,9 +281,12 @@ export function prependJob(job) {
     const tbody = getTbody();
     if (!tbody) return;
 
-    const existing = tbody.querySelector(`tr[data-job-id="${CSS.escape(String(job.id))}"]`);
+    const jobId = String(job.id);
+    const renderedCountBeforePrepend = getRenderedJobCount();
+
+    const existing = tbody.querySelector(`tr[data-job-id="${CSS.escape(jobId)}"]`);
     if (existing) {
-        document.getElementById(`detail-${String(job.id)}`)?.remove();
+        document.getElementById(`detail-${jobId}`)?.remove();
         existing.remove();
     }
 
@@ -292,7 +294,10 @@ export function prependJob(job) {
     tbody.prepend(buildRow(job));
     state.done = false;
     trimRows();
-    syncNextOffset();
+
+    if (!existing && (state.preserveHistory || renderedCountBeforePrepend < CONFIG.MAX_ROWS)) {
+        state.nextOffset += 1;
+    }
 }
 
 /**
@@ -303,7 +308,7 @@ export function resetPagingState() {
     cachedTableColumnCount = null;
     state.done = false;
     state.preserveHistory = false;
-    syncNextOffset();
+    state.nextOffset = 0;
 }
 
 /**
@@ -311,6 +316,8 @@ export function resetPagingState() {
  * Skips jobs whose IDs already exist in the table.
  * Appends both a main row and a hidden detail row per job.
  * Dispatches `jobs-load-error` on non-abort failures.
+ * Sets `state.done = true` when the server returns a non-array payload,
+ * an empty page, or a final partial page.
  * @param {(offset: number) => Promise<object[]>} fetchFn
  *   Function that accepts a row offset and resolves to a job array.
  * @returns {Promise<void>}
@@ -344,7 +351,7 @@ export async function loadMore(fetchFn) {
         state.preserveHistory = true;
 
         const expectedNextOffset = currentOffset + jobs.length;
-        state.nextOffset = Math.max(state.nextOffset, expectedNextOffset);
+        state.nextOffset = expectedNextOffset;
 
         const existingIds = new Set(
             Array.from(tbody.querySelectorAll("tr[data-job-id]"), (row) => row.dataset.jobId),
@@ -369,7 +376,6 @@ export async function loadMore(fetchFn) {
             state.done = true;
         }
 
-        syncNextOffset();
     } catch (error) {
         if (error?.name === "AbortError") {
             return;
@@ -383,8 +389,9 @@ export async function loadMore(fetchFn) {
 
 function init() {
     if (!getTbody()) return;
-    syncNextOffset();
+    state.nextOffset = getRenderedJobCount();
     trimRows();
+    window.removeEventListener("jobs-reload", resetPagingState);
     window.addEventListener("jobs-reload", resetPagingState);
 }
 

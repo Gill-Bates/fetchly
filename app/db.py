@@ -14,6 +14,30 @@ from typing import Any, Final
 
 logger = logging.getLogger(__name__)
 
+__all__ = [
+    "DB_PATH",
+    "get_db",
+    "close_db",
+    "init_db",
+    "insert_job",
+    "update_job",
+    "update_job_if_status",
+    "get_audio_analysis_cache",
+    "upsert_audio_analysis_cache",
+    "list_completed_bpms",
+    "list_jobs_requiring_audio_analysis",
+    "list_queued_jobs",
+    "cancel_interrupted_jobs",
+    "get_job",
+    "job_exists",
+    "list_jobs",
+    "paginate_jobs",
+    "get_stats",
+    "purge_old_jobs",
+    "get_settings",
+    "set_settings",
+]
+
 # --------------------------------------------------------------------------- #
 # Configuration
 # --------------------------------------------------------------------------- #
@@ -56,6 +80,10 @@ _SETTINGS_DEFAULTS: Final[dict[str, str]] = {
 
 def _int_parser(default: int) -> Callable[[str], int]:
     return lambda v: int(v) if str(v).isdigit() else default
+
+
+def _in_placeholders(values: frozenset[str] | tuple[str, ...]) -> str:
+    return ",".join("?" for _ in values)
 
 
 _INTERNAL_SETTINGS_KEYS: Final[frozenset[str]] = frozenset({
@@ -225,6 +253,8 @@ def update_job(job_id: str, **fields: Any) -> None:
     safe_fields = {k: v for k, v in fields.items() if k in _UPDATEABLE_COLUMNS}
     if not safe_fields:
         raise ValueError("No valid fields to update")
+    if not all(column.isidentifier() for column in safe_fields):
+        raise ValueError("Invalid column name")
 
     keys = ", ".join(f"{k}=?" for k in safe_fields)
     values = [*safe_fields.values(), job_id]
@@ -243,9 +273,11 @@ def update_job_if_status(job_id: str, expected_statuses: tuple[str, ...], **fiel
     safe_fields = {k: v for k, v in fields.items() if k in _UPDATEABLE_COLUMNS}
     if not safe_fields:
         raise ValueError("No valid fields to update")
+    if not all(column.isidentifier() for column in safe_fields):
+        raise ValueError("Invalid column name")
 
     keys = ", ".join(f"{k}=?" for k in safe_fields)
-    placeholders = ", ".join("?" for _ in expected_statuses)
+    placeholders = _in_placeholders(expected_statuses)
     values = [*safe_fields.values(), job_id, *expected_statuses]
 
     with get_db() as con:
@@ -291,7 +323,7 @@ def upsert_audio_analysis_cache(
 
 
 def list_completed_bpms(limit: int = 1000) -> list[int]:
-    placeholders = ",".join("?" for _ in _COMPLETED_STATUSES)
+    placeholders = _in_placeholders(_COMPLETED_STATUSES)
     with get_db() as con:
         rows = con.execute(
             f"""
@@ -337,7 +369,7 @@ def list_queued_jobs() -> list[sqlite3.Row]:
 
 def cancel_interrupted_jobs() -> int:
     """Mark stale in-flight jobs as cancelled after an application restart."""
-    placeholders = ",".join("?" for _ in _RECOVERABLE_IN_FLIGHT_STATUSES)
+    placeholders = _in_placeholders(_RECOVERABLE_IN_FLIGHT_STATUSES)
     message = "Cancelled because the application restarted during processing"
     finished_at = datetime.now(UTC).isoformat()
 
@@ -353,7 +385,7 @@ def cancel_interrupted_jobs() -> int:
             ("cancelled", message, finished_at, *_RECOVERABLE_IN_FLIGHT_STATUSES),
         )
         con.commit()
-        return int(cursor.rowcount or 0)
+        return max(cursor.rowcount, 0)
 
 
 def get_job(job_id: str) -> sqlite3.Row | None:
@@ -365,7 +397,12 @@ def get_job(job_id: str) -> sqlite3.Row | None:
 
 def job_exists(job_id: str) -> bool:
     """Check if a job exists in the database."""
-    return get_job(job_id) is not None
+    with get_db() as con:
+        row = con.execute(
+            "SELECT 1 FROM jobs WHERE id=? LIMIT 1",
+            (job_id,),
+        ).fetchone()
+    return row is not None
 
 
 def list_jobs(limit: int = 100) -> list[sqlite3.Row]:
@@ -382,7 +419,7 @@ def paginate_jobs(limit: int = 50, offset: int = 0) -> list[sqlite3.Row]:
 
 
 def get_stats() -> dict[str, int]:
-    """Aggregated KPIs for completed jobs."""
+    """Aggregated KPIs for jobs that reached the final `done` state."""
     with get_db() as con:
         row = con.execute("""
             SELECT
@@ -410,6 +447,8 @@ def purge_old_jobs(keep_days: int) -> list[str]:
     Delete completed jobs older than keep_days.
     Returns deleted IDs so callers can clean up filesystem artifacts.
     """
+    if isinstance(keep_days, bool) or not isinstance(keep_days, int):
+        raise TypeError("keep_days must be a non-negative integer")
     if keep_days < 0:
         raise ValueError("keep_days must be non-negative")
 
@@ -466,11 +505,11 @@ def set_settings(data: dict[str, Any], *, allow_internal: bool = False) -> None:
     filtered = {k: v for k, v in data.items() if k in allowed}
 
     with get_db() as con:
-        for key, value in filtered.items():
-            if isinstance(value, bool):
-                value = "true" if value else "false"
+        for key, raw_value in filtered.items():
+            if isinstance(raw_value, bool):
+                value = "true" if raw_value else "false"
             else:
-                value = str(value)
+                value = str(raw_value)
 
             con.execute(
                 "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
