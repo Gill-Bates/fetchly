@@ -353,9 +353,6 @@ async def api_set_settings(request: Request, _user: str = Depends(require_sessio
     if "retention_days" in payload:
         settings_to_update["retention_days"] = _clamp_int(payload["retention_days"], 1, 365, "retention_days")
 
-    if "session_idle_minutes" in payload:
-        settings_to_update["session_idle_minutes"] = _clamp_int(payload["session_idle_minutes"], 5, 1440, "session_idle_minutes")
-
     try:
         if "admin_password" in payload and payload["admin_password"]:
             new_password = str(payload["admin_password"]).strip()

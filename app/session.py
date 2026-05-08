@@ -38,7 +38,6 @@ if not _SECRET_KEY:
 _SECRET_KEY_BYTES = _SECRET_KEY.encode("utf-8")
 _COOKIE_SECURE_ENV: Final = "TUBEYOU_BEHIND_HTTPS"
 _SESSION_SETTINGS_DEFAULTS: Final[dict[str, Any]] = {
-    "session_idle_minutes": _DEFAULT_IDLE_MINUTES,
     "session_version": 0,
 }
 _SESSION_SETTINGS_CACHE: dict[str, Any] = dict(_SESSION_SETTINGS_DEFAULTS)
@@ -80,9 +79,9 @@ def _encode_token(payload: str, signature: str) -> str:
 
 def _is_session_expired(session: SessionData, now: int) -> bool:
     """Return True if hard expiry or sliding idle timeout has been exceeded."""
-    if now - session.issued_at > SESSION_HARD_LIMIT_SECONDS:
+    if now >= session.issued_at + SESSION_HARD_LIMIT_SECONDS:
         return True
-    return now - session.last_activity > _get_idle_timeout_seconds()
+    return now >= session.last_activity + _get_idle_timeout_seconds()
 
 
 def refresh_session_settings_cache() -> None:
@@ -94,7 +93,6 @@ def refresh_session_settings_cache() -> None:
         settings = {}
 
     refreshed = {
-        "session_idle_minutes": settings.get("session_idle_minutes", _DEFAULT_IDLE_MINUTES),
         "session_version": settings.get("session_version", 0),
     }
     with _SESSION_SETTINGS_LOCK:
@@ -108,13 +106,8 @@ def _get_cached_session_setting(key: str, default: Any) -> Any:
 
 
 def _get_idle_timeout_seconds() -> int:
-    """Get idle timeout from the cached session settings snapshot."""
-    try:
-        minutes = int(_get_cached_session_setting("session_idle_minutes", _DEFAULT_IDLE_MINUTES))
-    except Exception as exc:
-        logger.warning("Failed to parse cached session_idle_minutes: %s", exc)
-        minutes = _DEFAULT_IDLE_MINUTES
-    return max(5, min(minutes, 1440)) * 60
+    """Return the fixed sliding idle timeout in seconds."""
+    return _DEFAULT_IDLE_MINUTES * 60
 
 
 def _get_session_version() -> int:
@@ -254,11 +247,28 @@ def get_session_info(token: str | None) -> SessionInfo | None:
     }
 
 
+def _get_cookie_max_age(token: str) -> int:
+    """Return the browser cookie lifetime in seconds for a still-valid token."""
+    session = parse_session(token)
+    if not session:
+        raise ValueError("Cannot set cookie for an invalid session token")
+
+    now = int(time())
+    if not _validate_live_session(session, now):
+        raise ValueError("Cannot set cookie for an expired session token")
+
+    hard_remaining = session.issued_at + SESSION_HARD_LIMIT_SECONDS - now
+    idle_remaining = session.last_activity + _get_idle_timeout_seconds() - now
+    return min(hard_remaining, idle_remaining)
+
+
 def set_session_cookie(response: Response, token: str, request: Request) -> None:
     """Set session cookie on response with appropriate security flags."""
+    max_age = _get_cookie_max_age(token)
     response.set_cookie(
         key=SESSION_COOKIE,
         value=token,
+        max_age=max_age,
         httponly=True,
         secure=request.url.scheme == "https",
         samesite="lax",
