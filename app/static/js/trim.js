@@ -38,8 +38,10 @@ let isLooping = false;
 let isOpening = false;
 let trimSession = 0;
 let zoomRaf = 0;
+let beatGridRaf = 0;
 let trimAbortController = new AbortController();
 let listenersAttached = false;
+let panListenersAttached = false;
 let isPanning = false;
 let panStartX = 0;
 let panScrollLeft = 0;
@@ -64,6 +66,7 @@ const DEFAULT_ZOOM_LEVEL = 50;
 const MAX_ZOOM_LEVEL = 2000;
 const PAN_THRESHOLD_PX = 4;
 const SELECTION_REGION_COLOR = "rgba(99, 102, 241, 0.55)";
+const LALAL_REQUEST_TIMEOUT_MS = 60_000;
 const lalalEnabled = document.documentElement.dataset.lalalEnabled === "true";
 
 // DOM Elements (lazy-loaded)
@@ -162,7 +165,6 @@ async function parseApiResponse(res, fallbackMessage) {
 
 function destroyWaveSurfer() {
     if (!trimWs) return;
-    trimWs.unAll?.();
     trimWs.destroy();
     trimWs = null;
     trimWaveEl?.replaceChildren();
@@ -272,6 +274,15 @@ function drawBeatGrid() {
 }
 
 
+function scheduleBeatGridDraw() {
+    if (beatGridRaf) return;
+    beatGridRaf = requestAnimationFrame(() => {
+        beatGridRaf = 0;
+        drawBeatGrid();
+    });
+}
+
+
 function syncLoopButton() {
     if (!btnLoop) return;
 
@@ -338,11 +349,11 @@ function handleWheelZoom(e) {
  */
 async function loadWaveSurfer() {
     if (WaveSurfer && RegionsPlugin) return true;
-    
+
     try {
         const wsModule = await import(WAVESURFER_MODULE_PATH);
         WaveSurfer = wsModule.default;
-        
+
         const regModule = await import(WAVESURFER_REGIONS_PATH);
         RegionsPlugin = regModule.default;
 
@@ -355,24 +366,31 @@ async function loadWaveSurfer() {
     }
 }
 
+
+function refreshElement(current, id) {
+    return current && document.body.contains(current)
+        ? current
+        : document.getElementById(id);
+}
+
 /**
  * Initialize DOM element references
  */
 function initElements() {
-    trimModalEl ??= document.getElementById("trimModal");
-    trimWaveEl ??= document.getElementById("trimWave");
-    trimInfoEl ??= document.getElementById("trimInfo");
-    btnPlay ??= document.getElementById("trimPlay");
-    btnPause ??= document.getElementById("trimPause");
-    btnApply ??= document.getElementById("trimApply");
-    btnDownload ??= document.getElementById("trimDownload");
-    btnVocals ??= document.getElementById("trimVocals");
-    btnInstr ??= document.getElementById("trimInstr");
-    btnLoop ??= document.getElementById("trimLoop");
-    loaderEl ??= document.getElementById("trimLoader");
+    trimModalEl = refreshElement(trimModalEl, "trimModal");
+    trimWaveEl = refreshElement(trimWaveEl, "trimWave");
+    trimInfoEl = refreshElement(trimInfoEl, "trimInfo");
+    btnPlay = refreshElement(btnPlay, "trimPlay");
+    btnPause = refreshElement(btnPause, "trimPause");
+    btnApply = refreshElement(btnApply, "trimApply");
+    btnDownload = refreshElement(btnDownload, "trimDownload");
+    btnVocals = refreshElement(btnVocals, "trimVocals");
+    btnInstr = refreshElement(btnInstr, "trimInstr");
+    btnLoop = refreshElement(btnLoop, "trimLoop");
+    loaderEl = refreshElement(loaderEl, "trimLoader");
 
     syncLoopButton();
-    
+
     if (trimModalEl && !trimModal && typeof bootstrap !== "undefined") {
         trimModal = new bootstrap.Modal(trimModalEl);
     }
@@ -519,18 +537,7 @@ function fitSelectionIntoView(start, end) {
 
     zoomLevel = clamp(pxPerSec, ZOOM_MIN, MAX_ZOOM_LEVEL);
     trimWs.zoom(zoomLevel);
-    trimWs.setTime(viewStart);
-
-    requestAnimationFrame(() => {
-        trimWs?.setScrollTime(viewStart);
-        // Two extra frames give WaveSurfer time to apply its internal
-        // scroll/canvas updates before the overlay positions are recalculated.
-        requestAnimationFrame(() => {
-            requestAnimationFrame(() => {
-                updateSelectionOverlays(start, end);
-            });
-        });
-    });
+    trimWs.setScrollTime(viewStart);
 }
 
 
@@ -566,6 +573,7 @@ function handlePanStart(event) {
     movedDuringPan = false;
     panStartX = event.clientX;
     panScrollLeft = trimWs.getScroll();
+    attachPanListeners();
 }
 
 
@@ -593,12 +601,54 @@ function handlePanEnd() {
     const shouldSuppressClick = movedDuringPan;
     isPanning = false;
     trimWaveEl.style.cursor = "";
+    detachPanListeners();
 
     if (shouldSuppressClick) {
         window.setTimeout(() => {
             movedDuringPan = false;
         }, 0);
     }
+}
+
+
+function attachPanListeners() {
+    if (panListenersAttached) return;
+    panListenersAttached = true;
+    window.addEventListener("pointermove", handlePanMove);
+    window.addEventListener("pointerup", handlePanEnd);
+    window.addEventListener("pointercancel", handlePanEnd);
+}
+
+
+function detachPanListeners() {
+    if (!panListenersAttached) return;
+    panListenersAttached = false;
+    window.removeEventListener("pointermove", handlePanMove);
+    window.removeEventListener("pointerup", handlePanEnd);
+    window.removeEventListener("pointercancel", handlePanEnd);
+}
+
+
+function removeEventListeners() {
+    if (!listenersAttached) return;
+
+    btnPlay?.removeEventListener("click", handlePlay);
+    btnPause?.removeEventListener("click", handlePause);
+    btnApply?.removeEventListener("click", handleApplyTrim);
+    btnVocals?.removeEventListener("click", handleVocalsClick);
+    btnInstr?.removeEventListener("click", handleInstrumentalClick);
+    btnLoop?.removeEventListener("click", handleLoopToggle);
+
+    trimWaveEl?.removeEventListener("wheel", handleWheelZoom);
+    trimWaveEl?.removeEventListener("click", handleWaveClick);
+    trimWaveEl?.removeEventListener("pointerdown", handlePanStart);
+    trimWaveEl?.removeEventListener("dblclick", handleWaveReset);
+
+    trimModalEl?.removeEventListener("shown.bs.modal", handleModalShown);
+    trimModalEl?.removeEventListener("hide.bs.modal", handleModalHide);
+    trimModalEl?.removeEventListener("hidden.bs.modal", handleModalHidden);
+
+    listenersAttached = false;
 }
 
 
@@ -704,9 +754,6 @@ function setupEventListeners() {
     trimWaveEl?.addEventListener("click", handleWaveClick);
     trimWaveEl?.addEventListener("pointerdown", handlePanStart);
     trimWaveEl?.addEventListener("dblclick", handleWaveReset);
-    window.addEventListener("pointermove", handlePanMove);
-    window.addEventListener("pointerup", handlePanEnd);
-    window.addEventListener("pointercancel", handlePanEnd);
 
     trimModalEl.addEventListener("shown.bs.modal", handleModalShown);
     trimModalEl.addEventListener("hide.bs.modal", handleModalHide);
@@ -755,7 +802,7 @@ export async function openTrimModal(jobId, options = {}) {
     }
 
     initElements();
-    
+
     if (!trimModal || !trimWaveEl) {
         showToast("Trim modal not available", "danger");
         return;
@@ -767,31 +814,31 @@ export async function openTrimModal(jobId, options = {}) {
 
     isOpening = true;
     const session = ++trimSession;
-    
+
     trimJobId = jobId;
     trimId = null;  // Reset trim ID for new job
     trimReady = false;
     pendingStart = null;
     isLooping = false;
     zoomLevel = DEFAULT_ZOOM_LEVEL;
-    
+
     // Reset UI state
     resetButtons();
     if (trimInfoEl) trimInfoEl.textContent = "Loading waveform...";
-    
+
     setLoading(true);
     lastFocusedBeforeTrimModal = document.activeElement instanceof HTMLElement
         ? document.activeElement
         : null;
     trimModal.show();
-    
+
     // Destroy previous instance
     destroyWaveSurfer();
     resetBeatGridState();
     applyBeatOptions(options);
     regionPlugin = null;
     trimRegion = null;
-    
+
     // Load WaveSurfer dynamically
     const loaded = await loadWaveSurfer();
     if (session !== trimSession) {
@@ -806,13 +853,13 @@ export async function openTrimModal(jobId, options = {}) {
         isOpening = false;
         return;
     }
-    
+
     try {
         if (session !== trimSession) return;
 
         // Create regions plugin
         regionPlugin = RegionsPlugin.create();
-        
+
         // Create WaveSurfer instance
         trimWs = WaveSurfer.create({
             container: trimWaveEl,
@@ -833,20 +880,20 @@ export async function openTrimModal(jobId, options = {}) {
             fetchParams: { credentials: "include" },
             plugins: [regionPlugin]
         });
-        
+
         // Load the audio file
         const fileUrl = `/audio-source/${encodeURIComponent(jobId)}`;
         if (session !== trimSession) return;
         trimWs.load(fileUrl);
-        
+
         // Setup ready handler
         trimWs.on("ready", () => {
             if (session !== trimSession) return;
 
             setLoading(false);
             trimReady = true;
-            drawBeatGrid();
-            
+            scheduleBeatGridDraw();
+
             // No default selection - user must click once for start and again for end
             // Buttons stay disabled until selection is made
             if (trimInfoEl) trimInfoEl.textContent = "Click to set start, then click again to set the end.";
@@ -877,7 +924,7 @@ export async function openTrimModal(jobId, options = {}) {
             updateSelectionOverlays(region.start, region.end);
             updateInfo();
         });
-        
+
         // Update info on region change
         regionPlugin.on("region-updated", (region) => {
             if (session !== trimSession) return;
@@ -890,13 +937,13 @@ export async function openTrimModal(jobId, options = {}) {
         trimWs.on("scroll", () => {
             if (session !== trimSession) return;
             if (trimRegion) updateSelectionOverlays(trimRegion.start, trimRegion.end);
-            drawBeatGrid();
+            scheduleBeatGridDraw();
         });
 
         trimWs.on("redrawcomplete", () => {
             if (session !== trimSession) return;
             if (trimRegion) updateSelectionOverlays(trimRegion.start, trimRegion.end);
-            drawBeatGrid();
+            scheduleBeatGridDraw();
         });
 
         trimWs.on("timeupdate", () => {
@@ -907,7 +954,7 @@ export async function openTrimModal(jobId, options = {}) {
                 trimWs.setTime(trimRegion.start);
             }
         });
-        
+
         // Handle loading errors
         trimWs.on("error", (err) => {
             if (session !== trimSession) return;
@@ -915,7 +962,7 @@ export async function openTrimModal(jobId, options = {}) {
             showToast(`Failed to load audio: ${err?.message || err}`, "danger");
             if (trimInfoEl) trimInfoEl.textContent = "Failed to load audio";
         });
-        
+
     } catch (err) {
         setLoading(false);
         showToast(`Failed to initialize waveform: ${err?.message || err}`, "danger");
@@ -951,22 +998,22 @@ async function handleApplyTrim() {
     if (!trimRegion || !trimJobId) return;
     const session = trimSession;
     const abortController = trimAbortController;
-    
+
     const start = trimRegion.start;
     const end = trimRegion.end;
     const duration = end - start;
-    
+
     // Validate selection
     if (duration < 1) {
         showToast("Selection too short (minimum 1 second)", "warning");
         return;
     }
-    
+
     if (duration > 600) {
         showToast("Selection too long (maximum 10 minutes)", "warning");
         return;
     }
-    
+
     if (!btnApply) return;
 
     let csrfToken;
@@ -978,7 +1025,7 @@ async function handleApplyTrim() {
     }
 
     setButtonState(btnApply, { disabled: true, text: "Processing..." });
-    
+
     try {
         const res = await fetch(`/api/trim/${encodeURIComponent(trimJobId)}`, {
             method: "POST",
@@ -991,24 +1038,24 @@ async function handleApplyTrim() {
         });
         const data = await parseApiResponse(res, "Trim failed");
         if (session !== trimSession) return;
-        
+
         // Store trim_id for Lalal processing
         trimId = data.trim_id || buildTrimId(start, end);
-        
+
         // Enable Lalal buttons only when the integration is configured.
         if (lalalEnabled && btnVocals) btnVocals.disabled = false;
         if (lalalEnabled && btnInstr) btnInstr.disabled = false;
-        
+
         // Show and configure download button
         if (btnDownload) {
             btnDownload.href = `/api/trim/${encodeURIComponent(trimJobId)}/${encodeURIComponent(trimId)}/download`;
             btnDownload.classList.remove("d-none");
         }
-        
+
         const cachedNote = data.cached ? " (cached)" : "";
         showToast(`Trimmed ${duration.toFixed(1)}s of audio${cachedNote}`, "success");
         setButtonState(btnApply, { text: "✓ Ready" });
-        
+
     } catch (err) {
         if (err?.name === "AbortError") return;
         if (session !== trimSession) return;
@@ -1034,7 +1081,8 @@ async function runLalal(stem) {
     const session = trimSession;
     const abortController = trimAbortController;
     const progressController = new AbortController();
-    
+    const requestController = new AbortController();
+
     const btn = stem === "vocals" ? btnVocals : btnInstr;
     if (!btn) return;
 
@@ -1045,51 +1093,58 @@ async function runLalal(stem) {
         showToast(err.message, "danger");
         return;
     }
-    
+
     const originalText = btn.textContent;
     setButtonState(btn, { disabled: true, text: "Processing..." });
-    
+
+    const timeoutId = window.setTimeout(() => requestController.abort(), LALAL_REQUEST_TIMEOUT_MS);
+    const abortRequest = () => requestController.abort();
+    abortController.signal.addEventListener("abort", abortRequest, { once: true });
+
     // Listen for progress updates
     subscribeToLalalProgress(trimJobId, stem, (stage, progress) => {
         if (session !== trimSession) return;
         btn.textContent = `${stage} ${progress}%`;
     }, progressController.signal);
-    
+
     try {
         // Build URL with trim_id parameter
         const url = new URL(`/api/lalal/${encodeURIComponent(trimJobId)}`, window.location.origin);
         url.searchParams.set("stem", stem);
         url.searchParams.set("trimmed", "true");
         url.searchParams.set("trim_id", trimId);
-        
+
         const res = await fetch(
             url.toString(),
             {
                 method: "POST",
                 headers: {
                     "X-CSRF-Token": csrfToken,
+                    "Content-Type": "application/json",
                 },
-                signal: abortController.signal,
+                signal: requestController.signal,
             }
         );
         const data = await parseApiResponse(res, "Lalal processing failed");
         if (session !== trimSession) return;
-        
+
         // Download the result
         if (data.download_url && isSafeRedirect(data.download_url)) {
             triggerDownload(data.download_url);
         }
-        
+
         // Show cached indicator (no API credits used)
         const statusText = data.cached ? "✓ Cached" : "✓ Done";
         setButtonState(btn, { text: statusText });
-        
+
     } catch (err) {
         if (err?.name === "AbortError") return;
         if (session !== trimSession) return;
         showToast(`Lalal failed: ${err.message}`, "danger");
         setButtonState(btn, { text: originalText, disabled: false });
     } finally {
+        window.clearTimeout(timeoutId);
+        abortController.signal.removeEventListener("abort", abortRequest);
         progressController.abort();
     }
 }
@@ -1106,6 +1161,11 @@ function cleanup() {
         cancelAnimationFrame(zoomRaf);
         zoomRaf = 0;
     }
+    if (beatGridRaf) {
+        cancelAnimationFrame(beatGridRaf);
+        beatGridRaf = 0;
+    }
+    detachPanListeners();
     isPanning = false;
     movedDuringPan = false;
     trimRegion?.remove();
@@ -1125,6 +1185,8 @@ function cleanup() {
 
     resetButtons();
     if (trimInfoEl) trimInfoEl.textContent = "–";
+
+    removeEventListeners();
 }
 
 /**
@@ -1137,7 +1199,7 @@ export function initTrim() {
     document.addEventListener("click", async (e) => {
         const btn = e.target.closest("[data-action='open-trim']");
         if (!btn) return;
-        
+
         e.preventDefault();
         const jobId = btn.dataset.jobId;
         if (jobId) {

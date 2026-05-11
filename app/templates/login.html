@@ -16,26 +16,29 @@
 <main class="login-shell" role="main">
     <section class="login-card">
         <div class="login-header text-center">
-            <img src="/static/img/tubeyou.svg"
-                 alt="tubeyou"
-                 class="logo mb-3">
+            <img src="/static/img/tubeyou.svg" alt="tubeyou" class="logo mb-3">
         </div>
 
-        <div id="login-message" class="login-message text-center">
+        <div id="login-message" class="login-message text-center" role="status" aria-live="polite" aria-atomic="true">
             <p id="message-text">Please log in to continue.</p>
         </div>
 
         <form id="login-form" novalidate>
+            <input type="hidden" name="csrf_token" value="{{ csrf_token | e }}">
             <div class="mb-3">
                 <label class="form-label" for="username">Username</label>
-                <input class="form-control form-control-lg" id="username" name="username" autocomplete="username" required>
+                <input class="form-control form-control-lg" id="username" name="username" autocomplete="username"
+                    required>
             </div>
             <div class="mb-4">
                 <label class="form-label" for="password">Password</label>
-                <input class="form-control form-control-lg" id="password" name="password" type="password" autocomplete="current-password" required>
+                <input class="form-control form-control-lg" id="password" name="password" type="password"
+                    autocomplete="current-password" required>
             </div>
-            <button id="submit-btn" type="submit" class="btn btn-primary btn-lg w-100 mt-2">
-                Log In
+            <button id="submit-btn" type="submit"
+                class="btn btn-primary btn-lg w-100 mt-2 d-inline-flex align-items-center justify-content-center gap-2">
+                <span id="submit-spinner" class="spinner-border spinner-border-sm d-none" aria-hidden="true"></span>
+                <span id="submit-btn-label">Sign in</span>
             </button>
         </form>
     </section>

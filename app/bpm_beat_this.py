@@ -20,9 +20,12 @@ import logging
 import math
 import threading
 from pathlib import Path
-from typing import Final, NamedTuple
+from typing import TYPE_CHECKING, Final, NamedTuple
 
 import numpy as np
+
+if TYPE_CHECKING:
+    from beat_this.inference import File2Beats
 
 logger = logging.getLogger(__name__)
 
@@ -144,12 +147,9 @@ def _bpm_from_beats(beats: np.ndarray) -> tuple[float, float]:
     q1, q3 = np.percentile(intervals, [25, 75])
     iqr = q3 - q1
     # Confidence is higher when intervals are consistent (low IQR relative to median)
-    if median_interval > 0:
-        normalized_iqr = iqr / median_interval
-        # Map to 0-1 range: perfect consistency = 1.0, very inconsistent = 0.0
-        confidence = max(0.0, min(1.0, 1.0 - normalized_iqr))
-    else:
-        confidence = 0.0
+    normalized_iqr = iqr / median_interval
+    # Map to 0-1 range: perfect consistency = 1.0, very inconsistent = 0.0
+    confidence = max(0.0, min(1.0, 1.0 - normalized_iqr))
 
     return raw_bpm, confidence
 
@@ -174,15 +174,17 @@ def extract_bpm_beat_this(audio_path: Path) -> BeatThisResult:
         raise FileNotFoundError(f"Audio file not found: {audio_path}")
 
     try:
-        with _model_lock:
-            model = _get_model()
+        model = _get_model()
 
+        with _model_lock:
             # Shared PyTorch model instances are not safe for concurrent forward passes.
             beats, _downbeats = model(str(audio_path))
 
     except ImportError as exc:
         logger.info("beat_this not available: %s", exc)
         return BeatThisResult(bpm=0.0, confidence=0.0, num_beats=0)
+    except MemoryError:
+        raise
     except KeyboardInterrupt:
         raise
     except Exception as exc:

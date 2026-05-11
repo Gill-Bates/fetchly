@@ -8,10 +8,12 @@
 #
 
 import base64
+import binascii
 import hmac
 import logging
 import os
 import secrets
+import sqlite3
 import threading
 from dataclasses import dataclass
 from time import time
@@ -29,7 +31,7 @@ SESSION_COOKIE: Final = "tubeyou_session"
 # Hard session limit: 24 hours from login (non-configurable)
 SESSION_HARD_LIMIT_SECONDS: Final = 24 * 60 * 60
 
-# Default idle timeout (overridden by setting session_idle_minutes)
+# Fixed sliding idle timeout (non-configurable)
 _DEFAULT_IDLE_MINUTES: Final = 60
 
 _SECRET_KEY = os.environ.get("TUBEYOU_SECRET_KEY", "")
@@ -88,7 +90,7 @@ def refresh_session_settings_cache() -> None:
     """Refresh the small session-related settings snapshot from the database."""
     try:
         settings = get_settings()
-    except Exception as exc:
+    except (sqlite3.Error, OSError) as exc:
         logger.warning("Failed to refresh session settings cache: %s", exc)
         settings = {}
 
@@ -139,6 +141,8 @@ def create_session(username: str) -> str:
     - issued_at: Login time (for 24h hard limit)
     - last_activity: Last request time (for sliding idle timeout)
     """
+    if ":" in username:
+        raise ValueError("username must not contain ':'")
     now = int(time())
     nonce = secrets.token_urlsafe(12)
     session_version = _get_session_version()
@@ -180,7 +184,7 @@ def parse_session(token: str | None) -> SessionData | None:
             nonce=nonce,
             session_version=session_version,
         )
-    except Exception:
+    except (ValueError, TypeError, binascii.Error, UnicodeDecodeError):
         logger.debug("Session parsing failed", exc_info=True)
         return None
 
@@ -270,7 +274,7 @@ def set_session_cookie(response: Response, token: str, request: Request) -> None
         value=token,
         max_age=max_age,
         httponly=True,
-        secure=request.url.scheme == "https",
+        secure=_resolve_cookie_secure(request),
         samesite="lax",
         path="/",
     )
@@ -299,5 +303,3 @@ def delete_session_cookie(
         samesite="lax",
     )
 
-
-refresh_session_settings_cache()

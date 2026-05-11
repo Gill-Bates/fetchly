@@ -9,11 +9,14 @@
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import logging
 import os
 import re
 import stat as stat_module
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from time import time
 from typing import Any, Callable
@@ -32,13 +35,13 @@ router = APIRouter(prefix="/api/lalal", tags=["lalal"])
 
 # Constants
 _LALAL_AUTH_VALIDATION_CACHE_SECONDS = 300
-_LOCK_TIMEOUT_SECONDS = 600
 _MAX_EMAIL_LENGTH = 320
 _EMAIL_RE = re.compile(r"^[^@]+@[^@]+\.[^@]+$")
 _TRIM_ID_RE = re.compile(r"^\d+_\d+$")
 _STEM_VOCALS = "vocals"
 _STEM_INSTRUMENTAL = "instrumental"
 _VALID_STEMS = frozenset({_STEM_VOCALS, _STEM_INSTRUMENTAL})
+_LALAL_PROCESS_TIMEOUT_SECONDS = 600
 
 # Module-level state
 _DATA_DIR: Path | None = None
@@ -122,31 +125,65 @@ async def _path_is_ready_file(path: Path) -> bool:
     return await asyncio.to_thread(_check)
 
 
-def _acquire_processing_lock(lock_file: Path) -> int:
-    now_ts = int(time())
-
-    for _attempt in range(2):
+@asynccontextmanager
+async def _acquire_processing_lock(lock_file: Path) -> AsyncIterator[None]:
+    def _lock() -> int:
+        lock_fd = os.open(lock_file, os.O_CREAT | os.O_RDWR)
         try:
-            lock_fd = os.open(lock_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError as exc:
-            try:
-                lock_age = now_ts - int(lock_file.stat().st_mtime)
-            except FileNotFoundError:
-                continue
-            except OSError:
-                lock_age = -1
-
-            if lock_age >= _LOCK_TIMEOUT_SECONDS:
-                logger.warning("Removing stale Lalal lock file: %s", lock_file)
-                lock_file.unlink(missing_ok=True)
-                continue
-
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            os.close(lock_fd)
             raise HTTPException(status_code=409, detail="Lalal processing already in progress") from exc
-
-        os.write(lock_fd, f"{now_ts}\n".encode("ascii"))
         return lock_fd
 
-    raise HTTPException(status_code=409, detail="Lalal processing already in progress")
+    def _unlock(lock_fd: int) -> None:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        finally:
+            os.close(lock_fd)
+            with suppress(OSError):
+                os.unlink(lock_file)
+
+    lock_fd = await asyncio.to_thread(_lock)
+    try:
+        yield
+    finally:
+        await asyncio.to_thread(_unlock, lock_fd)
+
+
+async def _get_cached_split_response(
+    job_id_str: str,
+    stem: str,
+    vocals_path: Path,
+    instrumental_path: Path,
+    *,
+    trimmed: bool,
+    trim_id: str | None,
+) -> dict[str, Any] | None:
+    vocals_exists, instrumental_exists = await asyncio.gather(
+        _path_is_ready_file(vocals_path),
+        _path_is_ready_file(instrumental_path),
+    )
+    if not (vocals_exists and instrumental_exists):
+        return None
+
+    cached_path = vocals_path if stem == _STEM_VOCALS else instrumental_path
+    if trimmed:
+        logger.debug("Returning cached Lalal result for %s (stem=%s, trim_id=%s)", job_id_str, stem, trim_id)
+    await _mark_lalal_split_done_if_ready(
+        job_id_str,
+        vocals_path,
+        instrumental_path,
+        trimmed=trimmed,
+    )
+    return _make_split_response(
+        job_id_str,
+        stem,
+        trimmed=trimmed,
+        filename=cached_path.name,
+        cached=True,
+        trim_id=trim_id,
+    )
 
 
 async def _latest_trim_input(output_dir: Path, trim_id: str | None) -> tuple[Path, str]:
@@ -422,62 +459,24 @@ async def lalal_split(
     vocals_path = output_dir / f"{base_name}_vocals.mp3"
     instrumental_path = output_dir / f"{base_name}_instrumental.mp3"
 
-    vocals_exists, instrumental_exists = await asyncio.gather(
-        _path_is_ready_file(vocals_path),
-        _path_is_ready_file(instrumental_path),
+    cached_response = await _get_cached_split_response(
+        job_id_str,
+        stem,
+        vocals_path,
+        instrumental_path,
+        trimmed=trimmed,
+        trim_id=trim_id,
     )
-    if vocals_exists and instrumental_exists:
-        cached_path = vocals_path if stem == _STEM_VOCALS else instrumental_path
-        logger.debug("Returning cached Lalal result for %s (stem=%s, trim_id=%s)", job_id, stem, trim_id)
-        await _mark_lalal_split_done_if_ready(
-            job_id_str,
-            vocals_path,
-            instrumental_path,
-            trimmed=trimmed,
-        )
-        return _make_split_response(
-            job_id_str,
-            stem,
-            trimmed=trimmed,
-            filename=cached_path.name,
-            cached=True,
-            trim_id=trim_id,
-        )
+    if cached_response is not None:
+        return cached_response
 
     logger.info("Starting Lalal.ai processing for %s (stem=%s, trim_id=%s)", job_id, stem, trim_id)
     lock_file = output_dir / f".lalal_{base_name}.lock"
-    lock_fd: int | None = None
 
     try:
         from ..lalal import LalalClient, LalalError, StemType, get_lalal_client
     except ImportError as exc:
         raise HTTPException(status_code=500, detail="Lalal.ai module not available") from exc
-
-    try:
-        lock_fd = _acquire_processing_lock(lock_file)
-
-        vocals_exists, instrumental_exists = await asyncio.gather(
-            _path_is_ready_file(vocals_path),
-            _path_is_ready_file(instrumental_path),
-        )
-        if vocals_exists and instrumental_exists:
-            cached_path = vocals_path if stem == _STEM_VOCALS else instrumental_path
-            await _mark_lalal_split_done_if_ready(
-                job_id_str,
-                vocals_path,
-                instrumental_path,
-                trimmed=trimmed,
-            )
-            return _make_split_response(
-                job_id_str,
-                stem,
-                trimmed=trimmed,
-                filename=cached_path.name,
-                cached=True,
-                trim_id=trim_id,
-            )
-    except HTTPException:
-        raise
 
     client = get_lalal_client()
     if not client:
@@ -503,15 +502,28 @@ async def lalal_split(
         download_stem = True
         download_backing = True
 
-        async with client:
-            results = await client.process_file(
-                file_path,
-                output_dir,
-                stem=stem_type,
-                download_stem=download_stem,
-                download_backing=download_backing,
-                progress_callback=sync_progress_callback,
+        async with _acquire_processing_lock(lock_file):
+            cached_response = await _get_cached_split_response(
+                job_id_str,
+                stem,
+                vocals_path,
+                instrumental_path,
+                trimmed=trimmed,
+                trim_id=trim_id,
             )
+            if cached_response is not None:
+                return cached_response
+
+            async with client:
+                async with asyncio.timeout(_LALAL_PROCESS_TIMEOUT_SECONDS):
+                    results = await client.process_file(
+                        file_path,
+                        output_dir,
+                        stem=stem_type,
+                        download_stem=download_stem,
+                        download_backing=download_backing,
+                        progress_callback=sync_progress_callback,
+                    )
 
         if stem == _STEM_VOCALS and "stem" in results:
             result_path = results["stem"]
@@ -536,6 +548,9 @@ async def lalal_split(
             trim_id=trim_id,
         )
 
+    except TimeoutError:
+        logger.error("Lalal.ai processing timed out for job %s", job_id)
+        raise HTTPException(status_code=504, detail="Lalal.ai processing timed out")
     except LalalError:
         logger.exception("Lalal.ai error for job %s", job_id)
         raise HTTPException(status_code=500, detail="Lalal.ai processing failed")
@@ -544,10 +559,6 @@ async def lalal_split(
     except Exception:
         logger.exception("Unexpected error in Lalal.ai processing for job %s", job_id)
         raise HTTPException(status_code=500, detail="Processing failed")
-    finally:
-        if lock_fd is not None:
-            os.close(lock_fd)
-            lock_file.unlink(missing_ok=True)
 
 
 @router.get("/download/{job_id}")
@@ -591,4 +602,4 @@ async def lalal_download(
         if not await _path_is_file(stem_path):
             raise HTTPException(status_code=404, detail=f"{stem.capitalize()} file not found. Please process with Lalal.ai first.")
 
-    return FileResponse(path=stem_path, filename=stem_path.name)
+    return FileResponse(path=stem_path, filename=stem_path.name, media_type="audio/mpeg")

@@ -9,7 +9,7 @@
 import asyncio
 import logging
 import os
-import signal
+import queue
 import shutil
 from collections.abc import Callable
 from contextlib import asynccontextmanager
@@ -74,20 +74,16 @@ type EventPayload = dict[str, Any]
 type EventQueue = asyncio.Queue[EventPayload]
 
 BASE_DIR = Path(__file__).parent.resolve()
-DATA_DIR = (BASE_DIR.parent / "data").resolve()
+DATA_DIR = Path(os.environ.get("TUBEYOU_DATA_DIR", str(BASE_DIR.parent / "data"))).resolve()
 
 _SECRET_KEY = os.environ.get("TUBEYOU_SECRET_KEY")
 if not _SECRET_KEY:
     raise RuntimeError("TUBEYOU_SECRET_KEY environment variable is required")
 
-_DEV_MODE = os.environ.get("LOG_LEVEL", "").lower() == "debug"
 _DEFAULT_USER = os.environ.get("TUBEYOU_ADMIN_USER", "admin")
 _DEFAULT_PASS = os.environ.get("TUBEYOU_ADMIN_PASSWORD")
 if not _DEFAULT_PASS:
-    if _DEV_MODE:
-        _DEFAULT_PASS = "admin"
-    else:
-        raise RuntimeError("TUBEYOU_ADMIN_PASSWORD environment variable is required")
+    raise RuntimeError("TUBEYOU_ADMIN_PASSWORD environment variable is required")
 
 _CSRF_COOKIE = "tubeyou_csrf"
 _HOUSEKEEPING_INTERVAL = 3600  # Every hour
@@ -175,7 +171,9 @@ async def _event_broadcaster(queue: EventQueue) -> None:
                 publish_payload(payload)
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as exc:
+                if isinstance(exc, MemoryError):
+                    raise
                 logger.exception("Broadcasting status update failed")
     except asyncio.CancelledError:
         logger.debug("Event broadcaster cancelled")
@@ -199,6 +197,8 @@ async def _housekeeping_daemon() -> None:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
+                if isinstance(exc, MemoryError):
+                    raise
                 log.warning("Housekeeping failed: %s", exc)
     except asyncio.CancelledError:
         log.debug("Housekeeping daemon cancelled")
@@ -218,7 +218,11 @@ async def _requeue_pending_download_jobs() -> None:
             str(row["type"]),
             str(row["quality"]),
         )
-        await asyncio.to_thread(job_queue.put, job)
+        try:
+            job_queue.put_nowait(job)
+        except queue.Full:
+            logger.warning("Job queue full during startup replay, dropping job %s", row["id"])
+            break
         if index % 10 == 0:
             await asyncio.sleep(0)
 
@@ -234,7 +238,9 @@ async def _session_settings_refresh_daemon() -> None:
                 await asyncio.to_thread(refresh_session_settings_cache)
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as exc:
+                if isinstance(exc, MemoryError):
+                    raise
                 logger.exception("Session settings refresh failed")
     except asyncio.CancelledError:
         logger.debug("Session settings refresh daemon cancelled")
@@ -296,6 +302,7 @@ async def lifespan(app: FastAPI):
     """Application startup and shutdown lifecycle."""
     _ = app
     _check_dependencies()
+    await asyncio.to_thread(DATA_DIR.mkdir, parents=True, exist_ok=True)
     await asyncio.to_thread(init_db)
     init_sse_shutdown_event()
     await asyncio.to_thread(refresh_session_settings_cache)
@@ -360,29 +367,11 @@ async def lifespan(app: FastAPI):
     for task in background_tasks:
         task.add_done_callback(_log_background_task_completion)
 
-    # Register signal handlers to trigger SSE shutdown immediately on SIGINT/SIGTERM.
-    # These handlers set the shutdown flag, then restore the original handler and re-raise
-    # so uvicorn also receives the signal and initiates its shutdown sequence.
-    _original_handlers: dict[int, signal.Handlers] = {}
-
-    def _make_signal_handler(signum: int):
-        def _handler(sig: int, frame: object) -> None:
-            _ = frame
-            logger.debug("Shutdown signal received, closing SSE streams")
-            signal_sse_shutdown()
-            # Restore original handler and re-raise so uvicorn can handle it
-            original = _original_handlers.get(signum, signal.SIG_DFL)
-            signal.signal(signum, original)
-            signal.raise_signal(signum)
-        return _handler
-
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        _original_handlers[sig] = signal.signal(sig, _make_signal_handler(sig))
-
     try:
         yield
     finally:
         logger.info("Shutting down...")
+        signal_sse_shutdown()
         disable_event_dispatch()
         set_status_callback(None)
         set_analysis_status_callback(None)
@@ -419,7 +408,6 @@ class SessionRenewalMiddleware:
         request = Request(scope, receive=receive)
         request_path = request.url.path
         old_token = request.cookies.get(SESSION_COOKIE)
-        secure = request.url.scheme == "https"
         renewed_token: str | None = None
 
         if old_token and not _should_skip_session_renewal(request_path):
@@ -444,7 +432,11 @@ class SessionRenewalMiddleware:
 
 # Add middleware
 app.add_middleware(SessionRenewalMiddleware)
-app.add_middleware(CSRFMiddleware, csrf_cookie_name=_CSRF_COOKIE)
+app.add_middleware(
+    CSRFMiddleware,
+    csrf_cookie_name=_CSRF_COOKIE,
+    protected_paths=("/login", "/logout", "/api"),
+)
 app.state.limiter = limiter
 # Decorator-based SlowAPI checks use request.client.host, so proxy headers must
 # wrap the app before route handlers run when requests come through Caddy.

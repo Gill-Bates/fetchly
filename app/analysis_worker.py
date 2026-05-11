@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import logging
 import os
 import queue
@@ -56,6 +57,7 @@ _SHUTDOWN_SENTINEL: object = object()
 _QUEUE_MAXSIZE = 50
 # Tracks longer than 15 minutes are skipped to bound worst-case analysis time.
 _MAX_ANALYSIS_DURATION_SECONDS = max(0, int(os.environ.get("TUBEYOU_MAX_ANALYSIS_SECONDS", "900")))
+_ANALYSIS_TIMEOUT_SECONDS = max(1, int(os.environ.get("TUBEYOU_AUDIO_ANALYSIS_TIMEOUT_SECONDS", "300")))
 _analysis_queue: queue.Queue[AnalysisJob] | None = None
 _queue_lock = threading.Lock()
 _worker_lock = threading.Lock()
@@ -96,6 +98,11 @@ def _emit(job_id: str, status: str, message: str = "", **extra: Any) -> None:
 
 
 def set_status_callback(callback: Callable[[dict[str, Any]], None] | None) -> None:
+    """Set the status callback.
+
+    The callback must be thread-safe, non-blocking, and safe to invoke from
+    background worker threads.
+    """
     global _status_callback
     with _status_callback_lock:
         _status_callback = callback
@@ -198,6 +205,25 @@ def _commit_analysis(
         bpm=bpm,
         bpm_confidence=bpm_confidence,
     )
+
+
+def _extract_analysis_with_timeout(path: Path) -> Any:
+    """Run audio analysis with a hard wall-clock timeout.
+
+    The underlying analysis runs in an isolated worker thread so the main
+    analysis worker can abandon a stuck call after the configured timeout.
+    """
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="audio-analysis")
+    future = executor.submit(extract_analysis, path)
+    try:
+        return future.result(timeout=_ANALYSIS_TIMEOUT_SECONDS)
+    except concurrent.futures.TimeoutError as exc:
+        future.cancel()
+        raise TimeoutError(
+            f"Audio analysis exceeded time limit ({_ANALYSIS_TIMEOUT_SECONDS}s)"
+        ) from exc
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
     _emit(
         job_id,
         JobStatus.ANALYSIS_DONE,
@@ -232,7 +258,7 @@ def _apply_analysis(job: AnalysisJob) -> None:
         return
 
     with governor.analysis_semaphore_sync:
-        result = extract_analysis(job.file_path)
+        result = _extract_analysis_with_timeout(job.file_path)
 
     final_path = _rename_with_bpm(job.file_path, result.bpm)
     message = f"BPM {result.bpm or '-'}"
@@ -313,7 +339,9 @@ def _worker_loop() -> None:
             job = item
             try:
                 _handle_analysis_job(job)
-            except Exception:
+            except BaseException as exc:
+                if isinstance(exc, (SystemExit, KeyboardInterrupt, MemoryError)):
+                    raise
                 logger.exception("Audio analysis failed for %s", job.job_id)
                 _finalize_job(
                     job.job_id,
@@ -367,9 +395,9 @@ def stop_analysis_workers(timeout: float = 30.0) -> None:
     q = get_analysis_queue()
     for _ in threads_to_join:
         try:
-            q.put_nowait(_SHUTDOWN_SENTINEL)
+            q.put(_SHUTDOWN_SENTINEL, timeout=1.0)
         except queue.Full:
-            break
+            logger.warning("Could not enqueue analysis shutdown sentinel, queue full")
 
     per_thread_timeout = max(1.0, timeout / max(len(threads_to_join), 1))
     alive_threads: list[threading.Thread] = []

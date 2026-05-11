@@ -10,26 +10,29 @@
  * redirect-safe navigation, and iOS keyboard scroll stabilization.
  */
 
+let iosKeyboardController = null;
+
 function initLogin() {
     const form = document.getElementById("login-form");
     const submitBtn = document.getElementById("submit-btn");
+    const submitSpinner = document.getElementById("submit-spinner");
+    const submitBtnLabel = document.getElementById("submit-btn-label");
     const usernameIn = document.getElementById("username");
     const passwordIn = document.getElementById("password");
     const messageEl = document.getElementById("login-message");
     const messageText = document.getElementById("message-text");
 
-    if (!form || !submitBtn) {
+    if (!form || !submitBtn || !usernameIn || !passwordIn) {
         return;
     }
 
-    /** @type {HTMLMetaElement | null} */
-    const csrfMeta = document.querySelector('meta[name="csrf-token"]');
-
     function csrfToken() {
-        const token = csrfMeta?.content ?? "";
+        const token = document.querySelector('input[name="csrf_token"]')?.value
+            || document.querySelector('meta[name="csrf-token"]')?.content
+            || "";
         if (!token) {
             console.error(
-                "CSRF token missing from <meta name=\"csrf-token\">. "
+                "CSRF token missing from <meta name=\"csrf-token\"> or hidden input. "
                 + "Login requests will be rejected."
             );
         }
@@ -80,8 +83,8 @@ function initLogin() {
 
         setMessage(null);
 
-        const username = usernameIn?.value?.trim() ?? "";
-        const password = passwordIn?.value ?? "";
+        const username = usernameIn.value.trim();
+        const password = passwordIn.value;
 
         if (!username || !password) {
             setMessage("Please enter username and password.", "error");
@@ -90,9 +93,15 @@ function initLogin() {
         }
 
         submitBtn.disabled = true;
-        const originalText = submitBtn.textContent;
-        submitBtn.textContent = "Logging in...";
+        const originalLabel = submitBtnLabel?.textContent ?? "Sign in";
+        submitBtn.setAttribute("aria-busy", "true");
+        submitSpinner?.classList.remove("d-none");
+        if (submitBtnLabel) {
+            submitBtnLabel.textContent = "Signing in...";
+        }
         let success = false;
+        const controller = new AbortController();
+        const timeoutId = window.setTimeout(() => controller.abort(), 10_000);
 
         try {
             const response = await fetch("/login", {
@@ -103,7 +112,7 @@ function initLogin() {
                     "X-CSRF-Token": csrfToken(),
                 },
                 body: JSON.stringify({ username, password }),
-                signal: AbortSignal.timeout(10_000),
+                signal: controller.signal,
             });
 
             let data = {};
@@ -116,13 +125,15 @@ function initLogin() {
                 }
             }
 
+            if (response.status === 429) {
+                setMessage("Too many login attempts. Please wait a minute and try again.", "error");
+                passwordIn.focus();
+                return;
+            }
+
             if (!response.ok || data.ok === false) {
-                setMessage(data.detail || "Login failed.", "error");
-                const focusTarget =
-                    data.error_code === "USER_NOT_FOUND"
-                        ? usernameIn
-                        : passwordIn;
-                focusTarget?.focus();
+                setMessage("Invalid username or password.", "error");
+                passwordIn.focus();
                 return;
             }
 
@@ -131,7 +142,7 @@ function initLogin() {
             window.location.assign(redirect);
         } catch (err) {
             console.error("Login error:", err);
-            if (err?.name === "TimeoutError" || err?.name === "AbortError") {
+            if (err?.name === "AbortError") {
                 setMessage(
                     "Request timed out. If this persists, try refreshing the page.",
                     "error",
@@ -140,12 +151,17 @@ function initLogin() {
                 setMessage("Network error. Please try again.", "error");
             }
         } finally {
+            window.clearTimeout(timeoutId);
             if (passwordIn) passwordIn.value = "";
 
             if (!success) {
                 isSubmitting = false;
                 submitBtn.disabled = false;
-                submitBtn.textContent = originalText;
+                submitBtn.removeAttribute("aria-busy");
+                submitSpinner?.classList.add("d-none");
+                if (submitBtnLabel) {
+                    submitBtnLabel.textContent = originalLabel;
+                }
             }
         }
     }
@@ -154,6 +170,10 @@ function initLogin() {
 
     function setupIOSKeyboardStabilization() {
         if (!window.visualViewport) return;
+
+        iosKeyboardController?.abort();
+        iosKeyboardController = new AbortController();
+        const { signal } = iosKeyboardController;
 
         const vv = window.visualViewport;
         let lastHeight = vv.height;
@@ -202,8 +222,9 @@ function initLogin() {
             }
         }
 
-        vv.addEventListener("resize", onViewportResize);
-        document.addEventListener("focusin", onFocusIn);
+        vv.addEventListener("resize", onViewportResize, { signal });
+        document.addEventListener("focusin", onFocusIn, { signal });
+        window.addEventListener("pagehide", () => iosKeyboardController?.abort(), { once: true, signal });
     }
 
     setupIOSKeyboardStabilization();

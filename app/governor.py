@@ -34,7 +34,7 @@ def _read_cgroup_file(path: str) -> str | None:
     """Read a cgroup file, returning None if not accessible."""
     try:
         return Path(path).read_text(encoding="utf-8").strip()
-    except (OSError, FileNotFoundError):
+    except OSError:
         return None
 
 
@@ -250,6 +250,7 @@ class Governor:
         self._config: GovernorConfig | None = None
         self._limits: ResourceLimits | None = None
         self._lock = threading.Lock()
+        self._memory_read_lock = threading.Lock()
         
         # Semaphores are initialized eagerly in configure()
         self._cpu_sem: asyncio.Semaphore | None = None
@@ -475,6 +476,20 @@ class Governor:
             return
 
         self._store_memory_cache(value)
+
+    def _read_memory_available_mb_serialized(self) -> int:
+        """Read memory once across concurrent cold-cache callers."""
+        with self._memory_read_lock:
+            with self._lock:
+                cached = self._memory_cache
+                if cached is not None:
+                    cached_at, cached_value = cached
+                    if monotonic() - cached_at < _MEMORY_CACHE_TTL_SECONDS:
+                        return cached_value
+
+            result = self._read_memory_available_mb_uncached()
+            self._store_memory_cache(result)
+            return result
     
     def get_memory_available_mb(self) -> int:
         """Get available memory in MB (cgroup-aware).
@@ -504,14 +519,39 @@ class Governor:
                     ).start()
                     return cached_value
 
-        result = self._read_memory_available_mb_uncached()
-        self._store_memory_cache(result)
-        return result
+        return self._read_memory_available_mb_serialized()
+
+    async def get_memory_available_mb_async(self) -> int:
+        """Async variant of get_memory_available_mb() for request paths."""
+        now = monotonic()
+        with self._lock:
+            cached = self._memory_cache
+            if cached is not None:
+                cached_at, cached_value = cached
+                if now - cached_at < _MEMORY_CACHE_TTL_SECONDS:
+                    return cached_value
+                if not self._memory_refreshing:
+                    self._memory_refreshing = True
+                    threading.Thread(
+                        target=self._refresh_memory_cache_background,
+                        daemon=True,
+                    ).start()
+                    return cached_value
+
+        return await asyncio.to_thread(self._read_memory_available_mb_serialized)
 
     def _memory_backpressure_state(self) -> tuple[int, int, bool]:
         """Return (available_mb, threshold_mb, is_triggered)."""
         config, _ = self._require_configured()
         mem_available = self.get_memory_available_mb()
+        threshold = config.memory_threshold_mb
+        triggered = config.enable_backpressure and mem_available >= 0 and mem_available < threshold
+        return mem_available, threshold, triggered
+
+    async def _memory_backpressure_state_async(self) -> tuple[int, int, bool]:
+        """Async variant of _memory_backpressure_state()."""
+        config, _ = self._require_configured()
+        mem_available = await self.get_memory_available_mb_async()
         threshold = config.memory_threshold_mb
         triggered = config.enable_backpressure and mem_available >= 0 and mem_available < threshold
         return mem_available, threshold, triggered
@@ -533,11 +573,50 @@ class Governor:
             return False
         
         return True
+
+    async def can_accept_job_async(self) -> bool:
+        """Async variant of can_accept_job() for request paths."""
+        config, _ = self._require_configured()
+
+        if not config.enable_backpressure:
+            return True
+
+        mem_available, threshold, triggered = await self._memory_backpressure_state_async()
+        if triggered:
+            logger.warning(
+                "Memory below threshold: %dMB available, %dMB required",
+                mem_available,
+                threshold,
+            )
+            return False
+
+        return True
     
     def status(self) -> GovernorStatus:
         """Return current governor status without logging side effects."""
         config, limits = self._require_configured()
         mem_available, threshold, triggered = self._memory_backpressure_state()
+        can_accept = True if not config.enable_backpressure else not triggered
+
+        return {
+            "effective_cpus": limits.effective_cpus,
+            "worker_count": limits.worker_count,
+            "queue_maxsize": limits.queue_maxsize,
+            "cpu_limit": limits.cpu_limit,
+            "analysis_limit": limits.analysis_limit,
+            "io_limit": limits.io_limit,
+            "transcode_limit": limits.transcode_limit,
+            "memory_available_mb": mem_available,
+            "memory_threshold_mb": threshold,
+            "memory_backpressure_triggered": triggered,
+            "backpressure_enabled": config.enable_backpressure,
+            "can_accept_job": can_accept,
+        }
+
+    async def status_async(self) -> GovernorStatus:
+        """Async variant of status() for request paths."""
+        config, limits = self._require_configured()
+        mem_available, threshold, triggered = await self._memory_backpressure_state_async()
         can_accept = True if not config.enable_backpressure else not triggered
 
         return {

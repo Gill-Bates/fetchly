@@ -22,9 +22,7 @@ __all__ = [
     "FileSize",
     "filesize",
     "is_lalala_configured",
-    "is_lalal_configured",
     "localtime",
-    "mask_api_key",
     "mask_secret",
     "public_settings",
     "register_filters",
@@ -107,8 +105,6 @@ def localtime(value: str | None) -> Markup:
         dt = datetime.fromisoformat(str(value))
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=UTC)
-        else:
-            dt = dt.astimezone(UTC)
         local_dt = dt.astimezone(LOCAL_TZ)
         date_str = escape(f"{local_dt:%d.%m.%Y}")
         time_str = escape(f"{local_dt:%H:%M}")
@@ -154,11 +150,6 @@ def mask_secret(value: str | None) -> str:
     return f"{secret[:4]}...{secret[-4:]}"
 
 
-def mask_api_key(value: str | None) -> str:
-    """Mask an API key value."""
-    return mask_secret(value)
-
-
 def _is_sensitive_key(key: str) -> bool:
     lowered = key.lower()
     return (
@@ -187,11 +178,6 @@ def is_lalala_configured(settings: dict[str, Any]) -> bool:
         str(settings.get("lalalaai_email", "")).strip()
         and str(settings.get("lalalaai_auth_key", "")).strip()
     )
-
-
-def is_lalal_configured(settings: dict[str, Any]) -> bool:
-    """Backward-compatible wrapper for legacy templates and routes."""
-    return is_lalala_configured(settings)
 
 
 def register_filters(templates: Jinja2Templates) -> None:

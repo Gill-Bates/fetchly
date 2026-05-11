@@ -11,7 +11,9 @@ from __future__ import annotations
 import asyncio
 import logging
 import mimetypes
+import threading
 import uuid
+from contextlib import suppress
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -32,11 +34,26 @@ router = APIRouter(tags=["media"])
 
 # Constants
 _LOSSLESS_AUDIO_EXTENSIONS = frozenset({".opus", ".m4a", ".webm", ".ogg", ".aac", ".flac", ".wav"})
+_BROWSER_SAFE_AUDIO_EXTENSIONS = frozenset({".mp3", ".m4a", ".aac", ".wav"})
+_AUDIO_MIME_TYPES = {
+    ".opus": "audio/opus",
+    ".ogg": "audio/ogg",
+    ".flac": "audio/flac",
+    ".wav": "audio/wav",
+    ".m4a": "audio/mp4",
+    ".webm": "audio/webm",
+    ".aac": "audio/aac",
+    ".mp3": "audio/mpeg",
+}
+_NOSNIFF_HEADER = {"X-Content-Type-Options": "nosniff"}
 
 # Module-level state
 _DATA_DIR: Path | None = None
 _BASE_DIR: Path | None = None
 _templates: "Jinja2Templates | None" = None
+_transcode_locks: dict[Path, asyncio.Lock] = {}
+_transcode_lock_refs: dict[Path, int] = {}
+_transcode_locks_guard = threading.Lock()
 
 
 def init_media(
@@ -125,7 +142,10 @@ def resolve_job_path(raw_filename: str | None) -> Path:
     file_path = Path(str(raw_filename).strip())
     if not file_path.is_absolute():
         file_path = data_dir / file_path
-    file_path = file_path.resolve()
+    try:
+        file_path = file_path.resolve()
+    except OSError as exc:
+        raise HTTPException(status_code=404, detail="not found") from exc
     try:
         file_path.relative_to(data_dir)
     except ValueError as exc:
@@ -150,6 +170,15 @@ def get_mp3_cache_path(source_path: Path) -> Path:
     return source_path.parent / f"{stem}.mp3"
 
 
+def needs_browser_audio_fallback(file_path: Path) -> bool:
+    """Return True when the source container/codec is not broadly browser-safe.
+
+    iOS Safari is stricter than Chromium and will reject common containers like
+    WebM/Opus or Ogg even though desktop Chrome can play them.
+    """
+    return file_path.suffix.lower() not in _BROWSER_SAFE_AUDIO_EXTENSIONS
+
+
 async def transcode_to_mp3(source_path: Path, output_path: Path) -> Path:
     """Transcode a lossless audio file to high-quality MP3.
 
@@ -169,47 +198,87 @@ async def transcode_to_mp3(source_path: Path, output_path: Path) -> Path:
     if await _path_is_file(output_path):
         return output_path
 
-    temp_path = output_path.with_name(f"{output_path.name}.tmp.{uuid.uuid4().hex[:8]}")
-
-    cmd = [
-        "ffmpeg",
-        "-y",
-        "-i", str(source_path),
-        "-vn",
-        "-codec:a", "libmp3lame",
-        "-q:a", "0",
-        "-map_metadata", "0",
-        "-f", "mp3",
-        str(temp_path),
-    ]
+    with _transcode_locks_guard:
+        lock = _transcode_locks.get(output_path)
+        if lock is None:
+            lock = asyncio.Lock()
+            _transcode_locks[output_path] = lock
+            _transcode_lock_refs[output_path] = 0
+        _transcode_lock_refs[output_path] = _transcode_lock_refs.get(output_path, 0) + 1
 
     try:
-        async with governor.transcode_semaphore:
+        async with lock:
             if await _path_is_file(output_path):
                 return output_path
 
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=600)
+            temp_path = output_path.with_name(f"{output_path.name}.tmp.{uuid.uuid4().hex[:8]}")
+            cmd = [
+                "ffmpeg",
+                "-y",
+                "-i", str(source_path),
+                "-vn",
+                "-codec:a", "libmp3lame",
+                "-q:a", "0",
+                "-map_metadata", "0",
+                "-f", "mp3",
+                str(temp_path),
+            ]
+            proc: asyncio.subprocess.Process | None = None
 
-            if proc.returncode != 0:
-                logger.error("FFmpeg transcode failed: %s", stderr.decode() if stderr else "unknown error")
-                raise RuntimeError("Audio transcoding failed")
+            try:
+                async with governor.transcode_semaphore:
+                    if await _path_is_file(output_path):
+                        return output_path
 
-            await asyncio.to_thread(temp_path.replace, output_path)
-        logger.info("Transcoded audio to MP3: %s", output_path.name)
-        return output_path
+                    try:
+                        proc = await asyncio.create_subprocess_exec(
+                            *cmd,
+                            stdout=asyncio.subprocess.DEVNULL,
+                            stderr=asyncio.subprocess.PIPE,
+                        )
+                    except FileNotFoundError as exc:
+                        raise RuntimeError("ffmpeg not found") from exc
 
-    except asyncio.TimeoutError:
-        raise RuntimeError("Audio transcoding timed out")
-    except Exception:
-        raise
+                    _, stderr = await asyncio.wait_for(proc.communicate(), timeout=600)
+
+                    if proc.returncode != 0:
+                        logger.error(
+                            "FFmpeg transcode failed: %s",
+                            stderr.decode(errors="replace") if stderr else "unknown error",
+                        )
+                        raise RuntimeError("Audio transcoding failed")
+
+                    await asyncio.to_thread(temp_path.replace, output_path)
+                logger.info("Transcoded audio to MP3: %s", output_path.name)
+                return output_path
+
+            except asyncio.TimeoutError as exc:
+                if proc is not None and proc.returncode is None:
+                    proc.kill()
+                    with suppress(ProcessLookupError):
+                        await proc.wait()
+                raise RuntimeError("Audio transcoding timed out") from exc
+            finally:
+                if await _path_is_file(temp_path):
+                    await asyncio.to_thread(temp_path.unlink, missing_ok=True)
     finally:
-        if await _path_is_file(temp_path):
-            await asyncio.to_thread(temp_path.unlink, missing_ok=True)
+        with _transcode_locks_guard:
+            next_ref_count = _transcode_lock_refs.get(output_path, 0) - 1
+            if next_ref_count <= 0:
+                _transcode_lock_refs.pop(output_path, None)
+                _transcode_locks.pop(output_path, None)
+            else:
+                _transcode_lock_refs[output_path] = next_ref_count
+
+
+async def _ensure_mp3(file_path: Path) -> Path:
+    """Return an MP3 path, transcoding the source when the cache is missing."""
+    mp3_path = get_mp3_cache_path(file_path)
+    if await _path_is_file(mp3_path):
+        return mp3_path
+
+    await transcode_to_mp3(file_path, mp3_path)
+    return mp3_path
 
 
 # ============================================================================
@@ -257,18 +326,25 @@ async def download(request: Request, job_id: uuid.UUID):
         return JSONResponse(status_code=exc.status_code, content={"error": exc.detail})
 
     if job["type"] == "audio" and is_lossless_audio_source(file_path):
-        mp3_path = get_mp3_cache_path(file_path)
+        try:
+            mp3_path = await _ensure_mp3(file_path)
+        except RuntimeError as exc:
+            logger.error("Failed to transcode audio for job %s: %s", job_id, exc)
+            return JSONResponse(status_code=500, content={"error": "Audio transcoding failed"})
 
-        if not await _path_is_file(mp3_path):
-            try:
-                await transcode_to_mp3(file_path, mp3_path)
-            except RuntimeError as exc:
-                logger.error("Failed to transcode audio for job %s: %s", job_id, exc)
-                return JSONResponse(status_code=500, content={"error": "Audio transcoding failed"})
+        return FileResponse(
+            path=mp3_path,
+            filename=mp3_path.name,
+            media_type="audio/mpeg",
+            headers=_NOSNIFF_HEADER,
+        )
 
-        return FileResponse(path=mp3_path, filename=mp3_path.name, media_type="audio/mpeg")
-
-    return FileResponse(path=file_path, filename=file_path.name, media_type=_guess_media_type(file_path))
+    return FileResponse(
+        path=file_path,
+        filename=file_path.name,
+        media_type=_guess_media_type(file_path),
+        headers=_NOSNIFF_HEADER,
+    )
 
 
 @router.get("/audio-source/{job_id}")
@@ -276,8 +352,8 @@ async def download(request: Request, job_id: uuid.UUID):
 async def audio_source(request: Request, job_id: uuid.UUID):
     """Serve the job's stored audio file for trimming.
 
-    The X-Audio-Quality header indicates whether the served file matches
-    the internal lossless source naming scheme or a lossy audio file.
+    The X-Audio-Quality header indicates whether the served file is the
+    original source or a cached MP3 fallback for browser playback.
     """
     if not current_user(request):
         return JSONResponse(status_code=401, content={"error": "unauthorized"})
@@ -289,23 +365,27 @@ async def audio_source(request: Request, job_id: uuid.UUID):
 
     quality = "lossless" if is_lossless_audio_source(file_path) else "lossy"
 
-    mime_types = {
-        ".opus": "audio/opus",
-        ".ogg": "audio/ogg",
-        ".flac": "audio/flac",
-        ".wav": "audio/wav",
-        ".m4a": "audio/mp4",
-        ".webm": "audio/webm",
-        ".aac": "audio/aac",
-        ".mp3": "audio/mpeg",
-    }
-    media_type = mime_types.get(file_path.suffix.lower(), "application/octet-stream")
+    if needs_browser_audio_fallback(file_path):
+        try:
+            mp3_path = await _ensure_mp3(file_path)
+        except RuntimeError as exc:
+            logger.error("Failed to transcode audio source for job %s: %s", job_id, exc)
+            return JSONResponse(status_code=500, content={"error": "Audio transcoding failed"})
+
+        return FileResponse(
+            path=mp3_path,
+            filename=mp3_path.name,
+            media_type="audio/mpeg",
+            headers={**_NOSNIFF_HEADER, "X-Audio-Quality": f"{quality}-mp3-fallback"},
+        )
+
+    media_type = _AUDIO_MIME_TYPES.get(file_path.suffix.lower(), "application/octet-stream")
 
     return FileResponse(
         path=file_path,
         filename=file_path.name,
         media_type=media_type,
-        headers={"X-Audio-Quality": quality},
+        headers={**_NOSNIFF_HEADER, "X-Audio-Quality": quality},
     )
 
 
@@ -330,4 +410,4 @@ async def thumbnail(request: Request, job_id: uuid.UUID):
     except HTTPException as exc:
         return JSONResponse(status_code=exc.status_code, content={"error": exc.detail})
 
-    return FileResponse(path=thumb_path, media_type="image/jpeg")
+    return FileResponse(path=thumb_path, media_type="image/jpeg", headers=_NOSNIFF_HEADER)

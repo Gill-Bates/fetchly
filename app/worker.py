@@ -132,6 +132,15 @@ _QUALITY_LABELS: Final[dict[str, str]] = {
     "small": "smallQuality",
     "best": "bestQuality",
 }
+_AUDIO_SOURCE_EXTENSIONS: Final[frozenset[str]] = frozenset({
+    ".opus",
+    ".m4a",
+    ".webm",
+    ".ogg",
+    ".aac",
+    ".flac",
+    ".wav",
+})
 
 
 class JobCancelledError(Exception):
@@ -158,11 +167,11 @@ def signal_shutdown() -> None:
 
 def cancel_job(job_id: str) -> None:
     """Mark a job for cancellation."""
-    with _cancel_lock:
-        _cancelled_jobs.add(job_id)
     # Best-effort: terminate currently running subprocess for immediate cancel.
     with _active_lock:
         proc = _active_processes.get(job_id)
+    with _cancel_lock:
+        _cancelled_jobs.add(job_id)
     if proc is not None:
         try:
             proc.terminate()
@@ -249,6 +258,8 @@ def _run_cmd(
             # Avoid PIPE deadlocks on long-running yt-dlp/ffmpeg stderr output.
             stderr=subprocess.DEVNULL,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         ) as process:
             proc = process
             if job_id is not None:
@@ -331,9 +342,15 @@ def _ffmpeg_out_seconds(progress_state: dict[str, str]) -> float | None:
 def _read_progress_lines(pipe: Any, target_queue: queue.Queue[str | None]) -> None:
     try:
         for raw_line in iter(pipe.readline, ""):
-            target_queue.put(raw_line.rstrip())
+            try:
+                target_queue.put(raw_line.rstrip(), timeout=0.1)
+            except queue.Full:
+                continue
     finally:
-        target_queue.put(None)
+        try:
+            target_queue.put(None, timeout=0.1)
+        except queue.Full:
+            pass
 
 
 def _emit_ffmpeg_progress(
@@ -373,7 +390,7 @@ def _run_ffmpeg_transcode(
     logger.debug("Executing ffmpeg with progress: %s", " ".join(cmd))
     started = time.monotonic()
     proc: subprocess.Popen[str] | None = None
-    progress_lines: queue.Queue[str | None] = queue.Queue()
+    progress_lines: queue.Queue[str | None] = queue.Queue(maxsize=500)
     reader_thread: threading.Thread | None = None
     progress_state: dict[str, str] = {}
     last_progress = -1
@@ -384,6 +401,8 @@ def _run_ffmpeg_transcode(
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             bufsize=1,
         ) as process:
             proc = process
@@ -547,13 +566,13 @@ def _find_audio_source(job_dir: Path, stem: str) -> Path | None:
     This function finds the actual downloaded file matching the stem pattern.
     """
     # Common audio extensions from YouTube
-    for ext in ("opus", "m4a", "webm", "ogg", "aac", "flac", "wav"):
-        source = job_dir / f"{stem}.source.{ext}"
+    for ext in _AUDIO_SOURCE_EXTENSIONS:
+        source = job_dir / f"{stem}.source{ext}"
         if source.is_file():
             return source
     # Fallback: search for any .source.* audio file
     for candidate in job_dir.glob(f"{stem}.source.*"):
-        if candidate.suffix.lower() not in (".jpg", ".json", ".part"):
+        if candidate.suffix.lower() in _AUDIO_SOURCE_EXTENSIONS:
             return candidate
     return None
 
@@ -627,42 +646,43 @@ def _download_media(job_id: str, url: str, *, quality: str, media_type: str) -> 
     _emit(job_id, "transcoding", transcode_message, progress=0, eta_seconds=None)
     _, _, source_duration_seconds = _probe_media(temp, media_type)
     
-    # Use Governor semaphore to limit concurrent transcoding (CPU/memory protection)
-    with governor.transcode_semaphore_sync:
-        _run_ffmpeg_transcode(
-            [
-                "ffmpeg",
-                "-y",
-                "-i",
-                str(temp),
-                "-vf",
-                scale,
-                "-c:v",
-                "libx264",
-                "-preset",
-                "fast",
-                "-crf",
-                "23",
-                "-c:a",
-                "aac",
-                "-b:a",
-                "128k",
-                "-progress",
-                "pipe:1",
-                "-nostats",
-                str(out),
-            ],
-            timeout=_TIMEOUT_TRANSCODE,
-            job_id=job_id,
-            message=transcode_message,
-            duration_seconds=source_duration_seconds,
-        )
-    _check_cancellation(job_id)
-
     try:
-        temp.unlink(missing_ok=True)
-    except OSError as exc:
-        logger.warning("Could not remove temp file %s: %s", temp, exc)
+        # Use Governor semaphore to limit concurrent transcoding (CPU/memory protection)
+        with governor.transcode_semaphore_sync:
+            _run_ffmpeg_transcode(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-i",
+                    str(temp),
+                    "-vf",
+                    scale,
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "fast",
+                    "-crf",
+                    "23",
+                    "-c:a",
+                    "aac",
+                    "-b:a",
+                    "128k",
+                    "-progress",
+                    "pipe:1",
+                    "-nostats",
+                    str(out),
+                ],
+                timeout=_TIMEOUT_TRANSCODE,
+                job_id=job_id,
+                message=transcode_message,
+                duration_seconds=source_duration_seconds,
+            )
+        _check_cancellation(job_id)
+    finally:
+        try:
+            temp.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning("Could not remove temp file %s: %s", temp, exc)
 
     return out
 
@@ -676,8 +696,10 @@ def _get_filesize(path: Path) -> int | None:
 
 def _title_from_output_name(path: Path) -> str | None:
     stem = path.stem
+    if stem.endswith(".source"):
+        stem = stem[:-7]
     title = re.sub(r"\s\((?:max|medium|small|best|default|\w+)Quality\)$", "", stem)
-    title = title.replace(".source", "").strip()
+    title = title.strip()
     return title or None
 
 
@@ -828,17 +850,7 @@ def worker() -> None:
             _emit(job_id, "processing", "Worker picked up job")
             process_job(job)
         except ShutdownError:
-            logger.debug("Worker exiting due to shutdown, requeuing %s", job_id)
-            try:
-                q.put(job, timeout=5.0)
-            except queue.Full:
-                logger.critical("Queue full, cannot requeue %s", job_id)
-                update_job_if_status(
-                    job_id,
-                    ("processing",),
-                    status="queued",
-                    message="Requeue on shutdown failed; restart will be required",
-                )
+            logger.debug("Worker exiting due to shutdown, job %s is persisted as queued", job_id)
             return
         except Exception:
             logger.exception("Unhandled worker error for job %s", job_id)
@@ -888,11 +900,16 @@ def stop_workers(timeout: float = 5.0) -> None:
 
     # Send sentinel to each worker to wake them from queue.get()
     q = get_job_queue()
+    sent_count = 0
     for _ in threads:
         try:
-            q.put_nowait(_SHUTDOWN_SENTINEL)
+            q.put(_SHUTDOWN_SENTINEL, timeout=1.0)
+            sent_count += 1
         except queue.Full:
+            logger.warning("Queue full, could not send shutdown sentinel to worker")
             break
+
+    logger.info("Sent %d/%d shutdown sentinels", sent_count, len(threads))
 
     # Divide timeout among threads to avoid O(n * timeout) worst case
     per_thread_timeout = max(0.5, timeout / max(len(threads), 1))

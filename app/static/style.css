@@ -37,17 +37,19 @@
 
 .table-responsive {
     overflow-x: auto;
-    overflow-y: hidden; /* verhindert ghost scroll */
+    overflow-y: hidden;
+    /* verhindert ghost scroll */
     /* Use auto gutter to avoid ghost scrollbar when content doesn't overflow */
     scrollbar-gutter: auto;
     scrollbar-width: thin;
     scrollbar-color: rgba(255, 255, 255, 0.2) transparent;
     position: relative;
-    -webkit-overflow-scrolling: touch; /* iOS momentum scrolling */
+    -webkit-overflow-scrolling: touch;
+    /* iOS momentum scrolling */
 }
 
 /* verhindert Subpixel overflow durch Tabellenberechnung */
-.table-responsive > table {
+.table-responsive>table {
     min-width: 0;
 }
 
@@ -183,11 +185,13 @@ textarea:focus-visible {
         var(--bg-gradient);
     color: var(--text);
     min-height: 100vh;
-    min-height: 100dvh; /* Fixes iOS Safari URL-bar height calculation */
+    min-height: 100dvh;
+    /* Fixes iOS Safari URL-bar height calculation */
     font-family: "Roboto Flex", system-ui, -apple-system, sans-serif;
     padding-top: var(--nav-offset);
     margin: 0;
-    background-attachment: scroll; /* Fixed attachment breaks on mobile */
+    background-attachment: scroll;
+    /* Fixed attachment breaks on mobile */
     /* subtle global contrast improvement */
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
@@ -543,13 +547,13 @@ body {
 }
 
 /* Narrow split toggle in button groups - override Bootstrap's .btn-group > .btn { flex: 1 1 auto } */
-.btn-group > .btn-icon,
-.btn-group > .dropdown-toggle-split {
+.btn-group>.btn-icon,
+.btn-group>.dropdown-toggle-split {
     flex: 0 0 auto !important;
 }
 
 /* Split dropdown toggle: narrow caret-only button */
-.btn-group > .btn.dropdown-toggle-split {
+.btn-group>.btn.dropdown-toggle-split {
     padding-left: 0.4rem !important;
     padding-right: 0.4rem !important;
     min-width: 28px !important;
@@ -879,7 +883,7 @@ button .material-symbols-outlined,
 }
 
 /* Add vertical spacing above Settings page heading */
-.settings-form-layout > h1 {
+.settings-form-layout>h1 {
     margin-top: var(--space-4);
 }
 
@@ -898,17 +902,17 @@ button .material-symbols-outlined,
 }
 
 /* Only card body should expand, not header */
-.ui-card > .ui-card-body {
+.ui-card>.ui-card-body {
     flex: 1;
 }
 
 /* Generic wrapper divs (non-header, non-body) can expand */
-.ui-card:not(.ui-card--stat) > div:not(.ui-card-header):not(.ui-card-body) {
+.ui-card:not(.ui-card--stat)>div:not(.ui-card-header):not(.ui-card-body) {
     flex: 1;
 }
 
 /* Stat cards: children must not expand; centering happens via justify-content on the card */
-.ui-card--stat > div {
+.ui-card--stat>div {
     flex: 0 0 auto;
 }
 
@@ -921,11 +925,9 @@ button .material-symbols-outlined,
 }
 
 .ui-card--primary {
-    background: linear-gradient(
-        135deg,
-        color-mix(in srgb, var(--primary) 15%, rgba(15, 23, 42, 0.92)),
-        rgba(15, 23, 42, 0.88)
-    );
+    background: linear-gradient(135deg,
+            color-mix(in srgb, var(--primary) 15%, rgba(15, 23, 42, 0.92)),
+            rgba(15, 23, 42, 0.88));
     border-color: color-mix(in srgb, var(--primary) 40%, var(--border));
 }
 
@@ -995,11 +997,11 @@ button .material-symbols-outlined,
     gap: var(--space-4);
 }
 
-.settings-grid-item > .ui-card {
+.settings-grid-item>.ui-card {
     width: 100%;
 }
 
-.settings-grid-stack > .ui-card {
+.settings-grid-stack>.ui-card {
     height: auto;
 }
 
@@ -1023,7 +1025,7 @@ button .material-symbols-outlined,
     min-width: 0;
 }
 
-.settings-field-stack > * {
+.settings-field-stack>* {
     min-width: 0;
 }
 
@@ -1109,8 +1111,8 @@ button .material-symbols-outlined,
     gap: var(--space-3);
 }
 
-.lalal-tile-section > .text-muted,
-.lalal-tile-section > .lalal-tile-header {
+.lalal-tile-section>.text-muted,
+.lalal-tile-section>.lalal-tile-header {
     margin-bottom: 0 !important;
 }
 
@@ -1197,7 +1199,7 @@ button .material-symbols-outlined,
     min-height: 0;
 }
 
-.video-preview-grid > * {
+.video-preview-grid>* {
     min-width: 0;
 }
 
@@ -1239,7 +1241,7 @@ button .material-symbols-outlined,
 }
 
 /* Inner wrapper div */
-#submitCard > div {
+#submitCard>div {
     flex: 0 0 auto !important;
     height: auto !important;
 }
@@ -1251,7 +1253,7 @@ button .material-symbols-outlined,
     min-height: 0 !important;
 }
 
-.ui-card:has(#submitForm) > div {
+.ui-card:has(#submitForm)>div {
     flex: 0 0 auto !important;
     height: auto !important;
 }
@@ -1361,12 +1363,10 @@ button .material-symbols-outlined,
     position: absolute;
     inset: 0;
     border-radius: 999px;
-    background: linear-gradient(
-        90deg,
-        rgba(255, 255, 255, 0.08) 0%,
-        rgba(255, 255, 255, 0.24) 50%,
-        rgba(255, 255, 255, 0.08) 100%
-    );
+    background: linear-gradient(90deg,
+            rgba(255, 255, 255, 0.08) 0%,
+            rgba(255, 255, 255, 0.24) 50%,
+            rgba(255, 255, 255, 0.08) 100%);
     background-size: 200% 100%;
     animation: meta-shimmer 1.2s linear infinite;
 }
@@ -1880,8 +1880,15 @@ td[data-label="Title"] {
 }
 
 @keyframes pulse {
-    0%, 100% { opacity: 1; }
-    50% { opacity: 0.6; }
+
+    0%,
+    100% {
+        opacity: 1;
+    }
+
+    50% {
+        opacity: 0.6;
+    }
 }
 
 /* Action buttons in tables */
@@ -2023,11 +2030,9 @@ td:last-child {
 }
 
 #lalalAuthModal .modal-body {
-    background: linear-gradient(
-        180deg,
-        color-mix(in srgb, var(--surface-strong) 92%, transparent),
-        color-mix(in srgb, var(--surface) 75%, transparent)
-    );
+    background: linear-gradient(180deg,
+            color-mix(in srgb, var(--surface-strong) 92%, transparent),
+            color-mix(in srgb, var(--surface) 75%, transparent));
     padding: 2rem;
     display: flex;
     flex-direction: column;
@@ -2067,11 +2072,9 @@ td:last-child {
 }
 
 .auth-method-panel--alt {
-    background: linear-gradient(
-        135deg,
-        color-mix(in srgb, var(--primary) 12%, var(--surface-elevated)),
-        color-mix(in srgb, var(--primary) 4%, var(--surface-elevated))
-    );
+    background: linear-gradient(135deg,
+            color-mix(in srgb, var(--primary) 12%, var(--surface-elevated)),
+            color-mix(in srgb, var(--primary) 4%, var(--surface-elevated)));
     border-color: color-mix(in srgb, var(--primary) 25%, var(--border));
     box-shadow: 0 0 0 1px rgba(99, 102, 241, 0.25);
 }
@@ -2123,6 +2126,8 @@ td:last-child {
     border: 1px solid var(--border);
     overflow: hidden;
     cursor: grab;
+    touch-action: none;
+    overscroll-behavior: none;
 }
 
 #trimWave.has-selection {
@@ -2258,8 +2263,8 @@ td:last-child {
     }
 
     /* Neutralize Bootstrap columns inside the custom mobile grid. */
-    .stats-row > .col-6,
-    .stats-row > .col-md-3 {
+    .stats-row>.col-6,
+    .stats-row>.col-md-3 {
         width: 100% !important;
         flex: 0 0 auto !important;
         max-width: none !important;
@@ -2409,18 +2414,49 @@ td:last-child {
         letter-spacing: 0.03em;
     }
 
-    .table tbody td[data-label="Format"]::before { content: "Format"; }
-    .table tbody td[data-label="Quality"]::before { content: "Quality"; }
-    .table tbody td[data-label="BPM"]::before { content: "BPM"; }
+    .table tbody td[data-label="Format"]::before {
+        content: "Format";
+    }
+
+    .table tbody td[data-label="Quality"]::before {
+        content: "Quality";
+    }
+
+    .table tbody td[data-label="BPM"]::before {
+        content: "BPM";
+    }
 
     /* Grid placement: Row 2 */
-    .table tbody td[data-label="Format"]  { grid-column: 1; grid-row: 2; }
-    .table tbody td[data-label="Quality"] { grid-column: 2; grid-row: 2; }
-    .table tbody td[data-label="BPM"]     { grid-column: 3; grid-row: 2; }
-    .table tbody td[data-label="Created"] { grid-column: 4; grid-row: 2; justify-content: flex-start; align-self: center; text-align: left; }
+    .table tbody td[data-label="Format"] {
+        grid-column: 1;
+        grid-row: 2;
+    }
+
+    .table tbody td[data-label="Quality"] {
+        grid-column: 2;
+        grid-row: 2;
+    }
+
+    .table tbody td[data-label="BPM"] {
+        grid-column: 3;
+        grid-row: 2;
+    }
+
+    .table tbody td[data-label="Created"] {
+        grid-column: 4;
+        grid-row: 2;
+        justify-content: flex-start;
+        align-self: center;
+        text-align: left;
+    }
+
     /* Col 5 = 1fr spacer (empty, no element) */
     /* Status+Action: far right */
-    .table tbody td[data-label="Status"]  { grid-column: 6; grid-row: 2; align-self: center; }
+    .table tbody td[data-label="Status"] {
+        grid-column: 6;
+        grid-row: 2;
+        align-self: center;
+    }
 
     /* Date: muted small text, only date-part visible */
     .table tbody td[data-label="Created"],
@@ -2513,12 +2549,12 @@ td:last-child {
         width: auto;
     }
 
-    .status-action-group .btn-group > .btn {
+    .status-action-group .btn-group>.btn {
         display: inline-grid;
         place-items: center;
     }
 
-    .status-action-group .btn-group > .dropdown-toggle-split {
+    .status-action-group .btn-group>.dropdown-toggle-split {
         width: 32px !important;
         height: 32px !important;
         min-width: 32px !important;
@@ -2578,7 +2614,7 @@ td:last-child {
         grid-template-columns: 1fr;
     }
 
-    #submitForm > .row {
+    #submitForm>.row {
         --bs-gutter-x: 0;
         margin-left: 0;
         margin-right: 0;
@@ -2635,7 +2671,7 @@ td:last-child {
         gap: var(--space-4);
     }
 
-    .settings-grid > * {
+    .settings-grid>* {
         margin: 0 !important;
     }
 
@@ -2660,7 +2696,7 @@ td:last-child {
         border-top: none !important;
     }
 
-    .settings-grid .settings-section + .settings-section {
+    .settings-grid .settings-section+.settings-section {
         margin-top: var(--space-3) !important;
     }
 
@@ -2855,6 +2891,7 @@ td:last-child {
    Restrict to actual touch devices: -webkit-touch-callout is iOS only,
    and (hover: none) ensures we're on a true touch device, not desktop Safari. */
 @supports (-webkit-touch-callout: none) and (hover: none) {
+
     /* background-attachment: fixed is broken on iOS (repaint on scroll) */
     .app-root {
         background-attachment: scroll;
@@ -2893,6 +2930,7 @@ td:last-child {
 /* ── Mobile-specific refinements ──────────────────────────────────────────
    Base rules already allow vertical scroll; these are additional mobile tweaks. */
 @media (max-width: 768px) {
+
     html,
     body {
         height: auto !important;
@@ -2931,6 +2969,7 @@ td:last-child {
 }
 
 @media (prefers-reduced-motion: reduce) {
+
     *,
     *::before,
     *::after {

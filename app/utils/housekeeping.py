@@ -15,6 +15,7 @@ import re
 import shutil
 from collections.abc import Callable
 from pathlib import Path
+from time import time
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,7 @@ _UUID_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
     re.IGNORECASE,
 )
+_ORPHAN_DIR_GRACE_PERIOD_SECONDS = 900
 
 
 def _is_job_uuid(name: str) -> bool:
@@ -43,16 +45,24 @@ def cleanup_job_directory(job_id: str, data_dir: Path) -> bool:
         data_dir: Base data directory containing job folders.
 
     Returns:
-        True if the directory was deleted or already absent, False on error.
+        True if the directory was deleted or already absent.
+        False if the job_id is invalid, the path is unsafe, or deletion fails.
     """
     if not _is_job_uuid(job_id):
         logger.error("Refusing to delete invalid job_id: %r", job_id)
         return False
 
-    data_dir_resolved = data_dir.resolve()
-    job_dir = (data_dir_resolved / job_id).resolve()
+    try:
+        data_dir_resolved = data_dir.resolve()
+    except OSError as exc:
+        logger.warning("Failed to resolve data directory %s: %s", data_dir, exc)
+        return False
 
-    if not job_dir.is_relative_to(data_dir_resolved):
+    job_dir = data_dir_resolved / job_id
+
+    try:
+        job_dir.relative_to(data_dir_resolved)
+    except ValueError:
         logger.error(
             "Refusing to delete %s because it escapes data directory %s",
             job_dir,
@@ -62,6 +72,10 @@ def cleanup_job_directory(job_id: str, data_dir: Path) -> bool:
 
     if not job_dir.exists():
         return True
+
+    if job_dir.is_symlink():
+        logger.warning("Refusing to delete symlinked job path: %s", job_dir)
+        return False
 
     if not job_dir.is_dir():
         logger.warning("Job path is not a directory: %s", job_dir)
@@ -104,20 +118,35 @@ def cleanup_expired_jobs(
     if not deleted_ids:
         return (0, 0)
 
+    valid_ids = [job_id for job_id in deleted_ids if _is_job_uuid(job_id)]
+    invalid_count = len(deleted_ids) - len(valid_ids)
+    if invalid_count:
+        logger.warning(
+            "Housekeeping: DB purge returned %d invalid job ID(s); processing %d valid ID(s)",
+            invalid_count,
+            len(valid_ids),
+        )
+
+    try:
+        data_dir_resolved = data_dir.resolve()
+    except OSError as exc:
+        logger.warning("Failed to resolve data directory %s: %s", data_dir, exc)
+        return (len(valid_ids), 0)
+
     # Clean up filesystem artifacts
     dirs_ok = 0
-    for job_id in deleted_ids:
-        if cleanup_job_directory(job_id, data_dir):
+    for job_id in valid_ids:
+        if cleanup_job_directory(job_id, data_dir_resolved):
             dirs_ok += 1
 
     logger.info(
         "Housekeeping: %d job(s) older than %d days removed (%d filesystem cleanup outcomes ok)",
-        len(deleted_ids),
+        len(valid_ids),
         keep_days,
         dirs_ok,
     )
 
-    return (len(deleted_ids), dirs_ok)
+    return (len(valid_ids), dirs_ok)
 
 
 def cleanup_orphaned_directories(
@@ -145,12 +174,26 @@ def cleanup_orphaned_directories(
     if not data_dir.exists():
         return orphans
 
+    try:
+        data_dir_resolved = data_dir.resolve()
+    except OSError as exc:
+        logger.warning("Failed to resolve data directory %s: %s", data_dir, exc)
+        return orphans
+
+    now = time()
+
     # Snapshot candidates first to reduce races with concurrent directory creation.
-    candidates = [
-        entry
-        for entry in data_dir.iterdir()
-        if entry.is_dir() and _is_job_uuid(entry.name)
-    ]
+    candidates: list[Path] = []
+    for entry in data_dir_resolved.iterdir():
+        if not entry.is_dir() or not _is_job_uuid(entry.name):
+            continue
+        try:
+            if (now - entry.stat().st_mtime) < _ORPHAN_DIR_GRACE_PERIOD_SECONDS:
+                continue
+        except OSError as exc:
+            logger.debug("Skipping orphan candidate %s due to stat failure: %s", entry, exc)
+            continue
+        candidates.append(entry)
 
     for entry in candidates:
         name = entry.name
@@ -168,7 +211,7 @@ def cleanup_orphaned_directories(
                 )
                 continue
 
-            if cleanup_job_directory(name, data_dir):
+            if cleanup_job_directory(name, data_dir_resolved):
                 cleaned += 1
                 logger.info("Cleaned orphaned directory: %s", name)
 

@@ -24,6 +24,7 @@ import { createStatusElement, createActionButton } from "./ui.js?v=20260429m";
 import { EMPTY_VALUE } from "./utils.js";
 
 const FALLBACK_JOBS_TABLE_COLUMN_COUNT = 8;
+const HARD_MAX_ROWS = CONFIG.MAX_ROWS * 2;
 
 const STATUS = Object.freeze({
     DONE: "done",
@@ -36,8 +37,6 @@ const STATUS = Object.freeze({
 const JOB_TYPE = Object.freeze({
     AUDIO: "audio",
 });
-
-let cachedTableColumnCount = null;
 
 /** @type {{ loading: boolean, done: boolean, nextOffset: number, preserveHistory: boolean }} */
 const state = { loading: false, done: false, nextOffset: 0, preserveHistory: false };
@@ -70,14 +69,9 @@ function getRenderedJobCount() {
 }
 
 function getJobsTableColumnCount() {
-    if (cachedTableColumnCount !== null) {
-        return cachedTableColumnCount;
-    }
-
     const tbody = getTbody();
     const headerCells = tbody?.closest("table")?.tHead?.rows?.[0]?.cells;
-    cachedTableColumnCount = headerCells?.length || FALLBACK_JOBS_TABLE_COLUMN_COUNT;
-    return cachedTableColumnCount;
+    return headerCells?.length || FALLBACK_JOBS_TABLE_COLUMN_COUNT;
 }
 
 /**
@@ -138,7 +132,7 @@ function createCell(label, text, className = "") {
 
 function getQualityLabel(job) {
     if (job?.type === JOB_TYPE.AUDIO) {
-        return "MP3";
+        return job?.quality || job?.codec || "MP3";
     }
 
     return job?.quality || "";
@@ -161,18 +155,23 @@ export function applyRowStatusClasses(tr, status) {
 
 function trimRows() {
     const tbody = getTbody();
-    if (!tbody || state.preserveHistory) return;
+    if (!tbody) return;
 
-    const rows = tbody.querySelectorAll("tr[data-job-id]");
-    if (rows.length <= CONFIG.MAX_ROWS) return;
+    const rows = Array.from(tbody.querySelectorAll("tr[data-job-id]"));
+    const maxRows = state.preserveHistory ? HARD_MAX_ROWS : CONFIG.MAX_ROWS;
+    if (rows.length <= maxRows) return;
 
-    for (let index = CONFIG.MAX_ROWS; index < rows.length; index += 1) {
-        const mainRow = rows[index];
+    const rowsToRemove = rows.slice(maxRows);
+    for (const mainRow of rowsToRemove) {
         const jobId = mainRow.dataset.jobId;
         if (jobId) {
             document.getElementById(`detail-${jobId}`)?.remove();
         }
         mainRow.remove();
+    }
+
+    if (state.preserveHistory) {
+        state.nextOffset = Math.max(0, state.nextOffset - rowsToRemove.length);
     }
 }
 
@@ -305,7 +304,6 @@ export function prependJob(job) {
  * Call this after a full reload or filter change.
  */
 export function resetPagingState() {
-    cachedTableColumnCount = null;
     state.done = false;
     state.preserveHistory = false;
     state.nextOffset = 0;

@@ -68,7 +68,12 @@ def _is_youtube_host(host: str) -> bool:
 
 
 def _build_ydl_opts() -> dict[str, Any]:
-    opts: dict[str, Any] = {"quiet": True, "no_warnings": True, "noplaylist": True}
+    opts: dict[str, Any] = {
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        "socket_timeout": 15,
+    }
     if COOKIES_PATH.is_file():
         opts["cookiefile"] = str(COOKIES_PATH)
     return opts
@@ -87,7 +92,7 @@ def _cache_bucket() -> int:
     return int(monotonic() // _CACHE_TTL_SECONDS)
 
 
-def _prune_info(info: dict[str, Any] | None) -> dict[str, Any] | None:
+def _prune_info(info: dict[str, Any] | None) -> InfoPayload | None:
     """Keep only the metadata fields the API actually uses before caching."""
     if not isinstance(info, dict):
         return None
@@ -117,6 +122,7 @@ def _prune_info(info: dict[str, Any] | None) -> dict[str, Any] | None:
         "duration": info.get("duration"),
         "view_count": info.get("view_count"),
         "formats": formats,
+        "unavailable": False,
     }
 
 
@@ -202,7 +208,7 @@ def normalize_info_url(url: str) -> str:
     resolution paths and intermittent timeouts in yt-dlp. Callers should
     validate the input URL first.
     """
-    value = url.strip()
+    value = _strip_zwsp(url.strip().replace("&amp;", "&"))
     try:
         parsed = urlparse(value)
     except ValueError:
@@ -232,7 +238,7 @@ def normalize_info_url(url: str) -> str:
     return value
 
 
-def _load_video_info_uncached(url: str) -> dict[str, Any] | None:
+def _load_video_info_uncached(url: str) -> InfoPayload | None:
     """Load video metadata from YouTube using yt-dlp.
     
     Tries the Python library first, falls back to subprocess.
@@ -243,7 +249,7 @@ def _load_video_info_uncached(url: str) -> dict[str, Any] | None:
     Returns:
         Video info dict or None if extraction fails
     """
-    info: dict[str, Any] | None = None
+    info: InfoPayload | None = None
     ydl_opts = _build_ydl_opts()
     
     try:
@@ -260,9 +266,6 @@ def _load_video_info_uncached(url: str) -> dict[str, Any] | None:
         info = None
     except OSError:
         logger.exception("System-level yt-dlp library error for %s", url)
-        raise
-    except Exception:
-        logger.exception("Unexpected yt-dlp library extraction error for %s", url)
         info = None
 
     if info is None:
@@ -275,7 +278,10 @@ def _load_video_info_uncached(url: str) -> dict[str, Any] | None:
                 text=True,
                 timeout=15,
             )
-            parsed = json.loads(result.stdout or "{}")
+            if not result.stdout:
+                return None
+
+            parsed = json.loads(result.stdout)
             if isinstance(parsed, dict):
                 info = _prune_info(parsed)
         except subprocess.TimeoutExpired:
@@ -285,7 +291,13 @@ def _load_video_info_uncached(url: str) -> dict[str, Any] | None:
             logger.error("yt-dlp command not found in PATH")
             raise
         except subprocess.CalledProcessError as exc:
-            logger.debug("yt-dlp subprocess extraction failed for %s: %s", url, exc)
+            stderr = exc.stderr[:500] if exc.stderr else None
+            logger.debug(
+                "yt-dlp subprocess extraction failed for %s: rc=%s stderr=%s",
+                url,
+                exc.returncode,
+                stderr,
+            )
             return None
         except json.JSONDecodeError as exc:
             logger.debug("yt-dlp subprocess returned invalid JSON for %s: %s", url, exc)
@@ -298,12 +310,12 @@ def _load_video_info_uncached(url: str) -> dict[str, Any] | None:
 
 
 @lru_cache(maxsize=_INFO_CACHE_MAXSIZE)
-def _cached_load_video_info(normalized_url: str, cache_bucket: int) -> dict[str, Any] | None:
+def _cached_load_video_info(normalized_url: str, cache_bucket: int) -> InfoPayload | None:
     _ = cache_bucket
     return _load_video_info_uncached(normalized_url)
 
 
-def load_video_info(url: str) -> dict[str, Any] | None:
+def load_video_info(url: str) -> InfoPayload | None:
     """Load video metadata from YouTube using yt-dlp.
     
     This function is blocking; async callers should use
@@ -319,7 +331,7 @@ def load_video_info(url: str) -> dict[str, Any] | None:
     return _cached_load_video_info(normalized_url, _cache_bucket())
 
 
-async def load_video_info_async(url: str) -> dict[str, Any] | None:
+async def load_video_info_async(url: str) -> InfoPayload | None:
     """Async wrapper around :func:`load_video_info`."""
     return await asyncio.to_thread(load_video_info, url)
 
@@ -349,8 +361,12 @@ def extract_video_meta(url: str) -> dict[str, object]:
     if uploader:
         lines.append(f"Uploader: {uploader}")
     if isinstance(duration, int) and duration > 0:
-        mins, secs = divmod(duration, 60)
-        lines.append(f"Duration: {mins}:{secs:02d}")
+        hours, remainder = divmod(duration, 3600)
+        mins, secs = divmod(remainder, 60)
+        if hours:
+            lines.append(f"Duration: {hours}:{mins:02d}:{secs:02d}")
+        else:
+            lines.append(f"Duration: {mins}:{secs:02d}")
     if isinstance(views, int) and views >= 0:
         lines.append(f"Views: {views:,}")
 
