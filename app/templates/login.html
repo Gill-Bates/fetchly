@@ -4,6 +4,10 @@
 <meta name="csrf-token" content="{{ csrf_token | e }}">
 {% endblock %}
 
+{% block head_extra %}
+<link rel="preload" href="/static/fonts/roboto-flex.woff2" as="font" type="font/woff2" crossorigin>
+{% endblock %}
+
 {% block title %}tubeyou - next-gen Video Downloader{% endblock %}
 
 {% block app_styles %}
@@ -17,10 +21,11 @@
     <section class="login-card">
         <div class="login-header text-center">
             <img src="/static/img/tubeyou.svg" alt="tubeyou" class="logo mb-3">
+            <p class="login-kicker">next-gen media toolkit</p>
         </div>
 
         <div id="login-message" class="login-message text-center" role="status" aria-live="polite" aria-atomic="true">
-            <p id="message-text">Please log in to continue.</p>
+            <p id="message-text">Please sign in to continue ...</p>
         </div>
 
         <form id="login-form" novalidate>
@@ -28,7 +33,7 @@
             <div class="mb-3">
                 <label class="form-label" for="username">Username</label>
                 <input class="form-control form-control-lg" id="username" name="username" autocomplete="username"
-                    required>
+                    autocapitalize="none" spellcheck="false" inputmode="email" required>
             </div>
             <div class="mb-4">
                 <label class="form-label" for="password">Password</label>

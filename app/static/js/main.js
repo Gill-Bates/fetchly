@@ -3,16 +3,17 @@
 // Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 //
 
-import { AUDIO_TYPE, CONFIG, DOWNLOADABLE_STATUSES, TERMINAL_STATUSES, VIDEO_QUALITY_OPTIONS } from "./config.js";
-import { fetchJobs, fetchStats, submitJob, fetchVideoInfo, toErrorMessage } from "./api.js";
+import { AUDIO_TYPE, CONFIG, DOWNLOADABLE_STATUSES, VIDEO_QUALITY_OPTIONS } from "./config.js";
+import { fetchJobs, fetchStats, submitJob, fetchVideoInfo, toErrorMessage } from "./api.js?v=20260519f";
+import { reportWarning } from "./errors.js";
 import { getCookie, humanSize, isValidYouTubeUrl, extractYouTubeVideoId, formatDuration, isSafeRedirect, subscribeToLalalProgress } from "./utils.js";
-import { prependJob, loadMore, applyRowStatusClasses } from "./jobs.js?v=20260429m";
-import { setEventStreamEnabled } from "./events.js?v=20260429m";
+import { prependJob, loadMore, applyJobUpdate, getJobById, applyStoredJobTitleFilter, hasNonTerminalJobs } from "./jobs.js?v=20260519f";
+import { EVENT_NAMES, dispatchJobUpdate, setEventStreamEnabled } from "./events.js?v=20260519f";
 import { showToast, toast } from "./toast.js";
 import { initTrim } from "./trim.js?v=20260429v";
 
 // Expose toast globally for inline scripts
-window.TubeYou = Object.freeze({ toast, showToast });
+window.__tubeyou__ = Object.freeze({ toast, showToast });
 
 const submitForm = document.getElementById("submitForm");
 const urlInput = document.getElementById("urlInput");
@@ -22,17 +23,16 @@ const videoPreviewGrid = document.getElementById("videoPreviewGrid");
 const thumbnailPreview = document.getElementById("thumbnailPreview");
 const videoMeta = document.getElementById("videoMeta");
 const metaTitle = document.getElementById("metaTitle");
-const metaChannel = document.getElementById("metaChannel");
-const metaUploader = document.getElementById("metaUploader");
-const metaDuration = document.getElementById("metaDuration");
-const metaViews = document.getElementById("metaViews");
+const metaSummary = document.getElementById("metaSummary");
 const metaFormats = document.getElementById("metaFormats");
 const submitBtn = document.getElementById("submitBtn");
 const btnText = document.getElementById("btnText");
 const formError = document.getElementById("formError");
 const jobsSearchInput = document.getElementById("jobsSearchInput");
 const jobsTbody = document.getElementById("jobsTbody");
-const jobsScrollContainer = document.querySelector("#jobsCard .table-responsive");
+const jobsMobileList = document.getElementById("jobsMobileList");
+const jobsRenderRoot = document.getElementById("jobsRenderRoot");
+const jobsScrollContainer = document.querySelector("#jobsCard .jobs-list-shell");
 const jobsSentinel = document.getElementById("jobsSentinel");
 const detailModalEl = document.getElementById("detailModal");
 const settingsBtn = document.getElementById("settingsBtn");
@@ -43,7 +43,12 @@ const detailModal = detailModalEl ? bootstrap.Modal.getOrCreateInstance(detailMo
 const statCards = new Map(
     [...document.querySelectorAll(".stat-card[data-stat-key]")].map((card) => [card.dataset.statKey, card]),
 );
-const defaultQualityHtml = qualitySelect ? qualitySelect.innerHTML : "";
+const defaultQualityOptions = qualitySelect
+    ? [...qualitySelect.options].map((option) => ({
+        value: option.value,
+        text: option.textContent || "",
+    }))
+    : [];
 
 let activeDetailId = null;
 let lastFocusedBeforeModal = null;
@@ -55,18 +60,16 @@ let previewRequestUrl = "";
 let filterRafId = null;
 let activeTitleCell = null;
 let statsRefreshTimer = null;
+let detailInfoAbortController = null;
+let dropdownObserver = null;
 const inflightActions = new WeakSet();
 const actionTimers = new WeakMap();
 
 const STATS_REFRESHABLE_STATUSES = new Set(["done"]);
-
-async function copyTextToClipboard(text) {
-    if (!text) {
-        throw new Error("No source URL available");
-    }
-
-    await navigator.clipboard.writeText(text);
-}
+const COMPACT_NUMBER_FORMATTER = new Intl.NumberFormat(undefined, {
+    notation: "compact",
+    maximumFractionDigits: 1,
+});
 
 function triggerDownload(url) {
     const anchor = document.createElement("a");
@@ -140,19 +143,19 @@ function setText(el, text) {
 
 function renderStatParts(statKey, value) {
     switch (statKey) {
-    case "total_bytes": {
-        const rendered = humanSize(value);
-        const match = /^(.+?)\s+([^\s]+)$/.exec(rendered);
-        return match
-            ? { value: match[1], unit: match[2] }
-            : { value: rendered, unit: "" };
-    }
-    case "total_jobs":
-    case "total_minutes":
-    case "total_lalal_minutes":
-        return { value: String(Math.max(0, Math.trunc(Number(value) || 0))), unit: "" };
-    default:
-        return { value: String(value ?? 0), unit: "" };
+        case "total_bytes": {
+            const rendered = humanSize(value);
+            const match = /^(.+?)\s+([^\s]+)$/.exec(rendered);
+            return match
+                ? { value: match[1], unit: match[2] }
+                : { value: rendered, unit: "" };
+        }
+        case "total_jobs":
+        case "total_minutes":
+        case "total_lalal_minutes":
+            return { value: String(Math.max(0, Math.trunc(Number(value) || 0))), unit: "" };
+        default:
+            return { value: String(value ?? 0), unit: "" };
     }
 }
 
@@ -185,7 +188,11 @@ async function refreshDashboardStats() {
     try {
         applyDashboardStats(await fetchStats());
     } catch (error) {
-        console.warn("Failed to refresh dashboard stats:", error);
+        reportWarning("Failed to refresh dashboard stats", {
+            module: "main",
+            action: "refreshDashboardStats",
+            error: error?.message || String(error),
+        });
     }
 }
 
@@ -204,32 +211,21 @@ function scheduleDashboardStatsRefresh() {
     }, 250);
 }
 
-function hasNonTerminalJobs() {
-    if (!jobsTbody) {
-        return false;
-    }
-
-    return [...jobsTbody.querySelectorAll("tr[data-job-id]")].some((row) => {
-        const status = row instanceof HTMLElement ? row.dataset.status || "" : "";
-        return status !== "" && !TERMINAL_STATUSES.has(status);
-    });
-}
-
 function syncDashboardEventStream() {
     setEventStreamEnabled(hasNonTerminalJobs());
 }
 
-jobsTbody?.addEventListener("mouseover", (event) => {
-    const cell = event.target.closest(".job-title-cell");
+jobsRenderRoot?.addEventListener("mouseover", (event) => {
+    const cell = event.target.closest(".job-title-popover-target");
     if (!(cell instanceof HTMLElement) || cell === activeTitleCell) return;
     showTitlePopover(cell);
 });
 
-jobsTbody?.addEventListener("mouseout", (event) => {
+jobsRenderRoot?.addEventListener("mouseout", (event) => {
     if (!activeTitleCell) return;
 
     const relatedCell = event.relatedTarget instanceof Element
-        ? event.relatedTarget.closest(".job-title-cell")
+        ? event.relatedTarget.closest(".job-title-popover-target")
         : null;
 
     if (relatedCell === activeTitleCell) return;
@@ -249,25 +245,7 @@ window.addEventListener("resize", () => {
     if (activeTitleCell) positionTitlePopover(activeTitleCell);
 });
 
-jobsTbody?.addEventListener("click", (event) => {
-    const copyBtn = event.target instanceof Element
-        ? event.target.closest(".job-copy-url-btn")
-        : null;
-
-    if (copyBtn instanceof HTMLButtonElement) {
-        event.preventDefault();
-        event.stopPropagation();
-        void copyTextToClipboard(copyBtn.dataset.copyUrl || "")
-            .then(() => {
-                showToast("Source URL copied", "success", 2200);
-            })
-            .catch((error) => {
-                showToast(`Copy failed: ${error.message}`, "warning", 3200);
-            });
-    }
-});
-
-document.addEventListener("tubeyou:job-update", (event) => {
+document.addEventListener(EVENT_NAMES.JOB_UPDATE, (event) => {
     const status = typeof event.detail?.status === "string" ? event.detail.status : "";
     if (STATS_REFRESHABLE_STATUSES.has(status)) {
         scheduleDashboardStatsRefresh();
@@ -314,13 +292,15 @@ function disposeDropdowns(root) {
 }
 
 function observeJobDropdowns() {
-    if (!jobsTbody) {
+    if (!jobsRenderRoot) {
         return;
     }
 
-    initDropdowns(jobsTbody);
+    dropdownObserver?.disconnect();
 
-    const observer = new MutationObserver((mutations) => {
+    initDropdowns(jobsRenderRoot);
+
+    dropdownObserver = new MutationObserver((mutations) => {
         for (const mutation of mutations) {
             mutation.addedNodes.forEach((node) => {
                 if (node instanceof Element) {
@@ -335,10 +315,42 @@ function observeJobDropdowns() {
         }
     });
 
-    observer.observe(jobsTbody, { childList: true, subtree: true });
+    dropdownObserver.observe(jobsRenderRoot, { childList: true, subtree: true });
 }
 
-function getOrCreateFilterEmptyRow() {
+function cleanupDropdownObserver() {
+    dropdownObserver?.disconnect();
+    dropdownObserver = null;
+}
+
+function removeFilterEmptyState() {
+    document.getElementById("jobsFilterEmptyRow")?.remove();
+    document.getElementById("jobsFilterEmptyState")?.remove();
+}
+
+function getOrCreateFilterEmptyState() {
+    if (window.matchMedia("(max-width: 768px)").matches) {
+        if (!jobsMobileList) return null;
+
+        let state = document.getElementById("jobsFilterEmptyState");
+        if (state) return state;
+
+        state = document.createElement("div");
+        state.id = "jobsFilterEmptyState";
+        state.className = "jobs-mobile-empty empty-state empty-state--mobile d-none";
+
+        const iconDiv = document.createElement("div");
+        iconDiv.className = "icon";
+        iconDiv.textContent = "🔎";
+
+        const p = document.createElement("p");
+        p.textContent = "No jobs match this title search.";
+
+        state.append(iconDiv, p);
+        jobsMobileList.append(state);
+        return state;
+    }
+
     if (!jobsTbody) return null;
 
     let row = document.getElementById("jobsFilterEmptyRow");
@@ -370,33 +382,15 @@ function getOrCreateFilterEmptyRow() {
 }
 
 function applyJobTitleFilter() {
-    if (!jobsTbody) return;
+    if (!jobsRenderRoot) return;
 
-    const query = (jobsSearchInput?.value || "").trim().toLowerCase();
-    const rows = jobsTbody.querySelectorAll("tr[data-job-id]");
-    let visibleCount = 0;
-    const changes = [];
+    const query = jobsSearchInput?.value || "";
+    const { totalCount, visibleCount } = applyStoredJobTitleFilter(query);
 
-    // Single read pass: collect changes
-    for (const row of rows) {
-        const titleCell = row.querySelector("td[data-label='Title']");
-        const text = (titleCell?.querySelector(".job-title-text")?.textContent || "").toLowerCase();
-        const shouldHide = query && !text.includes(query);
-        const isHidden = row.classList.contains("d-none");
-        if (shouldHide !== isHidden) {
-            changes.push({ row, shouldHide });
-        }
-        if (!shouldHide) visibleCount++;
-    }
-
-    // Single write pass: apply changes
-    for (const { row, shouldHide } of changes) {
-        row.classList.toggle("d-none", shouldHide);
-    }
-
-    const emptySearchRow = getOrCreateFilterEmptyRow();
+    removeFilterEmptyState();
+    const emptySearchRow = getOrCreateFilterEmptyState();
     if (emptySearchRow) {
-        const hasRows = rows.length > 0;
+        const hasRows = totalCount > 0;
         emptySearchRow.classList.toggle("d-none", !(query && hasRows && visibleCount === 0));
     }
 }
@@ -420,7 +414,11 @@ async function maybeLoadMoreJobs() {
         syncDashboardEventStream();
         scheduleJobTitleFilter();
     } catch (err) {
-        console.warn("loadMore failed:", err);
+        reportWarning("loadMore failed", {
+            module: "main",
+            action: "maybeLoadMoreJobs",
+            error: err?.message || String(err),
+        });
     } finally {
         isLoadingMore = false;
     }
@@ -476,10 +474,7 @@ function setError(message) {
 function resetVideoMeta() {
     setVideoMetaLoading(false);
     setText(metaTitle, "–");
-    setText(metaChannel, "–");
-    setText(metaUploader, "–");
-    setText(metaDuration, "–");
-    setText(metaViews, "–");
+    setText(metaSummary, "–");
     setText(metaFormats, "–");
 }
 
@@ -494,7 +489,14 @@ function setVideoMetaLoading(isLoading) {
 
 function resetQualityOptions() {
     if (qualitySelect) {
-        qualitySelect.innerHTML = defaultQualityHtml;
+        qualitySelect.replaceChildren(
+            ...defaultQualityOptions.map(({ value, text }) => {
+                const option = document.createElement("option");
+                option.value = value;
+                option.textContent = text;
+                return option;
+            }),
+        );
     }
 }
 
@@ -591,6 +593,37 @@ function normalizePreviewFormatLabel(resolution) {
     }
 
     return raw;
+}
+
+function getPreviewCreator(channel, uploader) {
+    const primary = typeof channel === "string" ? channel.trim() : "";
+    const secondary = typeof uploader === "string" ? uploader.trim() : "";
+    if (!primary) {
+        return secondary;
+    }
+    if (!secondary) {
+        return primary;
+    }
+    return primary.localeCompare(secondary, undefined, { sensitivity: "accent" }) === 0
+        ? primary
+        : `${primary} / ${secondary}`;
+}
+
+function formatPreviewViewCount(viewCount) {
+    const numeric = Number(viewCount);
+    if (!Number.isFinite(numeric) || numeric <= 0) {
+        return "";
+    }
+    return `${COMPACT_NUMBER_FORMATTER.format(numeric)} views`;
+}
+
+function renderPreviewSummary(info) {
+    const parts = [
+        getPreviewCreator(info?.channel, info?.uploader),
+        formatDuration(info?.duration),
+        formatPreviewViewCount(info?.view_count),
+    ].filter(Boolean);
+    setText(metaSummary, parts.join(" • ") || "Unknown source");
 }
 
 function renderPreviewFormats(formats, totalFormats = 0, isTruncated = false) {
@@ -694,10 +727,7 @@ async function updateVideoPreview() {
             return;
         }
         setText(metaTitle, info.title);
-        setText(metaChannel, info.channel);
-        setText(metaUploader, info.uploader);
-        setText(metaDuration, formatDuration(info.duration));
-        setText(metaViews, info.view_count?.toLocaleString());
+        renderPreviewSummary(info);
         renderPreviewFormats(info.formats, info.formats_total, info.formats_truncated);
         updateQualityOptions(info.formats || []);
     } catch (error) {
@@ -707,6 +737,7 @@ async function updateVideoPreview() {
         // Clear stale metadata from the previous video before showing the error.
         resetVideoMeta();
         setText(metaTitle, "Metadata unavailable");
+        setText(metaSummary, "Enter a valid public YouTube URL to load preview metadata.");
         setText(metaFormats, "–");
     } finally {
         if (previewAbortController === controller) {
@@ -737,37 +768,227 @@ function scheduleVideoPreviewUpdateFromChange() {
     scheduleVideoPreviewUpdate();
 }
 
+function abortDetailInfoRequest() {
+    detailInfoAbortController?.abort();
+    detailInfoAbortController = null;
+}
+
+function formatDetailStatus(status) {
+    const raw = String(status || "queued").replaceAll("_", " ");
+    return raw.charAt(0).toUpperCase() + raw.slice(1);
+}
+
+function formatDetailViewCount(viewCount) {
+    const count = Number(viewCount);
+    if (!Number.isFinite(count) || count <= 0) {
+        return "";
+    }
+
+    return `${COMPACT_NUMBER_FORMATTER.format(count)} views`;
+}
+
+function setDetailChip(id, text) {
+    const chip = document.getElementById(id);
+    if (!(chip instanceof HTMLElement)) {
+        return;
+    }
+
+    const value = typeof text === "string" ? text.trim() : "";
+    chip.textContent = value || "";
+    chip.classList.toggle("d-none", value === "");
+}
+
+function resetDetailFormats() {
+    for (const sectionId of ["mAudioFormatsSection", "mVideoFormatsSection"]) {
+        document.getElementById(sectionId)?.classList.add("d-none");
+    }
+
+    for (const containerId of ["mAudioFormats", "mVideoFormats"]) {
+        const container = document.getElementById(containerId);
+        if (container) {
+            container.replaceChildren();
+        }
+    }
+}
+
+function resetDetailThumbnail() {
+    const image = document.getElementById("mThumb");
+    const fallback = document.getElementById("mThumbFallback");
+    if (image instanceof HTMLImageElement) {
+        image.src = "";
+        image.classList.add("d-none");
+    }
+    fallback?.classList.remove("d-none");
+}
+
+function setDetailThumbnail(url) {
+    const image = document.getElementById("mThumb");
+    const fallback = document.getElementById("mThumbFallback");
+    if (!(image instanceof HTMLImageElement)) {
+        return;
+    }
+
+    const videoId = extractYouTubeVideoId(url || "");
+    if (!videoId) {
+        resetDetailThumbnail();
+        return;
+    }
+
+    image.onload = () => {
+        fallback?.classList.add("d-none");
+        image.classList.remove("d-none");
+    };
+    image.onerror = () => {
+        resetDetailThumbnail();
+    };
+    image.src = `https://img.youtube.com/vi/${encodeURIComponent(videoId)}/hqdefault.jpg`;
+    image.alt = "Video thumbnail";
+}
+
+function createDetailFormatChip(format) {
+    const chip = document.createElement("span");
+    chip.className = "detail-chip";
+
+    const resolution = typeof format?.resolution === "string" ? format.resolution.trim() : "";
+    const ext = typeof format?.ext === "string" ? format.ext.trim().toUpperCase() : "";
+    chip.textContent = [ext, resolution].filter(Boolean).join(" ");
+    return chip;
+}
+
+function renderDetailFormatGroup(sectionId, containerId, formats) {
+    const section = document.getElementById(sectionId);
+    const container = document.getElementById(containerId);
+    if (!(section instanceof HTMLElement) || !(container instanceof HTMLElement)) {
+        return;
+    }
+
+    container.replaceChildren();
+    if (!formats.length) {
+        section.classList.add("d-none");
+        return;
+    }
+
+    const fragment = document.createDocumentFragment();
+    for (const format of formats.slice(0, 6)) {
+        fragment.append(createDetailFormatChip(format));
+    }
+    container.append(fragment);
+    section.classList.remove("d-none");
+}
+
+function renderDetailFormats(formats) {
+    if (!Array.isArray(formats)) {
+        resetDetailFormats();
+        return;
+    }
+
+    const audioFormats = [];
+    const videoFormats = [];
+
+    for (const format of formats) {
+        const resolution = typeof format?.resolution === "string" ? format.resolution.trim().toLowerCase() : "";
+        if (!resolution) {
+            continue;
+        }
+
+        if (resolution.endsWith("p")) {
+            videoFormats.push(format);
+        } else {
+            audioFormats.push(format);
+        }
+    }
+
+    renderDetailFormatGroup("mAudioFormatsSection", "mAudioFormats", audioFormats);
+    renderDetailFormatGroup("mVideoFormatsSection", "mVideoFormats", videoFormats);
+}
+
+function setDetailMetaLine({ channel, uploader, duration, viewCount }) {
+    const metaLine = document.getElementById("mMetaLine");
+    if (!(metaLine instanceof HTMLElement)) {
+        return;
+    }
+
+    const creator = channel || uploader || "Unknown source";
+    const parts = [
+        creator,
+        duration ? formatDuration(duration) : "",
+        formatDetailViewCount(viewCount),
+    ].filter(Boolean);
+    metaLine.textContent = parts.join(" • ") || "Unknown source";
+}
+
+function populateDetailFromJob(job) {
+    setText(document.getElementById("mId"), getJobById(job.id)?.id || "");
+    setText(document.getElementById("mTitle"), job.video_title || job.url || "Untitled");
+    setText(document.getElementById("mMetaLine"), formatDetailStatus(job.status));
+    setText(document.getElementById("mStatus"), formatDetailStatus(job.status));
+
+    const message = (job.message || "").trim();
+    const messageEl = document.getElementById("mMessage");
+    if (messageEl instanceof HTMLElement) {
+        messageEl.textContent = message || "";
+        messageEl.classList.toggle("d-none", message === "");
+    }
+
+    setText(document.getElementById("mUrl"), job.url || "");
+    setDetailChip("mType", job.type || "");
+    setDetailChip("mQuality", job.quality || "");
+    setDetailChip("mBpm", job.bpm ? `${job.bpm} BPM` : "");
+    resetDetailFormats();
+    setDetailThumbnail(job.url || "");
+
+    const downloadBtn = document.getElementById("mDownloadBtn");
+    if (downloadBtn instanceof HTMLAnchorElement) {
+        downloadBtn.href = `/download/${encodeURIComponent(job.id)}`;
+        downloadBtn.classList.toggle("d-none", !DOWNLOADABLE_STATUSES.has(job.status || ""));
+    }
+}
+
+async function hydrateDetailMedia(job) {
+    if (!job?.url) {
+        return;
+    }
+
+    abortDetailInfoRequest();
+    const controller = new AbortController();
+    detailInfoAbortController = controller;
+
+    try {
+        const info = await fetchVideoInfo(job.url, { signal: controller.signal });
+        if (controller.signal.aborted || activeDetailId !== String(job.id)) {
+            return;
+        }
+
+        setText(document.getElementById("mTitle"), info.title || job.video_title || job.url || "Untitled");
+        setDetailMetaLine({
+            channel: info.channel,
+            uploader: info.uploader,
+            duration: info.duration,
+            viewCount: info.view_count,
+        });
+        renderDetailFormats(info.formats);
+    } catch (error) {
+        if (controller.signal.aborted) {
+            return;
+        }
+        setDetailMetaLine({ channel: "Metadata unavailable" });
+    } finally {
+        if (detailInfoAbortController === controller) {
+            detailInfoAbortController = null;
+        }
+    }
+}
+
 function openDetail(jobId) {
     if (!jobId || !detailModalEl || !detailModal) return;
 
-    const row = document.querySelector(`tr[data-job-id="${CSS.escape(jobId)}"]`);
-    if (!row) return;
-
-    /** Read a cell's trimmed text by its data-label attribute. */
-    const getCellText = (label) => {
-        const cell = row.querySelector(`td[data-label='${CSS.escape(label)}']`);
-        return cell?.textContent?.trim() || "–";
-    };
-
-    const statusValue = row.dataset.status || "–";
+    const job = getJobById(jobId);
+    if (!job) return;
 
     activeDetailId = jobId;
-    setText(document.getElementById("mId"), jobId);
-    setText(document.getElementById("mUrl"), row.dataset.url || "–");
-    setText(document.getElementById("mType"), getCellText("Format"));
-    setText(document.getElementById("mQuality"), getCellText("Quality"));
-    setText(document.getElementById("mBpm"), row.dataset.bpm || getCellText("BPM"));
-    setText(document.getElementById("mBpmConfidence"), row.dataset.bpmConfidence || "–");
-    setText(document.getElementById("mStatus"), statusValue);
-    setText(document.getElementById("mMessage"), row.dataset.message || "–");
-
-    const downloadBtn = document.getElementById("mDownloadBtn");
-    if (downloadBtn) {
-        downloadBtn.href = `/download/${encodeURIComponent(jobId)}`;
-        downloadBtn.classList.toggle("d-none", !DOWNLOADABLE_STATUSES.has(statusValue));
-    }
-
+    populateDetailFromJob(job);
     detailModal.show();
+    void hydrateDetailMedia(job);
 }
 
 async function handleLalalSplit(btn) {
@@ -829,7 +1050,8 @@ async function handleCancelJob(btn) {
     try {
         const payload = await handleActionPost(btn, `/api/jobs/${encodeURIComponent(jobId)}/cancel`);
         if (payload && typeof payload === "object") {
-            document.dispatchEvent(new CustomEvent("tubeyou:job-update", { detail: payload }));
+            const updatedJob = applyJobUpdate(payload);
+            dispatchJobUpdate(updatedJob || payload);
         }
     } catch (err) {
         if (err?.name !== "AbortError") {
@@ -863,46 +1085,23 @@ document.addEventListener("click", (event) => {
     handler?.(actionBtn, event);
 });
 
-document.addEventListener("tubeyou:job-update", (event) => {
+document.addEventListener(EVENT_NAMES.JOB_UPDATE, (event) => {
     const payload = event.detail;
     if (!payload) return;
 
     if (payload.id === activeDetailId) {
-        // Use setText() for null-safe updates; direct textContent assignment would
-        // throw a TypeError if the modal element is absent.
-        setText(document.getElementById("mStatus"), payload.status);
-        setText(document.getElementById("mMessage"), payload.message);
-        if (payload.bpm != null) {
-            setText(document.getElementById("mBpm"), String(payload.bpm));
-        }
-        if (payload.bpm_confidence != null) {
-            setText(document.getElementById("mBpmConfidence"), String(payload.bpm_confidence));
-        }
-        const downloadBtn = document.getElementById("mDownloadBtn");
-        if (downloadBtn) {
-            downloadBtn.classList.toggle("d-none", !DOWNLOADABLE_STATUSES.has(payload.status || ""));
+        const activeJob = getJobById(payload.id);
+        if (activeJob) {
+            populateDetailFromJob(activeJob);
         }
     }
 
-    // Update the main job row CSS classes when status changes
-    const mainRow = document.querySelector(
-        `tr[data-job-id="${CSS.escape(String(payload.id))}"]`
-    );
-    if (mainRow && payload.status) {
-        applyRowStatusClasses(mainRow, payload.status);
-    }
+    syncDashboardEventStream();
+    scheduleJobTitleFilter();
+});
 
-    // Keep the open detail row in sync with live analysis data.
-    const detailRow = document.getElementById(`detail-${payload.id}`);
-    if (detailRow) {
-        const update = (field, value) => {
-            const el = detailRow.querySelector(`[data-detail-field="${field}"] span`);
-            if (el && value != null) el.textContent = String(value) || "–";
-        };
-        update("bpm", payload.bpm);
-        update("bpm_confidence", payload.bpm_confidence);
-    }
-
+window.addEventListener("jobs-layout-change", () => {
+    hideTitlePopover();
     syncDashboardEventStream();
     scheduleJobTitleFilter();
 });
@@ -923,6 +1122,7 @@ if (detailModalEl) {
 
     detailModalEl.addEventListener("hidden.bs.modal", () => {
         activeDetailId = null;
+        abortDetailInfoRequest();
         if (lastFocusedBeforeModal && document.body.contains(lastFocusedBeforeModal)) {
             lastFocusedBeforeModal.focus();
             return;
@@ -957,7 +1157,6 @@ submitForm?.addEventListener("submit", async (event) => {
         }
 
         const job = await submitJob(formData, getCsrfToken());
-        document.getElementById("emptyRow")?.remove();
         prependJob(job);
         syncDashboardEventStream();
         scheduleJobTitleFilter();
@@ -1017,6 +1216,8 @@ window.addEventListener("jobs-load-error", (event) => {
 });
 
 window.addEventListener("pagehide", () => {
+    cleanupDropdownObserver();
+
     if (statsRefreshTimer) {
         clearTimeout(statsRefreshTimer);
         statsRefreshTimer = null;
@@ -1034,6 +1235,8 @@ window.addEventListener("pagehide", () => {
 
     abortPreviewRequest();
 });
+
+window.addEventListener("beforeunload", cleanupDropdownObserver);
 
 /**
  * POST to an action endpoint with CSRF protection, inflight deduplication,

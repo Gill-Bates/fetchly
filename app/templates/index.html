@@ -18,9 +18,9 @@
         <div class="stat-value">
             <span class="material-symbols-outlined stat-icon" aria-hidden="true">{{ icon }}</span>
             {%- if value.value is defined and value.unit is defined -%}
-                <span data-stat-value>{{ value.value }}</span><span class="stat-unit" data-stat-unit>{{ value.unit }}</span>
+            <span data-stat-value>{{ value.value }}</span><span class="stat-unit" data-stat-unit>{{ value.unit }}</span>
             {%- else -%}
-                <span data-stat-value>{{ value }}</span><span class="stat-unit" data-stat-unit hidden></span>
+            <span data-stat-value>{{ value }}</span><span class="stat-unit" data-stat-unit hidden></span>
             {%- endif %}
         </div>
         <div class="stat-label">{{ label }}</div>
@@ -42,43 +42,20 @@
                 <input type="hidden" name="csrf_token" value="{{ csrf_token | e }}">
                 <div class="row g-3 align-items-end">
                     <div class="col-12">
-                        <label class="form-label fw-medium" for="urlInput">YouTube URL</label>
-                        <input
-                            class="form-control form-control-lg ui-input"
-                            id="urlInput"
-                            name="url"
-                            placeholder="https://www.youtube.com/watch?v=..."
-                            required
-                            aria-describedby="formError"
-                        >
+                        <label class="form-label fw-medium" for="urlInput">Paste a YouTube link</label>
+                        <input class="form-control form-control-lg ui-input" id="urlInput" name="url"
+                            placeholder="https://www.youtube.com/watch?v=..." required aria-describedby="formError">
 
                         <div class="video-preview-grid d-none" id="videoPreviewGrid">
                             <div id="thumbnailPreview" class="video-thumb"></div>
 
                             <div class="video-meta" id="videoMeta">
-                                <div class="meta-row">
-                                    <span class="meta-label">Title</span>
-                                    <span class="meta-value" id="metaTitle">–</span>
-                                </div>
-                                <div class="meta-row">
-                                    <span class="meta-label">Channel</span>
-                                    <span class="meta-value" id="metaChannel">–</span>
-                                </div>
-                                <div class="meta-row">
-                                    <span class="meta-label">Uploader</span>
-                                    <span class="meta-value" id="metaUploader">–</span>
-                                </div>
-                                <div class="meta-row">
-                                    <span class="meta-label">Duration</span>
-                                    <span class="meta-value" id="metaDuration">–</span>
-                                </div>
-                                <div class="meta-row">
-                                    <span class="meta-label">Views</span>
-                                    <span class="meta-value" id="metaViews">–</span>
-                                </div>
-                                <div class="meta-row">
-                                    <span class="meta-label">Qualities</span>
-                                    <span class="meta-value" id="metaFormats">–</span>
+                                <span class="video-meta__eyebrow">Preview</span>
+                                <h3 class="video-meta__title" id="metaTitle">–</h3>
+                                <p class="video-meta__summary" id="metaSummary">–</p>
+                                <div class="video-meta__section">
+                                    <span class="video-meta__label">Available formats</span>
+                                    <div class="meta-value meta-value--badges" id="metaFormats">–</div>
                                 </div>
                             </div>
                         </div>
@@ -102,116 +79,54 @@
                         <button class="btn btn-primary btn-lg w-100" type="submit" id="submitBtn">
                             <span id="btnText">
                                 <span class="material-symbols-outlined">download</span>
-                                Start
+                                Download Video
                             </span>
                         </button>
                     </div>
                 </div>
-                <div id="formError"
-                     class="alert alert-danger mt-3 d-none"
-                     role="alert"
-                     aria-live="assertive"
-                ></div>
+                <div id="formError" class="alert alert-danger mt-3 d-none" role="alert" aria-live="assertive"></div>
             </form>
         </div>
     </div>
 
     <section class="ui-card ui-card--flush" id="jobsCard">
         <div class="ui-card-header d-flex align-items-center jobs-card-header">
-            <span class="fw-semibold jobs-card-title">Jobs</span>
-            <span id="wsIndicator"
-                  class="ws-indicator badge bg-warning text-dark"
-                  role="status"
-                  aria-live="polite"
-                  aria-atomic="true"
-            >● connecting...</span>
+            <div class="jobs-card-heading">
+                <span class="jobs-card-kicker">Recent downloads</span>
+                <span class="fw-semibold jobs-card-title">Processing Queue</span>
+            </div>
+            <span id="wsIndicator" class="ws-indicator badge bg-secondary" role="status" aria-live="polite"
+                aria-atomic="true" data-ws-state="idle">● Idle</span>
             <div class="jobs-card-controls">
                 <label for="jobsSearchInput" class="visually-hidden">Search jobs by title</label>
                 <div class="input-icon jobs-search-wrap">
                     <span class="material-symbols-outlined input-icon__icon" aria-hidden="true">search</span>
-                    <input
-                        id="jobsSearchInput"
-                        class="form-control form-control-sm input-icon__field jobs-search-input"
-                        type="search"
-                        placeholder="Search title..."
-                        autocomplete="off"
-                    >
+                    <input id="jobsSearchInput" class="form-control form-control-sm input-icon__field jobs-search-input"
+                        type="search" placeholder="Search queue..." autocomplete="off">
                 </div>
             </div>
         </div>
         <div class="ui-card-body ui-card-body--flush">
-            <div class="table-responsive">
-                <table class="table table-hover align-middle mb-0 jobs-table" id="jobsTable">
-                    <caption class="visually-hidden">List of download jobs</caption>
-                    <thead>
-                        <tr>
-                            <th scope="col" class="col-title">Title</th>
-                            <th scope="col" class="th-mono col-compact">Format</th>
-                            <th scope="col" class="th-mono col-compact">Quality</th>
-                            <th scope="col" class="th-mono col-compact">BPM</th>
-                            <th scope="col" class="th-mono col-compact">kbps</th>
-                            <th scope="col" class="th-mono status-column col-status">Status</th>
-                            <th scope="col" class="col-date">Created</th>
-                            <th scope="col" class="col-actions"><span class="visually-hidden">Action</span></th>
-                        </tr>
-                    </thead>
-                    <tbody id="jobsTbody">
-                        {% for job in jobs %}
-                        <tr data-job-id="{{ job['id'] | e }}"
-                            data-url="{{ job['url'] | e }}"
-                            data-status="{{ job['status'] | e }}"
-                            data-type="{{ job['type'] | e }}"
-                            data-message="{{ (job['message'] or '') | e }}"
-                            data-size-bytes="{{ (job['filesize_bytes'] if job['filesize_bytes'] is not none else '') | e }}"
-                            data-bpm="{{ (job['bpm'] if job['bpm'] is not none else '') | e }}"
-                            class="{% if job["status"] in ('done', 'analysis_done') %}row-done{% elif job["status"] == 'error' %}row-error{% endif %}">
-                            <td data-label="Title"
-                                class="job-title-cell job-title-cell--wide col-title"
-                                    data-popover-text="{{ (job['video_meta_hover'] or job['url'] or '') | e }}"
-                            >
-                                <button
-                                    type="button"
-                                    class="job-copy-url-btn"
-                                    data-copy-url="{{ (job['url'] or '') | e }}"
-                                    aria-label="Copy source URL"
-                                    title="Copy source URL"
-                                >
-                                    <span class="material-symbols-outlined" aria-hidden="true">content_copy</span>
-                                </button>
-                                <span class="job-title-text">{{ (job['video_title'] or job['url']) | e }}</span>
-                            </td>
-                            <td data-label="Format" class="td-mono job-meta-cell col-compact">{{ job['type'] | e }}<div class="meta-sub">{{ (job['codec'] or '–') | e }}</div></td>
-                            <td data-label="Quality" class="td-mono job-meta-cell col-compact">{% if job['type'] == 'audio' %}MP3{% else %}{{ job['quality'] | e }}{% endif %}</td>
-                            <td data-label="BPM" class="td-mono job-meta-cell col-compact">{{ (job['bpm'] if job['bpm'] is not none else '–') | e }}</td>
-                            <td data-label="Bitrate" class="td-mono job-meta-cell col-compact">{% if job['bitrate_kbps'] %}{{ job['bitrate_kbps'] | e }} kbps{% else %}–{% endif %}</td>
-                            <td data-label="Status" class="col-status">
-                                <div class="status-action-group">
-                                    {{ status.status_badge(job) }}
-                                    <div class="d-mobile-only">{% include "_action_btn.html" %}</div>
-                                </div>
-                            </td>
-                            <td data-label="Created" class="text-nowrap col-date">{{ job["created_at"] | localtime | safe }}</td>
-                            <td data-label="Action" class="col-actions">
-                                <div class="action-cell-wrap">
-                                    {% include "_action_btn.html" %}
-                                </div>
-                            </td>
-                        </tr>
-
-                        {% else %}
-                        <tr id="emptyRow">
-                            <td colspan="8">
-                                <div class="empty-state">
-                                    <div class="icon">📥</div>
-                                    <p>No downloads yet. Add a URL above!</p>
-                                </div>
-                            </td>
-                        </tr>
-                        {% endfor %}
-                    </tbody>
-                </table>
+            <div class="jobs-list-shell" id="jobsRenderRoot">
+                <div class="jobs-desktop-view">
+                    <table class="table table-hover align-middle mb-0 jobs-table" id="jobsTable">
+                        <caption class="visually-hidden">Recent download jobs in the processing queue</caption>
+                        <thead>
+                            <tr>
+                                <th scope="col" class="col-title">Title</th>
+                                <th scope="col" class="th-mono col-media">Media</th>
+                                <th scope="col" class="th-mono status-column col-status">Status</th>
+                                <th scope="col" class="col-date">Added</th>
+                                <th scope="col" class="col-actions"><span class="visually-hidden">Action</span></th>
+                            </tr>
+                        </thead>
+                        <tbody id="jobsTbody"></tbody>
+                    </table>
+                </div>
+                <div id="jobsMobileList" class="jobs-mobile-list" aria-label="Jobs"></div>
                 <div id="jobsSentinel" aria-hidden="true"></div>
             </div>
+            <script id="jobsBootstrapData" type="application/json">{{ jobs | tojson }}</script>
         </div>
     </section>
 </div>
@@ -235,13 +150,13 @@
                     </div>
                     <p class="mt-2 text-muted small">Loading waveform...</p>
                 </div>
-                
+
                 <!-- Waveform -->
                 <div id="trimWave" class="d-none"></div>
-                
+
                 <!-- Time display -->
                 <div class="text-muted small" id="trimInfo">–</div>
-                
+
                 <!-- Playback controls -->
                 <div class="d-flex gap-2">
                     <button class="btn btn-outline-secondary btn-sm" id="trimPlay" type="button">
@@ -263,26 +178,22 @@
                         Download
                     </a>
                 </div>
-                
+
                 <!-- Lalal actions -->
                 <div class="d-flex gap-2 pt-3 border-top">
-                    <button class="btn btn-outline-secondary btn-sm trim-provider-button" id="trimVocals" type="button" disabled{% if not lalal_enabled %} title="Lalal.ai is not connected"{% endif %}>
+                    <button class="btn btn-outline-secondary btn-sm trim-provider-button" id="trimVocals" type="button"
+                        disabled{% if not lalal_enabled %} title="Lalal.ai is not connected" {% endif %}>
                         <span class="material-symbols-outlined icon-inline">mic</span>
                         A Cappella
-                        <img class="trim-provider-logo"
-                             src="/static/img/lalal_ai_small.svg"
-                             alt="Lalal.ai"
-                             width="34"
-                             height="10">
+                        <img class="trim-provider-logo" src="/static/img/lalal_ai_small.svg" alt="Lalal.ai" width="34"
+                            height="10">
                     </button>
-                    <button class="btn btn-outline-secondary btn-sm trim-provider-button" id="trimInstr" type="button" disabled{% if not lalal_enabled %} title="Lalal.ai is not connected"{% endif %}>
+                    <button class="btn btn-outline-secondary btn-sm trim-provider-button" id="trimInstr" type="button"
+                        disabled{% if not lalal_enabled %} title="Lalal.ai is not connected" {% endif %}>
                         <span class="material-symbols-outlined icon-inline">music_off</span>
                         Instrumental
-                        <img class="trim-provider-logo"
-                             src="/static/img/lalal_ai_small.svg"
-                             alt="Lalal.ai"
-                             width="34"
-                             height="10">
+                        <img class="trim-provider-logo" src="/static/img/lalal_ai_small.svg" alt="Lalal.ai" width="34"
+                            height="10">
                     </button>
                 </div>
             </div>
@@ -292,22 +203,50 @@
 
 <div class="modal fade" id="detailModal" tabindex="-1">
     <div class="modal-dialog modal-dialog-centered">
-        <div class="modal-content">
+        <div class="modal-content detail-modal">
             <div class="modal-header">
-                <h5 class="modal-title">Job Details</h5>
+                <h5 class="modal-title">Now Playing</h5>
                 <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close dialog"></button>
             </div>
-            <div class="modal-body">
-                <p><strong>ID:</strong> <code id="mId"></code></p>
-                <p><strong>URL:</strong> <span id="mUrl" class="text-break"></span></p>
-                <p><strong>Format:</strong> <span id="mType"></span></p>
-                <p><strong>Quality:</strong> <span id="mQuality"></span></p>
-                <p><strong>BPM:</strong> <span id="mBpm"></span></p>
-                <p><strong>Confidence:</strong> <span id="mBpmConfidence"></span></p>
-                <p><strong>Status:</strong> <span id="mStatus"></span></p>
-                <p><strong>Message:</strong> <span id="mMessage" class="text-muted">–</span></p>
+            <div class="modal-body detail-modal__body">
+                <div class="detail-hero">
+                    <div class="detail-hero__thumb" id="mThumbWrap">
+                        <img id="mThumb" class="detail-hero__image d-none" alt="Video thumbnail">
+                        <div id="mThumbFallback" class="detail-hero__fallback">
+                            <span class="material-symbols-outlined" aria-hidden="true">music_video</span>
+                        </div>
+                    </div>
+                    <div class="detail-hero__content">
+                        <h2 class="detail-title" id="mTitle">–</h2>
+                        <p class="detail-meta-line" id="mMetaLine">–</p>
+                        <div class="detail-status-line">
+                            <span class="detail-status-text" id="mStatus">–</span>
+                            <span class="detail-message" id="mMessage">–</span>
+                        </div>
+                    </div>
+                </div>
+
+                <section class="detail-section d-none" id="mAudioFormatsSection">
+                    <h3 class="detail-section__title">Audio</h3>
+                    <div class="detail-chip-row" id="mAudioFormats"></div>
+                </section>
+
+                <section class="detail-section d-none" id="mVideoFormatsSection">
+                    <h3 class="detail-section__title">Video</h3>
+                    <div class="detail-chip-row" id="mVideoFormats"></div>
+                </section>
+
+                <section class="detail-section detail-section--technical">
+                    <div class="detail-chip-row detail-chip-row--technical">
+                        <span class="detail-chip detail-chip--muted" id="mType">–</span>
+                        <span class="detail-chip detail-chip--muted" id="mQuality">–</span>
+                        <span class="detail-chip detail-chip--muted" id="mBpm">–</span>
+                    </div>
+                    <p class="detail-source text-break" id="mUrl">–</p>
+                    <code class="detail-job-id" id="mId"></code>
+                </section>
             </div>
-            <div class="modal-footer">
+            <div class="modal-footer detail-modal__footer">
                 <a id="mDownloadBtn" class="btn btn-primary d-none" href="#">
                     <span class="material-symbols-outlined">download</span>
                     Download
@@ -320,5 +259,5 @@
 {% endblock %}
 
 {% block page_scripts %}
-<script type="module" src="/static/js/main.js?v=20260429x"></script>
+<script type="module" src="/static/js/main.js?v=20260519f"></script>
 {% endblock %}

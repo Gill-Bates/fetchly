@@ -364,9 +364,16 @@ async function _raceWithAbort(promise, signal) {
 }
 
 /**
- * Deduplicate concurrent GET/HEAD requests by sharing the same underlying
- * network promise. Caller abort signals only short-circuit the local await;
- * they do not cancel the shared request for other callers.
+ * Request deduplication layer for idempotent GET/HEAD requests.
+ *
+ * Prevents overlapping identical reads from:
+ * - double-clicks
+ * - concurrent dashboard refreshes
+ * - repeated UI state sync during the same render window
+ *
+ * Callers share the same underlying network promise. Local abort signals only
+ * short-circuit the awaiting caller; they do not cancel the shared request for
+ * other consumers.
  * @param {string} url
  * @param {ApiOptions} [options]
  * @param {number} [timeoutMs]
@@ -402,6 +409,19 @@ async function _apiCallDeduped(url, options = {}, timeoutMs = TIMEOUT_DEFAULT_MS
 export async function fetchJobs(offset, options = {}) {
     return _apiCallDeduped(
         `/api/jobs?offset=${encodeURIComponent(String(offset))}&limit=${CONFIG.PAGE_SIZE}`,
+        options,
+        TIMEOUT_FETCH_JOBS_MS,
+    );
+}
+
+/**
+ * Fetch a single job snapshot.
+ * @param {string} jobId
+ * @param {ApiOptions} [options]
+ */
+export async function fetchJob(jobId, options = {}) {
+    return _apiCallDeduped(
+        `/api/jobs/${encodeURIComponent(String(jobId))}`,
         options,
         TIMEOUT_FETCH_JOBS_MS,
     );

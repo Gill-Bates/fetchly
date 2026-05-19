@@ -11,6 +11,7 @@ import json
 import logging
 from collections import defaultdict
 from collections.abc import Callable
+from itertools import count
 from typing import Any
 
 from fastapi import APIRouter, Depends, Request
@@ -31,6 +32,7 @@ _SSE_QUEUE_MAXSIZE = 32
 # beyond a single process, replace this with a shared broker (for example Redis).
 _sse_connections: set[asyncio.Queue[dict[str, Any]]] = set()
 _job_sse_connections: defaultdict[str, set[asyncio.Queue[dict[str, Any]]]] = defaultdict(set)
+_sse_sequence = count(1)
 
 
 class SSEStreamingResponse(StreamingResponse):
@@ -45,7 +47,9 @@ class SSEStreamingResponse(StreamingResponse):
 
 def publish_payload(payload: dict[str, Any]) -> None:
     """Broadcast a payload to all current SSE subscribers."""
-    _publish_sse_payload(payload)
+    sequenced_payload = dict(payload)
+    sequenced_payload.setdefault("seq", next(_sse_sequence))
+    _publish_sse_payload(sequenced_payload)
 
 
 def broadcast_shutdown() -> None:

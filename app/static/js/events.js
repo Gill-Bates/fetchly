@@ -3,17 +3,22 @@
 // Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 //
 
-import { CONFIG, TERMINAL_STATUSES } from "./config.js";
-import { createStatusElement, createActionButton, getActionButtonCategory } from "./ui.js?v=20260429m";
+import { CONFIG } from "./config.js";
+import { fetchJob } from "./api.js";
+import { reportError, reportWarning } from "./errors.js";
+import { applyJobUpdate, hasNonTerminalJobs, upsertJobSnapshot } from "./jobs.js?v=20260519f";
 
-const DATA_LABELS = Object.freeze({
-    TITLE: "Title",
-    FORMAT: "Format",
-    BITRATE: "Bitrate",
-    BPM: "BPM",
-    STATUS: "Status",
-    ACTION: "Action",
+export const EVENT_NAMES = Object.freeze({
+    JOB_UPDATE: "tubeyou:job-update",
+    LALAL_PROGRESS: "tubeyou:lalal-progress",
 });
+
+const INDICATOR_STATE_CLASSES = Object.freeze(["bg-success", "bg-secondary", "bg-danger", "live", "text-dark"]);
+const queuedJobUpdates = new Map();
+const latestSequences = new Map();
+
+/** @type {number | null} */
+let queuedJobUpdateFrame = null;
 
 /**
  * @typedef {object} JobUpdatePayload
@@ -30,6 +35,7 @@ const DATA_LABELS = Object.freeze({
  * @property {number} [bpm_confidence]
  * @property {number} [filesize_bytes]
  * @property {number} [progress]
+ * @property {number} [seq]
  */
 
 /** @type {number | null} */
@@ -42,6 +48,69 @@ let activeStream = null;
 let reconnectAttempt = 0;
 let shouldReconnect = true;
 let streamEnabled = true;
+const recoveryRequestsInFlight = new Set();
+
+export function dispatchAppEvent(name, detail) {
+    document.dispatchEvent(new CustomEvent(name, { detail }));
+}
+
+export function dispatchJobUpdate(detail) {
+    dispatchAppEvent(EVENT_NAMES.JOB_UPDATE, detail);
+}
+
+function flushQueuedJobUpdates() {
+    queuedJobUpdateFrame = null;
+
+    const payloads = [...queuedJobUpdates.values()];
+    queuedJobUpdates.clear();
+
+    for (const payload of payloads) {
+        const handled = applyUpdate(payload);
+        if (!handled) {
+            void recoverUnknownJobUpdate(payload);
+        }
+    }
+}
+
+function scheduleJobUpdate(payload) {
+    if (!payload?.id) {
+        reportWarning("SSE update missing job id", {
+            module: "events",
+            action: "scheduleJobUpdate",
+            payload,
+        });
+        return;
+    }
+
+    if (!isNewerUpdate(payload)) {
+        return;
+    }
+
+    queuedJobUpdates.set(String(payload.id), payload);
+    if (queuedJobUpdateFrame !== null) {
+        return;
+    }
+
+    queuedJobUpdateFrame = window.requestAnimationFrame(() => {
+        flushQueuedJobUpdates();
+    });
+}
+
+function isNewerUpdate(payload) {
+    const seq = Number(payload?.seq);
+    if (!Number.isFinite(seq)) {
+        return true;
+    }
+
+    const id = String(payload.id);
+    const previousSeq = latestSequences.get(id) || 0;
+    if (seq <= previousSeq) {
+        return false;
+    }
+
+    latestSequences.set(id, seq);
+    return true;
+}
 
 function clearReconnectTimer() {
     if (reconnectTimer) {
@@ -53,38 +122,33 @@ function clearReconnectTimer() {
 /**
  * Update the connection indicator badge.
  * @param {HTMLElement | null} indicator - The indicator element
- * @param {boolean} online - Whether the connection is active
+ * @param {"processing" | "idle"} state - Desired indicator state
  */
-function setIndicator(indicator, online) {
+function setIndicator(indicator, state) {
     if (!indicator) return;
 
-    const nextState = online ? "live" : "offline";
-    if (indicator.dataset.wsState === nextState) {
+    if (indicator.dataset.wsState === state) {
         return;
     }
 
-    if (online) {
-        indicator.textContent = "● LIVE";
-        indicator.className = "ws-indicator badge bg-success live";
-    } else {
-        indicator.textContent = "● offline";
-        indicator.className = "ws-indicator badge bg-danger";
+    indicator.classList.remove(...INDICATOR_STATE_CLASSES);
+    indicator.classList.add("ws-indicator", "badge");
+
+    switch (state) {
+        case "processing":
+            indicator.textContent = "● Processing";
+            indicator.classList.add("bg-success", "live");
+            break;
+        default:
+            indicator.textContent = "● Idle";
+            indicator.classList.add("bg-secondary");
+            break;
     }
-    indicator.dataset.wsState = nextState;
+    indicator.dataset.wsState = state;
 }
 
-/**
- * Find a table cell by data-label attribute.
- * @param {HTMLElement} row - The table row
- * @param {string} label - The data-label value to find
- * @returns {HTMLElement | null}
- */
-function getCell(row, label) {
-    return row.querySelector(`td[data-label="${CSS.escape(String(label))}"]`);
-}
-
-function getRenderedActionCategory(root) {
-    return root?.querySelector("[data-action-category]")?.dataset.actionCategory || null;
+function syncIndicatorState(indicator = document.getElementById("wsIndicator")) {
+    setIndicator(indicator, hasNonTerminalJobs() ? "processing" : "idle");
 }
 
 /**
@@ -109,7 +173,11 @@ function teardown(stream) {
     try {
         stream.close();
     } catch (err) {
-        console.warn("SSE close error:", err);
+        reportWarning("SSE close error", {
+            module: "events",
+            action: "teardown",
+            error: err?.message || String(err),
+        });
     }
 }
 
@@ -122,11 +190,11 @@ function scheduleReconnect() {
     }
 
     clearReconnectTimer();
-    setIndicator(document.getElementById("wsIndicator"), false);
+    setIndicator(document.getElementById("wsIndicator"), "offline");
 
     reconnectAttempt += 1;
     const baseDelay = Math.min(CONFIG.WS_RECONNECT_MS * (2 ** (reconnectAttempt - 1)), 30_000);
-    const jitter = Math.random() * 1000;
+    const jitter = Math.random() * Math.min(baseDelay * 0.5, 5_000);
 
     reconnectTimer = window.setTimeout(() => {
         reconnectTimer = null;
@@ -140,146 +208,59 @@ function scheduleReconnect() {
  */
 function applyUpdate(payload) {
     if (!payload?.id) {
-        console.warn("SSE update missing job id:", payload);
+        reportWarning("SSE update missing job id", {
+            module: "events",
+            action: "applyUpdate",
+            payload,
+        });
+        return null;
+    }
+
+    const updatedJob = applyJobUpdate(payload);
+    if (!updatedJob) {
+        return null;
+    }
+
+    syncIndicatorState();
+
+    dispatchJobUpdate(updatedJob);
+    return updatedJob;
+}
+
+async function recoverUnknownJobUpdate(payload) {
+    if (!payload?.id) {
         return;
     }
 
-    const row = document.querySelector(`tr[data-job-id="${CSS.escape(String(payload.id))}"]`);
-    if (!row) return;
-
-    // Update cached row state first so detail modals and follow-up renders stay in sync.
-    const previousJobType = row.dataset.type || "";
-    const status = payload.status || row.dataset.status || "queued";
-    row.dataset.status = status;
-    if (payload.message != null) {
-        row.dataset.message = payload.message;
-    }
-    if (payload.url != null) {
-        row.dataset.url = payload.url;
-    }
-    if (payload.type) {
-        row.dataset.type = payload.type;
+    const jobId = String(payload.id);
+    if (recoveryRequestsInFlight.has(jobId)) {
+        return;
     }
 
-    let sizeBytes = null;
-    if (payload.filesize_bytes != null) {
-        const parsedSize = Number(payload.filesize_bytes);
-        sizeBytes = Number.isFinite(parsedSize) ? parsedSize : null;
-        row.dataset.sizeBytes = sizeBytes != null ? String(sizeBytes) : "";
-    } else if (row.dataset.sizeBytes) {
-        const cachedSize = Number(row.dataset.sizeBytes);
-        sizeBytes = Number.isFinite(cachedSize) ? cachedSize : null;
-    }
+    recoveryRequestsInFlight.add(jobId);
 
-    // Update BPM data attribute
-    if (payload.bpm != null) {
-        row.dataset.bpm = String(payload.bpm);
-    }
-    if (payload.bpm_confidence != null) {
-        row.dataset.bpmConfidence = String(payload.bpm_confidence);
-    }
-    if (payload.progress != null) {
-        const parsedProgress = Number(payload.progress);
-        row.dataset.progress = Number.isFinite(parsedProgress) ? String(parsedProgress) : "";
-    } else if (status !== "transcoding") {
-        row.dataset.progress = "";
-    }
-
-    const titleCell = (payload.video_title != null || payload.video_meta_hover != null || payload.url != null)
-        ? getCell(row, DATA_LABELS.TITLE)
-        : null;
-    const formatCell = payload.codec != null ? getCell(row, DATA_LABELS.FORMAT) : null;
-    const bitrateCell = payload.bitrate_kbps != null ? getCell(row, DATA_LABELS.BITRATE) : null;
-    const bpmCell = payload.bpm != null ? getCell(row, DATA_LABELS.BPM) : null;
-    const statusCell = getCell(row, DATA_LABELS.STATUS);
-    const actionCell = getCell(row, DATA_LABELS.ACTION);
-
-    const jobType = row.dataset.type || payload.type || "";
-    const nextActionCategory = getActionButtonCategory(status);
-    const renderedActionCategory = getRenderedActionCategory(actionCell) || getRenderedActionCategory(statusCell);
-    const shouldRefreshActions = renderedActionCategory == null
-        || renderedActionCategory !== nextActionCategory
-        || previousJobType !== jobType;
-
-    // Apply DOM updates for the changed row.
-    if (titleCell) {
-        const titleText = titleCell.querySelector(".job-title-text");
-        if (payload.video_title) {
-            if (titleText) {
-                titleText.textContent = payload.video_title;
-            } else {
-                titleCell.textContent = payload.video_title;
-            }
+    try {
+        const job = await fetchJob(jobId);
+        const updatedJob = upsertJobSnapshot(job);
+        if (!updatedJob) {
+            return;
         }
 
-        const hoverText = payload.video_meta_hover
-            || row.dataset.url
-            || titleText?.textContent
-            || titleCell.textContent
-            || "";
-
-        titleCell.dataset.popoverText = hoverText;
-        titleCell.removeAttribute("title");
-    }
-
-    if (formatCell) {
-        const codecText = formatCell.querySelector(".meta-sub");
-        if (codecText) {
-            codecText.textContent = payload.codec || "–";
+        syncIndicatorState();
+        dispatchJobUpdate(updatedJob);
+    } catch (error) {
+        if (error?.status === 404) {
+            return;
         }
+        reportWarning("Failed to recover unknown SSE job", {
+            module: "events",
+            action: "recoverUnknownJobUpdate",
+            jobId,
+            error: error?.message || String(error),
+        });
+    } finally {
+        recoveryRequestsInFlight.delete(jobId);
     }
-
-    if (bitrateCell && payload.bitrate_kbps != null) {
-        bitrateCell.textContent = `${payload.bitrate_kbps} kbps`;
-    }
-
-    if (bpmCell && payload.bpm != null) {
-        bpmCell.textContent = Number(payload.bpm) > 0 ? String(payload.bpm) : "–";
-    }
-
-    // Update status display (inside .status-action-group if mobile layout)
-    if (statusCell) {
-        const statusInline = statusCell.querySelector(".status-inline");
-        const statusGroup = statusCell.querySelector(".status-action-group");
-        const newStatus = createStatusElement(status, sizeBytes, row.dataset.progress);
-
-        if (statusInline) {
-            // Preserve structure: just replace the status-inline element
-            statusInline.replaceWith(newStatus);
-        } else if (statusGroup) {
-            // Mobile layout with action group: prepend new status, remove old if any
-            const existing = statusGroup.querySelector(".status-inline");
-            if (existing) existing.remove();
-            statusGroup.prepend(newStatus);
-        } else {
-            // Fallback: replace entire cell content
-            statusCell.replaceChildren(newStatus);
-        }
-
-        // Update mobile action button inside status cell
-        if (shouldRefreshActions) {
-            const mobileContainer = statusCell.querySelector(".d-mobile-only");
-            if (mobileContainer) {
-                mobileContainer.replaceChildren(createActionButton(payload.id, status, jobType));
-            }
-        }
-    }
-
-    // Class updates
-    row.classList.toggle("row-done", TERMINAL_STATUSES.has(status));
-    row.classList.toggle("row-error", status === "error");
-
-    // Update desktop action button
-    if (actionCell && shouldRefreshActions) {
-        const actionWrap = actionCell.querySelector(".action-cell-wrap");
-        if (actionWrap) {
-            actionWrap.replaceChildren(createActionButton(payload.id, status, jobType));
-        } else {
-            actionCell.replaceChildren(createActionButton(payload.id, status, jobType));
-        }
-    }
-
-    document.dispatchEvent(new CustomEvent("tubeyou:job-update", { detail: payload }));
 }
 
 /**
@@ -301,14 +282,18 @@ function handleMessage(data) {
 
         // Handle Lalal.ai progress updates
         if (payload.type === "lalal_progress") {
-            document.dispatchEvent(new CustomEvent("tubeyou:lalal-progress", { detail: payload }));
+            dispatchAppEvent(EVENT_NAMES.LALAL_PROGRESS, payload);
             return;
         }
 
         // Regular job update
-        applyUpdate(payload);
+        scheduleJobUpdate(payload);
     } catch (err) {
-        console.warn("Malformed SSE event data:", err);
+        reportError(err, {
+            module: "events",
+            action: "handleMessage",
+            data,
+        });
     }
 }
 
@@ -325,6 +310,7 @@ export function connectEventStream() {
     clearReconnectTimer();
 
     const indicator = document.getElementById("wsIndicator");
+    syncIndicatorState(indicator);
 
     if (activeStream && activeStream.readyState !== EventSource.CLOSED) {
         return activeStream;
@@ -339,7 +325,7 @@ export function connectEventStream() {
 
     stream.onopen = () => {
         reconnectAttempt = 0;
-        setIndicator(indicator, true);
+        syncIndicatorState(indicator);
     };
 
     stream.onmessage = (event) => {
@@ -347,7 +333,7 @@ export function connectEventStream() {
     };
 
     stream.onerror = () => {
-        setIndicator(indicator, false);
+        syncIndicatorState(indicator);
         if (activeStream !== stream) {
             return;
         }
@@ -371,10 +357,11 @@ export function setEventStreamEnabled(enabled) {
         if (activeStream) {
             teardown(activeStream);
         }
-        setIndicator(document.getElementById("wsIndicator"), false);
+        setIndicator(document.getElementById("wsIndicator"), "idle");
         return;
     }
 
+    syncIndicatorState();
     if (shouldReconnect) {
         connectEventStream();
     }
@@ -399,5 +386,20 @@ function handlePageShow(event) {
     }
 }
 
+function handleVisibilityChange() {
+    if (document.visibilityState !== "visible") {
+        if (activeStream) {
+            teardown(activeStream);
+        }
+        return;
+    }
+
+    shouldReconnect = true;
+    if (streamEnabled) {
+        connectEventStream();
+    }
+}
+
 window.addEventListener("pagehide", handlePageHide);
 window.addEventListener("pageshow", handlePageShow);
+document.addEventListener("visibilitychange", handleVisibilityChange);

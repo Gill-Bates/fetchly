@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 import secrets
 from collections.abc import Awaitable, Callable
+from urllib.parse import parse_qs
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
@@ -55,6 +56,69 @@ class CSRFMiddleware:
 
     def _path_protected(self, path: str) -> bool:
         return any(path == p or path.startswith(p + "/") for p in self._protected_paths)
+
+    @staticmethod
+    def _normalize_content_type(content_type: str) -> str:
+        return content_type.split(";", 1)[0].strip().lower()
+
+    @staticmethod
+    def _build_replay_receive(body: bytes) -> Callable[[], Awaitable[dict]]:
+        body_sent = False
+
+        async def receive_with_body() -> dict:
+            nonlocal body_sent
+            if not body_sent:
+                body_sent = True
+                return {"type": "http.request", "body": body, "more_body": False}
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        return receive_with_body
+
+    @staticmethod
+    async def _read_body(receive: Callable[[], Awaitable[dict]]) -> bytes:
+        chunks: list[bytes] = []
+
+        while True:
+            message = await receive()
+            message_type = message.get("type")
+
+            if message_type == "http.disconnect":
+                break
+            if message_type != "http.request":
+                continue
+
+            chunk = message.get("body", b"")
+            if chunk:
+                chunks.append(chunk)
+            if not message.get("more_body", False):
+                break
+
+        return b"".join(chunks)
+
+    async def _extract_form_token(
+        self,
+        scope: dict,
+        receive: Callable[[], Awaitable[dict]],
+        content_type: str,
+    ) -> tuple[str | None, bytes]:
+        body = await self._read_body(receive)
+
+        if content_type == "application/x-www-form-urlencoded":
+            try:
+                form_data = parse_qs(body.decode("utf-8"), keep_blank_values=True)
+            except UnicodeDecodeError:
+                return None, body
+            return form_data.get("csrf_token", [None])[0], body
+
+        if content_type == "multipart/form-data":
+            request = Request(scope, receive=self._build_replay_receive(body))
+            try:
+                form_data = await request.form()
+            except ValueError:
+                return None, body
+            return form_data.get("csrf_token"), body
+
+        return None, body
 
     async def _reject(
         self,
@@ -125,25 +189,14 @@ class CSRFMiddleware:
         if method not in SAFE_METHODS and self._path_protected(path):
             # Check header first (for JS fetch requests)
             sent_token = request.headers.get("X-CSRF-Token")
-            
+
             # Fall back to form data for traditional HTML form submissions.
             if not sent_token:
-                content_type = request.headers.get("content-type", "")
-                if content_type.startswith("application/x-www-form-urlencoded") or content_type.startswith("multipart/form-data"):
-                    try:
-                        form_data = await request.form()
-                        sent_token = form_data.get("csrf_token")
-                        body_consumed = True
-                    except Exception:
-                        try:
-                            body_cache = await request.body()
-                            body_consumed = True
-                            from urllib.parse import parse_qs
-                            form_data = parse_qs(body_cache.decode("utf-8"))
-                            sent_token = form_data.get("csrf_token", [None])[0]
-                        except Exception:
-                            pass
-            
+                content_type = self._normalize_content_type(request.headers.get("content-type", ""))
+                if content_type in {"application/x-www-form-urlencoded", "multipart/form-data"}:
+                    sent_token, body_cache = await self._extract_form_token(scope, receive, content_type)
+                    body_consumed = True
+
             if not sent_token:
                 await self._reject(
                     "Missing CSRF token",
@@ -168,16 +221,7 @@ class CSRFMiddleware:
 
         # If we consumed the body, create a receive that replays it
         if body_consumed and body_cache is not None:
-            body_sent = False
-            
-            async def receive_with_body() -> dict:
-                nonlocal body_sent
-                if not body_sent:
-                    body_sent = True
-                    return {"type": "http.request", "body": body_cache, "more_body": False}
-                return {"type": "http.disconnect"}
-            
-            receive = receive_with_body
+            receive = self._build_replay_receive(body_cache)
 
         async def send_wrapper(message: dict) -> None:
             if is_new_cookie and message.get("type") == "http.response.start":

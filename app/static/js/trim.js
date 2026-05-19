@@ -11,6 +11,7 @@
  */
 
 import { showToast } from "./toast.js";
+import { reportError } from "./errors.js";
 import {
     buildTrimId,
     clamp,
@@ -86,7 +87,10 @@ let loaderEl = null;
 function getCsrfToken() {
     const token = getCookie("tubeyou_csrf");
     if (!token) {
-        console.error("CSRF token missing from tubeyou_csrf cookie. Trim requests will be rejected.");
+        reportError(new Error("CSRF token missing from tubeyou_csrf cookie"), {
+            module: "trim",
+            action: "getCsrfToken",
+        });
     }
     return token;
 }
@@ -1125,7 +1129,10 @@ async function runLalal(stem) {
                 signal: requestController.signal,
             }
         );
-        const data = await parseApiResponse(res, "Lalal processing failed");
+        reportError(err, {
+            module: "trim",
+            action: "loadWaveSurfer",
+        });
         if (session !== trimSession) return;
 
         // Download the result

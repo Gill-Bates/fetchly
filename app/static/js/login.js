@@ -10,6 +10,8 @@
  * redirect-safe navigation, and iOS keyboard scroll stabilization.
  */
 
+import { reportError, reportWarning } from "./errors.js";
+
 let iosKeyboardController = null;
 
 function initLogin() {
@@ -31,10 +33,10 @@ function initLogin() {
             || document.querySelector('meta[name="csrf-token"]')?.content
             || "";
         if (!token) {
-            console.error(
-                "CSRF token missing from <meta name=\"csrf-token\"> or hidden input. "
-                + "Login requests will be rejected."
-            );
+            reportError(new Error("CSRF token missing"), {
+                module: "login",
+                action: "csrfToken",
+            });
         }
         return token;
     }
@@ -46,10 +48,17 @@ function initLogin() {
             messageEl.classList.remove("d-none", "error");
             if (type === "error") {
                 messageEl.classList.add("error");
+                messageEl.setAttribute("role", "alert");
+                messageEl.setAttribute("aria-live", "assertive");
+            } else {
+                messageEl.setAttribute("role", "status");
+                messageEl.setAttribute("aria-live", "polite");
             }
         } else {
             messageEl.classList.add("d-none");
             messageEl.classList.remove("error");
+            messageEl.setAttribute("role", "status");
+            messageEl.setAttribute("aria-live", "polite");
             messageText.textContent = "";
         }
     }
@@ -93,6 +102,8 @@ function initLogin() {
         }
 
         submitBtn.disabled = true;
+        usernameIn.disabled = true;
+        passwordIn.disabled = true;
         const originalLabel = submitBtnLabel?.textContent ?? "Sign in";
         submitBtn.setAttribute("aria-busy", "true");
         submitSpinner?.classList.remove("d-none");
@@ -121,7 +132,10 @@ function initLogin() {
                 try {
                     data = await response.json();
                 } catch {
-                    console.warn("Login response contained invalid JSON");
+                    reportWarning("Login response contained invalid JSON", {
+                        module: "login",
+                        action: "submitLogin",
+                    });
                 }
             }
 
@@ -141,10 +155,13 @@ function initLogin() {
             const redirect = isSafeLocalRedirect(data.redirect) ? data.redirect : "/";
             window.location.assign(redirect);
         } catch (err) {
-            console.error("Login error:", err);
+            reportError(err, {
+                module: "login",
+                action: "submitLogin",
+            });
             if (err?.name === "AbortError") {
                 setMessage(
-                    "Request timed out. If this persists, try refreshing the page.",
+                    "Request timed out. Check your connection and try again.",
                     "error",
                 );
             } else {
@@ -157,6 +174,8 @@ function initLogin() {
             if (!success) {
                 isSubmitting = false;
                 submitBtn.disabled = false;
+                usernameIn.disabled = false;
+                passwordIn.disabled = false;
                 submitBtn.removeAttribute("aria-busy");
                 submitSpinner?.classList.add("d-none");
                 if (submitBtnLabel) {

@@ -15,195 +15,210 @@
     </h2>
 
     {% if not job %}
-        <div class="alert alert-warning" role="alert">Job not found.</div>
+    <div class="alert alert-warning" role="alert">Job not found.</div>
     {% else %}
-        {% set job_url = job['url'] or '' %}
-        {% set job_url_lower = job_url | lower %}
-        {% set external_job_url = job_url if job_url_lower.startswith('https://') or job_url_lower.startswith('http://') else '' %}
-        <div class="ui-card">
-            <div class="ui-card-body">
-                <dl class="status-grid mb-0">
-                    <dt>ID</dt>
-                    <dd class="font-monospace">{{ job['id'] | e }}</dd>
+    {% set job_url = job['url'] or '' %}
+    {% set job_url_lower = job_url | lower %}
+    {% set external_job_url = job_url if job_url_lower.startswith('https://') or job_url_lower.startswith('http://')
+    else '' %}
+    <div class="ui-card">
+        <div class="ui-card-body">
+            <dl class="status-grid mb-0">
+                <dt>ID</dt>
+                <dd class="font-monospace">{{ job['id'] | e }}</dd>
 
-                    <dt>URL</dt>
-                    <dd>
-                        {% if external_job_url %}
-                        <a href="{{ external_job_url | e }}"
-                           title="{{ external_job_url | e }}"
-                           target="_blank"
-                           rel="noopener noreferrer">{{ external_job_url | e }}</a>
-                        {% else %}
-                        <span class="text-muted">{{ job_url | e }}</span>
-                        {% endif %}
-                    </dd>
-
-                    <dt>Format</dt>
-                    <dd>{{ job['type'] | e }}</dd>
-
-                    <dt>Quality</dt>
-                    <dd>{% if job['type'] == 'audio' %}MP3{% else %}{{ job['quality'] | e }}{% endif %}</dd>
-
-                    <dt>Status</dt>
-                    <dd>
-                        <span id="status" class="status-pill status-pill-{{ job['status'] | status_class }}">
-                            <span id="statusText">{{ (('Cancelled' if job['status'] == 'cancelled' else ('done' if job['status'] == 'analysis_done' else job['status'])) | upper) | e }}</span>
-                        </span>
-                    </dd>
-
-                    <dt class="d-none" id="progressLabel">Progress</dt>
-                    <dd class="d-none" id="progressRow">
-                        <div class="progress progress-thin" role="none">
-                            <div id="progressBar"
-                                 class="progress-bar"
-                                 role="progressbar"
-                                 aria-valuenow="0"
-                                 aria-valuemin="0"
-                                 aria-valuemax="100"></div>
-                        </div>
-                        <small id="etaText" class="text-muted"></small>
-                    </dd>
-
-                    <dt>BPM</dt>
-                    <dd class="{% if job['bpm'] is none %}text-muted{% endif %}" id="bpmRow"><span id="bpmValue">{{ (job['bpm'] if job['bpm'] is not none else '–') | e }}</span></dd>
-
-                    <dt>Confidence</dt>
-                    <dd><span id="bpmConfidence">{% if job['bpm_confidence'] is not none %}{{ '%.2f'|format(job['bpm_confidence']) }}{% else %}–{% endif %}</span></dd>
-
-                    <dt>Created</dt>
-                    <dd>{{ job['created_at'] | localtime }}</dd>
-
-                    {% if job['finished_at'] %}
-                    <dt>Completed</dt>
-                    <dd>{{ job['finished_at'] | localtime }}</dd>
+                <dt>URL</dt>
+                <dd>
+                    {% if external_job_url %}
+                    <a href="{{ external_job_url | e }}" title="{{ external_job_url | e }}" target="_blank"
+                        rel="noopener noreferrer">{{ external_job_url | e }}</a>
+                    {% else %}
+                    <span class="text-muted">{{ job_url | e }}</span>
                     {% endif %}
+                </dd>
 
-                    <dt>Message</dt>
-                    <dd><span id="message">{{ (job['message'] or '–') | e }}</span></dd>
-                </dl>
+                <dt>Format</dt>
+                <dd>{{ job['type'] | e }}</dd>
 
-                <div class="mt-4">
-                    <a id="downloadLink"
-                       class="btn btn-primary btn-lg {% if job['status'] not in ('done', 'analysis', 'analysis_done') %}d-none{% endif %}"
-                       href="/download/{{ job['id'] | e }}">
-                        <span class="material-symbols-outlined icon-inline" aria-hidden="true">download</span>
-                        Download
-                    </a>
-                </div>
+                <dt>Quality</dt>
+                <dd>{% if job['type'] == 'audio' %}MP3{% else %}{{ job['quality'] | e }}{% endif %}</dd>
+
+                <dt>Status</dt>
+                <dd>
+                    <span id="status" class="status-pill status-pill-{{ job['status'] | status_class }}">
+                        <span id="statusText">{{ (('Cancelled' if job['status'] == 'cancelled' else ('done' if
+                            job['status'] == 'analysis_done' else job['status'])) | upper) | e }}</span>
+                    </span>
+                </dd>
+
+                <dt class="d-none" id="progressLabel">Progress</dt>
+                <dd class="d-none" id="progressRow">
+                    <div class="progress progress-thin" role="none">
+                        <div id="progressBar" class="progress-bar" role="progressbar" aria-valuenow="0"
+                            aria-valuemin="0" aria-valuemax="100"></div>
+                    </div>
+                    <small id="etaText" class="text-muted"></small>
+                </dd>
+
+                <dt>BPM</dt>
+                <dd class="{% if job['bpm'] is none %}text-muted{% endif %}" id="bpmRow"><span id="bpmValue">{{
+                        (job['bpm'] if job['bpm'] is not none else '–') | e }}</span></dd>
+
+                <dt>Confidence</dt>
+                <dd><span id="bpmConfidence">{% if job['bpm_confidence'] is not none %}{{
+                        '%.2f'|format(job['bpm_confidence']) }}{% else %}–{% endif %}</span></dd>
+
+                <dt>Created</dt>
+                <dd>{{ job['created_at'] | localtime }}</dd>
+
+                {% if job['finished_at'] %}
+                <dt>Completed</dt>
+                <dd>{{ job['finished_at'] | localtime }}</dd>
+                {% endif %}
+
+                <dt>Message</dt>
+                <dd><span id="message">{{ (job['message'] or '–') | e }}</span></dd>
+            </dl>
+
+            <div class="mt-4">
+                <a id="downloadLink"
+                    class="btn btn-primary btn-lg {% if job['status'] not in ('done', 'analysis', 'analysis_done') %}d-none{% endif %}"
+                    href="/download/{{ job['id'] | e }}">
+                    <span class="material-symbols-outlined icon-inline" aria-hidden="true">download</span>
+                    Download
+                </a>
             </div>
         </div>
+    </div>
 
-        <script>
-            {
-                const jobId = {{ job['id'] | tojson }};
-                const statusEl = document.getElementById("status");
-                const messageEl = document.getElementById("message");
-                const bpmEl = document.getElementById("bpmValue");
-                const bpmRowEl = document.getElementById("bpmRow");
-                const confidenceEl = document.getElementById("bpmConfidence");
-                const linkEl = document.getElementById("downloadLink");
-                const progressBar = document.getElementById("progressBar");
-                const progressRow = document.getElementById("progressRow");
-                const progressLabel = document.getElementById("progressLabel");
-                const etaText = document.getElementById("etaText");
-                const statusText = document.getElementById("statusText");
+    <script>
+        {
+            const jobId = {{ job['id'] | tojson
+        }};
+        const statusEl = document.getElementById("status");
+        const messageEl = document.getElementById("message");
+        const bpmEl = document.getElementById("bpmValue");
+        const bpmRowEl = document.getElementById("bpmRow");
+        const confidenceEl = document.getElementById("bpmConfidence");
+        const linkEl = document.getElementById("downloadLink");
+        const progressBar = document.getElementById("progressBar");
+        const progressRow = document.getElementById("progressRow");
+        const progressLabel = document.getElementById("progressLabel");
+        const etaText = document.getElementById("etaText");
+        const statusText = document.getElementById("statusText");
+        const initialStatus = {{ job['status'] | tojson }};
 
-                const STATUS_META = {
-                    queued: { text: "QUEUED", icon: "schedule" },
-                    processing: { text: "PROCESSING", icon: "sync" },
-                    downloading: { text: "DOWNLOADING", icon: "download" },
-                    transcoding: { text: "TRANSCODING", icon: "memory" },
-                    analysis: { text: "ANALYSIS", icon: "analytics" },
-                    cancelled: { text: "CANCELLED", icon: "cancel" },
-                    done: { text: "DONE", icon: "check_circle" },
-                    analysis_done: { text: "DONE", icon: "check_circle" },
-                    error: { text: "ERROR", icon: "error" },
-                };
+        const STATUS_META = {
+            queued: { text: "QUEUED", icon: "schedule" },
+            processing: { text: "PROCESSING", icon: "sync" },
+            downloading: { text: "DOWNLOADING", icon: "download" },
+            transcoding: { text: "TRANSCODING", icon: "memory" },
+            analysis: { text: "ANALYSIS", icon: "analytics" },
+            cancelled: { text: "CANCELLED", icon: "cancel" },
+            done: { text: "DONE", icon: "check_circle" },
+            analysis_done: { text: "DONE", icon: "check_circle" },
+            error: { text: "ERROR", icon: "error" },
+        };
 
-                const STATUS_PILL = {
-                    queued: "status-pill-primary",
-                    processing: "status-pill-primary",
-                    downloading: "status-pill-primary",
-                    transcoding: "status-pill-primary",
-                    analysis: "status-pill-primary",
-                    cancelled: "status-pill-secondary",
-                    done: "status-pill-success",
-                    analysis_done: "status-pill-success",
-                    error: "status-pill-danger",
-                };
+        const STATUS_PILL = {
+            queued: "status-pill-primary",
+            processing: "status-pill-primary",
+            downloading: "status-pill-primary",
+            transcoding: "status-pill-primary",
+            analysis: "status-pill-primary",
+            cancelled: "status-pill-secondary",
+            done: "status-pill-success",
+            analysis_done: "status-pill-success",
+            error: "status-pill-danger",
+        };
 
-                const FINAL_STATUSES = new Set(["done", "analysis_done", "error", "cancelled"]);
+        const FINAL_STATUSES = new Set(["done", "analysis_done", "error", "cancelled"]);
 
-                let shouldReconnect = true;
-                let stream = null;
+        let shouldReconnect = !FINAL_STATUSES.has(initialStatus);
+        let stream = null;
 
-                function updateStatus(payload) {
-                    const meta = STATUS_META[payload.status] || { text: String(payload.status || "unknown") };
-                    const progress = Number(payload.progress);
-                    statusText.textContent = payload.status === "transcoding" && Number.isFinite(progress)
-                        ? `${meta.text} ${Math.round(progress)}%`
-                        : meta.text;
-                    statusEl.className = `status-pill ${STATUS_PILL[payload.status] || "status-pill-primary"}`;
-                }
+        function updateStatus(payload) {
+            const meta = STATUS_META[payload.status] || { text: String(payload.status || "unknown") };
+            const progress = Number(payload.progress);
+            statusText.textContent = payload.status === "transcoding" && Number.isFinite(progress)
+                ? `${meta.text} ${Math.round(progress)}%`
+                : meta.text;
+            statusEl.className = `status-pill ${STATUS_PILL[payload.status] || "status-pill-primary"}`;
+        }
 
-                function updateProgress(payload) {
-                    if (payload.progress != null) {
-                        progressRow.classList.remove("d-none");
-                        progressLabel.classList.remove("d-none");
-                        const pct = Math.max(0, Math.min(100, Number(payload.progress) || 0));
-                        progressBar.style.width = `${pct}%`;
-                        progressBar.setAttribute("aria-valuenow", String(pct));
-                    }
-
-                    if (payload.eta_seconds != null) {
-                        const seconds = Math.max(0, Math.round(Number(payload.eta_seconds) || 0));
-                        etaText.textContent = seconds > 60
-                            ? `~${Math.round(seconds / 60)} min remaining`
-                            : `~${seconds}s remaining`;
-                    }
-                }
-
-                function handleMessage(event) {
-                    let payload;
-                    try { payload = JSON.parse(event.data); } catch { return; }
-                    if (payload.id !== jobId) return;
-
-                    updateStatus(payload);
-                    messageEl.textContent = payload.message || "–";
-
-                    if (payload.bpm != null) {
-                        bpmEl.textContent = String(payload.bpm);
-                        bpmRowEl.classList.remove("text-muted");
-                    }
-
-                    if (payload.bpm_confidence != null) {
-                        confidenceEl.textContent = Number(payload.bpm_confidence).toFixed(2);
-                    }
-
-                    updateProgress(payload);
-
-                    if (payload.status && FINAL_STATUSES.has(payload.status)) {
-                        shouldReconnect = false;
-                        try { stream?.close(); } catch (_) {}
-                        linkEl.classList.remove("d-none");
-                    }
-                }
-
-                function connect() {
-                    stream = new EventSource(`/api/jobs/${encodeURIComponent(jobId)}/events`, { withCredentials: true });
-                    stream.onmessage = handleMessage;
-                }
-
-                if (!FINAL_STATUSES.has({{ job['status'] | tojson }})) {
-                    connect();
-                }
-
-                window.addEventListener("pagehide", () => {
-                    shouldReconnect = false;
-                    try { stream?.close(); } catch (_) {}
-                });
+        function updateProgress(payload) {
+            if (payload.progress != null) {
+                progressRow.classList.remove("d-none");
+                progressLabel.classList.remove("d-none");
+                const pct = Math.max(0, Math.min(100, Number(payload.progress) || 0));
+                progressBar.style.width = `${pct}%`;
+                progressBar.setAttribute("aria-valuenow", String(pct));
             }
-        </script>
+
+            if (payload.eta_seconds != null) {
+                const seconds = Math.max(0, Math.round(Number(payload.eta_seconds) || 0));
+                etaText.textContent = seconds > 60
+                    ? `~${Math.round(seconds / 60)} min remaining`
+                    : `~${seconds}s remaining`;
+            }
+        }
+
+        function handleMessage(event) {
+            let payload;
+            try { payload = JSON.parse(event.data); } catch { return; }
+            if (payload.id !== jobId) return;
+
+            updateStatus(payload);
+            messageEl.textContent = payload.message || "–";
+
+            if (payload.bpm != null) {
+                bpmEl.textContent = String(payload.bpm);
+                bpmRowEl.classList.remove("text-muted");
+            }
+
+            if (payload.bpm_confidence != null) {
+                confidenceEl.textContent = Number(payload.bpm_confidence).toFixed(2);
+            }
+
+            updateProgress(payload);
+
+            if (payload.status && FINAL_STATUSES.has(payload.status)) {
+                shouldReconnect = false;
+                try { stream?.close(); } catch (_) { }
+                linkEl.classList.remove("d-none");
+            }
+        }
+
+        function connect() {
+            if (!shouldReconnect) {
+                return;
+            }
+
+            if (stream && stream.readyState !== EventSource.CLOSED) {
+                return;
+            }
+
+            stream = new EventSource(`/api/jobs/${encodeURIComponent(jobId)}/events`, { withCredentials: true });
+            stream.onmessage = handleMessage;
+        }
+
+        if (shouldReconnect) {
+            connect();
+        }
+
+        window.addEventListener("pagehide", () => {
+            try { stream?.close(); } catch (_) { }
+        });
+
+        window.addEventListener("pageshow", (event) => {
+            if (!event.persisted || !shouldReconnect) {
+                return;
+            }
+
+            connect();
+        });
+            }
+    </script>
     {% endif %}
 </div>
 {% endblock %}

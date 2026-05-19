@@ -31,7 +31,7 @@ const JOBS_JS_PATH = new URL('../../app/static/js/jobs.js', import.meta.url);
 let jobsScrollContractMetricsPromise;
 
 function viewAuditsJobsList(view) {
-    return Array.isArray(view?.requiredSelectors) && view.requiredSelectors.includes('#jobsTable');
+    return Array.isArray(view?.requiredSelectors) && view.requiredSelectors.includes('#jobsRenderRoot');
 }
 
 async function getJobsScrollContractMetrics() {
@@ -46,22 +46,21 @@ async function getJobsScrollContractMetrics() {
             const localScrollFallback = /jobsScrollContainer\.addEventListener\(\s*['"]scroll['"]\s*,\s*onScroll/.test(mainJsSource);
             const windowScrollLoadsMore = /window\.addEventListener\(\s*['"]scroll['"][\s\S]{0,400}?maybeLoadMoreJobs/.test(mainJsSource);
 
-            const renderedCountAssignments = [...jobsJsSource.matchAll(/state\.nextOffset\s*=\s*getRenderedJobCount\(\)/g)].length;
-            const initSeedsFromRenderedCount = /function init\(\)\s*\{[\s\S]*?state\.nextOffset\s*=\s*getRenderedJobCount\(\)/.test(jobsJsSource);
+            const storeLengthAssignments = [...jobsJsSource.matchAll(/state\.nextOffset\s*=\s*state\.jobs\.length/g)].length;
+            const initSeedsFromStoreLength = /function init\(\)\s*\{[\s\S]*?state\.nextOffset\s*=\s*state\.jobs\.length/.test(jobsJsSource);
             const usesLegacyDomSyncHelper = /function\s+syncNextOffset\s*\(/.test(jobsJsSource)
                 || /\bsyncNextOffset\(\)/.test(jobsJsSource);
 
             const tracksMonotonicOffset = /nextOffset:\s*0/.test(jobsJsSource)
                 && /const currentOffset = state\.nextOffset/.test(jobsJsSource)
                 && /await fetchFn\(currentOffset\)/.test(jobsJsSource)
-                && /const expectedNextOffset = currentOffset \+ jobs\.length/.test(jobsJsSource)
-                && /(state\.nextOffset\s*=\s*expectedNextOffset|state\.nextOffset\s*=\s*Math\.max\(state\.nextOffset,\s*expectedNextOffset\))/.test(jobsJsSource);
+                && /state\.nextOffset\s*=\s*currentOffset\s*\+\s*jobs\.length/.test(jobsJsSource);
             const usesRenderedCountAsFetchOffset = /fetchFn\(\s*(?:getRenderedJobCount\(|tbody\s*\.\s*querySelectorAll\(|document\s*\.\s*querySelectorAll\()[\s\S]*?\)/.test(jobsJsSource);
-            const hasUnexpectedRenderedCountResync = renderedCountAssignments > (initSeedsFromRenderedCount ? 1 : 0);
+            const hasUnexpectedStoreLengthResync = storeLengthAssignments > (initSeedsFromStoreLength ? 1 : 0);
 
             return {
                 jobsInfiniteScrollNotObserverBased: !(observerBoundToScroller && localScrollFallback) || windowScrollLoadsMore,
-                jobsPagingOffsetContractBroken: !tracksMonotonicOffset || usesRenderedCountAsFetchOffset || usesLegacyDomSyncHelper || hasUnexpectedRenderedCountResync,
+                jobsPagingOffsetContractBroken: !tracksMonotonicOffset || usesRenderedCountAsFetchOffset || usesLegacyDomSyncHelper || hasUnexpectedStoreLengthResync,
             };
         })();
     }
@@ -146,7 +145,7 @@ const VIEW_DEFS = [
         readySelector: '#submitForm',
         auth: true,
         device: 'desktop',
-        requiredSelectors: ['.stats-row', '#submitForm', '#jobsTable', '#wsIndicator'],
+        requiredSelectors: ['.stats-row', '#submitForm', '#jobsRenderRoot', '#jobsTable', '#wsIndicator'],
     },
     {
         name: 'settings',
@@ -162,7 +161,7 @@ const VIEW_DEFS = [
         readySelector: '#submitForm',
         auth: true,
         device: 'mobile',
-        requiredSelectors: ['.stats-row', '#submitForm', '#jobsTable'],
+        requiredSelectors: ['.stats-row', '#submitForm', '#jobsRenderRoot', '#jobsMobileList', '#wsIndicator'],
     },
     {
         name: 'mobile-settings',
@@ -270,7 +269,7 @@ function formatResultSummary(result) {
     if (metrics.tightlyPackedTargets) parts.push(`tightTargets=${metrics.tightlyPackedTargets}`);
     if (metrics.localOverflowIssues) parts.push(`localOverflow=${metrics.localOverflowIssues}`);
     if (metrics.brokenTitleTruncation) parts.push(`brokenEllipsis=${metrics.brokenTitleTruncation}`);
-    if (metrics.mobileJobTableIssues) parts.push(`mobileJobTable=${metrics.mobileJobTableIssues}`);
+    if (metrics.mobileJobsFeedIssues) parts.push(`mobileJobsFeed=${metrics.mobileJobsFeedIssues}`);
     if (metrics.mixedLayoutIssues) parts.push(`mixedLayout=${metrics.mixedLayoutIssues}`);
     if (metrics.statCardCenteringIssues) parts.push(`statCardCentering=${metrics.statCardCenteringIssues}`);
     if (metrics.containerWidthIssue) parts.push('containerWidth=bad');
@@ -384,7 +383,7 @@ const BASE_METRICS = Object.freeze({
     importantAbuse: 0,
     localOverflowIssues: 0,
     brokenTitleTruncation: 0,
-    mobileJobTableIssues: 0,
+    mobileJobsFeedIssues: 0,
     mixedLayoutIssues: 0,
     containerWidthIssue: 0,
     statCardCenteringIssues: 0,
@@ -559,7 +558,7 @@ async function waitForLayoutStability(page, view) {
         });
 
         if (document.fonts?.ready) {
-            await document.fonts.ready.catch(() => {});
+            await document.fonts.ready.catch(() => { });
         }
 
         if (document.activeElement instanceof HTMLElement) {
@@ -1189,7 +1188,7 @@ async function collectMetrics(page, view) {
 
         const pageScrollable = document.documentElement.scrollHeight > window.innerHeight + 4;
         const doubleScrollRisk = pageScrollable && scrollContainers.length > 0 ? 1 : 0;
-        const jobsTableScroller = document.querySelector('#jobsCard .table-responsive');
+        const jobsTableScroller = document.querySelector('#jobsCard .jobs-list-shell');
         const viewportScrollLeak = (() => {
             if (!jobsTableScroller || !isLayoutVisible(jobsTableScroller)) return 0;
             const style = window.getComputedStyle(jobsTableScroller);
@@ -1299,10 +1298,10 @@ async function collectMetrics(page, view) {
                 .filter((el) => {
                     const style = window.getComputedStyle(el);
                     if (el.classList.contains('job-title-text')) {
-                        return style.display !== 'block'
-                            || style.overflow !== 'hidden'
-                            || style.textOverflow !== 'ellipsis'
-                            || style.whiteSpace !== 'nowrap';
+                        const lineClamp = style.webkitLineClamp || style.getPropertyValue('-webkit-line-clamp');
+                        const isMultiLineClamp = Number.parseInt(lineClamp || '0', 10) >= 1;
+                        return style.overflow !== 'hidden'
+                            || (!isMultiLineClamp && (style.textOverflow !== 'ellipsis' || style.whiteSpace !== 'nowrap'));
                     }
 
                     if (el.classList.contains('job-title-cell')) {
@@ -1318,106 +1317,78 @@ async function collectMetrics(page, view) {
                 }))
             : [];
 
-        // Mobile job table layout check:
-        // - Table rows should use CSS Grid
-        // - .time-part should be hidden (only date visible)
-        // - Per-cell headers via ::before pseudo-elements
-        // - No horizontal overflow between cells
-        const mobileJobTableIssues = isMobile
+        // Mobile jobs feed contract:
+        // - feed list is visible while the desktop view is hidden
+        // - rows render as article.job-item nodes, not table rows
+        // - each job exposes exactly one visible primary action
+        // - no per-row dropdown/action cluster is visible in the feed
+        const mobileJobsFeedIssues = isMobile
             ? (() => {
                 const issues = [];
-                const tableRows = Array.from(document.querySelectorAll('#jobsTable tbody tr[data-job-id]'));
+                const mobileList = document.querySelector('#jobsMobileList');
+                const desktopView = document.querySelector('.jobs-desktop-view');
+                if (!mobileList) {
+                    return [{ type: 'missing-mobile-list' }];
+                }
 
-                for (const row of tableRows) {
-                    if (!isLayoutVisible(row)) continue;
-                    const style = window.getComputedStyle(row);
+                if (!isLayoutVisible(mobileList)) {
+                    issues.push({ type: 'mobile-list-hidden' });
+                }
 
-                    // 1. Row must be a CSS grid
-                    if (!style.display.includes('grid')) {
-                        issues.push({ type: 'not-grid', rowId: row.dataset.jobId });
-                        continue; // remaining checks need grid
+                if (desktopView && isLayoutVisible(desktopView)) {
+                    issues.push({ type: 'desktop-view-visible' });
+                }
+
+                const jobItems = Array.from(mobileList.querySelectorAll('article.job-item[data-job-id]'));
+                for (const item of jobItems) {
+                    if (!isLayoutVisible(item)) continue;
+
+                    const rowId = item.dataset.jobId;
+                    const itemStyle = window.getComputedStyle(item);
+                    if (!itemStyle.display.includes('flex')) {
+                        issues.push({ type: 'job-not-flex', rowId });
                     }
 
-                    // 2. Grid must have exactly 6 columns: auto auto auto auto 1fr auto
-                    //    Resolved value looks like "NNpx NNpx NNpx NNpx NNpx NNpx" (6 tokens).
-                    const cols = (style.gridTemplateColumns || '').trim();
-                    const colTokens = cols.split(/\s+/);
-                    if (colTokens.length !== 6) {
-                        issues.push({ type: 'wrong-column-count', expected: 6, got: colTokens.length, rowId: row.dataset.jobId });
+                    if (item.querySelector('table, tr, td, th')) {
+                        issues.push({ type: 'table-markup-in-feed', rowId });
                     }
 
-                    // 3. Title cell must span row 1, full width (grid-column starts at 1, ends at -1)
-                    const titleCell = row.querySelector('td[data-label="Title"]');
-                    if (titleCell) {
-                        const cs = window.getComputedStyle(titleCell);
-                        if (cs.gridRow !== '1 / 2' && cs.gridRowStart !== '1') {
-                            issues.push({ type: 'title-wrong-row', rowId: row.dataset.jobId });
-                        }
+                    const body = item.querySelector('.job-item__body');
+                    if (!(body instanceof HTMLElement) || !isLayoutVisible(body)) {
+                        issues.push({ type: 'missing-body', rowId });
                     }
 
-                    // 4. Created cell must be in row 2 (grid-row: 2)
-                    const createdCell = row.querySelector('td[data-label="Created"]');
-                    if (createdCell) {
-                        const cs = window.getComputedStyle(createdCell);
-                        const rowStart = cs.gridRowStart;
-                        if (rowStart !== '2') {
-                            issues.push({ type: 'date-wrong-row', expected: '2', got: rowStart, rowId: row.dataset.jobId });
-                        }
+                    const meta = item.querySelector('.job-item__meta');
+                    if (!(meta instanceof HTMLElement) || !isLayoutVisible(meta)) {
+                        issues.push({ type: 'missing-meta', rowId });
                     }
 
-                    // 5. Status cell must be in row 2 and rightmost column (col 6)
-                    const statusCell = row.querySelector('td[data-label="Status"]');
-                    if (statusCell) {
-                        const cs = window.getComputedStyle(statusCell);
-                        if (cs.gridRowStart !== '2') {
-                            issues.push({ type: 'status-wrong-row', rowId: row.dataset.jobId });
-                        }
-                        if (cs.gridColumnStart !== '6') {
-                            issues.push({ type: 'status-wrong-column', expected: '6', got: cs.gridColumnStart, rowId: row.dataset.jobId });
-                        }
+                    const primaryActionWrap = item.querySelector('.job-item__primary-action');
+                    if (!(primaryActionWrap instanceof HTMLElement) || !isLayoutVisible(primaryActionWrap)) {
+                        issues.push({ type: 'missing-primary-action-wrap', rowId });
+                        continue;
                     }
 
-                    // 6. Action cell must be hidden on mobile
-                    const actionCell = row.querySelector('td[data-label="Action"]');
-                    if (actionCell) {
-                        const cs = window.getComputedStyle(actionCell);
-                        if (cs.display !== 'none') {
-                            issues.push({ type: 'action-cell-visible', rowId: row.dataset.jobId });
-                        }
+                    const primaryActions = primaryActionWrap.querySelectorAll('.jobs-mobile-action');
+                    if (primaryActions.length !== 1) {
+                        issues.push({ type: 'wrong-primary-action-count', count: primaryActions.length, rowId });
                     }
 
-                    // 7. Status cell must contain a .status-action-group with an action button
-                    if (statusCell) {
-                        const group = statusCell.querySelector('.status-action-group');
-                        if (!group) {
-                            issues.push({ type: 'missing-status-action-group', rowId: row.dataset.jobId });
-                        } else {
-                            const btn = group.querySelector('.btn');
-                            if (!btn) {
-                                issues.push({ type: 'missing-action-btn-in-group', rowId: row.dataset.jobId });
-                            }
-                        }
+                    const extraActionUis = Array.from(item.querySelectorAll('.job-item__actions, .btn-group, .dropdown-menu, .dropdown-toggle'))
+                        .filter((el) => isLayoutVisible(el));
+                    if (extraActionUis.length > 0) {
+                        issues.push({ type: 'secondary-actions-visible', count: extraActionUis.length, rowId });
                     }
 
-                    // 8. time-part must be hidden
-                    const timeParts = row.querySelectorAll('.time-part');
-                    for (const tp of timeParts) {
-                        if (window.getComputedStyle(tp).display !== 'none') {
-                            issues.push({ type: 'time-visible', rowId: row.dataset.jobId });
-                            break;
+                    const titleText = item.querySelector('.job-title-text');
+                    if (titleText instanceof HTMLElement) {
+                        const titleStyle = window.getComputedStyle(titleText);
+                        const lineClamp = titleStyle.webkitLineClamp || titleStyle.getPropertyValue('-webkit-line-clamp');
+                        if (titleStyle.overflow !== 'hidden' || Number.parseInt(lineClamp || '0', 10) < 2) {
+                            issues.push({ type: 'title-not-clamped', rowId });
                         }
-                    }
-
-                    // 9. ::before column headers must exist on Format, Quality, BPM
-                    for (const label of ['Format', 'Quality', 'BPM']) {
-                        const cell = row.querySelector(`td[data-label="${label}"]`);
-                        if (cell) {
-                            const before = window.getComputedStyle(cell, '::before');
-                            const content = before.content;
-                            if (!content || content === 'none' || content === '""') {
-                                issues.push({ type: 'missing-header', label, rowId: row.dataset.jobId });
-                            }
-                        }
+                    } else {
+                        issues.push({ type: 'missing-title', rowId });
                     }
                 }
 
@@ -2253,7 +2224,7 @@ async function collectMetrics(page, view) {
             const shellFitsViewport = Math.abs(shellRect.height - window.innerHeight) <= 4;
             const shellIsColumn = shellStyle.display.includes('flex') && shellStyle.flexDirection === 'column';
             const mainIsFlexColumn = mainStyle.display.includes('flex') && mainStyle.flexDirection === 'column';
-            const hasLocalJobsScroller = Boolean(document.querySelector('#jobsCard .table-responsive'));
+            const hasLocalJobsScroller = Boolean(document.querySelector('#jobsCard .jobs-list-shell'));
 
             return !(viewportLocked && shellFitsViewport && shellIsColumn && mainIsFlexColumn && hasLocalJobsScroller);
         })();
@@ -2264,7 +2235,7 @@ async function collectMetrics(page, view) {
             if (!isDashboardViewportLayout) return false;
             const card = document.querySelector('#jobsCard');
             const body = document.querySelector('#jobsCard .ui-card-body');
-            const scroller = document.querySelector('#jobsCard .table-responsive');
+            const scroller = document.querySelector('#jobsCard .jobs-list-shell');
             if (!card || !body || !scroller) return true;
 
             const cardStyle = window.getComputedStyle(card);
@@ -2281,10 +2252,10 @@ async function collectMetrics(page, view) {
             return !(fillsHeight && shrinkable);
         })();
 
-        // 19. Jobs table scroller must be the only vertical scroll owner
+        // 19. Jobs list shell must be the only vertical scroll owner on desktop
         const tableResponsiveGhostScroll = (() => {
             if (isMobile) return false;
-            const container = document.querySelector('#jobsCard .table-responsive');
+            const container = document.querySelector('#jobsCard .jobs-list-shell');
             if (!container || !isLayoutVisible(container)) return isDashboardViewportLayout;
             const style = window.getComputedStyle(container);
             const overflowYOk = style.overflowY === 'auto' || style.overflowY === 'scroll';
@@ -2302,7 +2273,7 @@ async function collectMetrics(page, view) {
 
             const card = document.querySelector('#jobsCard');
             const body = document.querySelector('#jobsCard .ui-card-body');
-            const scroller = document.querySelector('#jobsCard .table-responsive');
+            const scroller = document.querySelector('#jobsCard .jobs-list-shell');
             if (!card || !body || !scroller) return false;
 
             const cardStyle = window.getComputedStyle(card);
@@ -2321,8 +2292,8 @@ async function collectMetrics(page, view) {
 
         // 19b. The sentinel must live inside the local jobs scroll container
         const jobsSentinelOutsideScrollContainer = (() => {
-            if (!document.querySelector('#jobsTable')) return false;
-            const container = document.querySelector('#jobsCard .table-responsive');
+            if (!document.querySelector('#jobsSentinel')) return false;
+            const container = document.querySelector('#jobsCard .jobs-list-shell');
             const sentinel = document.querySelector('#jobsSentinel');
             if (!container || !sentinel) return true;
             return !container.contains(sentinel);
@@ -2346,7 +2317,7 @@ async function collectMetrics(page, view) {
         // 21. Desktop jobs table header must remain sticky inside the scroller
         const stickyTableHeaderBroken = await (async () => {
             if (!isDashboardViewportLayout || isMobile) return false;
-            const container = document.querySelector('#jobsCard .table-responsive');
+            const container = document.querySelector('#jobsCard .jobs-list-shell');
             const thead = document.querySelector('#jobsCard .table thead');
             const firstHeader = document.querySelector('#jobsCard .table thead th');
             if (!container || !thead || !firstHeader || !isLayoutVisible(firstHeader)) return true;
@@ -2486,8 +2457,8 @@ async function collectMetrics(page, view) {
                 if (!isLayoutVisible(card)) continue;
                 const children = Array.from(card.children).filter(
                     c => c.tagName === 'DIV' &&
-                         !c.classList.contains('ui-card-header') &&
-                         !c.classList.contains('ui-card-body')
+                        !c.classList.contains('ui-card-header') &&
+                        !c.classList.contains('ui-card-body')
                 );
                 for (const child of children) {
                     const style = window.getComputedStyle(child);
@@ -2646,7 +2617,7 @@ async function collectMetrics(page, view) {
             gridViolations,
             overlapIssues,
             brokenTitleTruncation,
-            mobileJobTableIssues,
+            mobileJobsFeedIssues,
             mixedLayoutIssues,
             containerWidthIssue,
             fontLoadingStatus,
@@ -3019,7 +2990,7 @@ async function runView(browser, storageState, view, replacements = {}) {
             warnings.push(`tightly packed touch targets: ${metrics.tightlyPackedTargets.length}`);
         }
         if (metrics.viewportScrollLeak) {
-            warnings.push('page scroll leaks past local table scroller');
+            warnings.push('page scroll leaks past local jobs scroller');
         }
         if (metrics.localOverflowIssues?.length) {
             failures.push(`local overflow elements: ${metrics.localOverflowIssues.length}`);
@@ -3027,8 +2998,8 @@ async function runView(browser, storageState, view, replacements = {}) {
         if (metrics.brokenTitleTruncation?.length) {
             failures.push(`broken title truncation: ${metrics.brokenTitleTruncation.length}`);
         }
-        if (metrics.mobileJobTableIssues?.length) {
-            failures.push(`mobile job table layout issues: ${metrics.mobileJobTableIssues.length}`);
+        if (metrics.mobileJobsFeedIssues?.length) {
+            failures.push(`mobile jobs feed layout issues: ${metrics.mobileJobsFeedIssues.length}`);
         }
         if (metrics.statCardCenteringIssues?.length) {
             failures.push(`stat card vertical centering broken (child expands): ${metrics.statCardCenteringIssues.length}`);
@@ -3188,7 +3159,7 @@ async function runView(browser, storageState, view, replacements = {}) {
                 importantAbuse: metrics.importantAbuse?.count || 0,
                 localOverflowIssues: metrics.localOverflowIssues?.length || 0,
                 brokenTitleTruncation: metrics.brokenTitleTruncation?.length || 0,
-                mobileJobTableIssues: metrics.mobileJobTableIssues?.length || 0,
+                mobileJobsFeedIssues: metrics.mobileJobsFeedIssues?.length || 0,
                 statCardCenteringIssues: metrics.statCardCenteringIssues?.length || 0,
                 mixedLayoutIssues: metrics.mixedLayoutIssues?.length || 0,
                 containerWidthIssue: metrics.containerWidthIssue ? 1 : 0,

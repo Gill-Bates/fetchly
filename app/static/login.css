@@ -5,6 +5,8 @@
     --login-muted: #94a3b8;
     --login-border: rgba(255, 255, 255, 0.07);
     --login-shadow: 0 14px 36px rgba(2, 6, 23, 0.22);
+    --focus-ring: 0 0 0 3px rgba(99, 102, 241, 0.15);
+    --focus-border: rgba(99, 102, 241, 0.55);
 }
 
 /* Roboto Flex Font */
@@ -85,6 +87,32 @@ body {
     overflow-x: hidden;
 }
 
+body::before,
+body::after {
+    content: "";
+    position: fixed;
+    inset: auto;
+    pointer-events: none;
+    filter: blur(80px);
+    opacity: 0.55;
+}
+
+body::before {
+    top: 7%;
+    left: 8%;
+    width: 320px;
+    height: 320px;
+    background: rgba(56, 189, 248, 0.14);
+}
+
+body::after {
+    right: 6%;
+    bottom: 10%;
+    width: 360px;
+    height: 360px;
+    background: rgba(99, 102, 241, 0.18);
+}
+
 .login-shell {
     min-height: 100dvh;
     display: flex;
@@ -100,15 +128,16 @@ body {
 
 .login-card {
     width: 100%;
-    max-width: 420px;
-    padding: 3.5rem 2rem 2.5rem;
-    border-radius: 18px;
-    background: rgba(17, 24, 39, 0.95);
-    border: 1px solid rgba(255, 255, 255, 0.08);
+    max-width: 520px;
+    padding: 3.25rem 2.4rem 2.6rem;
+    border-radius: 24px;
+    background: linear-gradient(180deg, rgba(17, 24, 39, 0.9), rgba(15, 23, 42, 0.82));
+    border: 1px solid rgba(255, 255, 255, 0.1);
     backdrop-filter: blur(10px);
     -webkit-backdrop-filter: blur(10px);
-    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.45),
-                0 2px 8px rgba(0, 0, 0, 0.25);
+    box-shadow: 0 22px 60px rgba(0, 0, 0, 0.44),
+        0 0 0 1px rgba(255, 255, 255, 0.03) inset,
+        0 2px 8px rgba(0, 0, 0, 0.25);
     display: flex;
     flex-direction: column;
     transform: translateY(0);
@@ -116,12 +145,13 @@ body {
         transform 0.25s ease,
         box-shadow 0.25s ease,
         border-color 0.2s ease;
-    will-change: transform;
     min-height: 480px;
 }
 
-.login-card:hover {
-    border-color: rgba(99, 102, 241, 0.25);
+@media (hover: hover) and (pointer: fine) {
+    .login-card:hover {
+        border-color: rgba(99, 102, 241, 0.25);
+    }
 }
 
 .login-card h1 {
@@ -137,6 +167,15 @@ body {
     color: var(--login-muted);
     font-size: 0.9rem;
     line-height: 1.5;
+}
+
+.login-kicker {
+    margin: 0;
+    color: #8bd4ff;
+    font-size: 0.74rem;
+    font-weight: 700;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
 }
 
 .form-label {
@@ -168,8 +207,8 @@ body {
 
 .form-control:focus {
     background: rgba(15, 23, 42, 0.9);
-    border-color: rgba(99, 102, 241, 0.55);
-    box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.15);
+    border-color: var(--focus-border);
+    box-shadow: var(--focus-ring);
     color: var(--login-text);
 }
 
@@ -180,33 +219,52 @@ body {
 /* Focus state for card */
 .login-card:focus-within {
     transform: translateY(-2px);
-    border-color: rgba(99, 102, 241, 0.4);
-    box-shadow: 0 0 0 1px rgba(99, 102, 241, 0.25),
-                0 14px 44px rgba(0, 0, 0, 0.5),
-                0 2px 8px rgba(0, 0, 0, 0.25);
+    border-color: var(--focus-border);
+    box-shadow: 0 0 0 1px color-mix(in srgb, var(--focus-border) 45%, transparent),
+        0 14px 44px rgba(0, 0, 0, 0.5),
+        0 2px 8px rgba(0, 0, 0, 0.25);
 }
 
 .btn-primary {
-    height: 48px;
-    border-radius: 10px;
-    font-weight: 600;
+    height: 54px;
+    border: none;
+    border-radius: 14px;
+    background: linear-gradient(135deg, #38bdf8 0%, #6366f1 55%, #8b5cf6 100%);
+    font-weight: 700;
     letter-spacing: 0.02em;
-    box-shadow: 0 4px 14px rgba(99, 102, 241, 0.25);
+    box-shadow: 0 12px 30px rgba(99, 102, 241, 0.28), 0 0 0 1px rgba(255, 255, 255, 0.06) inset;
     -webkit-tap-highlight-color: transparent;
     transition:
         transform 0.12s ease,
         box-shadow 0.12s ease,
-        background-color 0.2s ease;
+        filter 0.2s ease;
 }
 
 .btn-primary:hover {
     transform: translateY(-1px);
-    box-shadow: 0 6px 18px rgba(99, 102, 241, 0.35);
+    filter: saturate(1.08);
+    box-shadow: 0 16px 34px rgba(99, 102, 241, 0.38), 0 0 28px rgba(56, 189, 248, 0.12);
 }
 
 .btn-primary:active {
     transform: translateY(0);
     box-shadow: 0 2px 8px rgba(99, 102, 241, 0.25);
+}
+
+@media (prefers-reduced-motion: reduce) {
+
+    *,
+    *::before,
+    *::after {
+        animation: none !important;
+        transition: none !important;
+        scroll-behavior: auto !important;
+    }
+
+    .logo {
+        opacity: 1;
+        transform: none;
+    }
 }
 
 @media (max-width: 480px) {
@@ -219,7 +277,7 @@ body {
 
     .login-card {
         max-width: 100%;
-        padding: 1.35rem;
+        padding: 1.45rem;
     }
 
     .login-card h1 {

@@ -6,66 +6,101 @@
 /**
  * @module jobs
  *
- * Manages the jobs table DOM: building rows, paginated loading,
- * prepending new jobs, and trimming excess rows.
- *
- * State:
- *  - state.loading  Prevents concurrent loadMore() calls.
- *  - state.done     Suppresses loadMore() when all pages are fetched.
- *  - state.nextOffset  Offset used for the next LIMIT/OFFSET request.
- *  - state.preserveHistory  Stops row trimming once the user starts loading
- *                           older pages so fetched history is not discarded.
- *
- * Exports: buildRow, applyRowStatusClasses, prependJob, loadMore, resetPagingState
+ * Manages the jobs collection DOM for both desktop and mobile renderers.
+ * Desktop remains table-based, while mobile renders a feed of articles from
+ * the same in-memory job list so the UI does not duplicate per-job DOM.
  */
 
-import { CONFIG } from "./config.js";
-import { createStatusElement, createActionButton } from "./ui.js?v=20260429m";
-import { EMPTY_VALUE } from "./utils.js";
+import { CONFIG, TERMINAL_STATUSES } from "./config.js";
+import { reportError } from "./errors.js";
+import {
+    createStatusElement,
+    createActionButton,
+    createPrimaryActionButton,
+    resolveJobAction,
+} from "./ui.js?v=20260519b";
 
+const MOBILE_BREAKPOINT = "(max-width: 768px)";
 const FALLBACK_JOBS_TABLE_COLUMN_COUNT = 8;
 const HARD_MAX_ROWS = CONFIG.MAX_ROWS * 2;
+const EMPTY_VALUE = "–";
 
 const STATUS = Object.freeze({
+    DOWNLOADING: "downloading",
     DONE: "done",
     ANALYSIS: "analysis",
     ANALYSIS_DONE: "analysis_done",
+    CANCELLED: "cancelled",
     ERROR: "error",
+    PROCESSING: "processing",
     QUEUED: "queued",
+    TRANSCODING: "transcoding",
+});
+
+const STATUS_TEXT = Object.freeze({
+    analysis: "analyzing",
+    analysis_done: "done",
+    cancelled: "cancelled",
+    done: "done",
+    downloading: "downloading",
+    error: "error",
+    processing: "processing",
+    queued: "queued",
+    transcoding: "transcoding",
 });
 
 const JOB_TYPE = Object.freeze({
     AUDIO: "audio",
 });
 
-/** @type {{ loading: boolean, done: boolean, nextOffset: number, preserveHistory: boolean }} */
-const state = { loading: false, done: false, nextOffset: 0, preserveHistory: false };
+const DATE_FORMATTER = new Intl.DateTimeFormat(undefined, {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+});
 
-function createCopyUrlButton(url) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "job-copy-url-btn";
-    button.dataset.copyUrl = url || "";
-    button.setAttribute("aria-label", "Copy source URL");
-    button.title = "Copy source URL";
+const TIME_FORMATTER = new Intl.DateTimeFormat(undefined, {
+    hour: "2-digit",
+    minute: "2-digit",
+});
 
-    const icon = document.createElement("span");
-    icon.className = "material-symbols-outlined";
-    icon.setAttribute("aria-hidden", "true");
-    icon.textContent = "content_copy";
-    button.append(icon);
+const mediaQuery = typeof window !== "undefined" && typeof window.matchMedia === "function"
+    ? window.matchMedia(MOBILE_BREAKPOINT)
+    : null;
 
-    return button;
-}
+/** @type {{ loading: boolean, done: boolean, nextOffset: number, preserveHistory: boolean, jobs: object[], jobIds: Set<string>, desktopNodes: Map<string, HTMLElement>, mobileNodes: Map<string, HTMLElement>, mobileView: boolean, initialized: boolean }} */
+const state = {
+    loading: false,
+    done: false,
+    nextOffset: 0,
+    preserveHistory: false,
+    jobs: [],
+    jobIds: new Set(),
+    desktopNodes: new Map(),
+    mobileNodes: new Map(),
+    mobileView: mediaQuery?.matches ?? false,
+    initialized: false,
+};
 
 /** @returns {HTMLTableSectionElement | null} */
 function getTbody() {
     return document.getElementById("jobsTbody");
 }
 
-function getRenderedJobCount() {
-    const tbody = getTbody();
-    return tbody ? tbody.querySelectorAll("tr[data-job-id]").length : 0;
+function getMobileList() {
+    return document.getElementById("jobsMobileList");
+}
+
+function getBootstrapNode() {
+    return document.getElementById("jobsBootstrapData");
+}
+
+function getDesktopView() {
+    return getTbody()?.closest(".jobs-desktop-view") ?? null;
+}
+
+function getJobId(job) {
+    return String(job?.id ?? "");
 }
 
 function getJobsTableColumnCount() {
@@ -74,50 +109,223 @@ function getJobsTableColumnCount() {
     return headerCells?.length || FALLBACK_JOBS_TABLE_COLUMN_COUNT;
 }
 
-/**
- * Build the Created cell using safe DOM APIs only.
- * Invalid values are rendered as plain text.
- * @param {unknown} isoOrFormatted
- * @returns {HTMLTableCellElement}
- */
-function buildCreatedCell(isoOrFormatted) {
-    const td = document.createElement("td");
-    td.dataset.label = "Created";
-    td.className = "text-nowrap col-date";
+function getTitleText(job) {
+    return job?.video_title || job?.url || "";
+}
 
+function getQualityLabel(job) {
+    if (job?.type === JOB_TYPE.AUDIO) {
+        return job?.quality || job?.codec || "MP3";
+    }
+
+    return job?.quality || EMPTY_VALUE;
+}
+
+function formatBpmValue(value) {
+    const bpm = Number(value);
+    return Number.isFinite(bpm) && bpm > 0 ? String(Math.round(bpm)) : EMPTY_VALUE;
+}
+
+function formatBpmCompact(value) {
+    const bpm = formatBpmValue(value);
+    return bpm === EMPTY_VALUE ? EMPTY_VALUE : `${bpm} BPM`;
+}
+
+function formatBitrateText(value) {
+    const bitrate = Number(value);
+    return Number.isFinite(bitrate) && bitrate > 0 ? `${Math.round(bitrate)} kbps` : EMPTY_VALUE;
+}
+
+export function formatCompactJobMeta(jobLike) {
+    const parts = [
+        jobLike?.type || "",
+        getQualityLabel(jobLike),
+        formatBpmCompact(jobLike?.bpm),
+        formatBitrateText(jobLike?.bitrate_kbps),
+    ].filter((part) => part && part !== EMPTY_VALUE);
+    return parts.join(" · ") || EMPTY_VALUE;
+}
+
+function formatStatusText(status) {
+    if (!status) {
+        return "queued";
+    }
+
+    return STATUS_TEXT[status] || String(status).toLowerCase();
+}
+
+function formatMobileJobMeta(jobLike) {
+    const parts = [
+        jobLike?.type || "",
+        getQualityLabel(jobLike),
+        formatStatusText(jobLike?.status),
+    ].filter((part) => part && part !== EMPTY_VALUE);
+    return parts.join(" · ") || EMPTY_VALUE;
+}
+
+function formatCreatedText(isoOrFormatted) {
     const text = isoOrFormatted == null ? "" : String(isoOrFormatted);
     const dt = new Date(text);
     if (Number.isNaN(dt.getTime())) {
-        td.textContent = text;
-        return td;
+        return text;
     }
 
-    const datePart = document.createElement("span");
-    datePart.className = "date-part";
-    datePart.textContent = dt.toLocaleDateString(undefined, {
+    return `${dt.toLocaleDateString(undefined, {
         day: "2-digit",
         month: "2-digit",
         year: "numeric",
-    });
-
-    const timePart = document.createElement("span");
-    timePart.className = "time-part";
-    timePart.textContent = dt.toLocaleTimeString(undefined, {
+    })} ${dt.toLocaleTimeString(undefined, {
         hour: "2-digit",
         minute: "2-digit",
-    });
+    })}`;
+}
 
-    td.append(datePart, " ", timePart);
-    return td;
+function normalizeNumberField(value) {
+    const number = Number(value);
+    return Number.isFinite(number) ? number : null;
+}
+
+function hasOwnField(payload, key) {
+    return Object.prototype.hasOwnProperty.call(payload, key);
+}
+
+function findStoredJobIndex(jobId) {
+    return state.jobs.findIndex((job) => getJobId(job) === jobId);
+}
+
+function getStoredJob(jobId) {
+    const index = findStoredJobIndex(jobId);
+    return index === -1 ? null : state.jobs[index];
+}
+
+function replaceJobs(nextJobs) {
+    state.jobs = nextJobs;
+    state.jobIds = new Set(nextJobs.map((job) => getJobId(job)).filter(Boolean));
 }
 
 /**
- * Dispatches a global error event for upstream handlers.
- * @param {unknown} error
+ * Return a stored job by id.
+ * @param {string} jobId
+ * @returns {object | null}
  */
-function dispatchLoadError(error) {
-    const detail = error instanceof Error ? error : new Error(String(error));
-    window.dispatchEvent(new CustomEvent("jobs-load-error", { detail }));
+export function getJobById(jobId) {
+    return getStoredJob(String(jobId || ""));
+}
+
+function getRenderedNodesMap({ mobile = false } = {}) {
+    return mobile ? state.mobileNodes : state.desktopNodes;
+}
+
+function clearContainerEmptyState(container) {
+    container?.querySelector("#emptyRow, #jobsEmptyState")?.remove();
+}
+
+function trimRenderedNodes(container, renderedNodes) {
+    if (!(container instanceof Element)) {
+        return;
+    }
+
+    while (renderedNodes.size > state.jobs.length) {
+        const trailingNode = container.lastElementChild;
+        if (!(trailingNode instanceof HTMLElement)) {
+            return;
+        }
+
+        renderedNodes.delete(trailingNode.dataset.jobId || "");
+        trailingNode.remove();
+    }
+}
+
+function preserveRenderState(source, target) {
+    if (source.classList.contains("d-none")) {
+        target.classList.add("d-none");
+    }
+}
+
+function syncSurfaceVisibility() {
+    getDesktopView()?.classList.toggle("d-none", state.mobileView);
+    getMobileList()?.classList.toggle("d-none", !state.mobileView);
+}
+
+/**
+ * Normalize a partial job update from SSE or action responses.
+ * Only defined fields are copied so store merges can preserve existing data.
+ * @param {object | null | undefined} payload
+ * @returns {object | null}
+ */
+export function normalizeJobUpdate(payload) {
+    if (!payload || payload.id == null) {
+        return null;
+    }
+
+    const update = { id: String(payload.id) };
+
+    for (const key of ["status", "message", "url", "type", "video_title", "video_meta_hover", "codec", "quality", "filename"]) {
+        if (!hasOwnField(payload, key)) {
+            continue;
+        }
+
+        const value = payload[key];
+        if (value == null) {
+            update[key] = null;
+        } else if (typeof value === "string") {
+            update[key] = value;
+        }
+    }
+
+    for (const key of ["bitrate_kbps", "bpm", "bpm_confidence", "filesize_bytes", "progress", "duration_seconds"]) {
+        if (!hasOwnField(payload, key)) {
+            continue;
+        }
+
+        update[key] = payload[key] == null ? null : normalizeNumberField(payload[key]);
+    }
+
+    if (hasOwnField(payload, "created_at")) {
+        update.created_at = payload.created_at == null ? null : String(payload.created_at);
+    }
+
+    if (hasOwnField(payload, "finished_at")) {
+        update.finished_at = payload.finished_at == null ? null : String(payload.finished_at);
+    }
+
+    return update;
+}
+
+function mergeStoredJob(existingJob, update) {
+    const mergedJob = { ...existingJob, ...update };
+
+    if (hasOwnField(update, "status") && update.status !== STATUS.TRANSCODING && !hasOwnField(update, "progress")) {
+        mergedJob.progress = null;
+    }
+
+    return mergedJob;
+}
+
+/**
+ * Merge a normalized partial update into the in-memory job store.
+ * @param {object | null} update
+ * @returns {object | null}
+ */
+export function updateJobStore(update) {
+    if (!update?.id) {
+        return null;
+    }
+
+    const index = findStoredJobIndex(update.id);
+    if (index === -1) {
+        return null;
+    }
+
+    const mergedJob = mergeStoredJob(state.jobs[index], update);
+    state.jobs[index] = mergedJob;
+    return mergedJob;
+}
+
+function applyJobDataset(element, job) {
+    element.dataset.jobId = getJobId(job);
+    element.dataset.status = job?.status || STATUS.QUEUED;
+    element.dataset.bpm = String(job?.bpm ?? "");
 }
 
 function createCell(label, text, className = "") {
@@ -130,173 +338,688 @@ function createCell(label, text, className = "") {
     return td;
 }
 
-function getQualityLabel(job) {
-    if (job?.type === JOB_TYPE.AUDIO) {
-        return job?.quality || job?.codec || "MP3";
-    }
-
-    return job?.quality || "";
-}
-
-/**
- * Updates the status CSS classes on an existing job row.
- * Exported for use in WebSocket update handlers.
- * @param {HTMLTableRowElement} tr
- * @param {string} status
- */
-export function applyRowStatusClasses(tr, status) {
-    tr.classList.toggle(
-        "row-done",
-        status === STATUS.DONE || status === STATUS.ANALYSIS_DONE,
-    );
-    tr.classList.toggle("row-error", status === STATUS.ERROR);
-    tr.dataset.status = status;
-}
-
-function trimRows() {
-    const tbody = getTbody();
-    if (!tbody) return;
-
-    const rows = Array.from(tbody.querySelectorAll("tr[data-job-id]"));
-    const maxRows = state.preserveHistory ? HARD_MAX_ROWS : CONFIG.MAX_ROWS;
-    if (rows.length <= maxRows) return;
-
-    const rowsToRemove = rows.slice(maxRows);
-    for (const mainRow of rowsToRemove) {
-        const jobId = mainRow.dataset.jobId;
-        if (jobId) {
-            document.getElementById(`detail-${jobId}`)?.remove();
-        }
-        mainRow.remove();
-    }
-
-    if (state.preserveHistory) {
-        state.nextOffset = Math.max(0, state.nextOffset - rowsToRemove.length);
-    }
-}
-
-/**
- * Builds a table row element for a single job.
- * @param {object} job
- * @returns {HTMLTableRowElement}
- */
-export function buildRow(job) {
-    const jobId = String(job.id);
-    const tr = document.createElement("tr");
-    tr.dataset.jobId = jobId;
-    tr.dataset.url = job.url || "";
-    tr.dataset.status = job.status || STATUS.QUEUED;
-    tr.dataset.type = job.type || "";
-    tr.dataset.message = job.message || "";
-    tr.dataset.sizeBytes = String(job.filesize_bytes ?? "");
-    tr.dataset.bpm = String(job.bpm ?? "");
-    tr.dataset.bpmConfidence = String(job.bpm_confidence ?? "");
-    tr.dataset.progress = String(job.progress ?? "");
-
-    applyRowStatusClasses(tr, job.status || STATUS.QUEUED);
-
-    const titleCell = document.createElement("td");
-    titleCell.dataset.label = "Title";
-    titleCell.className = "job-title-cell job-title-cell--wide col-title";
-    titleCell.dataset.popoverText = job.video_meta_hover || job.url || "";
-    titleCell.append(createCopyUrlButton(job.url || ""));
-
+function renderJobTitleText(job) {
     const titleText = document.createElement("span");
     titleText.className = "job-title-text";
-    titleText.textContent = job.video_title || job.url || "";
-    titleCell.append(titleText);
-    tr.append(titleCell);
+    titleText.textContent = getTitleText(job);
+    return titleText;
+}
 
-    const formatCell = document.createElement("td");
-    formatCell.dataset.label = "Format";
-    formatCell.className = "td-mono job-meta-cell col-compact";
-    formatCell.textContent = job.type || "";
+function renderDesktopTitle(job) {
+    const td = document.createElement("td");
+    td.dataset.label = "Title";
+    td.className = "job-title-cell job-title-cell--wide col-title job-title-popover-target";
+    td.dataset.popoverText = job?.video_meta_hover || job?.url || "";
+    td.append(renderJobTitleText(job));
+    return td;
+}
 
-    const metaSub = document.createElement("div");
-    metaSub.className = "meta-sub";
-    metaSub.textContent = job.codec || EMPTY_VALUE;
-    formatCell.append(metaSub);
-    tr.append(formatCell);
+function formatDesktopMediaPrimary(job) {
+    const parts = [job?.type || "", getQualityLabel(job)].filter((part) => part && part !== EMPTY_VALUE);
+    return parts.join(" · ") || EMPTY_VALUE;
+}
 
-    tr.append(createCell("Quality", getQualityLabel(job), "td-mono job-meta-cell col-compact"));
-    tr.append(createCell("BPM", job.bpm ? String(job.bpm) : EMPTY_VALUE, "td-mono job-meta-cell col-compact"));
-    tr.append(createCell("Bitrate", job.bitrate_kbps ? `${job.bitrate_kbps} kbps` : EMPTY_VALUE, "td-mono job-meta-cell col-compact"));
+function formatDesktopMediaSecondary(job) {
+    const parts = [job?.codec || "", formatBpmCompact(job?.bpm), formatBitrateText(job?.bitrate_kbps)]
+        .filter((part) => part && part !== EMPTY_VALUE);
+    return parts.join(" · ") || "Live job metadata updates here";
+}
 
-    const statusCell = document.createElement("td");
-    statusCell.dataset.label = "Status";
-    statusCell.className = "col-status";
+function renderDesktopMeta(job) {
+    const mediaCell = document.createElement("td");
+    mediaCell.dataset.label = "Media";
+    mediaCell.className = "td-mono job-meta-cell col-media";
 
-    const statusActionGroup = document.createElement("div");
-    statusActionGroup.className = "status-action-group";
-    statusActionGroup.append(createStatusElement(job.status, job.filesize_bytes, job.progress));
+    const mediaValue = document.createElement("span");
+    mediaValue.className = "job-media-value";
+    mediaValue.textContent = formatDesktopMediaPrimary(job);
 
-    const actionButton = createActionButton(jobId, job.status, job.type);
+    const mediaDetail = document.createElement("div");
+    mediaDetail.className = "meta-sub job-media-detail";
+    mediaDetail.textContent = formatDesktopMediaSecondary(job);
 
-    const mobileActionWrap = document.createElement("div");
-    mobileActionWrap.className = "d-mobile-only";
-    mobileActionWrap.append(actionButton.cloneNode(true));
-    statusActionGroup.append(mobileActionWrap);
+    mediaCell.append(mediaValue, mediaDetail);
 
-    statusCell.append(statusActionGroup);
-    tr.append(statusCell);
-    tr.append(buildCreatedCell(job.created_at));
+    return [mediaCell];
+}
 
-    const actionCell = document.createElement("td");
-    actionCell.dataset.label = "Action";
-    actionCell.className = "col-actions";
+function renderMobileMeta(job) {
+    const meta = document.createElement("p");
+    meta.className = "job-item__meta jobs-mobile-meta";
+    meta.dataset.role = "job-meta-summary";
+    meta.textContent = formatMobileJobMeta(job);
+    return meta;
+}
+
+function createMobileDetailItem(label, value) {
+    const item = document.createElement("div");
+    item.className = "job-item__detail";
+
+    const detailLabel = document.createElement("span");
+    detailLabel.className = "job-item__detail-label";
+    detailLabel.textContent = label;
+
+    const detailValue = document.createElement("span");
+    detailValue.className = "job-item__detail-value";
+    detailValue.textContent = value;
+
+    item.append(detailLabel, detailValue);
+    return item;
+}
+
+function renderMobileDetails(job) {
+    const details = document.createElement("div");
+    details.className = "job-item__details";
+    details.dataset.role = "job-details";
+
+    const specs = formatDesktopMediaSecondary(job);
+    details.append(
+        createMobileDetailItem("Media", formatDesktopMediaPrimary(job)),
+        createMobileDetailItem("Details", specs || "Metadata updates while the job runs"),
+        createMobileDetailItem("Added", formatCreatedText(job?.created_at) || EMPTY_VALUE),
+    );
+
+    return details;
+}
+
+function renderJobStatus(job, { mobile = false } = {}) {
+    const container = document.createElement(mobile ? "div" : "td");
+    container.dataset.label = "Status";
+    container.dataset.role = "job-status";
+    container.className = mobile ? "job-item__status" : "col-status";
+    container.append(createStatusElement(job?.status, job?.filesize_bytes, job?.progress));
+    return container;
+}
+
+function renderJobActions(job, { mobile = false } = {}) {
+    const container = document.createElement(mobile ? "div" : "td");
+    const action = resolveJobAction(job);
+    container.dataset.label = "Action";
+    container.dataset.role = "job-actions";
+    container.dataset.actionCategory = action.category;
+    container.dataset.actionKey = action.actionKey;
+    container.className = mobile ? "job-item__actions" : "col-actions";
+
+    const actionButton = createActionButton(job);
+    if (mobile) {
+        container.append(actionButton);
+        return container;
+    }
 
     const actionWrap = document.createElement("div");
     actionWrap.className = "action-cell-wrap";
     actionWrap.append(actionButton);
-    actionCell.append(actionWrap);
-    tr.append(actionCell);
-
-    return tr;
+    container.append(actionWrap);
+    return container;
 }
 
 /**
- * Build the hidden companion row paired with a job row.
- * The row is addressed by `detail-{jobId}` from live-update handlers.
- * @param {object} job
- * @returns {HTMLTableRowElement}
+ * Updates the status CSS classes on an existing job node.
+ * @param {HTMLElement} element
+ * @param {string} status
  */
-function buildDetailRow(job) {
-    const jobId = String(job.id);
-    const tr = document.createElement("tr");
-    tr.className = "job-detail-row d-none";
-    tr.id = `detail-${jobId}`;
+function applyRowStatusClasses(element, status) {
+    element.classList.toggle(
+        "row-done",
+        status === STATUS.DONE || status === STATUS.ANALYSIS_DONE,
+    );
+    element.classList.toggle("row-error", status === STATUS.ERROR);
+    element.classList.toggle("row-pending", status !== "" && !TERMINAL_STATUSES.has(String(status || "")));
+    element.dataset.status = status;
+}
+
+function buildCreatedCell(isoOrFormatted) {
+    const td = document.createElement("td");
+    td.dataset.label = "Created";
+    td.dataset.role = "job-created";
+    td.className = "text-nowrap col-date";
+
+    const text = isoOrFormatted == null ? "" : String(isoOrFormatted);
+    const dt = new Date(text);
+    if (Number.isNaN(dt.getTime())) {
+        td.textContent = text;
+        return td;
+    }
+
+    const datePart = document.createElement("span");
+    datePart.className = "date-part";
+    datePart.textContent = DATE_FORMATTER.format(dt);
+
+    const timePart = document.createElement("span");
+    timePart.className = "time-part";
+    timePart.textContent = TIME_FORMATTER.format(dt);
+
+    td.append(datePart, " ", timePart);
+    return td;
+}
+
+function buildDesktopEmptyState(message, id = "emptyRow") {
+    const row = document.createElement("tr");
 
     const td = document.createElement("td");
     td.colSpan = getJobsTableColumnCount();
-    tr.append(td);
+
+    const wrapper = document.createElement("div");
+    wrapper.className = "empty-state";
+
+    const iconDiv = document.createElement("div");
+    iconDiv.className = "icon";
+    iconDiv.textContent = "📥";
+
+    const p = document.createElement("p");
+    p.textContent = message;
+
+    wrapper.append(iconDiv, p);
+    td.append(wrapper);
+    row.append(td);
+    return row;
+}
+
+function buildMobileEmptyState(message, id = "jobsEmptyState") {
+    const emptyState = document.createElement("div");
+    emptyState.id = id;
+    emptyState.className = "jobs-mobile-empty empty-state empty-state--mobile";
+
+    const iconDiv = document.createElement("div");
+    iconDiv.className = "icon";
+    iconDiv.textContent = "📥";
+
+    const p = document.createElement("p");
+    p.textContent = message;
+
+    emptyState.append(iconDiv, p);
+    return emptyState;
+}
+
+function buildDesktopJob(job) {
+    const tr = document.createElement("tr");
+    applyJobDataset(tr, job);
+    applyRowStatusClasses(tr, job?.status || STATUS.QUEUED);
+    tr.append(
+        renderDesktopTitle(job),
+        ...renderDesktopMeta(job),
+        renderJobStatus(job),
+        buildCreatedCell(job?.created_at),
+        renderJobActions(job),
+    );
     return tr;
 }
 
+function buildMobileJob(job) {
+    const article = document.createElement("article");
+    article.className = "job-item jobs-mobile-item jobs-mobile-feed-item";
+    applyJobDataset(article, job);
+    applyRowStatusClasses(article, job?.status || STATUS.QUEUED);
+
+    const body = document.createElement("div");
+    body.className = "job-item__body";
+
+    const titleWrap = document.createElement("div");
+    titleWrap.dataset.label = "Title";
+    titleWrap.dataset.role = "job-title";
+    titleWrap.className = "job-item__title-wrap";
+    titleWrap.append(renderJobTitleText(job));
+
+    body.append(titleWrap, renderMobileMeta(job), renderMobileDetails(job));
+
+    const actionWrap = document.createElement("div");
+    actionWrap.className = "job-item__primary-action";
+    actionWrap.dataset.label = "Action";
+    actionWrap.append(createPrimaryActionButton(job));
+
+    article.append(body, actionWrap);
+    return article;
+}
+
+function patchDesktopJobNode(row, job) {
+    applyJobDataset(row, job);
+    applyRowStatusClasses(row, job?.status || STATUS.QUEUED);
+
+    const titleCell = row.querySelector(".job-title-cell");
+    if (titleCell instanceof HTMLElement) {
+        titleCell.dataset.popoverText = job?.video_meta_hover || job?.url || "";
+        const titleText = titleCell.querySelector(".job-title-text");
+        if (titleText instanceof HTMLElement) {
+            titleText.textContent = getTitleText(job);
+        }
+    }
+
+    const mediaCell = row.querySelector('td[data-label="Media"]');
+    if (mediaCell instanceof HTMLElement) {
+        const mediaValue = mediaCell.querySelector(".job-media-value");
+        if (mediaValue instanceof HTMLElement) {
+            mediaValue.textContent = formatDesktopMediaPrimary(job);
+        }
+
+        const mediaDetail = mediaCell.querySelector(".job-media-detail");
+        if (mediaDetail instanceof HTMLElement) {
+            mediaDetail.textContent = formatDesktopMediaSecondary(job);
+        }
+    }
+
+    const statusCell = row.querySelector('[data-role="job-status"]');
+    if (statusCell instanceof HTMLTableCellElement) {
+        statusCell.replaceWith(renderJobStatus(job));
+    }
+
+    const createdCell = row.querySelector('[data-role="job-created"]');
+    if (createdCell instanceof HTMLTableCellElement) {
+        createdCell.replaceWith(buildCreatedCell(job?.created_at));
+    }
+
+    const actionsCell = row.querySelector('[data-role="job-actions"]');
+    if (actionsCell instanceof HTMLTableCellElement) {
+        const nextAction = resolveJobAction(job);
+        if (actionsCell.dataset.actionKey !== nextAction.actionKey) {
+            actionsCell.replaceWith(renderJobActions(job));
+        } else {
+            actionsCell.dataset.actionCategory = nextAction.category;
+            actionsCell.dataset.actionKey = nextAction.actionKey;
+        }
+    }
+}
+
+function patchMobileJobNode(article, job) {
+    applyJobDataset(article, job);
+    applyRowStatusClasses(article, job?.status || STATUS.QUEUED);
+
+    const titleText = article.querySelector(".job-title-text");
+    if (titleText instanceof HTMLElement) {
+        titleText.textContent = getTitleText(job);
+    }
+
+    const meta = article.querySelector('[data-role="job-meta-summary"]');
+    if (meta instanceof HTMLElement) {
+        meta.textContent = formatMobileJobMeta(job);
+    }
+
+    const details = article.querySelector('[data-role="job-details"]');
+    if (details instanceof HTMLElement) {
+        details.replaceWith(renderMobileDetails(job));
+    }
+
+    const actionWrap = article.querySelector(".job-item__primary-action");
+    if (actionWrap instanceof HTMLElement) {
+        const nextAction = resolveJobAction(job);
+        if (actionWrap.dataset.actionKey !== nextAction.actionKey) {
+            actionWrap.dataset.actionCategory = nextAction.category;
+            actionWrap.dataset.actionKey = nextAction.actionKey;
+            actionWrap.replaceChildren(createPrimaryActionButton(job));
+        } else {
+            actionWrap.dataset.actionCategory = nextAction.category;
+            actionWrap.dataset.actionKey = nextAction.actionKey;
+        }
+    }
+}
+
+function renderDesktopJobs() {
+    const tbody = getTbody();
+    if (!tbody) {
+        return;
+    }
+
+    if (state.jobs.length === 0) {
+        tbody.replaceChildren(buildDesktopEmptyState("No downloads yet. Add a URL above!"));
+        state.desktopNodes.clear();
+        return;
+    }
+
+    const fragment = document.createDocumentFragment();
+    const nextNodes = new Map();
+    for (const job of state.jobs) {
+        const node = buildDesktopJob(job);
+        fragment.append(node);
+        nextNodes.set(getJobId(job), node);
+    }
+    tbody.replaceChildren(fragment);
+    state.desktopNodes = nextNodes;
+}
+
+function renderMobileJobs() {
+    const mobileList = getMobileList();
+    if (!mobileList) {
+        return;
+    }
+
+    if (state.jobs.length === 0) {
+        mobileList.replaceChildren(buildMobileEmptyState("No downloads yet. Add a URL above!"));
+        state.mobileNodes.clear();
+        return;
+    }
+
+    const fragment = document.createDocumentFragment();
+    const nextNodes = new Map();
+    for (const job of state.jobs) {
+        const node = buildMobileJob(job);
+        fragment.append(node);
+        nextNodes.set(getJobId(job), node);
+    }
+    mobileList.replaceChildren(fragment);
+    state.mobileNodes = nextNodes;
+}
+
+function renderActiveJobs() {
+    renderDesktopJobs();
+    renderMobileJobs();
+    syncSurfaceVisibility();
+}
+
+function prependRenderedJobToSurface(container, renderedNodes, job, buildNode) {
+    if (!(container instanceof Element)) {
+        return;
+    }
+
+    const jobId = getJobId(job);
+    const existingNode = renderedNodes.get(jobId);
+    const nextNode = buildNode(job);
+
+    if (existingNode instanceof HTMLElement) {
+        preserveRenderState(existingNode, nextNode);
+        renderedNodes.delete(jobId);
+        existingNode.remove();
+    }
+
+    clearContainerEmptyState(container);
+    container.prepend(nextNode);
+    renderedNodes.set(jobId, nextNode);
+    trimRenderedNodes(container, renderedNodes);
+}
+
+function appendRenderedJobsToSurface(container, renderedNodes, jobs, buildNode) {
+    if (!(container instanceof Element) || jobs.length === 0) {
+        return;
+    }
+
+    clearContainerEmptyState(container);
+
+    const fragment = document.createDocumentFragment();
+    for (const job of jobs) {
+        const node = buildNode(job);
+        fragment.append(node);
+        renderedNodes.set(getJobId(job), node);
+    }
+
+    container.append(fragment);
+    trimRenderedNodes(container, renderedNodes);
+}
+
+function hasMountedJob(container, renderedNodes, jobId) {
+    if (!(container instanceof Element) || !jobId) {
+        return false;
+    }
+
+    const mappedNode = renderedNodes.get(jobId);
+    return mappedNode instanceof HTMLElement
+        && mappedNode.isConnected
+        && mappedNode.parentElement === container;
+}
+
+function prependRenderedJob(job) {
+    const tbody = getTbody();
+    const mobileList = getMobileList();
+    if (!tbody || !mobileList) {
+        return;
+    }
+
+    if (state.jobs.length > 0 && (state.desktopNodes.size === 0 || state.mobileNodes.size === 0)) {
+        renderActiveJobs();
+        return;
+    }
+
+    prependRenderedJobToSurface(tbody, state.desktopNodes, job, buildDesktopJob);
+    prependRenderedJobToSurface(mobileList, state.mobileNodes, job, buildMobileJob);
+
+    const jobId = getJobId(job);
+    if (!hasMountedJob(tbody, state.desktopNodes, jobId) || !hasMountedJob(mobileList, state.mobileNodes, jobId)) {
+        renderActiveJobs();
+    }
+}
+
+function appendRenderedJobs(jobs) {
+    if (!jobs.length) {
+        return;
+    }
+
+    const tbody = getTbody();
+    const mobileList = getMobileList();
+    if (!tbody || !mobileList) {
+        return;
+    }
+
+    if (state.jobs.length > 0 && (state.desktopNodes.size === 0 || state.mobileNodes.size === 0)) {
+        renderActiveJobs();
+        return;
+    }
+
+    appendRenderedJobsToSurface(tbody, state.desktopNodes, jobs, buildDesktopJob);
+    appendRenderedJobsToSurface(mobileList, state.mobileNodes, jobs, buildMobileJob);
+}
+
 /**
- * Prepends a job row to the table, replacing any existing row with the same ID.
+ * Re-render a single stored job in both mounted renderers.
+ * Falls back to a full render when the node maps are out of sync.
+ * @param {string} jobId
+ * @returns {HTMLElement | null}
+ */
+export function renderStoredJob(jobId) {
+    const job = getStoredJob(jobId);
+    if (!job) {
+        return null;
+    }
+
+    let desktopNode = state.desktopNodes.get(jobId);
+    let mobileNode = state.mobileNodes.get(jobId);
+
+    if (!(desktopNode instanceof HTMLTableRowElement) || !(mobileNode instanceof HTMLElement)) {
+        renderActiveJobs();
+        desktopNode = state.desktopNodes.get(jobId);
+        mobileNode = state.mobileNodes.get(jobId);
+    }
+
+    if (desktopNode instanceof HTMLTableRowElement) {
+        patchDesktopJobNode(desktopNode, job);
+    }
+
+    if (mobileNode instanceof HTMLElement) {
+        patchMobileJobNode(mobileNode, job);
+    }
+
+    return state.mobileView ? mobileNode || null : desktopNode || null;
+}
+
+/**
+ * Return whether any stored jobs are still in a non-terminal state.
+ * @returns {boolean}
+ */
+export function hasNonTerminalJobs() {
+    return state.jobs.some((job) => {
+        const status = String(job?.status || "");
+        return status !== "" && !TERMINAL_STATUSES.has(status);
+    });
+}
+
+/**
+ * Apply the title filter using store data as the source of truth.
+ * @param {string} query
+ * @returns {{ totalCount: number, visibleCount: number }}
+ */
+export function applyStoredJobTitleFilter(query) {
+    if (state.desktopNodes.size === 0 && state.mobileNodes.size === 0) {
+        return { totalCount: 0, visibleCount: 0 };
+    }
+
+    const normalizedQuery = String(query || "").trim().toLowerCase();
+    let totalCount = 0;
+    let visibleCount = 0;
+    const changes = [];
+
+    for (const job of state.jobs) {
+        const jobId = getJobId(job);
+        totalCount += 1;
+
+        const shouldHide = normalizedQuery !== "" && !getTitleText(job).toLowerCase().includes(normalizedQuery);
+        for (const nodes of [state.desktopNodes, state.mobileNodes]) {
+            const row = nodes.get(jobId);
+            if (!(row instanceof HTMLElement)) {
+                continue;
+            }
+
+            const isHidden = row.classList.contains("d-none");
+            if (shouldHide !== isHidden) {
+                changes.push({ row, shouldHide });
+            }
+        }
+
+        if (!shouldHide) {
+            visibleCount += 1;
+        }
+    }
+
+    for (const { row, shouldHide } of changes) {
+        row.classList.toggle("d-none", shouldHide);
+    }
+
+    return { totalCount, visibleCount };
+}
+
+/**
+ * Normalize, store, and re-render a job update in one step.
+ * @param {object | null | undefined} payload
+ * @returns {object | null}
+ */
+export function applyJobUpdate(payload) {
+    const normalizedUpdate = normalizeJobUpdate(payload);
+    if (!normalizedUpdate) {
+        return null;
+    }
+
+    const updatedJob = updateJobStore(normalizedUpdate);
+    if (!updatedJob) {
+        return null;
+    }
+
+    renderStoredJob(updatedJob.id);
+    return updatedJob;
+}
+
+function dispatchLoadError(error) {
+    const detail = error instanceof Error ? error : new Error(String(error));
+    window.dispatchEvent(new CustomEvent("jobs-load-error", { detail }));
+}
+
+function syncViewMode(force = false) {
+    const nextMobileView = mediaQuery?.matches ?? false;
+    if (!force && state.mobileView === nextMobileView) {
+        return false;
+    }
+
+    state.mobileView = nextMobileView;
+    syncSurfaceVisibility();
+    window.dispatchEvent(new CustomEvent("jobs-layout-change", {
+        detail: { mobile: state.mobileView },
+    }));
+    return true;
+}
+
+export function syncMobileJobsList() {
+    syncViewMode();
+}
+
+function trimJobs() {
+    const maxRows = state.preserveHistory ? HARD_MAX_ROWS : CONFIG.MAX_ROWS;
+    if (state.jobs.length <= maxRows) {
+        return;
+    }
+
+    const trimmedCount = state.jobs.length - maxRows;
+    const removedJobs = state.jobs.splice(maxRows);
+    for (const job of removedJobs) {
+        state.jobIds.delete(getJobId(job));
+    }
+
+    if (state.preserveHistory) {
+        state.nextOffset = Math.max(0, state.nextOffset - trimmedCount);
+    }
+}
+
+function readBootstrapJobs() {
+    const node = getBootstrapNode();
+    if (!(node instanceof HTMLScriptElement) || !node.textContent) {
+        return [];
+    }
+
+    try {
+        const parsed = JSON.parse(node.textContent);
+        if (!Array.isArray(parsed)) {
+            return [];
+        }
+
+        const seen = new Set();
+        const jobs = [];
+        for (const job of parsed) {
+            if (typeof job !== "object" || job == null || job.id == null) {
+                continue;
+            }
+
+            const jobId = getJobId(job);
+            if (!jobId || seen.has(jobId)) {
+                continue;
+            }
+            seen.add(jobId);
+            jobs.push(job);
+        }
+        return jobs;
+    } catch (error) {
+        reportError(error, {
+            module: "jobs",
+            action: "readBootstrapJobs",
+        });
+        return [];
+    }
+}
+
+/**
+ * Prepends a job to the active collection, replacing any existing entry.
  * @param {object} job
  */
 export function prependJob(job) {
-    const tbody = getTbody();
-    if (!tbody) return;
-
-    const jobId = String(job.id);
-    const renderedCountBeforePrepend = getRenderedJobCount();
-
-    const existing = tbody.querySelector(`tr[data-job-id="${CSS.escape(jobId)}"]`);
-    if (existing) {
-        document.getElementById(`detail-${jobId}`)?.remove();
-        existing.remove();
+    const jobId = getJobId(job);
+    if (!jobId) {
+        return;
     }
 
-    tbody.prepend(buildDetailRow(job));
-    tbody.prepend(buildRow(job));
-    state.done = false;
-    trimRows();
+    const jobsBeforePrepend = state.jobs.length;
+    const existingIndex = state.jobs.findIndex((item) => getJobId(item) === jobId);
+    const existed = existingIndex !== -1;
+    if (existed) {
+        state.jobs.splice(existingIndex, 1);
+    }
 
-    if (!existing && (state.preserveHistory || renderedCountBeforePrepend < CONFIG.MAX_ROWS)) {
+    state.jobs.unshift(job);
+    state.jobIds.add(jobId);
+    state.done = false;
+    trimJobs();
+    prependRenderedJob(job);
+
+    if (!existed && (state.preserveHistory || jobsBeforePrepend < CONFIG.MAX_ROWS)) {
         state.nextOffset += 1;
     }
+}
+
+/**
+ * Insert a full job snapshot into the current store/render pipeline.
+ * Unknown jobs are surfaced at the top of the active list.
+ * @param {object | null | undefined} job
+ * @returns {object | null}
+ */
+export function upsertJobSnapshot(job) {
+    const jobId = getJobId(job);
+    if (!jobId) {
+        return null;
+    }
+
+    prependJob(job);
+    return getStoredJob(jobId);
 }
 
 /**
@@ -310,24 +1033,17 @@ export function resetPagingState() {
 }
 
 /**
- * Fetch and append the next page of jobs to the table.
- * Skips jobs whose IDs already exist in the table.
- * Appends both a main row and a hidden detail row per job.
+ * Fetch and append the next page of jobs to the collection.
  * Dispatches `jobs-load-error` on non-abort failures.
- * Sets `state.done = true` when the server returns a non-array payload,
- * an empty page, or a final partial page.
  * @param {(offset: number) => Promise<object[]>} fetchFn
- *   Function that accepts a row offset and resolves to a job array.
  * @returns {Promise<void>}
  */
 export async function loadMore(fetchFn) {
-    const tbody = getTbody();
-    if (!tbody || state.loading || state.done) return;
+    if (state.loading || state.done) {
+        return;
+    }
 
     state.loading = true;
-
-    // Snapshot the current offset before awaiting so concurrent prependJob()
-    // updates cannot change which server page this request asks for.
     const currentOffset = state.nextOffset;
 
     try {
@@ -344,41 +1060,40 @@ export async function loadMore(fetchFn) {
             return;
         }
 
-        // With LIMIT/OFFSET pagination, trimming older rows after history loads
-        // would make later offsets skip or discard fetched pages.
         state.preserveHistory = true;
+        state.nextOffset = currentOffset + jobs.length;
 
-        const expectedNextOffset = currentOffset + jobs.length;
-        state.nextOffset = expectedNextOffset;
+        const previousLength = state.jobs.length;
+        let didAppend = false;
 
-        const existingIds = new Set(
-            Array.from(tbody.querySelectorAll("tr[data-job-id]"), (row) => row.dataset.jobId),
-        );
-
-        const fragment = document.createDocumentFragment();
         for (const job of jobs) {
-            const jobId = String(job.id);
-            if (existingIds.has(jobId)) {
+            const jobId = getJobId(job);
+            if (!jobId || state.jobIds.has(jobId)) {
                 continue;
             }
 
-            existingIds.add(jobId);
-            fragment.append(buildRow(job), buildDetailRow(job));
+            state.jobIds.add(jobId);
+            state.jobs.push(job);
+            didAppend = true;
         }
 
-        if (fragment.childNodes.length > 0) {
-            tbody.append(fragment);
+        if (didAppend) {
+            trimJobs();
+            appendRenderedJobs(state.jobs.slice(previousLength));
         }
 
         if (jobs.length < CONFIG.PAGE_SIZE) {
             state.done = true;
         }
-
     } catch (error) {
         if (error?.name === "AbortError") {
             return;
         }
-        console.error("Failed to load more jobs:", error);
+        reportError(error, {
+            module: "jobs",
+            action: "loadMore",
+            offset: currentOffset,
+        });
         dispatchLoadError(error);
     } finally {
         state.loading = false;
@@ -386,9 +1101,21 @@ export async function loadMore(fetchFn) {
 }
 
 function init() {
-    if (!getTbody()) return;
-    state.nextOffset = getRenderedJobCount();
-    trimRows();
+    if (state.initialized || !getTbody() || !getMobileList()) {
+        return;
+    }
+
+    replaceJobs(readBootstrapJobs());
+    state.nextOffset = state.jobs.length;
+    trimJobs();
+    renderActiveJobs();
+    syncViewMode(true);
+
+    mediaQuery?.addEventListener("change", () => {
+        syncViewMode(true);
+    });
+
+    state.initialized = true;
     window.removeEventListener("jobs-reload", resetPagingState);
     window.addEventListener("jobs-reload", resetPagingState);
 }

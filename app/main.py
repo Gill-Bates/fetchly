@@ -430,6 +430,45 @@ class SessionRenewalMiddleware:
         await self.app(scope, receive, send_wrapper)
 
 
+class SecurityHeadersMiddleware:
+    """Attach baseline security headers to all HTTP responses."""
+
+    _CSP = "; ".join([
+        "default-src 'self'",
+        "script-src 'self' 'unsafe-inline'",
+        "style-src 'self' 'unsafe-inline'",
+        "img-src 'self' data: https://img.youtube.com https://i.ytimg.com",
+        "font-src 'self'",
+        "connect-src 'self'",
+        "frame-ancestors 'none'",
+        "base-uri 'self'",
+        "form-action 'self'",
+    ])
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope.get("type") != "http":
+            await self.app(scope, receive, send)
+            return
+
+        async def send_wrapper(message: Message) -> None:
+            if message.get("type") == "http.response.start":
+                headers = MutableHeaders(scope=message)
+                headers.setdefault("Content-Security-Policy", self._CSP)
+                headers.setdefault("X-Frame-Options", "DENY")
+                headers.setdefault("X-Content-Type-Options", "nosniff")
+                headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+                headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
+                headers.setdefault("Cross-Origin-Resource-Policy", "same-origin")
+                if scope.get("scheme") == "https":
+                    headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+            await send(message)
+
+        await self.app(scope, receive, send_wrapper)
+
+
 # Add middleware
 app.add_middleware(SessionRenewalMiddleware)
 app.add_middleware(
@@ -437,6 +476,7 @@ app.add_middleware(
     csrf_cookie_name=_CSRF_COOKIE,
     protected_paths=("/login", "/logout", "/api"),
 )
+app.add_middleware(SecurityHeadersMiddleware)
 app.state.limiter = limiter
 # Decorator-based SlowAPI checks use request.client.host, so proxy headers must
 # wrap the app before route handlers run when requests come through Caddy.

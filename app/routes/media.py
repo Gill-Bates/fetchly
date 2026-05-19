@@ -9,6 +9,8 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
+from datetime import UTC, datetime
 import logging
 import mimetypes
 import threading
@@ -23,6 +25,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from ..common.rate_limit import limiter
 from ..db import get_job
 from ..governor import governor
+from .api import job_to_dict
 from .auth import current_user, require_html_auth
 
 if TYPE_CHECKING:
@@ -45,12 +48,26 @@ _AUDIO_MIME_TYPES = {
     ".aac": "audio/aac",
     ".mp3": "audio/mpeg",
 }
+_KNOWN_MEDIA_TYPES = {
+    **_AUDIO_MIME_TYPES,
+    ".mp4": "video/mp4",
+    ".m4v": "video/x-m4v",
+    ".mov": "video/quicktime",
+    ".mkv": "video/x-matroska",
+    ".webm": "video/webm",
+}
 _NOSNIFF_HEADER = {"X-Content-Type-Options": "nosniff"}
+MAX_MP3_CACHE_AGE_SECONDS = 7 * 24 * 3600
+
+
+@dataclass(slots=True, frozen=True)
+class MediaContext:
+    data_dir: Path
+    base_dir: Path
+    templates: "Jinja2Templates"
 
 # Module-level state
-_DATA_DIR: Path | None = None
-_BASE_DIR: Path | None = None
-_templates: "Jinja2Templates | None" = None
+_MEDIA_CONTEXT: MediaContext | None = None
 _transcode_locks: dict[Path, asyncio.Lock] = {}
 _transcode_lock_refs: dict[Path, int] = {}
 _transcode_locks_guard = threading.Lock()
@@ -62,28 +79,29 @@ def init_media(
     templates: "Jinja2Templates",
 ) -> None:
     """Initialize the media module with required dependencies."""
-    global _DATA_DIR, _BASE_DIR, _templates
-    _DATA_DIR = data_dir
-    _BASE_DIR = base_dir
-    _templates = templates
+    global _MEDIA_CONTEXT
+    context = MediaContext(data_dir=data_dir, base_dir=base_dir, templates=templates)
+    if _MEDIA_CONTEXT is not None and _MEDIA_CONTEXT != context:
+        raise RuntimeError("Media module already initialized with a different context")
+    _MEDIA_CONTEXT = context
+
+
+def _require_media_context() -> MediaContext:
+    if _MEDIA_CONTEXT is None:
+        raise RuntimeError("Media module not initialized: call init_media() first")
+    return _MEDIA_CONTEXT
 
 
 def _require_data_dir() -> Path:
-    if _DATA_DIR is None:
-        raise RuntimeError("Media module not initialized: call init_media() first")
-    return _DATA_DIR
+    return _require_media_context().data_dir
 
 
 def _require_base_dir() -> Path:
-    if _BASE_DIR is None:
-        raise RuntimeError("Media module not initialized: call init_media() first")
-    return _BASE_DIR
+    return _require_media_context().base_dir
 
 
 def _require_templates() -> "Jinja2Templates":
-    if _templates is None:
-        raise RuntimeError("Media module not initialized: call init_media() first")
-    return _templates
+    return _require_media_context().templates
 
 
 async def _path_is_file(path: Path) -> bool:
@@ -91,8 +109,30 @@ async def _path_is_file(path: Path) -> bool:
 
 
 def _guess_media_type(file_path: Path) -> str:
+    media_type = _KNOWN_MEDIA_TYPES.get(file_path.suffix.lower())
+    if media_type:
+        return media_type
+
     media_type, _ = mimetypes.guess_type(file_path.name)
     return media_type or "application/octet-stream"
+
+
+async def _has_fresh_mp3_cache(cache_path: Path) -> bool:
+    if not await _path_is_file(cache_path):
+        return False
+
+    try:
+        cache_stat = await asyncio.to_thread(cache_path.stat)
+    except OSError:
+        return False
+
+    cache_age_seconds = datetime.now(UTC).timestamp() - cache_stat.st_mtime
+    if cache_age_seconds <= MAX_MP3_CACHE_AGE_SECONDS:
+        return True
+
+    logger.info("Removing stale MP3 cache: %s", cache_path.name)
+    await asyncio.to_thread(cache_path.unlink, missing_ok=True)
+    return False
 
 
 async def _get_ready_job(job_id: uuid.UUID) -> dict[str, object]:
@@ -195,7 +235,7 @@ async def transcode_to_mp3(source_path: Path, output_path: Path) -> Path:
     Raises:
         RuntimeError: If ffmpeg transcoding fails
     """
-    if await _path_is_file(output_path):
+    if await _has_fresh_mp3_cache(output_path):
         return output_path
 
     with _transcode_locks_guard:
@@ -208,7 +248,7 @@ async def transcode_to_mp3(source_path: Path, output_path: Path) -> Path:
 
     try:
         async with lock:
-            if await _path_is_file(output_path):
+            if await _has_fresh_mp3_cache(output_path):
                 return output_path
 
             temp_path = output_path.with_name(f"{output_path.name}.tmp.{uuid.uuid4().hex[:8]}")
@@ -274,7 +314,7 @@ async def transcode_to_mp3(source_path: Path, output_path: Path) -> Path:
 async def _ensure_mp3(file_path: Path) -> Path:
     """Return an MP3 path, transcoding the source when the cache is missing."""
     mp3_path = get_mp3_cache_path(file_path)
-    if await _path_is_file(mp3_path):
+    if await _has_fresh_mp3_cache(mp3_path):
         return mp3_path
 
     await transcode_to_mp3(file_path, mp3_path)
@@ -309,7 +349,7 @@ async def job_page(request: Request, job_id: uuid.UUID):
     return templates.TemplateResponse(
         request=request,
         name="job.html",
-        context={"job": job, "csrf_token": csrf_token},
+        context={"job": job_to_dict(job), "csrf_token": csrf_token},
     )
 
 

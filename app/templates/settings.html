@@ -18,151 +18,171 @@
 <div>
     <h1 class="mb-2 d-flex align-items-center gap-2">
         <span class="material-symbols-outlined settings-page-icon" aria-hidden="true">settings</span>
-        Settings
+        Control Center
     </h1>
-    <p class="text-muted mb-4">Manage storage, access and integrations from one place.</p>
+    <p class="text-muted mb-4">Prioritize the essentials first, then tune integrations and advanced policies.</p>
 
     <form id="settingsForm" class="settings-form-layout">
         <div id="settingsAlert" class="alert d-none" role="alert"></div>
 
-        <div class="settings-grid mb-4">
-            <!-- Storage Card -->
-            <div class="settings-grid-item">
-                <div class="ui-card h-100">
-                    <div>
-                        <div class="settings-section">
-                            <h6 class="fw-semibold mb-1 d-flex align-items-center gap-1">
-                                <span class="material-symbols-outlined icon-inline" aria-hidden="true">database</span>
-                                Storage
-                            </h6>
-                            <small class="text-muted d-block mb-3">Retention and cleanup rules</small>
+        <section class="settings-group mb-4" aria-labelledby="settingsCoreHeading">
+            <div class="settings-group-title" id="settingsCoreHeading">Core</div>
+            <p class="settings-group-copy text-muted">Daily controls for retention and administrator access.</p>
+            <div class="settings-grid">
+                <div class="settings-grid-item">
+                    <div class="ui-card h-100">
+                        <div>
+                            <div class="settings-section">
+                                <h6 class="fw-semibold mb-1 d-flex align-items-center gap-1">
+                                    <span class="material-symbols-outlined icon-inline"
+                                        aria-hidden="true">database</span>
+                                    Storage
+                                </h6>
+                                <small class="text-muted d-block mb-3">Retention and cleanup rules</small>
 
-                            <div class="mb-3">
-                                <label for="retentionDays" class="form-label">Max. Job retention (days)</label>
-                                <input type="number" class="form-control ui-input" id="retentionDays"
-                                    name="retention_days" min="1" max="365"
-                                    value="{{ settings.retention_days | default(7) }}">
-                                <small class="setting-hint setting-hint--with-icon">
-                                    <span class="material-symbols-outlined setting-hint-icon"
-                                        aria-hidden="true">info</span>
-                                    <span>Completed jobs will be deleted after this period</span>
-                                </small>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-
-            <div class="settings-grid-item settings-grid-stack">
-                <!-- Session Card -->
-                <div class="ui-card">
-                    <div>
-                        <div class="settings-section">
-                            <h6 class="fw-semibold mb-1 d-flex align-items-center gap-1">
-                                <span class="material-symbols-outlined icon-inline" aria-hidden="true">security</span>
-                                Session
-                            </h6>
-                            <small class="text-muted d-block mb-3">Fixed session lifetime policy</small>
-
-                            <div class="mb-3">
-                                <label class="form-label" for="sessionIdlePolicy">Session policy</label>
-                                <input type="text" class="form-control ui-input" id="sessionIdlePolicy"
-                                    value="60 minutes idle timeout, sliding on activity" readonly>
-                                <small class="setting-hint setting-hint--with-icon">
-                                    <span class="material-symbols-outlined setting-hint-icon"
-                                        aria-hidden="true">info</span>
-                                    <span>Each interaction extends the session by 60 minutes. A new login is always
-                                        required after 24 hours.</span>
-                                </small>
+                                <div class="mb-3">
+                                    <label for="retentionDays" class="form-label">Max. Job retention (days)</label>
+                                    <input type="number" class="form-control ui-input" id="retentionDays"
+                                        name="retention_days" min="1" max="365"
+                                        value="{{ settings.retention_days | default(7) }}">
+                                    <small class="setting-hint setting-hint--with-icon">
+                                        <span class="material-symbols-outlined setting-hint-icon"
+                                            aria-hidden="true">info</span>
+                                        <span>Completed jobs will be deleted after this period</span>
+                                    </small>
+                                </div>
                             </div>
                         </div>
                     </div>
                 </div>
 
-                <!-- Password Card -->
-                <div class="ui-card">
-                    <div>
-                        <div class="settings-section">
-                            <h6 class="fw-semibold mb-1 d-flex align-items-center gap-1">
-                                <span class="material-symbols-outlined icon-inline" aria-hidden="true">password</span>
-                                Password
-                            </h6>
-                            <small class="text-muted d-block mb-3">Change the administrator login password</small>
+                <div class="settings-grid-item">
+                    <div class="ui-card h-100">
+                        <div>
+                            <div class="settings-section">
+                                <h6 class="fw-semibold mb-1 d-flex align-items-center gap-1">
+                                    <span class="material-symbols-outlined icon-inline"
+                                        aria-hidden="true">password</span>
+                                    Password
+                                </h6>
+                                <small class="text-muted d-block mb-3">Change the administrator login password</small>
 
-                            <div class="settings-field-stack">
-                                <div>
-                                    <label class="visually-hidden" for="currentPassword">Current password</label>
-                                    <input type="password" class="form-control ui-input" id="currentPassword" value=""
-                                        placeholder="Current password" autocomplete="current-password">
-                                </div>
-                                <div>
-                                    <label class="visually-hidden" for="adminPassword">New password</label>
-                                    <input type="password" class="form-control ui-input" id="adminPassword" value=""
-                                        placeholder="New password" autocomplete="new-password">
-                                </div>
-                                <div>
-                                    <label class="visually-hidden" for="adminPasswordConfirm">Repeat password</label>
-                                    <input type="password" class="form-control ui-input" id="adminPasswordConfirm"
-                                        value="" placeholder="Repeat password" autocomplete="new-password">
-                                </div>
-                                <div id="passwordError" class="invalid-feedback d-none"></div>
-                                <div class="d-flex justify-content-end">
-                                    <button id="passwordSaveBtn" class="btn btn-primary btn-sm" type="button">
-                                        Change Password
-                                    </button>
+                                <div class="settings-field-stack">
+                                    <div>
+                                        <label class="visually-hidden" for="currentPassword">Current password</label>
+                                        <input type="password" class="form-control ui-input" id="currentPassword"
+                                            value="" placeholder="Current password" autocomplete="current-password">
+                                    </div>
+                                    <div>
+                                        <label class="visually-hidden" for="adminPassword">New password</label>
+                                        <input type="password" class="form-control ui-input" id="adminPassword" value=""
+                                            placeholder="New password" autocomplete="new-password">
+                                    </div>
+                                    <div>
+                                        <label class="visually-hidden" for="adminPasswordConfirm">Repeat
+                                            password</label>
+                                        <input type="password" class="form-control ui-input" id="adminPasswordConfirm"
+                                            value="" placeholder="Repeat password" autocomplete="new-password">
+                                    </div>
+                                    <div id="passwordError" class="invalid-feedback d-none"></div>
+                                    <div class="d-flex justify-content-end">
+                                        <button id="passwordSaveBtn" class="btn btn-primary btn-sm" type="button">
+                                            Change Password
+                                        </button>
+                                    </div>
                                 </div>
                             </div>
                         </div>
                     </div>
                 </div>
             </div>
+        </section>
 
-            <!-- Integrations Card -->
-            <div class="settings-grid-item">
-                <div class="ui-card h-100">
-                    <div>
-                        <div class="settings-section lalal-tile-section">
-                            <h6 class="fw-semibold mb-1 d-flex align-items-center gap-1">
-                                <span class="material-symbols-outlined icon-inline" aria-hidden="true">extension</span>
-                                Lalal.ai
-                            </h6>
-                            <small class="text-muted d-block mb-3">Connect and manage your stem separation
-                                account.</small>
+        <section class="settings-group mb-4" aria-labelledby="settingsIntegrationsHeading">
+            <div class="settings-group-title" id="settingsIntegrationsHeading">Integrations</div>
+            <p class="settings-group-copy text-muted">Connected services that extend the download workflow.</p>
+            <div class="settings-grid">
+                <div class="settings-grid-item">
+                    <div class="ui-card h-100">
+                        <div>
+                            <div class="settings-section lalal-tile-section">
+                                <h6 class="fw-semibold mb-1 d-flex align-items-center gap-1">
+                                    <span class="material-symbols-outlined icon-inline"
+                                        aria-hidden="true">extension</span>
+                                    Lalal.ai
+                                </h6>
+                                <small class="text-muted d-block mb-3">Connect and manage your stem separation
+                                    account.</small>
 
-                            <div class="lalal-tile-header mb-3">
-                                <img src="/static/img/lalal_ai.svg" alt="Lalal.ai" class="lalal-tile-logo">
-                                <span id="lalalStatusBadge"
-                                    class="badge {{ 'bg-success' if lalal_configured else 'bg-secondary' }}">{{
-                                    lalal_status or 'Not configured' }}</span>
-                            </div>
-
-                            <div class="lalal-tile-actions">
-                                <div class="lalal-tile-action-row">
-                                    <button type="button" class="btn btn-outline-primary btn-sm" id="lalalAuthBtn"
-                                        data-bs-toggle="modal" data-bs-target="#lalalAuthModal">
-                                        <span class="material-symbols-outlined icon-inline"
-                                            aria-hidden="true">key</span>
-                                        <span id="lalalAuthBtnLabel">{{ 'Reconnect' if lalal_configured else
-                                            'Authenticate' }}</span>
-                                    </button>
-                                    <button type="button"
-                                        class="btn btn-outline-danger btn-sm {{ '' if lalal_configured else 'd-none' }}"
-                                        id="lalalDisconnectBtn" {{ 'disabled' if not lalal_configured else '' }}>
-                                        <span class="material-symbols-outlined icon-inline"
-                                            aria-hidden="true">link_off</span>
-                                        Disconnect
-                                    </button>
+                                <div class="lalal-tile-header mb-3">
+                                    <img src="/static/img/lalal_ai.svg" alt="Lalal.ai" class="lalal-tile-logo">
+                                    <span id="lalalStatusBadge"
+                                        class="badge {{ 'bg-success' if lalal_configured else 'bg-secondary' }}">{{
+                                        lalal_status or 'Not configured' }}</span>
                                 </div>
-                                <small class="setting-hint" id="lalalStatusLine">{% if lalal_configured and lalal_email
-                                    %}Logged in as <code class="lalal-status-email">{{ lalal_email }}</code>{% elif
-                                    lalal_configured %}Session active{% else %}Click 'Authenticate' to connect your
-                                    Lalal.ai account{% endif %}</small>
+
+                                <div class="lalal-tile-actions">
+                                    <div class="lalal-tile-action-row">
+                                        <button type="button" class="btn btn-outline-primary btn-sm" id="lalalAuthBtn"
+                                            data-bs-toggle="modal" data-bs-target="#lalalAuthModal">
+                                            <span class="material-symbols-outlined icon-inline"
+                                                aria-hidden="true">key</span>
+                                            <span id="lalalAuthBtnLabel">{{ 'Reconnect' if lalal_configured else
+                                                'Authenticate' }}</span>
+                                        </button>
+                                        <button type="button"
+                                            class="btn btn-outline-danger btn-sm {{ '' if lalal_configured else 'd-none' }}"
+                                            id="lalalDisconnectBtn" {{ 'disabled' if not lalal_configured else '' }}>
+                                            <span class="material-symbols-outlined icon-inline"
+                                                aria-hidden="true">link_off</span>
+                                            Disconnect
+                                        </button>
+                                    </div>
+                                    <small class="setting-hint" id="lalalStatusLine">{% if lalal_configured and
+                                        lalal_email
+                                        %}Logged in as <code class="lalal-status-email">{{ lalal_email }}</code>{% elif
+                                        lalal_configured %}Session active{% else %}Click 'Authenticate' to connect your
+                                        Lalal.ai account{% endif %}</small>
+                                </div>
                             </div>
                         </div>
                     </div>
                 </div>
             </div>
-        </div>
+        </section>
+
+        <section class="settings-group mb-4" aria-labelledby="settingsAdvancedHeading">
+            <div class="settings-group-title" id="settingsAdvancedHeading">Advanced</div>
+            <p class="settings-group-copy text-muted">Fixed session lifetime and security policies.</p>
+            <div class="settings-grid">
+                <div class="settings-grid-item">
+                    <div class="ui-card h-100">
+                        <div>
+                            <div class="settings-section">
+                                <h6 class="fw-semibold mb-1 d-flex align-items-center gap-1">
+                                    <span class="material-symbols-outlined icon-inline"
+                                        aria-hidden="true">security</span>
+                                    Session policies
+                                </h6>
+                                <small class="text-muted d-block mb-3">Fixed session lifetime policy</small>
+
+                                <div class="mb-3">
+                                    <label class="form-label" for="sessionIdlePolicy">Session policy</label>
+                                    <input type="text" class="form-control ui-input" id="sessionIdlePolicy"
+                                        value="60 minutes idle timeout, sliding on activity" readonly>
+                                    <small class="setting-hint setting-hint--with-icon">
+                                        <span class="material-symbols-outlined setting-hint-icon"
+                                            aria-hidden="true">info</span>
+                                        <span>Each interaction extends the session by 60 minutes. A new login is always
+                                            required after 24 hours.</span>
+                                    </small>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
 
         <div class="settings-status-bar d-flex justify-content-between align-items-center">
             <button id="settingsSaveBtn" class="btn btn-primary d-none" type="button">Save</button>

@@ -103,6 +103,8 @@ const LALAL_STAGE_SYMBOLS = Object.freeze({
     download_backing: "↓",
 });
 
+const LALAL_PROGRESS_EVENT_NAME = "tubeyou:lalal-progress";
+
 /**
  * Format a byte count as a human-readable string.
  * Uses binary prefixes (1024-based).
@@ -292,7 +294,7 @@ export function isSafeRedirect(url) {
  */
 export function subscribeToLalalProgress(jobId, stem, onProgress, signal) {
     document.addEventListener(
-        "tubeyou:lalal-progress",
+        LALAL_PROGRESS_EVENT_NAME,
         (event) => {
             const detail = event.detail ?? {};
             if (detail.job_id !== jobId || detail.stem !== stem) return;

@@ -195,7 +195,8 @@ async def index(request: Request):
 
     templates = _require_templates()
 
-    jobs = await asyncio.to_thread(paginate_jobs, limit=50, offset=0)
+    raw_jobs = await asyncio.to_thread(paginate_jobs, limit=50, offset=0)
+    jobs = [job_to_dict(job) for job in raw_jobs]
     stats = await get_cached_stats()
     settings = await asyncio.to_thread(get_settings)
     lalal_enabled = is_lalala_configured(settings)
@@ -238,6 +239,19 @@ async def api_jobs(request: Request, _user: str = Depends(require_user), offset:
 
     jobs = await asyncio.to_thread(paginate_jobs, limit=safe_limit, offset=safe_offset)
     return [job_to_dict(job) for job in jobs]
+
+
+@router.get("/api/jobs/{job_id}")
+@limiter.limit("60/minute")
+async def api_job(request: Request, job_id: uuid.UUID, _user: str = Depends(require_user)):
+    """Return a single job snapshot by id."""
+    _ = request
+
+    job = await asyncio.to_thread(get_job, str(job_id))
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    return job_to_dict(job)
 
 
 @router.get("/api/stats/bpm-clusters")
