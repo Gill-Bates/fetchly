@@ -23,7 +23,8 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 
 from ..common.rate_limit import limiter
-from ..db import get_job
+from ..db import COMPLETED_STATUSES, get_job
+from ..utils.fs import LOSSLESS_AUDIO_SOURCE_EXTENSIONS, path_is_file
 from ..governor import governor
 from .api import job_to_dict
 from .auth import current_user, require_html_auth
@@ -36,7 +37,6 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["media"])
 
 # Constants
-_LOSSLESS_AUDIO_EXTENSIONS = frozenset({".opus", ".m4a", ".webm", ".ogg", ".aac", ".flac", ".wav"})
 _BROWSER_SAFE_AUDIO_EXTENSIONS = frozenset({".mp3", ".m4a", ".aac", ".wav"})
 _AUDIO_MIME_TYPES = {
     ".opus": "audio/opus",
@@ -104,8 +104,6 @@ def _require_templates() -> "Jinja2Templates":
     return _require_media_context().templates
 
 
-async def _path_is_file(path: Path) -> bool:
-    return await asyncio.to_thread(path.is_file)
 
 
 def _guess_media_type(file_path: Path) -> str:
@@ -118,7 +116,7 @@ def _guess_media_type(file_path: Path) -> str:
 
 
 async def _has_fresh_mp3_cache(cache_path: Path) -> bool:
-    if not await _path_is_file(cache_path):
+    if not await path_is_file(cache_path):
         return False
 
     try:
@@ -137,7 +135,7 @@ async def _has_fresh_mp3_cache(cache_path: Path) -> bool:
 
 async def _get_ready_job(job_id: uuid.UUID) -> dict[str, object]:
     job = await asyncio.to_thread(get_job, str(job_id))
-    if not job or job["status"] not in {"done", "analysis", "analysis_done"}:
+    if not job or job["status"] not in COMPLETED_STATUSES:
         raise HTTPException(status_code=404, detail="not ready")
     return job
 
@@ -149,7 +147,7 @@ async def _get_ready_job_file(job_id: uuid.UUID) -> tuple[dict[str, object], Pat
         raise HTTPException(status_code=404, detail="not ready")
 
     file_path = resolve_job_path(raw_filename)
-    if not await _path_is_file(file_path):
+    if not await path_is_file(file_path):
         raise HTTPException(status_code=404, detail="not found")
     return job, file_path
 
@@ -157,7 +155,7 @@ async def _get_ready_job_file(job_id: uuid.UUID) -> tuple[dict[str, object], Pat
 async def _get_thumbnail_path(job_id: uuid.UUID) -> Path:
     data_dir = _require_data_dir()
     thumb_path = data_dir / str(job_id) / "thumbnail.jpg"
-    if not await _path_is_file(thumb_path):
+    if not await path_is_file(thumb_path):
         raise HTTPException(status_code=404, detail="not found")
     return thumb_path
 
@@ -198,7 +196,7 @@ def is_lossless_audio_source(file_path: Path) -> bool:
 
     Lossless source files are stored as '<stem>.source.<ext>'.
     """
-    return file_path.stem.endswith(".source") and file_path.suffix.lower() in _LOSSLESS_AUDIO_EXTENSIONS
+    return file_path.stem.endswith(".source") and file_path.suffix.lower() in LOSSLESS_AUDIO_SOURCE_EXTENSIONS
 
 
 def get_mp3_cache_path(source_path: Path) -> Path:
@@ -267,7 +265,7 @@ async def transcode_to_mp3(source_path: Path, output_path: Path) -> Path:
 
             try:
                 async with governor.transcode_semaphore:
-                    if await _path_is_file(output_path):
+                    if await path_is_file(output_path):
                         return output_path
 
                     try:
@@ -299,7 +297,7 @@ async def transcode_to_mp3(source_path: Path, output_path: Path) -> Path:
                         await proc.wait()
                 raise RuntimeError("Audio transcoding timed out") from exc
             finally:
-                if await _path_is_file(temp_path):
+                if await path_is_file(temp_path):
                     await asyncio.to_thread(temp_path.unlink, missing_ok=True)
     finally:
         with _transcode_locks_guard:
@@ -433,7 +431,7 @@ async def audio_source(request: Request, job_id: uuid.UUID):
 async def favicon():
     """Serve favicon from static/img if exists, else 204."""
     ico_path = _require_base_dir() / "static" / "img" / "favicon.ico"
-    if await _path_is_file(ico_path):
+    if await path_is_file(ico_path):
         return FileResponse(path=ico_path, media_type="image/x-icon")
     return Response(status_code=204)
 

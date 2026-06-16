@@ -1,32 +1,49 @@
-# Python
-__pycache__/
-*.py[cod]
-*.pyo
-.venv/
-
 # App data
-data/
 *.db
+data/
 
-# Env
-.env
-.env.*
-cookies.txt
-*.backup
-*.har
-.omx/
-.codex
-app/static/vendor/wavesurfer/
+# Build / packaging
+*.egg-info/
+build/
+dist/
+
+# Caches
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+__pycache__/
+
+# Coverage
+.coverage
+coverage.xml
+htmlcov/
 
 # Editor
-.vscode/
 .idea/
+.vscode/
 
-# Docker
+# Environment
+.env
+.env.*
+.venv/
+
+# Logs / traces
+*.backup
+*.har
 *.log
-BUILD_INFO
 
-# UI lint
+# Local tooling / runtime artifacts
+.codex
+.omx/
+app/static/vendor/wavesurfer/
+cookies.txt
+tools/ui-lint/.cache/
 tools/ui-lint/node_modules/
 tools/ui-lint/output/
-tools/ui-lint/.cache/
+
+# Project-generated metadata
+BUILD_INFO
+
+# Python bytecode
+*.py[cod]
+*.pyo

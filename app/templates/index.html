@@ -10,7 +10,6 @@
 {% endblock %}
 
 {% block content %}
-{% import "macros/status.html" as status %}
 
 {% macro stat_card(value, label, icon, stat_key) %}
 <div class="col-6 col-md-3">
@@ -42,7 +41,7 @@
                 <input type="hidden" name="csrf_token" value="{{ csrf_token | e }}">
                 <div class="row g-3 align-items-end">
                     <div class="col-12">
-                        <label class="form-label fw-medium" for="urlInput">Paste a YouTube link</label>
+                        <label class="form-label fw-medium" for="urlInput">Paste a YouTube, TikTok, or Instagram link</label>
                         <input class="form-control form-control-lg ui-input" id="urlInput" name="url"
                             placeholder="https://www.youtube.com/watch?v=..." required aria-describedby="formError">
 
@@ -78,8 +77,8 @@
                     <div class="col-12 col-md-3 d-flex align-items-end">
                         <button class="btn btn-primary btn-lg w-100" type="submit" id="submitBtn">
                             <span id="btnText">
-                                <span class="material-symbols-outlined">download</span>
-                                Download Video
+                                <span class="material-symbols-outlined" aria-hidden="true">download</span>
+                                Start Download
                             </span>
                         </button>
                     </div>
@@ -132,11 +131,11 @@
 </div>
 
 <!-- Trim Modal -->
-<div class="modal fade" id="trimModal" tabindex="-1">
+<div class="modal fade" id="trimModal" tabindex="-1" aria-labelledby="trimModalLabel" aria-hidden="true">
     <div class="modal-dialog modal-xl modal-dialog-centered">
         <div class="modal-content">
             <div class="modal-header">
-                <h5 class="modal-title">
+                <h5 class="modal-title" id="trimModalLabel">
                     <span class="material-symbols-outlined icon-inline" aria-hidden="true">content_cut</span>
                     Trim Audio
                 </h5>
@@ -160,11 +159,11 @@
                 <!-- Playback controls -->
                 <div class="d-flex gap-2">
                     <button class="btn btn-outline-secondary btn-sm" id="trimPlay" type="button">
-                        <span class="material-symbols-outlined icon-inline">play_arrow</span>
+                        <span class="material-symbols-outlined icon-inline" aria-hidden="true">play_arrow</span>
                         Play
                     </button>
                     <button class="btn btn-outline-secondary btn-sm" id="trimPause" type="button">
-                        <span class="material-symbols-outlined icon-inline">pause</span>
+                        <span class="material-symbols-outlined icon-inline" aria-hidden="true">pause</span>
                         Pause
                     </button>
                     <button class="btn btn-outline-secondary btn-sm" id="trimLoop" type="button" aria-pressed="false">
@@ -174,7 +173,7 @@
                         Use Selection
                     </button>
                     <a class="btn btn-success btn-sm d-none" id="trimDownload" href="#" download>
-                        <span class="material-symbols-outlined icon-inline">download</span>
+                        <span class="material-symbols-outlined icon-inline" aria-hidden="true">download</span>
                         Download
                     </a>
                 </div>
@@ -183,14 +182,14 @@
                 <div class="d-flex gap-2 pt-3 border-top">
                     <button class="btn btn-outline-secondary btn-sm trim-provider-button" id="trimVocals" type="button"
                         disabled{% if not lalal_enabled %} title="Lalal.ai is not connected" {% endif %}>
-                        <span class="material-symbols-outlined icon-inline">mic</span>
+                        <span class="material-symbols-outlined icon-inline" aria-hidden="true">mic</span>
                         A Cappella
                         <img class="trim-provider-logo" src="/static/img/lalal_ai_small.svg" alt="Lalal.ai" width="34"
                             height="10">
                     </button>
                     <button class="btn btn-outline-secondary btn-sm trim-provider-button" id="trimInstr" type="button"
                         disabled{% if not lalal_enabled %} title="Lalal.ai is not connected" {% endif %}>
-                        <span class="material-symbols-outlined icon-inline">music_off</span>
+                        <span class="material-symbols-outlined icon-inline" aria-hidden="true">music_off</span>
                         Instrumental
                         <img class="trim-provider-logo" src="/static/img/lalal_ai_small.svg" alt="Lalal.ai" width="34"
                             height="10">
@@ -201,11 +200,11 @@
     </div>
 </div>
 
-<div class="modal fade" id="detailModal" tabindex="-1">
+<div class="modal fade" id="detailModal" tabindex="-1" aria-labelledby="detailModalLabel" aria-hidden="true">
     <div class="modal-dialog modal-dialog-centered">
         <div class="modal-content detail-modal">
             <div class="modal-header">
-                <h5 class="modal-title">Now Playing</h5>
+                <h5 class="modal-title" id="detailModalLabel">Now Playing</h5>
                 <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close dialog"></button>
             </div>
             <div class="modal-body detail-modal__body">

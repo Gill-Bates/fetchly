@@ -27,6 +27,7 @@ __all__ = [
     "list_completed_bpms",
     "list_jobs_requiring_audio_analysis",
     "list_queued_jobs",
+    "claim_next_queued_job",
     "cancel_interrupted_jobs",
     "get_job",
     "job_exists",
@@ -36,6 +37,9 @@ __all__ = [
     "purge_old_jobs",
     "get_settings",
     "set_settings",
+    "COMPLETED_STATUSES",
+    "TERMINAL_JOB_STATUSES",
+    "utc_timestamp",
 ]
 
 # --------------------------------------------------------------------------- #
@@ -75,6 +79,7 @@ _SETTINGS_DEFAULTS: Final[dict[str, str]] = {
     "lalalaai_auth_checked_at": "0",
     "lalalaai_auth_is_valid": "false",
     "lalalaai_auth_last_error": "",
+    "lalalaai_duration_guard": "true",
 }
 
 
@@ -86,6 +91,11 @@ def _in_placeholders(values: frozenset[str] | tuple[str, ...]) -> str:
     return ",".join("?" for _ in values)
 
 
+def utc_timestamp() -> str:
+    """Return a SQLite-compatible UTC timestamp string without microseconds."""
+    return datetime.now(UTC).replace(microsecond=0).strftime("%Y-%m-%d %H:%M:%S")
+
+
 _INTERNAL_SETTINGS_KEYS: Final[frozenset[str]] = frozenset({
     "admin_password_hash",
     "session_version",
@@ -93,20 +103,42 @@ _INTERNAL_SETTINGS_KEYS: Final[frozenset[str]] = frozenset({
 # Only user-writable keys.  Internal keys require allow_internal=True in set_settings.
 _ALLOWED_SETTINGS_KEYS: Final[frozenset[str]] = frozenset(_SETTINGS_DEFAULTS)
 
-# Statuses that count as "completed" for audio analysis purposes.
-_COMPLETED_STATUSES: Final[frozenset[str]] = frozenset({"done", "analysis", "analysis_done"})
+# Statuses that count as "completed" for downloads / stats purposes.
+COMPLETED_STATUSES: Final[frozenset[str]] = frozenset({"done", "analysis", "analysis_done"})
+# All terminal statuses (no further transitions possible).
+TERMINAL_JOB_STATUSES: Final[frozenset[str]] = COMPLETED_STATUSES | frozenset({"error", "cancelled"})
 _RECOVERABLE_IN_FLIGHT_STATUSES: Final[frozenset[str]] = frozenset({"processing", "downloading", "transcoding"})
+
+_JOB_MIGRATIONS: Final[dict[str, str]] = {
+    "type": "TEXT",
+    "quality": "TEXT",
+    "status": "TEXT",
+    "filename": "TEXT",
+    "finished_at": "TIMESTAMP",
+    "duration_seconds": "INTEGER",
+    "filesize_bytes": "INTEGER",
+    "message": "TEXT",
+    "codec": "TEXT",
+    "bitrate_kbps": "INTEGER",
+    "video_title": "TEXT",
+    "video_meta_hover": "TEXT",
+    "bpm": "INTEGER",
+    "bpm_confidence": "REAL",
+    "audio_hash": "TEXT",
+    "lalal_split_done": "INTEGER NOT NULL DEFAULT 0",
+}
 
 _SETTINGS_TYPES: Final[dict[str, Callable[[str], Any]]] = {
     "retention_days": _int_parser(7),
-    "login_required": lambda v: v.lower() in ("true", "1", "yes"),
+    "login_required": lambda v: str(v).lower() in ("true", "1", "yes", "on"),
     "session_idle_minutes": _int_parser(60),
     "session_version": _int_parser(0),
     "lalalaai_email": str,
     "lalalaai_auth_key": str,
     "lalalaai_auth_checked_at": _int_parser(0),
-    "lalalaai_auth_is_valid": lambda v: str(v).lower() in ("true", "1", "yes"),
+    "lalalaai_auth_is_valid": lambda v: str(v).lower() in ("true", "1", "yes", "on"),
     "lalalaai_auth_last_error": str,
+    "lalalaai_duration_guard": lambda v: str(v).lower() in ("true", "1", "yes", "on"),
 }
 
 
@@ -115,9 +147,13 @@ _SETTINGS_TYPES: Final[dict[str, Callable[[str], Any]]] = {
 # --------------------------------------------------------------------------- #
 def _configure_connection(con: sqlite3.Connection) -> None:
     con.row_factory = sqlite3.Row
-    con.execute("PRAGMA journal_mode=WAL")
     con.execute("PRAGMA synchronous=NORMAL")
     con.execute("PRAGMA busy_timeout=5000")
+
+
+def _configure_database(con: sqlite3.Connection) -> None:
+    """Configure persistent database pragmas (run once at startup)."""
+    con.execute("PRAGMA journal_mode=WAL")
 
 
 @contextmanager
@@ -161,6 +197,9 @@ def close_db() -> None:
 def init_db() -> None:
     """Idempotent schema creation and lightweight column migration."""
     with get_db() as con:
+        # Configure persistent database pragmas
+        _configure_database(con)
+
         con.execute("""
             CREATE TABLE IF NOT EXISTS jobs (
                 id TEXT PRIMARY KEY,
@@ -185,17 +224,12 @@ def init_db() -> None:
             )
         """)
 
-        # Lightweight migration: add audio analysis columns to existing rows.
+        # Lightweight migration: add all columns defined in _JOB_MIGRATIONS.
         existing_cols = {
             row["name"]
             for row in con.execute("PRAGMA table_info(jobs)").fetchall()
         }
-        for col, dtype in (
-            ("bpm", "INTEGER"),
-            ("bpm_confidence", "REAL"),
-            ("audio_hash", "TEXT"),
-            ("lalal_split_done", "INTEGER NOT NULL DEFAULT 0"),
-        ):
+        for col, dtype in _JOB_MIGRATIONS.items():
             if col not in existing_cols:
                 con.execute(f"ALTER TABLE jobs ADD COLUMN {col} {dtype}")
 
@@ -219,6 +253,8 @@ def init_db() -> None:
         con.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status)")
         con.execute("CREATE INDEX IF NOT EXISTS idx_jobs_finished_at ON jobs(finished_at)")
         con.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status_finished_at ON jobs(status, finished_at)")
+        con.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status_created_at ON jobs(status, created_at DESC)")
+        con.execute("CREATE INDEX IF NOT EXISTS idx_jobs_audio_analysis ON jobs(type, status, created_at) WHERE filename IS NOT NULL")
 
         con.commit()
 
@@ -250,14 +286,16 @@ def update_job(job_id: str, **fields: Any) -> None:
     if not fields:
         return
 
-    safe_fields = {k: v for k, v in fields.items() if k in _UPDATEABLE_COLUMNS}
-    if not safe_fields:
-        raise ValueError("No valid fields to update")
-    if not all(column.isidentifier() for column in safe_fields):
+    # Validate that all fields are known; raise if any unknown fields are provided.
+    unknown_fields = set(fields) - _UPDATEABLE_COLUMNS
+    if unknown_fields:
+        raise ValueError(f"Unknown fields: {sorted(unknown_fields)}")
+
+    if not all(column.isidentifier() for column in fields):
         raise ValueError("Invalid column name")
 
-    keys = ", ".join(f"{k}=?" for k in safe_fields)
-    values = [*safe_fields.values(), job_id]
+    keys = ", ".join(f"{k}=?" for k in fields)
+    values = [*fields.values(), job_id]
 
     with get_db() as con:
         con.execute(f"UPDATE jobs SET {keys} WHERE id=?", values)
@@ -323,7 +361,7 @@ def upsert_audio_analysis_cache(
 
 
 def list_completed_bpms(limit: int = 1000) -> list[int]:
-    placeholders = _in_placeholders(_COMPLETED_STATUSES)
+    placeholders = _in_placeholders(COMPLETED_STATUSES)
     with get_db() as con:
         rows = con.execute(
             f"""
@@ -334,7 +372,7 @@ def list_completed_bpms(limit: int = 1000) -> list[int]:
             ORDER BY created_at DESC
             LIMIT ?
             """,
-            (*_COMPLETED_STATUSES, limit),
+            (*COMPLETED_STATUSES, limit),
         ).fetchall()
     return [int(row["bpm"]) for row in rows if row["bpm"] is not None]
 
@@ -362,16 +400,41 @@ def list_queued_jobs() -> list[sqlite3.Row]:
             SELECT id, url, type, quality
             FROM jobs
             WHERE status='queued'
-            ORDER BY created_at ASC
+            ORDER BY created_at ASC, id ASC
             """
         ).fetchall()
+
+
+def claim_next_queued_job() -> sqlite3.Row | None:
+    """Atomically claim and transition the next queued job to processing.
+
+    This prevents multiple workers from processing the same job.
+    Returns the updated job row or None if no queued jobs exist.
+    """
+    with get_db() as con:
+        row = con.execute(
+            """
+            UPDATE jobs
+            SET status='processing'
+            WHERE id = (
+                SELECT id
+                FROM jobs
+                WHERE status='queued'
+                ORDER BY created_at ASC, id ASC
+                LIMIT 1
+            )
+            RETURNING *
+            """
+        ).fetchone()
+        con.commit()
+        return row
 
 
 def cancel_interrupted_jobs() -> int:
     """Mark stale in-flight jobs as cancelled after an application restart."""
     placeholders = _in_placeholders(_RECOVERABLE_IN_FLIGHT_STATUSES)
     message = "Cancelled because the application restarted during processing"
-    finished_at = datetime.now(UTC).isoformat()
+    finished_at = utc_timestamp()
 
     with get_db() as con:
         cursor = con.execute(
@@ -419,9 +482,10 @@ def paginate_jobs(limit: int = 50, offset: int = 0) -> list[sqlite3.Row]:
 
 
 def get_stats() -> dict[str, int]:
-    """Aggregated KPIs for jobs that reached the final `done` state."""
+    """Aggregated KPIs for jobs that reached a completed state."""
+    placeholders = _in_placeholders(COMPLETED_STATUSES)
     with get_db() as con:
-        row = con.execute("""
+        row = con.execute(f"""
             SELECT
                 COUNT(*)                        AS total_jobs,
                 COALESCE(SUM(duration_seconds) / 60, 0) AS total_minutes,
@@ -431,8 +495,8 @@ def get_stats() -> dict[str, int]:
                     ELSE 0
                 END) / 60, 0) AS total_lalal_minutes
             FROM jobs
-            WHERE status = 'done'
-        """).fetchone()
+            WHERE status IN ({placeholders})
+        """, tuple(COMPLETED_STATUSES)).fetchone()
 
     return {
         "total_jobs": row["total_jobs"] or 0,
@@ -457,7 +521,8 @@ def purge_old_jobs(keep_days: int) -> list[str]:
             """
             DELETE FROM jobs
             WHERE status IN ('done', 'error')
-              AND finished_at < datetime('now', '-' || ? || ' days')
+              AND finished_at IS NOT NULL
+              AND datetime(finished_at) < datetime('now', '-' || ? || ' days')
             RETURNING id
             """,
             (keep_days,),
@@ -469,13 +534,34 @@ def purge_old_jobs(keep_days: int) -> list[str]:
 # --------------------------------------------------------------------------- #
 # Settings
 # --------------------------------------------------------------------------- #
-def get_settings() -> dict[str, Any]:
-    """Retrieve settings with type coercion."""
+def get_settings(*, include_internal: bool = False) -> dict[str, Any]:
+    """Retrieve settings with type coercion.
+
+    Args:
+        include_internal: When False (default), exclude internal keys such as
+            admin_password_hash and session_version. Set to True only when
+            retrieving settings for internal use (e.g., authentication).
+            User-facing APIs should always use the default False to prevent
+            accidental information disclosure.
+    """
+    allowed = (
+        _ALLOWED_SETTINGS_KEYS | _INTERNAL_SETTINGS_KEYS
+        if include_internal
+        else _ALLOWED_SETTINGS_KEYS
+    )
+
     with get_db() as con:
         rows = con.execute("SELECT key, value FROM settings").fetchall()
 
     settings: dict[str, Any] = {}
-    for key, value in ((row["key"], row["value"]) for row in rows):
+
+    for row in rows:
+        key = row["key"]
+        value = row["value"]
+
+        if key not in allowed:
+            continue
+
         parser = _SETTINGS_TYPES.get(key, str)
         try:
             settings[key] = parser(value)
@@ -483,9 +569,9 @@ def get_settings() -> dict[str, Any]:
             settings[key] = _SETTINGS_DEFAULTS.get(key, value)
 
     for key, default in _SETTINGS_DEFAULTS.items():
-        if key not in settings:
-            parser = _SETTINGS_TYPES.get(key, str)
-            settings[key] = parser(default)
+        if key not in allowed:
+            continue
+        settings.setdefault(key, _SETTINGS_TYPES.get(key, str)(default))
 
     return settings
 

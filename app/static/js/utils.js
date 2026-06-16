@@ -32,6 +32,71 @@ export function clamp(value, min, max) {
     return Math.min(max, Math.max(min, value));
 }
 
+function isAbortSignalLike(signal) {
+    return Boolean(signal)
+        && typeof signal.aborted === "boolean"
+        && typeof signal.addEventListener === "function"
+        && typeof signal.removeEventListener === "function";
+}
+
+export function createTimeoutSignal(timeoutMs) {
+    const durationMs = Number(timeoutMs);
+    if (!(durationMs > 0)) {
+        return { signal: undefined, cleanup() {} };
+    }
+
+    if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
+        return { signal: AbortSignal.timeout(durationMs), cleanup() {} };
+    }
+
+    const controller = new AbortController();
+    const timerId = globalThis.setTimeout(() => controller.abort(), durationMs);
+
+    return {
+        signal: controller.signal,
+        cleanup() {
+            globalThis.clearTimeout(timerId);
+        },
+    };
+}
+
+export function combineAbortSignals(signals) {
+    const validSignals = (signals || []).filter(isAbortSignalLike);
+    if (validSignals.length === 0) {
+        return { signal: undefined, cleanup() {} };
+    }
+    if (validSignals.length === 1) {
+        return { signal: validSignals[0], cleanup() {} };
+    }
+
+    if (typeof AbortSignal !== "undefined" && typeof AbortSignal.any === "function") {
+        return { signal: AbortSignal.any(validSignals), cleanup() {} };
+    }
+
+    const controller = new AbortController();
+    const listeners = [];
+
+    for (const signal of validSignals) {
+        if (signal.aborted) {
+            controller.abort();
+            break;
+        }
+
+        const onAbort = () => controller.abort();
+        signal.addEventListener("abort", onAbort, { once: true });
+        listeners.push([signal, onAbort]);
+    }
+
+    return {
+        signal: controller.signal,
+        cleanup() {
+            for (const [signal, onAbort] of listeners) {
+                signal.removeEventListener("abort", onAbort);
+            }
+        },
+    };
+}
+
 export function snapTime(seconds, interval = SNAP_INTERVAL_SECONDS) {
     if (!Number.isFinite(seconds) || seconds < 0) return 0;
 
@@ -216,6 +281,82 @@ export function isValidYouTubeUrl(url) {
     return normalizeYouTubeUrl(url) !== null;
 }
 
+// Supported platform identifiers (must match app/utils/platform.py).
+export const PLATFORM = Object.freeze({
+    YOUTUBE: "youtube",
+    TIKTOK: "tiktok",
+    INSTAGRAM: "instagram",
+});
+
+const PLATFORM_PILL_LABELS = Object.freeze({
+    [PLATFORM.YOUTUBE]: "YT",
+    [PLATFORM.TIKTOK]: "TikTok",
+    [PLATFORM.INSTAGRAM]: "Insta",
+});
+
+/**
+ * Detect the platform of a URL purely from its host. No UI toggles.
+ * Mirrors detect_platform() in app/utils/platform.py.
+ * @param {unknown} url
+ * @returns {string|null} one of PLATFORM.* or null when unsupported
+ */
+export function detectPlatform(url) {
+    if (!url || typeof url !== "string") return null;
+    const value = url.trim().replace(/&amp;/g, "&").replace(/[\u200B-\u200D\uFEFF]/g, "");
+    if (!/^https?:\/\//i.test(value)) return null;
+
+    let host;
+    try {
+        host = new URL(value).hostname.toLowerCase();
+    } catch {
+        return null;
+    }
+    if (!host) return null;
+
+    if (host === "youtu.be" || host.endsWith(".youtu.be") || host === "youtube.com" || host.endsWith(".youtube.com")) {
+        return PLATFORM.YOUTUBE;
+    }
+    if (host === "tiktok.com" || host.endsWith(".tiktok.com")) {
+        return PLATFORM.TIKTOK;
+    }
+    if (host === "instagram.com" || host.endsWith(".instagram.com") || host === "instagr.am" || host === "www.instagr.am") {
+        return PLATFORM.INSTAGRAM;
+    }
+    return null;
+}
+
+/**
+ * Short pill label (YT / TikTok / Insta) for a platform id, or "" if unknown.
+ * @param {unknown} platform
+ * @returns {string}
+ */
+export function platformPillLabel(platform) {
+    return PLATFORM_PILL_LABELS[platform] || "";
+}
+
+/**
+ * Validate whether a URL targets a supported platform (YouTube/TikTok/Instagram).
+ * YouTube keeps strict video-ID validation; TikTok/Instagram require a host
+ * match plus a non-trivial path (yt-dlp performs the final resolution).
+ * @param {unknown} url
+ * @returns {boolean}
+ */
+export function isValidMediaUrl(url) {
+    const platform = detectPlatform(url);
+    if (platform === PLATFORM.YOUTUBE) {
+        return isValidYouTubeUrl(url);
+    }
+    if (platform === PLATFORM.TIKTOK || platform === PLATFORM.INSTAGRAM) {
+        try {
+            const parsed = new URL(String(url).trim());
+            return parsed.pathname.replace(/^\/+|\/+$/g, "").length > 0;
+        } catch {
+            return false;
+        }
+    }
+    return false;
+}
+
 /**
  * Extract the canonical 11-character YouTube video ID from a supported URL.
  * Strips zero-width characters and HTML entities before parsing.
@@ -299,8 +440,19 @@ export function subscribeToLalalProgress(jobId, stem, onProgress, signal) {
             const detail = event.detail ?? {};
             if (detail.job_id !== jobId || detail.stem !== stem) return;
             const stageSymbol = LALAL_STAGE_SYMBOLS[detail.stage] ?? "⚙";
-            onProgress(stageSymbol, detail.progress);
+            const progress = clamp(Number(detail.progress), 0, 100);
+            onProgress(stageSymbol, Math.round(progress));
         },
         { signal },
     );
+}
+
+export function triggerDownload(url) {
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = "";
+    anchor.rel = "noopener";
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
 }

@@ -887,14 +887,14 @@ def get_lalal_client() -> LalalClient | None:
         Lalal provider instance or None if not configured
     """
     from .db import get_settings
+    from .utils.template_filters import is_lalala_configured
 
     settings = get_settings()
+    if not is_lalala_configured(settings):
+        return None
+
     auth_key = str(settings.get("lalalaai_auth_key", "")).strip()
-
-    if auth_key:
-        return LalalClient(auth_key)
-
-    return None
+    return LalalClient(auth_key)
 
 
 async def separate_vocals(

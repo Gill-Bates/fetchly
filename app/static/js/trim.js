@@ -12,14 +12,19 @@
 
 import { showToast } from "./toast.js";
 import { reportError } from "./errors.js";
+import { getJobById } from "./jobs.js";
+import { CSRF_COOKIE_NAME, LALAL_MAX_DURATION_SECONDS } from "./config.js";
 import {
     buildTrimId,
     clamp,
     getCookie,
     isSafeRedirect,
+    normalizeTimeRange,
     subscribeToLalalProgress,
+    triggerDownload,
     SNAP_INTERVAL_SECONDS,
 } from "./utils.js";
+import { isLalalEnabled, isLalalDurationGuardEnabled, isDurationBlocked as isJobDurationBlocked } from "./ui.js";
 
 // WaveSurfer imports (loaded dynamically)
 let WaveSurfer = null;
@@ -68,7 +73,11 @@ const MAX_ZOOM_LEVEL = 2000;
 const PAN_THRESHOLD_PX = 4;
 const SELECTION_REGION_COLOR = "rgba(99, 102, 241, 0.55)";
 const LALAL_REQUEST_TIMEOUT_MS = 60_000;
-const lalalEnabled = document.documentElement.dataset.lalalEnabled === "true";
+
+function isDurationBlocked(jobId) {
+    const job = getJobById(jobId);
+    return job ? isJobDurationBlocked(job) : false;
+}
 
 // DOM Elements (lazy-loaded)
 let trimModalEl = null;
@@ -84,10 +93,18 @@ let btnLoop = null;
 let loaderEl = null;
 
 
+function setPlaybackControlsEnabled(enabled) {
+    const interactive = Boolean(enabled);
+    setButtonState(btnPlay, { disabled: !interactive });
+    setButtonState(btnPause, { disabled: !interactive });
+    setButtonState(btnLoop, { disabled: !interactive });
+}
+
+
 function getCsrfToken() {
-    const token = getCookie("tubeyou_csrf");
+    const token = getCookie(CSRF_COOKIE_NAME);
     if (!token) {
-        reportError(new Error("CSRF token missing from tubeyou_csrf cookie"), {
+        reportError(new Error(`CSRF token missing from ${CSRF_COOKIE_NAME} cookie`), {
             module: "trim",
             action: "getCsrfToken",
         });
@@ -116,16 +133,6 @@ function setButtonState(btn, { disabled, text }) {
 }
 
 
-function triggerDownload(url) {
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = "";
-    anchor.rel = "noopener";
-    document.body.appendChild(anchor);
-    anchor.click();
-    anchor.remove();
-}
-
 
 function isValidJobId(jobId) {
     return JOB_ID_RE.test(String(jobId ?? ""));
@@ -133,6 +140,7 @@ function isValidJobId(jobId) {
 
 
 function resetButtons() {
+    setPlaybackControlsEnabled(false);
     setButtonState(btnApply, { disabled: true, text: "Use Selection" });
     setButtonState(btnVocals, { disabled: true });
     setButtonState(btnInstr, { disabled: true });
@@ -196,18 +204,7 @@ function applyBeatOptions(options = {}) {
 }
 
 function normalizeSelectionRange(start, end, duration) {
-    if (!Number.isFinite(duration) || duration <= 0) {
-        return { start: 0, end: 0 };
-    }
-
-    let selectionStart = clamp(start, 0, duration);
-    let selectionEnd = clamp(end, 0, duration);
-
-    if (selectionEnd < selectionStart) {
-        [selectionStart, selectionEnd] = [selectionEnd, selectionStart];
-    }
-
-    return { start: selectionStart, end: selectionEnd };
+    return normalizeTimeRange(start, end, duration);
 }
 
 
@@ -298,6 +295,9 @@ function syncLoopButton() {
 
 function handleKeydown(e) {
     if (!trimWs || !trimReady) return;
+    if (e.target instanceof Element && e.target.closest("button, a, input, select, textarea, [role='button']")) {
+        return;
+    }
 
     switch (e.key) {
         case " ":
@@ -791,6 +791,7 @@ function updateInfo() {
 function setLoading(loading) {
     loaderEl?.classList.toggle("d-none", !loading);
     trimWaveEl?.classList.toggle("d-none", loading);
+    setPlaybackControlsEnabled(!loading && trimReady);
 }
 
 /**
@@ -894,8 +895,8 @@ export async function openTrimModal(jobId, options = {}) {
         trimWs.on("ready", () => {
             if (session !== trimSession) return;
 
-            setLoading(false);
             trimReady = true;
+            setLoading(false);
             scheduleBeatGridDraw();
 
             // No default selection - user must click once for start and again for end
@@ -982,9 +983,14 @@ export async function openTrimModal(jobId, options = {}) {
  * No-op if the waveform is not ready or no region has been selected.
  */
 function handlePlay() {
-    if (!trimReady || !trimWs || !trimRegion) return;
+    if (!trimReady || !trimWs) return;
 
-    trimWs.play(trimRegion.start, trimRegion.end);
+    if (trimRegion) {
+        trimWs.play(trimRegion.start, trimRegion.end);
+        return;
+    }
+
+    trimWs.play();
 }
 
 /**
@@ -999,7 +1005,11 @@ function handlePause() {
  * Apply trim and prepare for Lalal processing
  */
 async function handleApplyTrim() {
-    if (!trimRegion || !trimJobId) return;
+    if (!trimJobId) return;
+    if (!trimRegion) {
+        showToast("Please select a range in the waveform first", "info");
+        return;
+    }
     const session = trimSession;
     const abortController = trimAbortController;
 
@@ -1013,7 +1023,7 @@ async function handleApplyTrim() {
         return;
     }
 
-    if (duration > 600) {
+    if (duration > LALAL_MAX_DURATION_SECONDS) {
         showToast("Selection too long (maximum 10 minutes)", "warning");
         return;
     }
@@ -1046,9 +1056,10 @@ async function handleApplyTrim() {
         // Store trim_id for Lalal processing
         trimId = data.trim_id || buildTrimId(start, end);
 
-        // Enable Lalal buttons only when the integration is configured.
-        if (lalalEnabled && btnVocals) btnVocals.disabled = false;
-        if (lalalEnabled && btnInstr) btnInstr.disabled = false;
+        // Enable Lalal buttons only when the integration is configured and duration is not blocked.
+        const durationBlockedForLalal = isDurationBlocked(trimJobId);
+        if (isLalalEnabled() && !durationBlockedForLalal && btnVocals) btnVocals.disabled = false;
+        if (isLalalEnabled() && !durationBlockedForLalal && btnInstr) btnInstr.disabled = false;
 
         // Show and configure download button
         if (btnDownload) {
@@ -1072,8 +1083,13 @@ async function handleApplyTrim() {
  * Run Lalal.ai processing on trimmed audio
  */
 async function runLalal(stem) {
-    if (!lalalEnabled) {
+    if (!isLalalEnabled()) {
         showToast("Lalal.ai is not connected", "warning");
+        return;
+    }
+
+    if (isDurationBlocked(trimJobId)) {
+        showToast("Track exceeds 10 min — blocked by Duration Guard", "warning");
         return;
     }
 
@@ -1101,7 +1117,11 @@ async function runLalal(stem) {
     const originalText = btn.textContent;
     setButtonState(btn, { disabled: true, text: "Processing..." });
 
-    const timeoutId = window.setTimeout(() => requestController.abort(), LALAL_REQUEST_TIMEOUT_MS);
+    let timedOut = false;
+    const timeoutId = window.setTimeout(() => {
+        timedOut = true;
+        requestController.abort();
+    }, LALAL_REQUEST_TIMEOUT_MS);
     const abortRequest = () => requestController.abort();
     abortController.signal.addEventListener("abort", abortRequest, { once: true });
 
@@ -1129,10 +1149,7 @@ async function runLalal(stem) {
                 signal: requestController.signal,
             }
         );
-        reportError(err, {
-            module: "trim",
-            action: "loadWaveSurfer",
-        });
+        const data = await parseApiResponse(res, "Lalal failed");
         if (session !== trimSession) return;
 
         // Download the result
@@ -1145,8 +1162,19 @@ async function runLalal(stem) {
         setButtonState(btn, { text: statusText });
 
     } catch (err) {
+        if (err?.name === "AbortError" && timedOut) {
+            if (session !== trimSession) return;
+            showToast("Lalal timed out. Please try again.", "warning");
+            setButtonState(btn, { text: originalText, disabled: false });
+            return;
+        }
         if (err?.name === "AbortError") return;
         if (session !== trimSession) return;
+        reportError(err, {
+            module: "trim",
+            action: "runLalal",
+            stem,
+        });
         showToast(`Lalal failed: ${err.message}`, "danger");
         setButtonState(btn, { text: originalText, disabled: false });
     } finally {
@@ -1201,8 +1229,12 @@ function cleanup() {
  * for all `[data-action="open-trim"]` triggers on the document.
  * Safe to call once on page load.
  */
+let _trimInitialized = false;
+
 export function initTrim() {
-    // Listen for trim button clicks
+    if (_trimInitialized) return;
+    _trimInitialized = true;
+
     document.addEventListener("click", async (e) => {
         const btn = e.target.closest("[data-action='open-trim']");
         if (!btn) return;

@@ -6,7 +6,7 @@
 import { CONFIG } from "./config.js";
 import { fetchJob } from "./api.js";
 import { reportError, reportWarning } from "./errors.js";
-import { applyJobUpdate, hasNonTerminalJobs, upsertJobSnapshot } from "./jobs.js?v=20260519f";
+import { applyJobUpdate, hasNonTerminalJobs, upsertJobSnapshot } from "./jobs.js";
 
 export const EVENT_NAMES = Object.freeze({
     JOB_UPDATE: "tubeyou:job-update",
@@ -86,7 +86,11 @@ function scheduleJobUpdate(payload) {
         return;
     }
 
-    queuedJobUpdates.set(String(payload.id), payload);
+    const jobId = String(payload.id);
+    queuedJobUpdates.set(jobId, {
+        ...(queuedJobUpdates.get(jobId) || {}),
+        ...payload,
+    });
     if (queuedJobUpdateFrame !== null) {
         return;
     }
@@ -109,6 +113,10 @@ function isNewerUpdate(payload) {
     }
 
     latestSequences.set(id, seq);
+    if (latestSequences.size > 1000) {
+        latestSequences.clear();
+        latestSequences.set(id, seq);
+    }
     return true;
 }
 
@@ -122,7 +130,7 @@ function clearReconnectTimer() {
 /**
  * Update the connection indicator badge.
  * @param {HTMLElement | null} indicator - The indicator element
- * @param {"processing" | "idle"} state - Desired indicator state
+ * @param {"processing" | "idle" | "offline"} state - Desired indicator state
  */
 function setIndicator(indicator, state) {
     if (!indicator) return;
@@ -139,9 +147,14 @@ function setIndicator(indicator, state) {
             indicator.textContent = "● Processing";
             indicator.classList.add("bg-success", "live");
             break;
+        case "offline":
+            indicator.textContent = "● Reconnecting";
+            indicator.classList.add("bg-danger");
+            break;
         default:
             indicator.textContent = "● Idle";
             indicator.classList.add("bg-secondary");
+            state = "idle";
             break;
     }
     indicator.dataset.wsState = state;

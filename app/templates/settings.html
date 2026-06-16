@@ -20,7 +20,6 @@
         <span class="material-symbols-outlined settings-page-icon" aria-hidden="true">settings</span>
         Control Center
     </h1>
-    <p class="text-muted mb-4">Prioritize the essentials first, then tune integrations and advanced policies.</p>
 
     <form id="settingsForm" class="settings-form-layout">
         <div id="settingsAlert" class="alert d-none" role="alert"></div>
@@ -144,6 +143,22 @@
                                         lalal_configured %}Session active{% else %}Click 'Authenticate' to connect your
                                         Lalal.ai account{% endif %}</small>
                                 </div>
+
+                                <div class="mt-3 pt-3 border-top">
+                                    <div class="form-check form-switch">
+                                        <input class="form-check-input" type="checkbox" role="switch"
+                                            id="lalalDurationGuard" name="lalalaai_duration_guard"
+                                            {{ 'checked' if settings.lalalaai_duration_guard | default(true) else '' }}>
+                                        <label class="form-check-label" for="lalalDurationGuard">
+                                            Duration Guard
+                                        </label>
+                                    </div>
+                                    <small class="setting-hint setting-hint--with-icon">
+                                        <span class="material-symbols-outlined setting-hint-icon"
+                                            aria-hidden="true">info</span>
+                                        <span>Block stem separation for tracks longer than 10 minutes to save Lalal.ai quota</span>
+                                    </small>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -155,6 +170,32 @@
             <div class="settings-group-title" id="settingsAdvancedHeading">Advanced</div>
             <p class="settings-group-copy text-muted">Fixed session lifetime and security policies.</p>
             <div class="settings-grid">
+                <div class="settings-grid-item">
+                    <div class="ui-card h-100">
+                        <div>
+                            <div class="settings-section">
+                                <h6 class="fw-semibold mb-1 d-flex align-items-center gap-1">
+                                    <span class="material-symbols-outlined icon-inline"
+                                        aria-hidden="true">terminal</span>
+                                    System
+                                </h6>
+                                <small class="text-muted d-block mb-3">Runtime tools available in this instance</small>
+
+                                <div class="mb-3">
+                                    <label class="form-label" for="ytDlpVersion">yt-dlp version</label>
+                                    <input type="text" class="form-control ui-input" id="ytDlpVersion"
+                                        value="{{ ytdlp_version | default('unavailable') }}" readonly>
+                                    <small class="setting-hint setting-hint--with-icon">
+                                        <span class="material-symbols-outlined setting-hint-icon"
+                                            aria-hidden="true">info</span>
+                                        <span>Shown from server runtime (`yt-dlp --version`)</span>
+                                    </small>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
                 <div class="settings-grid-item">
                     <div class="ui-card h-100">
                         <div>
@@ -186,9 +227,9 @@
 
         <div class="settings-status-bar d-flex justify-content-between align-items-center">
             <button id="settingsSaveBtn" class="btn btn-primary d-none" type="button">Save</button>
-            <span id="autoSaveIndicator" class="auto-save-indicator">
-                <span class="spinner-border spinner-border-sm" aria-hidden="true"></span>
-                <span>Saving...</span>
+            <span id="autoSaveIndicator" class="auto-save-indicator" role="status" aria-live="polite" aria-atomic="true">
+                <span id="autoSaveSpinner" class="spinner-border spinner-border-sm d-none" aria-hidden="true"></span>
+                <span id="autoSaveIndicatorText"></span>
             </span>
         </div>
     </form>
@@ -236,7 +277,7 @@
                             </div>
                             <div class="col-md-6">
                                 <label for="lalalActivationKey" class="form-label">Activation Key</label>
-                                <input type="text" class="form-control ui-input font-monospace" id="lalalActivationKey"
+                                <input type="password" class="form-control ui-input font-monospace" id="lalalActivationKey"
                                     autocomplete="off">
                             </div>
                         </div>
@@ -265,556 +306,10 @@
 {% endblock %}
 
 {% block page_scripts %}
-<script>
-    function getCsrfToken() {
-        const prefix = "tubeyou_csrf=";
-        const cookie = document.cookie
-            .split(";")
-            .map(v => v.trim())
-            .find(v => v.startsWith(prefix));
-        return cookie ? decodeURIComponent(cookie.slice(prefix.length)) : "";
-    }
-
-    function setAlert(el, type, msg) {
-        el.classList.remove("d-none", "alert-success", "alert-danger");
-        el.classList.add("alert", `alert-${type}`);
-        el.textContent = msg;
-    }
-
-    function clearAlert(el) {
-        el.classList.add("d-none");
-        el.textContent = "";
-    }
-
-    const formEl = document.getElementById("settingsForm");
-    const alertEl = document.getElementById("settingsAlert");
-    const settingsSaveBtn = document.getElementById("settingsSaveBtn");
-    const autoSaveIndicator = document.getElementById("autoSaveIndicator");
-    const passwordSaveBtn = document.getElementById("passwordSaveBtn");
-    const currentPasswordEl = document.getElementById("currentPassword");
-    const adminPasswordEl = document.getElementById("adminPassword");
-    const adminPasswordConfirmEl = document.getElementById("adminPasswordConfirm");
-    const lalalStatusBadge = document.getElementById("lalalStatusBadge");
-    const lalalStatusLine = document.getElementById("lalalStatusLine");
-    const lalalAuthBtnLabel = document.getElementById("lalalAuthBtnLabel");
-    const lalalDisconnectBtn = document.getElementById("lalalDisconnectBtn");
-
-    // Auth modal elements
-    const lalalAuthModal = document.getElementById("lalalAuthModal");
-    const lalalAuthAlert = document.getElementById("lalalAuthAlert");
-    const lalalAuthStep1 = document.getElementById("lalalAuthStep1");
-    const lalalAuthStep3 = document.getElementById("lalalAuthStep3");
-    const lalalAuthEmail = document.getElementById("lalalAuthEmail");
-    const lalalAuthUseKeyBtn = document.getElementById("lalalAuthUseKeyBtn");
-    const lalalAuthUseKeySpinner = document.getElementById("lalalAuthUseKeySpinner");
-    const lalalActivationKey = document.getElementById("lalalActivationKey");
-    let isAuthUseKeyBusy = false;
-
-    function renderAuthUseKeyButton() {
-        if (!lalalAuthUseKeyBtn || !lalalAuthUseKeySpinner) return;
-        lalalAuthUseKeyBtn.disabled = isAuthUseKeyBusy;
-        if (isAuthUseKeyBusy) {
-            lalalAuthUseKeySpinner.classList.remove("d-none");
-        } else {
-            lalalAuthUseKeySpinner.classList.add("d-none");
-        }
-    }
-
-    function setLalalStatus(text, type = "secondary") {
-        if (lalalStatusBadge) {
-            lalalStatusBadge.className = `badge bg-${type}`;
-            lalalStatusBadge.textContent = text;
-        }
-        updateLalalAuthButtonLabel(text);
-    }
-
-    function updateLalalAuthButtonLabel(statusText) {
-        if (!lalalAuthBtnLabel) return;
-        const normalized = (statusText || "").trim().toLowerCase();
-        const shouldReconnect = normalized.startsWith("connected") || normalized === "token invalid";
-        lalalAuthBtnLabel.textContent = shouldReconnect ? "Reconnect" : "Authenticate";
-    }
-
-    function setDisconnectVisible(visible) {
-        if (!lalalDisconnectBtn) return;
-        lalalDisconnectBtn.classList.toggle("d-none", !visible);
-        lalalDisconnectBtn.disabled = !visible;
-    }
-
-    function setLalalStatusLine(text) {
-        if (lalalStatusLine) {
-            lalalStatusLine.textContent = text;
-        }
-    }
-
-    function showAuthStep(step) {
-        lalalAuthStep1.classList.toggle("d-none", step !== 1);
-        lalalAuthStep3.classList.toggle("d-none", step !== 3);
-        clearAlert(lalalAuthAlert);
-    }
-
-    function setAuthAlert(type, msg) {
-        setAlert(lalalAuthAlert, type, msg);
-    }
-
-    async function loadLalalStatus() {
-        try {
-            const res = await fetch("/api/lalal/status?force_refresh=1", { credentials: "same-origin" });
-            const payload = await res.json().catch(() => ({}));
-
-            if (!res.ok) {
-                setLalalStatus("Error", "danger");
-                setLalalStatusLine(payload.detail || "Unable to check status");
-                return;
-            }
-
-            if (payload.configured && payload.token_valid === false) {
-                setLalalStatus("Token invalid", "danger");
-                setLalalStatusLine(payload.validation_error || "Stored Lalal token is invalid. Please authenticate again.");
-                setDisconnectVisible(true);
-            } else if (payload.configured) {
-                setLalalStatus("Connected", "success");
-                const emailPart = payload.email
-                    ? `<code class="lalal-status-email">${payload.email}</code>`
-                    : "";
-                const minutesPart = (payload.remaining_minutes != null)
-                    ? ` &mdash; <span class="lalal-status-minutes">${payload.remaining_minutes} min left</span>`
-                    : "";
-                if (lalalStatusLine) {
-                    lalalStatusLine.innerHTML = emailPart
-                        ? `Logged in as ${emailPart}${minutesPart}`
-                        : `Session active${minutesPart}`;
-                }
-                setDisconnectVisible(true);
-            } else {
-                setLalalStatus("Not configured", "secondary");
-                setLalalStatusLine("Click 'Authenticate' to connect your Lalal.ai account");
-                setDisconnectVisible(false);
-            }
-        } catch (err) {
-            setLalalStatus("Error", "danger");
-            setLalalStatusLine(err.message || "Unable to check status");
-            setDisconnectVisible(false);
-        }
-    }
-
-    lalalDisconnectBtn?.addEventListener("click", async () => {
-        lalalDisconnectBtn.disabled = true;
-        clearAlert(lalalAuthAlert);
-
-        try {
-            const res = await fetch("/api/lalal/auth/logout", {
-                method: "POST",
-                credentials: "same-origin",
-                headers: {
-                    "X-CSRF-Token": getCsrfToken(),
-                },
-            });
-
-            const payload = await res.json().catch(() => ({}));
-            if (!res.ok) {
-                throw new Error(payload.detail || `HTTP ${res.status}`);
-            }
-
-            setLalalStatus("Not configured", "secondary");
-            setLalalStatusLine("Session disconnected. Click 'Authenticate' to reconnect.");
-            setDisconnectVisible(false);
-            showToast("Lalal.ai session disconnected", "success");
-        } catch (err) {
-            showToast(err.message || "Failed to disconnect Lalal.ai session", "danger");
-            setDisconnectVisible(true);
-        } finally {
-            lalalDisconnectBtn.disabled = false;
-        }
-    });
-
-    // Auth flow fallback: direct activation key (captcha-free)
-    lalalAuthUseKeyBtn?.addEventListener("click", async () => {
-        if (isAuthUseKeyBusy) {
-            return;
-        }
-
-        const email = lalalAuthEmail.value.trim();
-        const activationKey = lalalActivationKey?.value.trim() || "";
-
-        if (!email || !email.includes("@")) {
-            setAuthAlert("danger", "Please enter a valid email address");
-            return;
-        }
-        if (!activationKey) {
-            setAuthAlert("danger", "Please enter a valid activation key");
-            return;
-        }
-
-        isAuthUseKeyBusy = true;
-        renderAuthUseKeyButton();
-        clearAlert(lalalAuthAlert);
-
-        try {
-            const res = await fetch("/api/lalal/auth/activation-key", {
-                method: "POST",
-                credentials: "same-origin",
-                headers: {
-                    "Content-Type": "application/json",
-                    "X-CSRF-Token": getCsrfToken(),
-                },
-                body: JSON.stringify({
-                    email,
-                    activation_key: activationKey,
-                }),
-            });
-
-            const payload = await res.json().catch(() => ({}));
-            if (!res.ok) {
-                throw new Error(payload.detail || `HTTP ${res.status}`);
-            }
-
-            showAuthStep(3);
-            void loadLalalStatus();
-            setTimeout(() => {
-                bootstrap.Modal.getInstance(lalalAuthModal)?.hide();
-            }, 2000);
-        } catch (err) {
-            setAuthAlert("danger", err.message || "Invalid activation key");
-        } finally {
-            isAuthUseKeyBusy = false;
-            renderAuthUseKeyButton();
-        }
-    });
-
-    // Reset modal state when opened
-    lalalAuthModal?.addEventListener("show.bs.modal", () => {
-        showAuthStep(1);
-        lalalAuthEmail.value = "";
-        if (lalalActivationKey) {
-            lalalActivationKey.value = "";
-            // Show a random-looking placeholder so no real key is revealed.
-            const rndHex = () => Array.from(crypto.getRandomValues(new Uint8Array(8)))
-                .map((b) => b.toString(16).padStart(2, "0")).join("");
-            lalalActivationKey.placeholder = rndHex();
-        }
-        renderAuthUseKeyButton();
-        lalalAuthEmail.focus();
-    });
-
-    // Enter key handling
-    lalalAuthEmail?.addEventListener("keydown", (e) => {
-        if (e.key === "Enter") {
-            e.preventDefault();
-            lalalAuthUseKeyBtn?.click();
-        }
-    });
-
-    lalalActivationKey?.addEventListener("keydown", (e) => {
-        if (e.key === "Enter") {
-            e.preventDefault();
-            lalalAuthUseKeyBtn?.click();
-        }
-    });
-
-    // Load initial status
-    updateLalalAuthButtonLabel(lalalStatusBadge?.textContent || "");
-    void loadLalalStatus();
-
-    // ── Toast System ────────────────────────────────────────────────────────────
-    const TOAST_ICONS = { success: "check_circle", danger: "error", warning: "warning", info: "info" };
-    let toastContainer = null;
-
-    function getToastContainer() {
-        if (toastContainer && document.body.contains(toastContainer)) return toastContainer;
-        toastContainer = document.createElement("div");
-        toastContainer.id = "toastContainer";
-        toastContainer.className = "toast-container";
-        toastContainer.setAttribute("aria-live", "polite");
-        document.body.appendChild(toastContainer);
-        return toastContainer;
-    }
-
-    function showToast(message, type = "info", duration = 3000) {
-        const wrapper = getToastContainer();
-        const toast = document.createElement("div");
-        toast.className = `toast toast--${type}`;
-        toast.setAttribute("role", "alert");
-
-        const icon = document.createElement("span");
-        icon.className = "material-symbols-outlined toast-icon";
-        icon.setAttribute("aria-hidden", "true");
-        icon.textContent = TOAST_ICONS[type] || TOAST_ICONS.info;
-        toast.appendChild(icon);
-
-        const text = document.createElement("span");
-        text.className = "toast-message";
-        text.textContent = message;
-        toast.appendChild(text);
-
-        const closeBtn = document.createElement("button");
-        closeBtn.type = "button";
-        closeBtn.className = "toast-close";
-        closeBtn.setAttribute("aria-label", "Close");
-        closeBtn.innerHTML = "&times;";
-        closeBtn.addEventListener("click", () => dismissToast(toast));
-        toast.appendChild(closeBtn);
-
-        wrapper.appendChild(toast);
-        void toast.offsetWidth;
-        toast.classList.add("toast--visible");
-
-        if (duration > 0) setTimeout(() => dismissToast(toast), duration);
-        return toast;
-    }
-
-    function dismissToast(toast) {
-        if (!toast || !toast.parentNode) return;
-        toast.classList.remove("toast--visible");
-        toast.classList.add("toast--hiding");
-        toast.addEventListener("transitionend", () => toast.remove(), { once: true });
-        setTimeout(() => toast.remove(), 300);
-    }
-
-    // ── Auto-Save System ────────────────────────────────────────────────────────
-    let saveTimeout = null;
-    let isSaving = false;
-
-    function showSavingIndicator() {
-        autoSaveIndicator?.classList.add("auto-save-indicator--visible");
-    }
-
-    function hideSavingIndicator() {
-        autoSaveIndicator?.classList.remove("auto-save-indicator--visible");
-    }
-
-    function validateSettings() {
-        const form = new FormData(formEl);
-        const retention = parseInt(form.get("retention_days"), 10);
-        if (!Number.isFinite(retention) || retention < 1 || retention > 365) {
-            return { valid: false, error: "Retention must be between 1 and 365 days" };
-        }
-        return {
-            valid: true,
-            data: {
-                retention_days: retention,
-            },
-        };
-    }
-
-    function validatePasswordChange() {
-        const currentPassword = currentPasswordEl.value;
-        const nextPassword = adminPasswordEl.value;
-        const confirmPassword = adminPasswordConfirmEl.value;
-
-        if (!currentPassword) {
-            return { valid: false, error: "Current password is required" };
-        }
-        if (!nextPassword) {
-            return { valid: false, error: "New password is required" };
-        }
-        if (nextPassword.length < 8) {
-            return { valid: false, error: "Password must be at least 8 characters" };
-        }
-        if (nextPassword !== confirmPassword) {
-            return { valid: false, error: "Passwords do not match" };
-        }
-
-        return {
-            valid: true,
-            data: {
-                current_password: currentPassword,
-                admin_password: nextPassword,
-            },
-        };
-    }
-
-    async function saveSettings() {
-        if (isSaving) return;
-
-        const validation = validateSettings();
-        if (!validation.valid) {
-            showToast(validation.error, "danger");
-            return;
-        }
-
-        isSaving = true;
-        showSavingIndicator();
-        clearAlert(alertEl);
-
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 10000);
-
-        try {
-            const res = await fetch("/api/settings", {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                    "X-CSRF-Token": getCsrfToken(),
-                },
-                body: JSON.stringify(validation.data),
-                signal: controller.signal,
-            });
-            clearTimeout(timeoutId);
-
-            let payload = {};
-            const contentType = res.headers.get("content-type") || "";
-            if (contentType.includes("application/json")) {
-                payload = await res.json();
-            }
-
-            if (!res.ok) {
-                throw new Error(payload.detail || `HTTP ${res.status}`);
-            }
-
-            showToast("Settings saved", "success");
-        } catch (err) {
-            clearTimeout(timeoutId);
-            if (err.name === "AbortError") {
-                showToast("Request timed out", "danger");
-            } else {
-                showToast("Error: " + err.message, "danger");
-            }
-        } finally {
-            isSaving = false;
-            hideSavingIndicator();
-        }
-    }
-
-    function scheduleAutoSave() {
-        if (saveTimeout) clearTimeout(saveTimeout);
-        saveTimeout = setTimeout(saveSettings, 800);
-    }
-
-    async function changePassword() {
-        const validation = validatePasswordChange();
-        if (!validation.valid) {
-            setPasswordError(validation.error);
-            showToast(validation.error, "danger");
-            return;
-        }
-
-        passwordSaveBtn.disabled = true;
-        setPasswordError("");
-
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 10000);
-
-        try {
-            const res = await fetch("/api/settings", {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                    "X-CSRF-Token": getCsrfToken(),
-                },
-                body: JSON.stringify(validation.data),
-                signal: controller.signal,
-            });
-            clearTimeout(timeoutId);
-
-            let payload = {};
-            const contentType = res.headers.get("content-type") || "";
-            if (contentType.includes("application/json")) {
-                payload = await res.json();
-            }
-
-            if (!res.ok) {
-                throw new Error(payload.detail || `HTTP ${res.status}`);
-            }
-
-            currentPasswordEl.value = "";
-            adminPasswordEl.value = "";
-            adminPasswordConfirmEl.value = "";
-            setPasswordError("");
-            if (payload.redirect) {
-                window.location.replace(payload.redirect);
-                return;
-            }
-
-            showToast(payload.message || "Password updated", "success");
-        } catch (err) {
-            clearTimeout(timeoutId);
-            const message = err.name === "AbortError" ? "Request timed out" : err.message;
-            setPasswordError(message);
-            showToast("Error: " + message, "danger");
-        } finally {
-            passwordSaveBtn.disabled = false;
-        }
-    }
-
-    // Bind auto-save to general settings only.
-
-    function setPasswordError(msg) {
-        const pwField = adminPasswordEl;
-        const confirmField = adminPasswordConfirmEl;
-        const errEl = document.getElementById("passwordError");
-        if (msg) {
-            errEl.textContent = msg;
-            errEl.classList.remove("d-none");
-            confirmField.classList.add("is-invalid");
-            pwField.classList.add("is-invalid");
-            currentPasswordEl.classList.toggle("is-invalid", msg.toLowerCase().includes("current password"));
-        } else {
-            errEl.classList.add("d-none");
-            errEl.textContent = "";
-            confirmField.classList.remove("is-invalid");
-            pwField.classList.remove("is-invalid");
-            currentPasswordEl.classList.remove("is-invalid");
-            if (adminPasswordEl.value) {
-                confirmField.classList.add("is-valid");
-                pwField.classList.add("is-valid");
-            } else {
-                confirmField.classList.remove("is-valid");
-                pwField.classList.remove("is-valid");
-            }
-        }
-    }
-
-    function validatePasswordFields() {
-        const pw = adminPasswordEl.value;
-        const confirm = adminPasswordConfirmEl.value;
-        if (!pw && !confirm) {
-            setPasswordError("");
-            return;
-        }
-        if (pw && pw.length < 8) {
-            setPasswordError("Password must be at least 8 characters");
-            return;
-        }
-        if (confirm && pw !== confirm) {
-            setPasswordError("Passwords do not match");
-            return;
-        }
-        setPasswordError("");
-    }
-
-    adminPasswordEl.addEventListener("input", validatePasswordFields);
-    adminPasswordConfirmEl.addEventListener("input", validatePasswordFields);
-    currentPasswordEl.addEventListener("input", () => {
-        currentPasswordEl.classList.remove("is-invalid");
-    });
-    passwordSaveBtn?.addEventListener("click", () => {
-        void changePassword();
-    });
-
-    formEl.querySelectorAll("input, select, textarea").forEach((input) => {
-        if (input === currentPasswordEl || input === adminPasswordEl || input === adminPasswordConfirmEl) {
-            return;
-        }
-        if (input.type === "checkbox") {
-            input.addEventListener("change", scheduleAutoSave);
-        } else {
-            input.addEventListener("input", scheduleAutoSave);
-            input.addEventListener("change", scheduleAutoSave);
-        }
-    });
-
-    settingsSaveBtn?.addEventListener("click", () => {
-        if (saveTimeout) {
-            clearTimeout(saveTimeout);
-            saveTimeout = null;
-        }
-        void saveSettings();
-    });
-
-    // Prevent form submission (no more save button)
-    formEl.addEventListener("submit", (e) => {
-        e.preventDefault();
-    });
-</script>
+<script id="settingsBootstrapData" type="application/json">{{ {
+    "lalal_configured": lalal_configured,
+    "lalal_status": (lalal_status or "Not configured"),
+    "lalal_email": (lalal_email or "")
+} | tojson }}</script>
+<script type="module" src="/static/js/settings.js?v=20260616a"></script>
 {% endblock %}

@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import logging
+import subprocess
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -38,6 +39,25 @@ def get_version() -> str:
 def get_build_info() -> str:
     """Return build info from the BUILD_INFO file, or 'dev'."""
     return _read_file("BUILD_INFO") or "dev"
+
+
+@lru_cache(maxsize=1)
+def get_ytdlp_version() -> str:
+    """Return installed yt-dlp version, or 'unavailable' on failure."""
+    try:
+        result = subprocess.run(
+            ["yt-dlp", "--version"],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=3,
+        )
+    except (subprocess.SubprocessError, OSError) as exc:
+        logger.warning("Unable to read yt-dlp version: %s", exc)
+        return "unavailable"
+
+    version = (result.stdout or "").strip()
+    return version or "unavailable"
 
 
 # --------------------------------------------------------------------------- #

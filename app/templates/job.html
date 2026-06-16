@@ -27,8 +27,13 @@
                 <dt>ID</dt>
                 <dd class="font-monospace">{{ job['id'] | e }}</dd>
 
+                {% set platform_pill_label = job_url | platform_pill %}
+                {% set platform_pill_id = job_url | platform_id %}
                 <dt>URL</dt>
                 <dd>
+                    {% if platform_pill_label %}
+                    <span class="platform-pill platform-pill--{{ platform_pill_id | e }}">{{ platform_pill_label | e }}</span>
+                    {% endif %}
                     {% if external_job_url %}
                     <a href="{{ external_job_url | e }}" title="{{ external_job_url | e }}" target="_blank"
                         rel="noopener noreferrer">{{ external_job_url | e }}</a>
@@ -91,7 +96,10 @@
         </div>
     </div>
 
-    <script>
+    <script type="module">
+        import { DOWNLOADABLE_STATUSES, TERMINAL_STATUSES } from "/static/js/config.js?v=20260616a";
+        import { getStatusPillClass, getStatusText } from "/static/js/ui.js?v=20260616a";
+
         {
             const jobId = {{ job['id'] | tojson
         }};
@@ -108,42 +116,12 @@
         const statusText = document.getElementById("statusText");
         const initialStatus = {{ job['status'] | tojson }};
 
-        const STATUS_META = {
-            queued: { text: "QUEUED", icon: "schedule" },
-            processing: { text: "PROCESSING", icon: "sync" },
-            downloading: { text: "DOWNLOADING", icon: "download" },
-            transcoding: { text: "TRANSCODING", icon: "memory" },
-            analysis: { text: "ANALYSIS", icon: "analytics" },
-            cancelled: { text: "CANCELLED", icon: "cancel" },
-            done: { text: "DONE", icon: "check_circle" },
-            analysis_done: { text: "DONE", icon: "check_circle" },
-            error: { text: "ERROR", icon: "error" },
-        };
-
-        const STATUS_PILL = {
-            queued: "status-pill-primary",
-            processing: "status-pill-primary",
-            downloading: "status-pill-primary",
-            transcoding: "status-pill-primary",
-            analysis: "status-pill-primary",
-            cancelled: "status-pill-secondary",
-            done: "status-pill-success",
-            analysis_done: "status-pill-success",
-            error: "status-pill-danger",
-        };
-
-        const FINAL_STATUSES = new Set(["done", "analysis_done", "error", "cancelled"]);
-
-        let shouldReconnect = !FINAL_STATUSES.has(initialStatus);
+        let shouldReconnect = !TERMINAL_STATUSES.has(initialStatus);
         let stream = null;
 
         function updateStatus(payload) {
-            const meta = STATUS_META[payload.status] || { text: String(payload.status || "unknown") };
-            const progress = Number(payload.progress);
-            statusText.textContent = payload.status === "transcoding" && Number.isFinite(progress)
-                ? `${meta.text} ${Math.round(progress)}%`
-                : meta.text;
-            statusEl.className = `status-pill ${STATUS_PILL[payload.status] || "status-pill-primary"}`;
+            statusText.textContent = getStatusText(payload.status, payload.progress);
+            statusEl.className = getStatusPillClass(payload.status);
         }
 
         function updateProgress(payload) {
@@ -182,10 +160,10 @@
 
             updateProgress(payload);
 
-            if (payload.status && FINAL_STATUSES.has(payload.status)) {
+            if (payload.status && TERMINAL_STATUSES.has(payload.status)) {
                 shouldReconnect = false;
                 try { stream?.close(); } catch (_) { }
-                linkEl.classList.remove("d-none");
+                linkEl.classList.toggle("d-none", !DOWNLOADABLE_STATUSES.has(payload.status));
             }
         }
 
@@ -200,6 +178,16 @@
 
             stream = new EventSource(`/api/jobs/${encodeURIComponent(jobId)}/events`, { withCredentials: true });
             stream.onmessage = handleMessage;
+            stream.onerror = () => {
+                if (!shouldReconnect) {
+                    return;
+                }
+
+                const reconnectSuffix = " · RECONNECTING";
+                if (!statusText.textContent.endsWith(reconnectSuffix)) {
+                    statusText.textContent = `${statusText.textContent}${reconnectSuffix}`;
+                }
+            };
         }
 
         if (shouldReconnect) {

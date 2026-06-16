@@ -9,6 +9,7 @@
 import asyncio
 import json
 import logging
+import os
 import re
 import subprocess
 from functools import lru_cache
@@ -20,8 +21,13 @@ from urllib.parse import parse_qs, urlparse
 
 logger = logging.getLogger(__name__)
 
-# Path to YouTube cookies file for age-restricted content
-COOKIES_PATH = Path(__file__).parent.parent.parent / "youtube_cookies.txt"
+_COOKIES_DIR: Path = Path(__file__).parent.parent.parent
+_COOKIES_DATA_DIR: Path = _COOKIES_DIR / "data"
+_PLATFORM_COOKIE_FILENAMES: dict[str, str] = {
+    "youtube": "youtube_cookies.txt",
+    "instagram": "instagram_cookies.txt",
+    "tiktok": "tiktok_cookies.txt",
+}
 _YOUTUBE_HOSTS = frozenset(
     {
         "youtube.com",
@@ -45,17 +51,22 @@ class InfoPayload(TypedDict):
     uploader: str | None
     duration: int | None
     view_count: int | None
+    thumbnail: str | None
     formats: list[dict[str, Any]]
     unavailable: bool
 
 
-def _strip_zwsp(text: str) -> str:
+def strip_zwsp(text: str) -> str:
     return _ZWSP_RE.sub("", text)
+
+
+# Backward-compatible alias for older imports.
+_strip_zwsp = strip_zwsp
 
 
 def _clean_video_id(value: str) -> str:
     """Strip zero-width chars and non-ID characters from video ID."""
-    cleaned = _strip_zwsp(value.strip())
+    cleaned = strip_zwsp(value.strip())
     return re.sub(r"[^\w-]", "", cleaned)
 
 
@@ -67,22 +78,47 @@ def _is_youtube_host(host: str) -> bool:
     return host in _YOUTUBE_HOSTS
 
 
-def _build_ydl_opts() -> dict[str, Any]:
+def _resolve_cookie_path(url: str) -> Path | None:
+    """Return the platform-specific cookie file for a URL, if it exists."""
+    from .platform import detect_platform
+
+    platform = detect_platform(url)
+    if not platform:
+        return None
+
+    filename = _PLATFORM_COOKIE_FILENAMES.get(platform)
+    if not filename:
+        return None
+
+    custom_dir = Path(custom_dir_raw) if (custom_dir_raw := os.environ.get("TUBEYOU_COOKIES_DIR", "").strip()) else None
+    search_dirs = [custom_dir, _COOKIES_DIR, _COOKIES_DATA_DIR]
+    for directory in search_dirs:
+        if directory is None:
+            continue
+        path = directory / filename
+        if path.is_file():
+            return path
+    return None
+
+
+def _build_ydl_opts(url: str = "") -> dict[str, Any]:
     opts: dict[str, Any] = {
         "quiet": True,
         "no_warnings": True,
         "noplaylist": True,
         "socket_timeout": 15,
     }
-    if COOKIES_PATH.is_file():
-        opts["cookiefile"] = str(COOKIES_PATH)
+    cookie_path = _resolve_cookie_path(url) if url else None
+    if cookie_path is not None:
+        opts["cookiefile"] = str(cookie_path)
     return opts
 
 
 def _build_yt_dlp_cmd(url: str) -> list[str]:
     cmd = ["yt-dlp", "--no-playlist", "--skip-download", "--dump-single-json"]
-    if COOKIES_PATH.is_file():
-        cmd.extend(["--cookies", str(COOKIES_PATH)])
+    cookie_path = _resolve_cookie_path(url)
+    if cookie_path is not None:
+        cmd.extend(["--cookies", str(cookie_path)])
     cmd.append("--")
     cmd.append(url)
     return cmd
@@ -121,6 +157,7 @@ def _prune_info(info: dict[str, Any] | None) -> InfoPayload | None:
         "uploader": info.get("uploader"),
         "duration": info.get("duration"),
         "view_count": info.get("view_count"),
+        "thumbnail": info.get("thumbnail"),
         "formats": formats,
         "unavailable": False,
     }
@@ -159,7 +196,7 @@ def validate_youtube_url(url: str) -> tuple[bool, str]:
     url = url.strip()
     
     # Normalize common copy/paste issues from mobile apps / HTML sources
-    url = _strip_zwsp(url.replace("&amp;", "&"))
+    url = strip_zwsp(url.replace("&amp;", "&"))
     
     if not url:
         return False, "URL is required"
@@ -208,7 +245,7 @@ def normalize_info_url(url: str) -> str:
     resolution paths and intermittent timeouts in yt-dlp. Callers should
     validate the input URL first.
     """
-    value = _strip_zwsp(url.strip().replace("&amp;", "&"))
+    value = strip_zwsp(url.strip().replace("&amp;", "&"))
     try:
         parsed = urlparse(value)
     except ValueError:
@@ -250,7 +287,7 @@ def _load_video_info_uncached(url: str) -> InfoPayload | None:
         Video info dict or None if extraction fails
     """
     info: InfoPayload | None = None
-    ydl_opts = _build_ydl_opts()
+    ydl_opts = _build_ydl_opts(url)
     
     try:
         from yt_dlp.utils import DownloadError, ExtractorError
@@ -389,6 +426,7 @@ def empty_info_payload() -> InfoPayload:
         "uploader": None,
         "duration": None,
         "view_count": None,
+        "thumbnail": None,
         "formats": [],
         "unavailable": True,
     }

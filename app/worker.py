@@ -9,7 +9,9 @@ import logging
 import os
 import queue
 import re
+import signal
 import subprocess
+import tempfile
 import threading
 import time
 from collections.abc import Callable
@@ -21,6 +23,9 @@ from urllib.parse import parse_qs, urlparse
 from .analysis_worker import SubmitResult, submit_analysis
 from .db import update_job, update_job_if_status
 from .governor import governor
+from .utils.platform import detect_platform
+from .utils.fs import LOSSLESS_AUDIO_SOURCE_EXTENSIONS
+from .utils.youtube import normalize_info_url
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +33,13 @@ type Job = tuple[str, str, str, str]
 type StatusPayload = dict[str, Any]
 type StatusCallback = Callable[[StatusPayload], None]
 
-_COOKIES_PATH: Final = Path(__file__).parent.parent / "youtube_cookies.txt"
+_COOKIES_DIR: Final = Path(__file__).parent.parent
+_COOKIES_DATA_DIR: Final = _COOKIES_DIR / "data"
+_PLATFORM_COOKIE_FILENAMES: Final[dict[str, str]] = {
+    "youtube": "youtube_cookies.txt",
+    "instagram": "instagram_cookies.txt",
+    "tiktok": "tiktok_cookies.txt",
+}
 _BASE_DIR: Path | None = None
 _base_dir_lock = threading.Lock()
 
@@ -52,30 +63,47 @@ def _get_base_dir() -> Path:
 
 def _cookies_args() -> list[str]:
     """Return --cookies argument list if youtube_cookies.txt exists."""
-    if _COOKIES_PATH.is_file():
-        return ["--cookies", str(_COOKIES_PATH)]
+    path = _resolve_cookie_file("youtube")
+    if path.is_file():
+        return ["--cookies", str(path)]
     return []
 
 
-def _normalize_url(url: str) -> str:
-    """Strip playlist parameters from YouTube URLs to avoid yt-dlp issues."""
-    value = url.strip()
-    try:
-        parsed = urlparse(value)
-    except Exception:
-        return value
-    host = (parsed.hostname or "").lower()
-    path = parsed.path or ""
-    if host.endswith("youtube.com") and path == "/watch":
-        params = parse_qs(parsed.query, keep_blank_values=False)
-        video_id = (params.get("v") or [""])[0].strip()
-        if video_id:
-            return f"https://www.youtube.com/watch?v={video_id}"
-    if host.endswith("youtu.be"):
-        segment = path.strip("/").split("/")[0].strip()
-        if segment:
-            return f"https://youtu.be/{segment}"
-    return value
+def _cookie_search_dirs() -> list[Path]:
+    dirs: list[Path] = []
+    custom_dir = os.environ.get("TUBEYOU_COOKIES_DIR", "").strip()
+    if custom_dir:
+        dirs.append(Path(custom_dir))
+    dirs.append(_COOKIES_DIR)
+    dirs.append(_COOKIES_DATA_DIR)
+    return dirs
+
+
+def _resolve_cookie_file(platform: str) -> Path:
+    filename = _PLATFORM_COOKIE_FILENAMES.get(platform, "")
+    if not filename:
+        return Path("")
+
+    for directory in _cookie_search_dirs():
+        candidate = directory / filename
+        if candidate.is_file():
+            return candidate
+
+    return _COOKIES_DIR / filename
+
+
+def _cookies_args_for_url(url: str) -> list[str]:
+    """Return platform-specific cookie arguments when a cookie file exists."""
+    platform = detect_platform(url)
+    if not platform:
+        return []
+
+    cookie_path = _resolve_cookie_file(platform)
+    if cookie_path.is_file():
+        return ["--cookies", str(cookie_path)]
+    return []
+
+
 
 # Queue maxsize managed by Governor for backpressure
 # Use get_job_queue() to access the queue (lazy initialization)
@@ -132,14 +160,11 @@ _QUALITY_LABELS: Final[dict[str, str]] = {
     "small": "smallQuality",
     "best": "bestQuality",
 }
-_AUDIO_SOURCE_EXTENSIONS: Final[frozenset[str]] = frozenset({
-    ".opus",
-    ".m4a",
+_VIDEO_SOURCE_EXTENSIONS: Final[frozenset[str]] = frozenset({
+    ".mp4",
     ".webm",
-    ".ogg",
-    ".aac",
-    ".flac",
-    ".wav",
+    ".mkv",
+    ".mov",
 })
 
 
@@ -149,6 +174,35 @@ class JobCancelledError(Exception):
 
 class ShutdownError(Exception):
     """Raised when a running command fails because the worker is shutting down."""
+
+
+_LOGIN_REQUIRED_PATTERNS: Final[tuple[str, ...]] = (
+    "login required",
+    "login_required",
+    "rate-limit reached",
+    "not available, rate-limit",
+    "cookies-from-browser or --cookies",
+)
+
+
+def _user_facing_error(url: str, exc: Exception) -> str:
+    """Turn a worker exception into an actionable user-visible message."""
+    raw = str(exc)
+    raw_lower = raw.lower()
+
+    if any(p in raw_lower for p in _LOGIN_REQUIRED_PATTERNS):
+        platform = detect_platform(url)
+        cookie_file = _PLATFORM_COOKIE_FILENAMES.get(platform or "", "")
+        cookie_path = _resolve_cookie_file(platform or "") if platform else Path("")
+        if platform and cookie_file and not cookie_path.is_file():
+            return (
+                f"Instagram/TikTok login required by platform. "
+                f"Place a Netscape-format cookie file at "
+                f"data/{cookie_file} or set TUBEYOU_COOKIES_DIR."
+            )
+        return f"Platform requires authentication: {raw[:200]}"
+
+    return f"Job failed: {raw[:300]}"
 
 
 def _now_iso() -> str:
@@ -173,10 +227,7 @@ def cancel_job(job_id: str) -> None:
     with _cancel_lock:
         _cancelled_jobs.add(job_id)
     if proc is not None:
-        try:
-            proc.terminate()
-        except Exception:
-            logger.debug("Failed to terminate active process for %s", job_id, exc_info=True)
+        _terminate_process(proc, grace_seconds=1.0)
 
 
 def is_job_cancelled(job_id: str) -> bool:
@@ -215,8 +266,14 @@ def _transition(job_id: str, status: str, message: str = "", **extra: Any) -> No
 
 
 def _transition_if_processing(job_id: str, status: str, message: str = "", **extra: Any) -> bool:
-    """Persist a terminal update only if the job is still in worker-owned processing state."""
-    updated = update_job_if_status(job_id, ("processing",), status=status, message=message, **extra)
+    """Persist a terminal update only if the job is still in a worker-owned state."""
+    updated = update_job_if_status(
+        job_id,
+        ("processing", "downloading", "transcoding"),
+        status=status,
+        message=message,
+        **extra,
+    )
     if updated:
         _emit(job_id, status, message, **extra)
         return True
@@ -225,16 +282,47 @@ def _transition_if_processing(job_id: str, status: str, message: str = "", **ext
     return False
 
 
+def _transition_worker_status(job_id: str, status: str, message: str = "", **extra: Any) -> bool:
+    """Persist worker-owned in-flight statuses and emit matching status events."""
+    updated = update_job_if_status(
+        job_id,
+        ("processing", "downloading", "transcoding"),
+        status=status,
+        message=message,
+        **extra,
+    )
+    if updated:
+        _emit(job_id, status, message, **extra)
+        return True
+    return False
+
+
 def _terminate_process(proc: subprocess.Popen[str], *, grace_seconds: float = 2.0) -> None:
-    """Terminate a subprocess and force-kill if it does not exit in time."""
+    """Terminate a subprocess (and its process group) and force-kill if needed."""
     if proc.poll() is not None:
         return
+
     try:
-        proc.terminate()
-        proc.wait(timeout=grace_seconds)
+        os.killpg(proc.pid, signal.SIGTERM)
     except Exception:
         try:
-            proc.kill()
+            proc.terminate()
+        except Exception:
+            logger.debug("Failed to terminate subprocess pid=%s", proc.pid, exc_info=True)
+
+    try:
+        proc.wait(timeout=grace_seconds)
+        return
+    except Exception:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                logger.debug("Failed to kill subprocess pid=%s", proc.pid, exc_info=True)
+
+        try:
             proc.wait(timeout=grace_seconds)
         except Exception:
             logger.debug("Failed to fully stop subprocess pid=%s", proc.pid, exc_info=True)
@@ -251,12 +339,15 @@ def _run_cmd(
     started = time.monotonic()
     stdout_value = ""
     proc: subprocess.Popen[str] | None = None
+    stderr_tmp: tempfile._TemporaryFileWrapper[str] | None = None
     try:
+        stderr_tmp = tempfile.NamedTemporaryFile(mode="w+", encoding="utf-8", errors="replace", delete=True)
         with subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE if capture_stdout else subprocess.DEVNULL,
-            # Avoid PIPE deadlocks on long-running yt-dlp/ffmpeg stderr output.
-            stderr=subprocess.DEVNULL,
+            # Keep stderr in a temp file for diagnostics without PIPE deadlocks.
+            stderr=stderr_tmp,
+            start_new_session=True,
             text=True,
             encoding="utf-8",
             errors="replace",
@@ -290,7 +381,21 @@ def _run_cmd(
                     stdout_value = proc.stdout.read()
 
                 if proc.returncode != 0:
-                    raise RuntimeError(f"Command failed: {proc.returncode}")
+                    executable = cmd[0] if cmd else "command"
+                    stderr_tail = ""
+                    if stderr_tmp is not None:
+                        try:
+                            stderr_tmp.seek(0)
+                            stderr_text = stderr_tmp.read()
+                            stderr_tail = stderr_text[-800:].strip()
+                        except Exception:
+                            stderr_tail = ""
+
+                    if stderr_tail:
+                        logger.warning("%s failed with exit code %s. stderr tail: %s", executable, proc.returncode, stderr_tail)
+                        raise RuntimeError(f"{executable} failed with exit code {proc.returncode}: {stderr_tail}")
+
+                    raise RuntimeError(f"{executable} failed with exit code {proc.returncode}")
             except Exception:
                 if proc.poll() is None:
                     _terminate_process(proc)
@@ -305,6 +410,11 @@ def _run_cmd(
     finally:
         if proc is not None and proc.poll() is None:
             _terminate_process(proc)
+        if stderr_tmp is not None:
+            try:
+                stderr_tmp.close()
+            except Exception:
+                logger.debug("Could not close temporary stderr file", exc_info=True)
         if job_id is not None:
             with _active_lock:
                 _active_processes.pop(job_id, None)
@@ -400,6 +510,7 @@ def _run_ffmpeg_transcode(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
+            start_new_session=True,
             text=True,
             encoding="utf-8",
             errors="replace",
@@ -489,10 +600,18 @@ def _run_ffmpeg_transcode(
             _active_processes.pop(job_id, None)
 
 
-def _sanitize_filename(name: str, max_len: int = 120) -> str:
-    cleaned = re.sub(r"[\\/:*?\"<>|]", "_", (name or "").strip())
+_WIN_RESERVED_NAMES = frozenset({
+    "CON", "PRN", "AUX", "NUL",
+    *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10)),
+})
+
+
+def sanitize_filename(name: str, max_len: int = 120) -> str:
+    # Strip control characters (0x00-0x1F, 0x7F) and Windows-reserved chars
+    cleaned = re.sub(r"[\x00-\x1f\x7f\\/:*?\"<>|]", "_", (name or "").strip())
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" .")
-    if not cleaned:
+    if not cleaned or cleaned.upper() in _WIN_RESERVED_NAMES:
         cleaned = "video"
     return cleaned[:max_len].rstrip(" .") or "video"
 
@@ -501,13 +620,18 @@ def _quality_label(quality: str) -> str:
     return _QUALITY_LABELS.get((quality or "").lower(), f"{quality}Quality" if quality else "defaultQuality")
 
 
-def _build_output_stem(url: str, quality: str) -> str:
+def _build_output_stem(job_id: str, url: str, quality: str) -> str:
     try:
-        title_raw = _run_cmd(["yt-dlp", "--no-playlist", *_cookies_args(), "--get-title", url], timeout=120, capture_stdout=True).strip()
+        title_raw = _run_cmd(
+            ["yt-dlp", "--no-playlist", *_cookies_args_for_url(url), "--get-title", "--", url],
+            timeout=120,
+            capture_stdout=True,
+            job_id=job_id,
+        ).strip()
     except Exception as exc:
         logger.warning("Could not fetch video title, using fallback filename: %s", exc)
         title_raw = "video"
-    title = _sanitize_filename(title_raw)
+    title = sanitize_filename(title_raw)
     return f"{title} ({_quality_label(quality)})"
 
 
@@ -538,7 +662,14 @@ def _build_ytdlp_cmd(
     cmd = [
         "yt-dlp",
         "--no-playlist",
-        *_cookies_args(),
+        # Fast-fail limits: keep a blocked/unavailable source (e.g. login-walled
+        # Instagram reel) from tying up a worker slot in yt-dlp's default retry
+        # storm (10 download + 10 fragment retries with backoff).
+        "--socket-timeout", "30",
+        "--retries", "3",
+        "--fragment-retries", "3",
+        "--extractor-retries", "1",
+        *_cookies_args_for_url(url),
         "--write-thumbnail",
         "--convert-thumbnails",
         "jpg",
@@ -555,6 +686,7 @@ def _build_ytdlp_cmd(
         cmd.extend(["-f", "bv*+ba/b", "--merge-output-format", "mp4"])
     else:
         cmd.extend(["-f", "bv*[height<=720]+ba/b", "--merge-output-format", "mp4"])
+    cmd.append("--")
     cmd.append(url)
     return cmd
 
@@ -566,13 +698,23 @@ def _find_audio_source(job_dir: Path, stem: str) -> Path | None:
     This function finds the actual downloaded file matching the stem pattern.
     """
     # Common audio extensions from YouTube
-    for ext in _AUDIO_SOURCE_EXTENSIONS:
+    for ext in LOSSLESS_AUDIO_SOURCE_EXTENSIONS:
         source = job_dir / f"{stem}.source{ext}"
         if source.is_file():
             return source
     # Fallback: search for any .source.* audio file
     for candidate in job_dir.glob(f"{stem}.source.*"):
-        if candidate.suffix.lower() in _AUDIO_SOURCE_EXTENSIONS:
+        if candidate.suffix.lower() in LOSSLESS_AUDIO_SOURCE_EXTENSIONS:
+            return candidate
+    return None
+
+
+def _find_video_source(job_dir: Path, stem: str, *, marker: str = "") -> Path | None:
+    pattern = f"{stem}{marker}.*"
+    for candidate in sorted(job_dir.glob(pattern)):
+        if not candidate.is_file():
+            continue
+        if candidate.suffix.lower() in _VIDEO_SOURCE_EXTENSIONS:
             return candidate
     return None
 
@@ -583,11 +725,11 @@ def _download_media(job_id: str, url: str, *, quality: str, media_type: str) -> 
     job_dir.mkdir(parents=True, exist_ok=True)
 
     # Normalize URL to strip playlist params that cause issues
-    clean_url = _normalize_url(url)
-    stem = _build_output_stem(clean_url, quality)
+    clean_url = normalize_info_url(url)
+    stem = _build_output_stem(job_id, clean_url, quality)
     if media_type == "audio":
         # Download lossless audio (no transcode) - we'll convert to MP3 on download
-        _emit(job_id, "downloading", "Downloading audio (lossless)")
+        _transition_worker_status(job_id, "downloading", "Downloading audio (lossless)")
         cmd = _build_ytdlp_cmd(
             clean_url,
             str(job_dir / f"{stem}.source.%(ext)s"),
@@ -608,7 +750,6 @@ def _download_media(job_id: str, url: str, *, quality: str, media_type: str) -> 
         return source_file
 
     if quality == "max":
-        out = job_dir / f"{stem}.mp4"
         cmd = _build_ytdlp_cmd(
             clean_url,
             str(job_dir / f"{stem}.%(ext)s"),
@@ -619,13 +760,20 @@ def _download_media(job_id: str, url: str, *, quality: str, media_type: str) -> 
         _run_cmd(cmd, timeout=_TIMEOUT_DOWNLOAD, job_id=job_id)
         _check_cancellation(job_id)
         _rename_thumbnail(job_dir)
-        return out
 
-    temp = job_dir / f"{stem}.source.mp4"
+        expected_out = job_dir / f"{stem}.mp4"
+        if expected_out.is_file():
+            return expected_out
+
+        found_out = _find_video_source(job_dir, stem)
+        if found_out is None:
+            raise RuntimeError(f"Downloaded video file not found in {job_dir}")
+        return found_out
+
     out = job_dir / f"{stem}.mp4"
 
     _check_cancellation(job_id)
-    _emit(job_id, "downloading", "Downloading source for transcoding")
+    _transition_worker_status(job_id, "downloading", "Downloading source for transcoding")
     _run_cmd(
         _build_ytdlp_cmd(
             clean_url,
@@ -638,13 +786,17 @@ def _download_media(job_id: str, url: str, *, quality: str, media_type: str) -> 
     )
     _rename_thumbnail(job_dir)
 
+    source_video = _find_video_source(job_dir, stem, marker=".source")
+    if source_video is None:
+        raise RuntimeError(f"Video source file not found in {job_dir}")
+
     _check_cancellation(job_id)
     # Cap resolution without upscaling: min(target, input_height)
     target_height = 720 if quality == "medium" else 480
     scale = f"scale=-2:'min({target_height},ih)'"
     transcode_message = f"Transcoding to {quality}"
-    _emit(job_id, "transcoding", transcode_message, progress=0, eta_seconds=None)
-    _, _, source_duration_seconds = _probe_media(temp, media_type)
+    _transition_worker_status(job_id, "transcoding", transcode_message, progress=0, eta_seconds=None)
+    _, _, source_duration_seconds = _probe_media(source_video, media_type)
     
     try:
         # Use Governor semaphore to limit concurrent transcoding (CPU/memory protection)
@@ -654,7 +806,7 @@ def _download_media(job_id: str, url: str, *, quality: str, media_type: str) -> 
                     "ffmpeg",
                     "-y",
                     "-i",
-                    str(temp),
+                    str(source_video),
                     "-vf",
                     scale,
                     "-c:v",
@@ -680,9 +832,9 @@ def _download_media(job_id: str, url: str, *, quality: str, media_type: str) -> 
         _check_cancellation(job_id)
     finally:
         try:
-            temp.unlink(missing_ok=True)
+            source_video.unlink(missing_ok=True)
         except OSError as exc:
-            logger.warning("Could not remove temp file %s: %s", temp, exc)
+            logger.warning("Could not remove temp file %s: %s", source_video, exc)
 
     return out
 
@@ -764,9 +916,9 @@ def process_job(job: Job) -> None:
 
     try:
         if type_ == "audio":
-            _emit(job_id, "downloading", "Downloading audio stream")
+            _transition_worker_status(job_id, "downloading", "Downloading audio stream")
         elif quality == "max":
-            _emit(job_id, "downloading", "Downloading best video+audio")
+            _transition_worker_status(job_id, "downloading", "Downloading best video+audio")
 
         out_path = _download_media(job_id, url, quality=quality, media_type=type_)
 
@@ -810,10 +962,10 @@ def process_job(job: Job) -> None:
     except ShutdownError:
         # Graceful shutdown - keep the job queued for the next startup.
         logger.info("Job %s interrupted by shutdown", job_id)
-        update_job(job_id, status="queued")
+        update_job_if_status(job_id, ("processing", "downloading", "transcoding"), status="queued")
         raise
     except Exception as exc:
-        err_msg = f"Job failed: {exc}"
+        err_msg = _user_facing_error(url, exc)
         logger.exception("Job %s failed", job_id)
         _transition_if_processing(job_id, "error", err_msg, finished_at=_now_iso())
     finally:
@@ -859,6 +1011,8 @@ def worker() -> None:
             except Exception:
                 logger.exception("Failed to persist internal error state for job %s", job_id)
         finally:
+            with _cancel_lock:
+                _cancelled_jobs.discard(job_id)
             q.task_done()
 
 
@@ -886,6 +1040,14 @@ def start_workers(n: int | None = None) -> None:
             _worker_threads.append(t)
         
         logger.info("Started %d worker threads (effective CPUs: %.2f)", n, governor.effective_cpus)
+
+        # Log cookie file availability at startup for operational visibility.
+        for platform, filename in _PLATFORM_COOKIE_FILENAMES.items():
+            resolved = _resolve_cookie_file(platform)
+            if resolved.is_file():
+                logger.info("Cookie file for %s: %s", platform, resolved)
+            else:
+                logger.info("No cookie file for %s (looked for %s)", platform, filename)
 
         _workers_started = True
 

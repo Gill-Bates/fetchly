@@ -1,32 +1,37 @@
-# Python
-__pycache__/
-*.py[cod]
-.venv/
-
 # App data (wird als Volume gemountet)
-data/
 *.db
+data/
+
+# Caches
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+__pycache__/
+
+# Editor
+.idea/
+.vscode/
 
 # Git
 .git/
 .gitignore
 
-# Editor
-.vscode/
-.idea/
-
-# Dev-only
-*.log
-setup.conf
-cookies.txt
-*.backup
-*.har
-.omx/
-.codex
-app/static/vendor/wavesurfer/
-
 # Local tooling
 tools/
-tools/ui-lint/node_modules/
-tools/ui-lint/output/
-tools/ui-lint/.cache/
+
+# Python
+*.py[cod]
+.venv/
+
+# Runtime / Dev artifacts
+*.backup
+*.har
+*.log
+.coverage
+.codex
+.omx/
+app/static/vendor/wavesurfer/
+cookies.txt
+coverage.xml
+htmlcov/
+setup.conf

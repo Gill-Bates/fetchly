@@ -88,7 +88,7 @@ def verify_login(username: str, password: str) -> bool:
 
     # Check if a custom password hash is stored in settings.
     try:
-        settings = get_settings()
+        settings = get_settings(include_internal=True)
         custom_hash = settings.get("admin_password_hash")
         if custom_hash and str(custom_hash).strip():
             stored_hash = str(custom_hash).strip()

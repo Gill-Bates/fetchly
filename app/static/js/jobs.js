@@ -18,7 +18,8 @@ import {
     createActionButton,
     createPrimaryActionButton,
     resolveJobAction,
-} from "./ui.js?v=20260519b";
+} from "./ui.js";
+import { detectPlatform, platformPillLabel } from "./utils.js";
 
 const MOBILE_BREAKPOINT = "(max-width: 768px)";
 const FALLBACK_JOBS_TABLE_COLUMN_COUNT = 8;
@@ -338,11 +339,30 @@ function createCell(label, text, className = "") {
     return td;
 }
 
-function renderJobTitleText(job) {
+function createPlatformPill(job) {
+    const platform = job?.platform || detectPlatform(job?.url || "");
+    const label = platformPillLabel(platform);
+    if (!label) return null;
+
+    const pill = document.createElement("span");
+    pill.className = `platform-pill platform-pill--${platform}`;
+    pill.textContent = label;
+    pill.title = label;
+    return pill;
+}
+
+function renderJobTitle(job) {
+    const fragment = document.createDocumentFragment();
+    const pill = createPlatformPill(job);
+    if (pill) {
+        fragment.appendChild(pill);
+    }
+
     const titleText = document.createElement("span");
     titleText.className = "job-title-text";
     titleText.textContent = getTitleText(job);
-    return titleText;
+    fragment.appendChild(titleText);
+    return fragment;
 }
 
 function renderDesktopTitle(job) {
@@ -350,7 +370,7 @@ function renderDesktopTitle(job) {
     td.dataset.label = "Title";
     td.className = "job-title-cell job-title-cell--wide col-title job-title-popover-target";
     td.dataset.popoverText = job?.video_meta_hover || job?.url || "";
-    td.append(renderJobTitleText(job));
+    td.append(renderJobTitle(job));
     return td;
 }
 
@@ -427,7 +447,7 @@ function renderJobStatus(job, { mobile = false } = {}) {
     container.dataset.label = "Status";
     container.dataset.role = "job-status";
     container.className = mobile ? "job-item__status" : "col-status";
-    container.append(createStatusElement(job?.status, job?.filesize_bytes, job?.progress));
+    container.append(createStatusElement(job?.status, job?.filesize_bytes, job?.progress, job?.message));
     return container;
 }
 
@@ -558,7 +578,7 @@ function buildMobileJob(job) {
     titleWrap.dataset.label = "Title";
     titleWrap.dataset.role = "job-title";
     titleWrap.className = "job-item__title-wrap";
-    titleWrap.append(renderJobTitleText(job));
+    titleWrap.append(renderJobTitle(job));
 
     body.append(titleWrap, renderMobileMeta(job), renderMobileDetails(job));
 

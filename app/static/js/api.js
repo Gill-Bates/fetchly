@@ -4,6 +4,7 @@
 //
 
 import { CONFIG } from "./config.js";
+import { combineAbortSignals, createTimeoutSignal } from "./utils.js";
 
 const TIMEOUT_DEFAULT_MS = 10_000;
 // Kept separate so the jobs polling budget can diverge later without changing all calls.
@@ -250,10 +251,8 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = TIMEOUT_DEFAULT_M
         throw new DOMException("Request already aborted", "AbortError");
     }
 
-    const timeoutSignal = AbortSignal.timeout(timeoutMs);
-    const signal = externalSignal
-        ? AbortSignal.any([externalSignal, timeoutSignal])
-        : timeoutSignal;
+    const { signal: timeoutSignal, cleanup: cleanupTimeout } = createTimeoutSignal(timeoutMs);
+    const { signal, cleanup: cleanupSignal } = combineAbortSignals([externalSignal, timeoutSignal]);
 
     try {
         return await fetch(url, {
@@ -271,6 +270,9 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = TIMEOUT_DEFAULT_M
             }
         }
         throw error;
+    } finally {
+        cleanupSignal();
+        cleanupTimeout();
     }
 }
 
@@ -469,6 +471,19 @@ export async function submitJob(formData, csrf, options = {}) {
 export async function fetchVideoInfo(url, options = {}) {
     return _apiCallDeduped(
         `/api/info?url=${encodeURIComponent(url)}`,
+        options,
+        TIMEOUT_VIDEO_INFO_MS,
+    );
+}
+
+/**
+ * Resolve a media URL to a local cached thumbnail URL.
+ * @param {string} url
+ * @param {ApiOptions} [options]
+ */
+export async function fetchResolvedThumbnail(url, options = {}) {
+    return _apiCallDeduped(
+        `/api/thumbnail/resolve?url=${encodeURIComponent(url)}`,
         options,
         TIMEOUT_VIDEO_INFO_MS,
     );

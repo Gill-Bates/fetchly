@@ -34,12 +34,13 @@
                 </button>
             </li>
             <li><hr class="dropdown-divider"></li>
+            {% set duration_blocked = lalal_duration_guard and (job["duration_seconds"] or 0) > 600 %}
             <li>
-                <button class="dropdown-item{% if not lalal_enabled %} disabled{% endif %}" type="button"
+                <button class="dropdown-item{% if not lalal_enabled or duration_blocked %} disabled{% endif %}" type="button"
                         data-action="lalal-split"
                         data-job-id="{{ job["id"] }}"
                         data-stem="instrumental"
-                        {% if not lalal_enabled %}disabled aria-disabled="true" title="Lalal.ai is not connected"{% endif %}>
+                        {% if not lalal_enabled %}disabled aria-disabled="true" title="Lalal.ai is not connected"{% elif duration_blocked %}disabled aria-disabled="true" title="Track exceeds 10 min — blocked by Duration Guard"{% endif %}>
                     <span class="material-symbols-outlined icon-inline" aria-hidden="true">music_off</span>
                     <span>Instrumental</span>
                     <img class="dropdown-provider-logo"
@@ -50,11 +51,11 @@
                 </button>
             </li>
             <li>
-                <button class="dropdown-item{% if not lalal_enabled %} disabled{% endif %}" type="button"
+                <button class="dropdown-item{% if not lalal_enabled or duration_blocked %} disabled{% endif %}" type="button"
                         data-action="lalal-split"
                         data-job-id="{{ job["id"] }}"
                         data-stem="vocals"
-                        {% if not lalal_enabled %}disabled aria-disabled="true" title="Lalal.ai is not connected"{% endif %}>
+                        {% if not lalal_enabled %}disabled aria-disabled="true" title="Lalal.ai is not connected"{% elif duration_blocked %}disabled aria-disabled="true" title="Track exceeds 10 min — blocked by Duration Guard"{% endif %}>
                     <span class="material-symbols-outlined icon-inline" aria-hidden="true">mic</span>
                     <span>A Cappella</span>
                     <img class="dropdown-provider-logo"

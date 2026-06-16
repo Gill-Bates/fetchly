@@ -7,7 +7,12 @@
 """Core API routes for jobs, settings, and info."""
 
 import asyncio
+import hashlib
 import logging
+import os
+import re
+import subprocess
+import tempfile
 from queue import Full
 import uuid
 from datetime import UTC, datetime
@@ -16,12 +21,16 @@ from time import time
 from typing import TYPE_CHECKING, Any, Protocol
 from weakref import WeakKeyDictionary
 
+import httpx
+
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 from ..common.rate_limit import limiter
 from ..bpm_cluster import cluster_bpms
 from ..db import (
+    COMPLETED_STATUSES,
+    TERMINAL_JOB_STATUSES,
     get_job,
     get_settings,
     get_stats,
@@ -31,15 +40,18 @@ from ..db import (
     set_settings,
     update_job,
     update_job_if_status,
+    utc_timestamp,
 )
+from ..utils.fs import get_json_body
 from ..session import delete_session_cookie, refresh_session_settings_cache
 from ..utils.template_filters import is_lalala_configured, public_settings
+from ..utils.platform import detect_platform, validate_media_url
+from ..utils.version import get_ytdlp_version
 from ..utils.youtube import (
     empty_info_payload,
     extract_video_meta_async,
     load_video_info_async,
     normalize_info_url,
-    validate_youtube_url,
 )
 from ..worker import cancel_job as cancel_worker_job, get_job_queue
 from .auth import (
@@ -56,14 +68,19 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+
 router = APIRouter(tags=["api"])
 
 # Constants
 _ALLOWED_MEDIA_TYPES = frozenset({"audio", "video"})
 _ALLOWED_QUALITIES = frozenset({"max", "medium", "small"})
 _STATS_CACHE_TTL_SECONDS = 60.0
-_TERMINAL_JOB_STATUSES = frozenset({"done", "analysis", "analysis_done", "error", "cancelled"})
-_PERSISTED_CANCELLABLE_JOB_STATUSES = ("queued", "processing")
+_PERSISTED_CANCELLABLE_JOB_STATUSES = (
+    "queued",
+    "processing",
+    "downloading",
+    "transcoding",
+)
 
 # Module-level state
 _templates: "Jinja2Templates | None" = None
@@ -82,15 +99,7 @@ def init_api(
     _DEFAULT_USER = default_user
 
 
-async def _get_json(request: Request) -> dict[str, Any]:
-    """Parse request body as JSON and ensure it is a dict."""
-    try:
-        payload = await request.json()
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail="Invalid JSON") from exc
-    if not isinstance(payload, dict):
-        raise HTTPException(status_code=400, detail="Invalid JSON")
-    return payload
+
 
 
 def _require_templates() -> "Jinja2Templates":
@@ -127,6 +136,7 @@ def job_to_dict(job: JobRecord) -> dict[str, object]:
     return {
         "id": job["id"],
         "url": job["url"],
+        "platform": detect_platform(job["url"]),
         "video_title": job["video_title"],
         "video_meta_hover": job["video_meta_hover"],
         "type": job["type"],
@@ -200,10 +210,12 @@ async def index(request: Request):
     stats = await get_cached_stats()
     settings = await asyncio.to_thread(get_settings)
     lalal_enabled = is_lalala_configured(settings)
+    lalal_duration_guard = str(settings.get("lalalaai_duration_guard", "true")).lower() in ("true", "1", "yes")
     return templates.TemplateResponse(request=request, name="index.html", context={
         "jobs": jobs,
         "stats": stats,
         "lalal_enabled": lalal_enabled,
+        "lalal_duration_guard": lalal_duration_guard,
         "csrf_token": getattr(request.state, "csrf_token", ""),
     })
 
@@ -218,11 +230,17 @@ async def settings_page(request: Request):
     templates = _require_templates()
 
     settings = await asyncio.to_thread(get_settings)
+    lalal_configured = is_lalala_configured(settings)
+    ytdlp_version = await asyncio.to_thread(get_ytdlp_version)
     return templates.TemplateResponse(
         request=request,
         name="settings.html",
         context={
             "settings": public_settings(settings),
+            "lalal_configured": lalal_configured,
+            "lalal_status": "Connected" if lalal_configured else "Not configured",
+            "lalal_email": str(settings.get("lalalaai_email", "") or ""),
+            "ytdlp_version": ytdlp_version,
             "csrf_token": getattr(request.state, "csrf_token", ""),
         },
     )
@@ -268,12 +286,30 @@ async def api_bpm_clusters(request: Request, _user: str = Depends(require_user),
     ]
 
 
+async def _tiktok_oembed_thumbnail(url: str) -> str | None:
+    """Fetch thumbnail from TikTok oEmbed API (no cookies/yt-dlp needed)."""
+    from urllib.parse import quote
+
+    oembed_url = f"https://www.tiktok.com/oembed?url={quote(url, safe='')}"
+    try:
+        async with httpx.AsyncClient(timeout=6.0, follow_redirects=True, max_redirects=3) as client:
+            resp = await client.get(oembed_url, headers={"User-Agent": "Mozilla/5.0"})
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        thumb = str(data.get("thumbnail_url") or "").strip()
+        return thumb or None
+    except Exception as exc:
+        logger.debug("TikTok oEmbed failed for %s: %s", url, exc)
+        return None
+
+
 @router.get("/api/info")
 @limiter.limit("20/minute")
-async def api_info(request: Request, url: str, user: str = Depends(require_user)):
+async def api_info(request: Request, url: str, _user: str = Depends(require_user)):
     """Extract video metadata using yt-dlp."""
     _ = request
-    is_valid, error_msg = validate_youtube_url(url)
+    is_valid, error_msg = validate_media_url(url)
     if not is_valid:
         raise HTTPException(status_code=400, detail=error_msg)
 
@@ -282,6 +318,16 @@ async def api_info(request: Request, url: str, user: str = Depends(require_user)
         info = await asyncio.wait_for(load_video_info_async(info_url), timeout=20.0)
 
         if not info:
+            # TikTok: try oEmbed even when yt-dlp returns nothing
+            platform = detect_platform(url)
+            if platform == "tiktok":
+                thumb = await _tiktok_oembed_thumbnail(url)
+                if thumb:
+                    payload = empty_info_payload()
+                    payload["thumbnail"] = thumb
+                    payload["platform"] = platform
+                    payload["unavailable"] = False
+                    return payload
             return empty_info_payload()
 
         title = str(info.get("title") or "").strip()
@@ -289,6 +335,12 @@ async def api_info(request: Request, url: str, user: str = Depends(require_user)
         uploader = str(info.get("uploader") or "").strip()
         duration = info.get("duration")
         views = info.get("view_count")
+        thumbnail = str(info.get("thumbnail") or "").strip()
+
+        # TikTok: yt-dlp often returns no thumbnail — try oEmbed as fallback
+        platform = detect_platform(url)
+        if not thumbnail and platform == "tiktok":
+            thumbnail = await _tiktok_oembed_thumbnail(url) or ""
 
         formats: list[dict[str, Any]] = []
         raw_formats = info.get("formats") or []
@@ -329,6 +381,8 @@ async def api_info(request: Request, url: str, user: str = Depends(require_user)
             "uploader": uploader or None,
             "duration": duration if isinstance(duration, int) else None,
             "view_count": views if isinstance(views, int) else None,
+            "thumbnail": thumbnail or None,
+            "platform": platform,
             "formats": formats[:20],
             "formats_total": len(formats),
             "formats_truncated": len(formats) > 20,
@@ -346,6 +400,308 @@ async def api_info(request: Request, url: str, user: str = Depends(require_user)
         return empty_info_payload()
 
 
+_THUMBNAIL_ALLOWED_SUFFIXES: frozenset[str] = frozenset({
+    # TikTok CDN domains
+    ".tiktokcdn.com",
+    ".tiktokcdn-us.com",
+    ".ttwstatic.com",
+    ".tiktokv.com",
+    ".byteimg.com",
+    ".ibyteimg.com",
+    ".muscdn.com",
+    # Instagram / Facebook CDN domains
+    ".cdninstagram.com",
+    ".fbcdn.net",
+    ".facebook.com",
+})
+_THUMBNAIL_MAX_BYTES = 2 * 1024 * 1024  # 2 MiB
+_THUMB_CACHE_DIR = Path(__file__).parent.parent.parent / "data" / "thumb-cache"
+_THUMB_CACHE_KEY_RE = re.compile(r"^[a-f0-9]{64}$")
+_THUMB_EXTRACTION_TIMEOUT_SECONDS = 30
+_THUMB_ALLOWED_EXTENSIONS: frozenset[str] = frozenset({".jpg", ".jpeg", ".png", ".webp"})
+_COOKIES_DIR = Path(__file__).parent.parent.parent
+_COOKIES_DATA_DIR = _COOKIES_DIR / "data"
+_PLATFORM_COOKIE_FILENAMES: dict[str, str] = {
+    "youtube": "youtube_cookies.txt",
+    "instagram": "instagram_cookies.txt",
+    "tiktok": "tiktok_cookies.txt",
+}
+
+
+def _is_allowed_thumbnail_url(url: str) -> bool:
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        if parsed.scheme != "https":
+            return False
+        host = (parsed.hostname or "").lower()
+        return any(host == s.lstrip(".") or host.endswith(s) for s in _THUMBNAIL_ALLOWED_SUFFIXES)
+    except Exception:
+        return False
+
+
+def _thumb_cache_key(url: str) -> str:
+    return hashlib.sha256(url.encode("utf-8")).hexdigest()
+
+
+def _cookies_args_for_url(url: str) -> list[str]:
+    platform = detect_platform(url)
+    if not platform:
+        return []
+    cookie_path = _resolve_cookie_file(platform)
+    if cookie_path and cookie_path.is_file():
+        return ["--cookies", str(cookie_path)]
+    return []
+
+
+def _resolve_cookie_file(platform: str) -> Path | None:
+    filename = _PLATFORM_COOKIE_FILENAMES.get(platform)
+    if not filename:
+        return None
+
+    custom_dir_raw = os.environ.get("TUBEYOU_COOKIES_DIR", "").strip()
+    custom_dir = Path(custom_dir_raw) if custom_dir_raw else None
+    for directory in (custom_dir, _COOKIES_DIR, _COOKIES_DATA_DIR):
+        if directory is None:
+            continue
+        candidate = directory / filename
+        if candidate.is_file():
+            return candidate
+    return _COOKIES_DIR / filename
+
+
+def _cookie_hint_for_url(url: str) -> str | None:
+    platform = detect_platform(url)
+    if platform not in {"instagram", "tiktok", "youtube"}:
+        return None
+    cookie_path = _resolve_cookie_file(platform)
+    if cookie_path and not cookie_path.is_file():
+        return f"{platform}_cookies_missing"
+    return None
+
+
+def _thumb_cache_paths(cache_key: str) -> tuple[Path, Path]:
+    return (
+        _THUMB_CACHE_DIR / f"{cache_key}.bin",
+        _THUMB_CACHE_DIR / f"{cache_key}.ct",
+    )
+
+
+def _read_cached_thumbnail(cache_key: str) -> tuple[bytes, str] | None:
+    data_path, content_type_path = _thumb_cache_paths(cache_key)
+    if not data_path.is_file() or not content_type_path.is_file():
+        return None
+
+    try:
+        data = data_path.read_bytes()
+        content_type = content_type_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+
+    if not data:
+        return None
+    if not content_type.startswith("image/"):
+        content_type = "image/jpeg"
+    return data, content_type
+
+
+def _write_cached_thumbnail(cache_key: str, data: bytes, content_type: str) -> None:
+    _THUMB_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    data_path, content_type_path = _thumb_cache_paths(cache_key)
+    tmp_data = data_path.with_suffix(data_path.suffix + ".tmp")
+    tmp_content_type = content_type_path.with_suffix(content_type_path.suffix + ".tmp")
+    tmp_data.write_bytes(data)
+    tmp_content_type.write_text(content_type, encoding="utf-8")
+    tmp_data.replace(data_path)
+    tmp_content_type.replace(content_type_path)
+
+
+async def _fetch_thumbnail_payload(url: str) -> tuple[bytes, str]:
+    if not _is_allowed_thumbnail_url(url):
+        raise HTTPException(status_code=400, detail="Thumbnail URL not allowed")
+
+    try:
+        async with httpx.AsyncClient(timeout=8.0, follow_redirects=True, max_redirects=3) as client:
+            resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
+    except httpx.RequestError as exc:
+        logger.warning("Thumbnail fetch failed for %s: %s", url, exc)
+        raise HTTPException(status_code=502, detail="Thumbnail unavailable") from exc
+
+    if resp.status_code != 200:
+        raise HTTPException(status_code=502, detail="Thumbnail fetch failed")
+
+    content_type = resp.headers.get("content-type", "image/jpeg").split(";")[0].strip().lower()
+    if not content_type.startswith("image/"):
+        raise HTTPException(status_code=502, detail="Unexpected content type")
+
+    data = resp.content[:_THUMBNAIL_MAX_BYTES]
+    if not data:
+        raise HTTPException(status_code=502, detail="Thumbnail unavailable")
+    return data, content_type
+
+
+def _content_type_from_suffix(suffix: str) -> str:
+    ext = suffix.lower()
+    if ext in {".jpg", ".jpeg"}:
+        return "image/jpeg"
+    if ext == ".png":
+        return "image/png"
+    if ext == ".webp":
+        return "image/webp"
+    return "image/jpeg"
+
+
+def _extract_thumbnail_with_ytdlp(url: str) -> tuple[bytes, str] | None:
+    with tempfile.TemporaryDirectory(prefix="thumb-resolve-") as tmp_dir:
+        out_template = str(Path(tmp_dir) / "thumb.%(ext)s")
+        cmd = [
+            "yt-dlp",
+            "--no-playlist",
+            "--skip-download",
+            "--write-thumbnail",
+            "--convert-thumbnails",
+            "jpg",
+            *_cookies_args_for_url(url),
+            "-o",
+            out_template,
+            "--",
+            url,
+        ]
+
+        try:
+            subprocess.run(
+                cmd,
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                text=False,
+                timeout=_THUMB_EXTRACTION_TIMEOUT_SECONDS,
+            )
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError):
+            return None
+
+        tmp_path = Path(tmp_dir)
+        candidates = sorted(
+            p for p in tmp_path.glob("thumb.*")
+            if p.is_file() and p.suffix.lower() in _THUMB_ALLOWED_EXTENSIONS
+        )
+        if not candidates:
+            return None
+
+        thumb_path = candidates[0]
+        try:
+            data = thumb_path.read_bytes()
+        except OSError:
+            return None
+
+        if not data:
+            return None
+        data = data[:_THUMBNAIL_MAX_BYTES]
+        return data, _content_type_from_suffix(thumb_path.suffix)
+
+
+@router.get("/api/thumbnail/resolve")
+@limiter.limit("30/minute")
+async def api_thumbnail_resolve(
+    request: Request,
+    url: str,
+    _user: str = Depends(require_user),
+) -> dict[str, object]:
+    """Resolve a media URL to a local persistent thumbnail cache URL."""
+    _ = request
+
+    is_valid, error_msg = validate_media_url(url)
+    if not is_valid:
+        raise HTTPException(status_code=400, detail=error_msg)
+
+    info_url = normalize_info_url(url)
+    cache_key = _thumb_cache_key(info_url)
+    cached = await asyncio.to_thread(_read_cached_thumbnail, cache_key)
+    if cached is not None:
+        return {
+            "thumbnail_url": f"/api/thumbnail-cache/{cache_key}",
+            "cached": True,
+            "unavailable": False,
+            "reason": None,
+        }
+
+    platform = detect_platform(info_url)
+    thumbnail_url = ""
+    if platform == "tiktok":
+        thumbnail_url = await _tiktok_oembed_thumbnail(info_url) or ""
+
+    if not thumbnail_url:
+        info = await asyncio.wait_for(load_video_info_async(info_url), timeout=20.0)
+        if info:
+            thumbnail_url = str(info.get("thumbnail") or "").strip()
+
+    data: bytes | None = None
+    content_type = "image/jpeg"
+    if thumbnail_url:
+        try:
+            data, content_type = await _fetch_thumbnail_payload(thumbnail_url)
+        except HTTPException:
+            data = None
+
+    if data is None:
+        extracted = await asyncio.to_thread(_extract_thumbnail_with_ytdlp, info_url)
+        if extracted is not None:
+            data, content_type = extracted
+
+    if data is None:
+        return {
+            "thumbnail_url": None,
+            "cached": False,
+            "unavailable": True,
+            "reason": _cookie_hint_for_url(info_url),
+        }
+
+    await asyncio.to_thread(_write_cached_thumbnail, cache_key, data, content_type)
+    return {
+        "thumbnail_url": f"/api/thumbnail-cache/{cache_key}",
+        "cached": False,
+        "unavailable": False,
+        "reason": None,
+    }
+
+
+@router.get("/api/thumbnail-cache/{cache_key}")
+@limiter.limit("120/minute")
+async def api_thumbnail_cache(
+    request: Request,
+    cache_key: str,
+    _user: str = Depends(require_user),
+) -> Response:
+    """Serve a previously cached thumbnail by cache key."""
+    _ = request
+    if not _THUMB_CACHE_KEY_RE.fullmatch(cache_key):
+        raise HTTPException(status_code=400, detail="Invalid cache key")
+
+    cached = await asyncio.to_thread(_read_cached_thumbnail, cache_key)
+    if cached is None:
+        raise HTTPException(status_code=404, detail="Thumbnail not found")
+
+    data, content_type = cached
+    return Response(
+        content=data,
+        media_type=content_type,
+        headers={"Cache-Control": "public, max-age=604800, immutable"},
+    )
+
+
+@router.get("/api/thumbnail-proxy")
+@limiter.limit("30/minute")
+async def api_thumbnail_proxy(
+    request: Request,
+    url: str,
+    _user: str = Depends(require_user),
+) -> Response:
+    """Proxy an external thumbnail URL server-side (CSP-safe for TikTok/Instagram)."""
+    _ = request
+    data, content_type = await _fetch_thumbnail_payload(url)
+    return Response(content=data, media_type=content_type, headers={"Cache-Control": "public, max-age=3600"})
+
+
 @router.get("/api/settings")
 @limiter.limit("60/minute")
 async def api_get_settings(request: Request, _user: str = Depends(require_user)):
@@ -355,17 +711,34 @@ async def api_get_settings(request: Request, _user: str = Depends(require_user))
     return public_settings(settings)
 
 
+def _parse_bool(value: Any, name: str) -> bool:
+    """Parse a value as boolean, handling string values robustly."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "off"}:
+            return False
+    raise HTTPException(status_code=400, detail=f"{name} must be a boolean")
+
+
 @router.post("/api/settings")
 @limiter.limit("5/minute")
 async def api_set_settings(request: Request, _user: str = Depends(require_session)):
     """Update retention/session settings and optional admin password."""
-    payload = await _get_json(request)
+    payload = await get_json_body(request)
 
     settings_to_update: dict[str, Any] = {}
     password_changed = False
 
     if "retention_days" in payload:
         settings_to_update["retention_days"] = _clamp_int(payload["retention_days"], 1, 365, "retention_days")
+
+    if "lalalaai_duration_guard" in payload:
+        enabled = _parse_bool(payload["lalalaai_duration_guard"], "lalalaai_duration_guard")
+        settings_to_update["lalalaai_duration_guard"] = "true" if enabled else "false"
 
     try:
         if "admin_password" in payload and payload["admin_password"]:
@@ -431,8 +804,8 @@ async def api_submit(
     if quality_value not in _ALLOWED_QUALITIES:
         raise HTTPException(status_code=400, detail=f"Invalid quality. Allowed: {', '.join(sorted(_ALLOWED_QUALITIES))}")
 
-    # Validate YouTube URL
-    is_valid, error_msg = validate_youtube_url(url)
+    # Validate media URL (platform detected from URL: YouTube / TikTok / Instagram)
+    is_valid, error_msg = validate_media_url(url)
     if not is_valid:
         raise HTTPException(status_code=400, detail=error_msg)
 
@@ -468,7 +841,7 @@ async def api_submit(
                 job_id,
                 status="error",
                 message="Queue full at submission time",
-                finished_at=datetime.now(UTC).isoformat(),
+                finished_at=utc_timestamp(),
             )
         except Exception:
             logger.exception("Failed to mark job %s as errored after queue overflow", job_id)
@@ -489,7 +862,7 @@ async def cancel_job(request: Request, job_id: uuid.UUID, _user: str = Depends(r
         raise HTTPException(status_code=404, detail="Job not found")
     
     status = job["status"] or ""
-    if status in _TERMINAL_JOB_STATUSES:
+    if status in TERMINAL_JOB_STATUSES:
         raise HTTPException(status_code=400, detail=f"Cannot cancel job with status: {status}")
 
     # Mark job for cancellation
@@ -501,7 +874,7 @@ async def cancel_job(request: Request, job_id: uuid.UUID, _user: str = Depends(r
         _PERSISTED_CANCELLABLE_JOB_STATUSES,
         status="cancelled",
         message="Cancelled by user",
-        finished_at=datetime.now(UTC).isoformat(),
+        finished_at=utc_timestamp(),
     )
 
     if cancelled:

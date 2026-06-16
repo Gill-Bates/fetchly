@@ -25,9 +25,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
 
 from ..common.rate_limit import limiter
-from ..db import get_job, get_settings, set_settings, update_job
+from ..db import COMPLETED_STATUSES, get_job, get_settings, set_settings, update_job
+from ..utils.fs import TRIM_ID_RE, get_json_body, path_is_file
 from ..utils.template_filters import is_lalala_configured
 from .auth import require_user, require_user_json
+from .media import resolve_job_path
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +39,6 @@ router = APIRouter(prefix="/api/lalal", tags=["lalal"])
 _LALAL_AUTH_VALIDATION_CACHE_SECONDS = 300
 _MAX_EMAIL_LENGTH = 320
 _EMAIL_RE = re.compile(r"^[^@]+@[^@]+\.[^@]+$")
-_TRIM_ID_RE = re.compile(r"^\d+_\d+$")
 _STEM_VOCALS = "vocals"
 _STEM_INSTRUMENTAL = "instrumental"
 _VALID_STEMS = frozenset({_STEM_VOCALS, _STEM_INSTRUMENTAL})
@@ -57,16 +58,6 @@ def init_lalal(
     _DATA_DIR = data_dir
     _queue_event = queue_event_func
 
-
-async def _get_json(request: Request) -> dict[str, Any]:
-    """Parse request JSON and ensure the payload is an object."""
-    try:
-        payload = await request.json()
-    except Exception as exc:
-        raise HTTPException(status_code=400, detail="Invalid JSON") from exc
-    if not isinstance(payload, dict):
-        raise HTTPException(status_code=400, detail="Invalid JSON")
-    return payload
 
 
 def _require_initialized() -> Path:
@@ -89,29 +80,11 @@ def _validate_stem(stem: str) -> None:
 
 
 def _validate_trim_id(trim_id: str) -> str:
-    if not _TRIM_ID_RE.fullmatch(trim_id):
+    if not TRIM_ID_RE.fullmatch(trim_id):
         raise HTTPException(status_code=400, detail="Invalid trim_id format")
     return trim_id
 
 
-def _resolve_job_file(raw_filename: str | None) -> Path:
-    data_dir = _require_initialized()
-    if not raw_filename:
-        raise HTTPException(status_code=404, detail="not ready")
-
-    file_path = Path(str(raw_filename).strip())
-    if not file_path.is_absolute():
-        file_path = data_dir / file_path
-    file_path = file_path.resolve()
-    try:
-        file_path.relative_to(data_dir)
-    except ValueError as exc:
-        raise HTTPException(status_code=403, detail="forbidden") from exc
-    return file_path
-
-
-async def _path_is_file(path: Path) -> bool:
-    return await asyncio.to_thread(path.is_file)
 
 
 async def _path_is_ready_file(path: Path) -> bool:
@@ -190,7 +163,7 @@ async def _latest_trim_input(output_dir: Path, trim_id: str | None) -> tuple[Pat
     if trim_id is not None:
         trim_id = _validate_trim_id(trim_id)
         file_path = output_dir / f"trim_{trim_id}.wav"
-        if not await _path_is_file(file_path):
+        if not await path_is_file(file_path):
             raise HTTPException(status_code=404, detail=f"Trim file not found: trim_{trim_id}.wav")
         return file_path, trim_id
 
@@ -216,7 +189,7 @@ async def _latest_trim_result(output_dir: Path, stem: str, trim_id: str | None) 
         trim_id = _validate_trim_id(trim_id)
         base_name = f"trim_{trim_id}"
         stem_path = output_dir / f"{base_name}_{stem}.mp3"
-        if not await _path_is_file(stem_path):
+        if not await path_is_file(stem_path):
             raise HTTPException(status_code=404, detail=f"{stem.capitalize()} file not found. Please process with Lalal.ai first.")
         return stem_path, base_name
 
@@ -359,7 +332,7 @@ async def api_lalal_status(request: Request, force_refresh: bool = False, _user:
 async def api_lalal_auth_activation_key(request: Request, _user: str = Depends(require_user)):
     """Validate and store a manually provided Lalal activation key."""
 
-    payload = await _get_json(request)
+    payload = await get_json_body(request)
 
     email = str(payload.get("email", "")).strip().lower()
     activation_key = str(payload.get("activation_key", "")).strip()
@@ -437,7 +410,7 @@ async def lalal_split(
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    if job["status"] not in ("done", "analysis", "analysis_done"):
+    if job["status"] not in COMPLETED_STATUSES:
         raise HTTPException(status_code=400, detail="Job not ready")
 
     if job["type"] != "audio":
@@ -451,8 +424,8 @@ async def lalal_split(
         base_name = f"trim_{trim_id}"
     else:
         raw_filename = job["filename"]
-        file_path = _resolve_job_file(raw_filename)
-        if not await _path_is_file(file_path):
+        file_path = resolve_job_path(raw_filename)
+        if not await path_is_file(file_path):
             raise HTTPException(status_code=404, detail="Source file not found")
         base_name = file_path.stem
 
@@ -595,11 +568,11 @@ async def lalal_download(
         stem_path, _base_name = await _latest_trim_result(output_dir, stem, trim_id)
     else:
         raw_filename = job["filename"]
-        source_path = _resolve_job_file(raw_filename)
-        if not await _path_is_file(source_path):
+        source_path = resolve_job_path(raw_filename)
+        if not await path_is_file(source_path):
             raise HTTPException(status_code=404, detail="Source file not found")
         stem_path = output_dir / f"{source_path.stem}_{stem}.mp3"
-        if not await _path_is_file(stem_path):
+        if not await path_is_file(stem_path):
             raise HTTPException(status_code=404, detail=f"{stem.capitalize()} file not found. Please process with Lalal.ai first.")
 
     return FileResponse(path=stem_path, filename=stem_path.name, media_type="audio/mpeg")

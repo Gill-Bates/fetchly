@@ -40,7 +40,7 @@ class CSRFMiddleware:
         self,
         app: ASGIApp,
         *,
-        csrf_cookie_name: str = "tubeyou_csrf",
+        csrf_cookie_name: str = "tubeyou_csrf",  # authoritative source: app/main.py:_CSRF_COOKIE
         protected_paths: tuple[str, ...] = ("/login", "/logout", "/api/submit"),
     ) -> None:
         self.app = app

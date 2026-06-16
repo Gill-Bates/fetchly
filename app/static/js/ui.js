@@ -3,7 +3,7 @@
 // Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 //
 
-import { CANCELLABLE_STATUSES, DOWNLOADABLE_STATUSES } from "./config.js";
+import { CANCELLABLE_STATUSES, DOWNLOADABLE_STATUSES, LALAL_MAX_DURATION_SECONDS } from "./config.js";
 import { humanSize } from "./utils.js";
 
 export const ACTION_CATEGORY = Object.freeze({
@@ -12,7 +12,7 @@ export const ACTION_CATEGORY = Object.freeze({
     DETAIL: "detail",
 });
 
-const STATUS_META = Object.freeze({
+export const STATUS_META = Object.freeze({
     analysis: { color: "primary", label: "ANALYSIS" },
     analysis_done: { color: "success", label: "DONE" },
     cancelled: { color: "secondary", label: "CANCELLED" },
@@ -24,13 +24,49 @@ const STATUS_META = Object.freeze({
     transcoding: { color: "primary", label: "TRANSCODING" },
 });
 
+export function getStatusMeta(status) {
+    const normalizedStatus = status || "queued";
+    return STATUS_META[normalizedStatus] || {
+        color: "primary",
+        label: String(normalizedStatus).toUpperCase(),
+    };
+}
+
+export function getStatusText(status, progress = null) {
+    const normalizedStatus = status || "queued";
+    const meta = getStatusMeta(normalizedStatus);
+    const parsedProgress = Number(progress);
+
+    if (normalizedStatus === "transcoding" && Number.isFinite(parsedProgress) && parsedProgress >= 0) {
+        return `${meta.label} ${Math.round(parsedProgress)}%`;
+    }
+
+    return meta.label;
+}
+
+export function getStatusPillClass(status) {
+    return `status-pill status-pill-${getStatusMeta(status).color}`;
+}
+
 const LALAL_STEMS = Object.freeze([
     Object.freeze({ icon: "music_off", label: "Instrumental", stem: "instrumental" }),
     Object.freeze({ icon: "mic", label: "A Cappella", stem: "vocals" }),
 ]);
 
-function isLalalEnabled() {
+export function isLalalEnabled() {
     return document.documentElement.dataset.lalalEnabled === "true";
+}
+
+export function isLalalDurationGuardEnabled() {
+    return document.documentElement.dataset.lalalDurationGuard !== "false";
+}
+
+export function isDurationBlocked(job) {
+    if (!isLalalDurationGuardEnabled()) {
+        return false;
+    }
+    const durationSeconds = job?.duration_seconds ?? 0;
+    return durationSeconds > LALAL_MAX_DURATION_SECONDS;
 }
 
 export function buildDownloadUrl(jobId) {
@@ -155,22 +191,31 @@ function createDropdownButton(iconName, label, dataset, {
     return item;
 }
 
-function appendAudioDownloadActions(menu, jobId) {
+function appendAudioDownloadActions(menu, job) {
+    const jobId = getJobId(job);
     const lalalEnabled = isLalalEnabled();
+    const durationBlocked = isDurationBlocked(job);
 
     menu.appendChild(createDivider());
     menu.appendChild(createDropdownButton("content_cut", "Trim", { action: "open-trim", jobId }));
 
     menu.appendChild(createDivider());
     for (const { icon: iconName, label, stem } of LALAL_STEMS) {
+        const isDisabled = !lalalEnabled || durationBlocked;
+        let title = "";
+        if (!lalalEnabled) {
+            title = "Lalal.ai is not connected";
+        } else if (durationBlocked) {
+            title = "Track exceeds 10 min — blocked by Duration Guard";
+        }
         menu.appendChild(createDropdownButton(
             iconName,
             label,
             { action: "lalal-split", jobId, stem },
             {
                 trailingNode: createProviderLogo(),
-                disabled: !lalalEnabled,
-                title: lalalEnabled ? "" : "Lalal.ai is not connected",
+                disabled: isDisabled,
+                title,
             },
         ));
     }
@@ -202,7 +247,7 @@ function createDesktopDownloadAction(job) {
     menu.appendChild(createDropdownLink("download", "Download", downloadBtn.href, { download: true }));
 
     if (jobType === "audio") {
-        appendAudioDownloadActions(menu, jobId);
+        appendAudioDownloadActions(menu, job);
     }
 
     btnGroup.append(downloadBtn, toggle, menu);
@@ -242,7 +287,11 @@ export function getActionButtonCategory(status) {
 export function resolveJobAction(job) {
     const category = getActionButtonCategory(job?.status);
     const jobId = getJobId(job);
-    const actionKey = `${category}:${job?.type || ""}`;
+    const durationBucket = Number(job?.duration_seconds || 0) > 600 ? "long" : "ok";
+    const lalalState = job?.type === "audio"
+        ? `${isLalalEnabled() ? "lalal-on" : "lalal-off"}:${isLalalDurationGuardEnabled() ? "guard-on" : "guard-off"}`
+        : "none";
+    const actionKey = `${category}:${job?.type || ""}:${durationBucket}:${lalalState}`;
     return {
         category,
         actionKey,
@@ -257,23 +306,16 @@ export function resolveJobAction(job) {
  * @param {string} status
  * @param {number | null | undefined} sizeBytes
  * @param {number | null | undefined} progress
+ * @param {string | null | undefined} message
  * @returns {HTMLDivElement} Element with class "status-inline"
  */
-export function createStatusElement(status, sizeBytes, progress = null) {
+export function createStatusElement(status, sizeBytes, progress = null, message = null) {
     const wrapper = document.createElement("div");
     wrapper.className = "status-inline";
 
-    const normalizedStatus = status || "queued";
-    const meta = STATUS_META[normalizedStatus] || { color: "primary", label: normalizedStatus.toUpperCase() };
-
     const pill = document.createElement("span");
-    pill.className = `status-pill status-pill-${meta.color}`;
-    const parsedProgress = Number(progress);
-    if (normalizedStatus === "transcoding" && Number.isFinite(parsedProgress) && parsedProgress >= 0) {
-        pill.textContent = `${meta.label} ${Math.round(parsedProgress)}%`;
-    } else {
-        pill.textContent = meta.label;
-    }
+    pill.className = getStatusPillClass(status);
+    pill.textContent = getStatusText(status, progress);
 
     wrapper.appendChild(pill);
 
@@ -286,7 +328,20 @@ export function createStatusElement(status, sizeBytes, progress = null) {
         wrapper.appendChild(size);
     }
 
+    const normalizedMessage = typeof message === "string" ? message.trim() : "";
+    if (normalizedStatus(status) === "error" && normalizedMessage) {
+        const detail = document.createElement("span");
+        detail.className = "status-message";
+        detail.textContent = normalizedMessage;
+        detail.title = normalizedMessage;
+        wrapper.appendChild(detail);
+    }
+
     return wrapper;
+}
+
+function normalizedStatus(status) {
+    return String(status || "queued").trim().toLowerCase();
 }
 
 /**
@@ -335,7 +390,7 @@ function renderDesktopAction(action) {
  * Downloadable jobs get a direct download action, running jobs get cancel,
  * and all remaining states expose details only.
  * @param {object} job
- * @returns {HTMLAnchorElement | HTMLButtonElement}
+ * @returns {HTMLAnchorElement | HTMLButtonElement | HTMLDivElement}
  */
 export function createPrimaryActionButton(job) {
     return renderPrimaryAction(resolveJobAction(job));

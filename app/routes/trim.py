@@ -23,8 +23,10 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 
 from ..common.rate_limit import limiter
-from ..db import get_job
+from ..db import COMPLETED_STATUSES, get_job
 from ..governor import governor
+from ..utils.fs import LOSSLESS_AUDIO_SOURCE_EXTENSIONS, TRIM_ID_RE, path_is_file
+from ..worker import sanitize_filename
 from .auth import require_user_json
 
 logger = logging.getLogger(__name__)
@@ -34,8 +36,6 @@ router = APIRouter(prefix="/api/trim", tags=["trim"])
 # Module-level state
 _DATA_DIR: Path | None = None
 _resolve_job_path: Callable[[str | None], Path] | None = None
-_TRIM_ID_RE = re.compile(r"^\d+_\d+$")
-
 
 class TrimRequest(BaseModel):
     start: float = Field(ge=0, description="Start time in seconds")
@@ -66,9 +66,6 @@ def _require_init() -> tuple[Path, Callable[[str | None], Path]]:
     return _DATA_DIR, _resolve_job_path
 
 
-async def _path_is_file(path: Path) -> bool:
-    return await asyncio.to_thread(path.is_file)
-
 
 async def _ensure_directory(path: Path) -> None:
     await asyncio.to_thread(path.mkdir, parents=True, exist_ok=True)
@@ -83,7 +80,7 @@ async def _unlink_file(path: Path) -> None:
 
 
 def _validate_trim_id(trim_id: str) -> str:
-    if not _TRIM_ID_RE.fullmatch(trim_id):
+    if not TRIM_ID_RE.fullmatch(trim_id):
         raise HTTPException(status_code=400, detail={"error": "Invalid trim_id format"})
     return trim_id
 
@@ -164,7 +161,7 @@ async def trim_audio(request: Request, job_id: uuid.UUID, body: TrimRequest, _us
     if job["type"] != "audio":
         return JSONResponse(status_code=400, content={"error": "Trim only works with audio jobs"})
     
-    if job["status"] not in ("done", "analysis", "analysis_done"):
+    if job["status"] not in COMPLETED_STATUSES:
         return JSONResponse(status_code=400, content={"error": "Job not ready"})
     
     # Validate end against known duration (if available)
@@ -180,12 +177,11 @@ async def trim_audio(request: Request, job_id: uuid.UUID, body: TrimRequest, _us
     except HTTPException as exc:
         return JSONResponse(status_code=exc.status_code, content={"error": exc.detail})
     
-    if not await _path_is_file(source_path):
+    if not await path_is_file(source_path):
         return JSONResponse(status_code=404, content={"error": "Source file not found"})
     
-    # Check if source is an audio file (lossless preferred, MP3 fallback)
-    audio_extensions = {".opus", ".ogg", ".flac", ".wav", ".m4a", ".webm", ".aac", ".mp3"}
-    if source_path.suffix.lower() not in audio_extensions:
+    # Check if source is an audio file (lossless preferred, MP3 also accepted for trim).
+    if source_path.suffix.lower() not in (LOSSLESS_AUDIO_SOURCE_EXTENSIONS | {".mp3"}):
         return JSONResponse(status_code=400, content={"error": "Not an audio file"})
     
     # Prepare output with unique trim_id based on timestamps
@@ -222,7 +218,7 @@ async def trim_audio(request: Request, job_id: uuid.UUID, body: TrimRequest, _us
     
     try:
         async with _acquire_trim_lock(lock_file):
-            if await _path_is_file(out_file):
+            if await path_is_file(out_file):
                 logger.info("Trim cache hit: %s", out_file.name)
                 return TrimResponse(
                     ok=True,
@@ -270,7 +266,7 @@ async def trim_audio(request: Request, job_id: uuid.UUID, body: TrimRequest, _us
 
     except BlockingIOError:
         await asyncio.sleep(0.5)
-        if await _path_is_file(out_file):
+        if await path_is_file(out_file):
             logger.info("Trim cache became available after lock contention: %s", out_file.name)
             return TrimResponse(
                 ok=True,
@@ -347,15 +343,14 @@ async def download_trim(request: Request, job_id: uuid.UUID, trim_id: str, _user
     job_id_str = str(job_id)
     trim_path = data_dir / job_id_str / f"trim_{trim_id}.wav"
     
-    if not await _path_is_file(trim_path):
+    if not await path_is_file(trim_path):
         return JSONResponse(status_code=404, content={"error": "Trimmed file not found. Please trim again."})
     
     # Get job info for filename
     job = await asyncio.to_thread(get_job, job_id_str)
     video_title = job["video_title"] if job and "video_title" in job else None
     if video_title:
-        # Sanitize filename
-        safe_title = "".join(c for c in video_title if c.isalnum() or c in " -_").strip()[:100]
+        safe_title = sanitize_filename(video_title, max_len=100)
         filename = f"{safe_title}_trimmed.wav"
     else:
         filename = f"trimmed_{trim_id}.wav"

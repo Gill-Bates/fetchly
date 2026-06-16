@@ -50,13 +50,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-# Install latest yt-dlp (no pinning, but hardened download)
-RUN curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp \
-    --fail --retry 5 --retry-delay 2 --connect-timeout 5 \
-    -o /usr/local/bin/yt-dlp \
-    && chmod 0755 /usr/local/bin/yt-dlp \
-    && /usr/local/bin/yt-dlp --version >/dev/null
-
 WORKDIR /app
 
 # Copy the prebuilt virtualenv from the builder stage.
@@ -64,6 +57,9 @@ COPY --from=builder /venv /venv
 
 ENV VIRTUAL_ENV=/venv \
     PATH="/venv/bin:$PATH"
+
+# Install latest yt-dlp into venv via pip (kept fresh at each build).
+RUN pip install --no-cache-dir yt-dlp && yt-dlp --version
 
 # Create non-root user
 RUN useradd -u 1000 -m --no-log-init appuser
@@ -89,8 +85,10 @@ ENV DATA_DIR=/app/data \
     WORKERS=auto \
     TIMEOUT=60
 
+EXPOSE 8000
+
 # Health check for orchestration
-HEALTHCHECK --interval=30s --timeout=5s --start-period=5s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
     CMD curl --fail --silent --max-time 2 http://localhost:8000/health || exit 1
 
 ENTRYPOINT ["/entrypoint.sh"]

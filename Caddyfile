@@ -24,6 +24,8 @@ yt.cirrio.de {
             img-src 'self' data:;
             connect-src 'self' https:;
             font-src 'self';
+            media-src 'self' blob:;
+            worker-src blob:;
             object-src 'none';
             base-uri 'self';
             form-action 'self';

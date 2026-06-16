@@ -17,6 +17,9 @@ from fastapi.templating import Jinja2Templates
 from markupsafe import Markup, escape
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from ..db import COMPLETED_STATUSES
+from .platform import detect_platform, platform_label
+
 __all__ = [
     "LOCAL_TZ",
     "FileSize",
@@ -24,6 +27,8 @@ __all__ = [
     "is_lalala_configured",
     "localtime",
     "mask_secret",
+    "platform_id",
+    "platform_pill",
     "public_settings",
     "register_filters",
     "status_class",
@@ -42,7 +47,7 @@ def _resolve_local_tz() -> ZoneInfo:
 
 LOCAL_TZ = _resolve_local_tz()
 
-_TERMINAL_STATUSES: frozenset[str] = frozenset({"done", "analysis_done"})
+_SUCCESS_STATUSES = COMPLETED_STATUSES
 _STATUS_CLASS_MAP: dict[str, str] = {
     "cancelled": "secondary",
     "error": "danger",
@@ -51,6 +56,10 @@ _STATUS_ICON_MAP: dict[str, str] = {
     "cancelled": "cancel",
     "error": "error",
     "analysis": "graphic_eq",
+    "queued": "schedule",
+    "processing": "sync",
+    "downloading": "download",
+    "transcoding": "memory",
 }
 _FILESIZE_UNITS: tuple[tuple[str, int], ...] = (
     ("TiB", 1_099_511_627_776),
@@ -70,6 +79,7 @@ _SENSITIVE_KEY_SUBSTRINGS: tuple[str, ...] = ("secret", "password", "token")
 
 _INTERNAL_PUBLIC_EXCLUDE: frozenset[str] = frozenset({
     "admin_password_hash",
+    "lalalaai_auth_last_error",
     "session_version",
 })
 
@@ -123,16 +133,26 @@ def filesize(value: int | None) -> FileSize:
 
 def status_class(status: str | None) -> str:
     """Get Bootstrap class for job status."""
-    if status in _TERMINAL_STATUSES:
+    if status in _SUCCESS_STATUSES:
         return "success"
     return _STATUS_CLASS_MAP.get(status, "primary")
 
 
 def status_icon(status: str | None) -> str:
     """Get Material icon name for job status."""
-    if status in _TERMINAL_STATUSES:
+    if status in _SUCCESS_STATUSES:
         return "check_circle"
     return _STATUS_ICON_MAP.get(status, "schedule")
+
+
+def platform_pill(url: str | None) -> str:
+    """Return the short platform pill label (YT / TikTok / Insta) for a URL."""
+    return platform_label(detect_platform(url))
+
+
+def platform_id(url: str | None) -> str:
+    """Return the platform identifier (youtube / tiktok / instagram) for a URL."""
+    return detect_platform(url) or ""
 
 
 def mask_secret(value: str | None) -> str:
@@ -186,3 +206,5 @@ def register_filters(templates: Jinja2Templates) -> None:
     templates.env.filters["filesize"] = filesize
     templates.env.filters["status_class"] = status_class
     templates.env.filters["status_icon"] = status_icon
+    templates.env.filters["platform_pill"] = platform_pill
+    templates.env.filters["platform_id"] = platform_id

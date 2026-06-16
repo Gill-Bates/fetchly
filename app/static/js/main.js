@@ -3,14 +3,14 @@
 // Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 //
 
-import { AUDIO_TYPE, CONFIG, DOWNLOADABLE_STATUSES, VIDEO_QUALITY_OPTIONS } from "./config.js";
-import { fetchJobs, fetchStats, submitJob, fetchVideoInfo, toErrorMessage } from "./api.js?v=20260519f";
+import { AUDIO_TYPE, CONFIG, CSRF_COOKIE_NAME, DOWNLOADABLE_STATUSES, TERMINAL_STATUSES, VIDEO_QUALITY_OPTIONS } from "./config.js";
+import { fetchJobs, fetchResolvedThumbnail, fetchStats, submitJob, fetchVideoInfo, toErrorMessage } from "./api.js";
 import { reportWarning } from "./errors.js";
-import { getCookie, humanSize, isValidYouTubeUrl, extractYouTubeVideoId, formatDuration, isSafeRedirect, subscribeToLalalProgress } from "./utils.js";
-import { prependJob, loadMore, applyJobUpdate, getJobById, applyStoredJobTitleFilter, hasNonTerminalJobs } from "./jobs.js?v=20260519f";
-import { EVENT_NAMES, dispatchJobUpdate, setEventStreamEnabled } from "./events.js?v=20260519f";
+import { createTimeoutSignal, getCookie, humanSize, isValidMediaUrl, detectPlatform, platformPillLabel, PLATFORM, extractYouTubeVideoId, formatDuration, isSafeRedirect, subscribeToLalalProgress, triggerDownload } from "./utils.js";
+import { prependJob, loadMore, applyJobUpdate, getJobById, applyStoredJobTitleFilter, hasNonTerminalJobs } from "./jobs.js";
+import { EVENT_NAMES, dispatchJobUpdate, setEventStreamEnabled } from "./events.js";
 import { showToast, toast } from "./toast.js";
-import { initTrim } from "./trim.js?v=20260429v";
+import { initTrim } from "./trim.js";
 
 // Expose toast globally for inline scripts
 window.__tubeyou__ = Object.freeze({ toast, showToast });
@@ -65,24 +65,15 @@ let dropdownObserver = null;
 const inflightActions = new WeakSet();
 const actionTimers = new WeakMap();
 
-const STATS_REFRESHABLE_STATUSES = new Set(["done"]);
+const STATS_REFRESHABLE_STATUSES = TERMINAL_STATUSES;
 const COMPACT_NUMBER_FORMATTER = new Intl.NumberFormat(undefined, {
     notation: "compact",
     maximumFractionDigits: 1,
 });
 
-function triggerDownload(url) {
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = "";
-    anchor.rel = "noopener";
-    document.body.appendChild(anchor);
-    anchor.click();
-    anchor.remove();
-}
 
 function getCsrfToken() {
-    return getCookie("tubeyou_csrf");
+    return getCookie(CSRF_COOKIE_NAME);
 }
 
 function isNativeNavigation(event) {
@@ -700,23 +691,26 @@ async function updateVideoPreview() {
     previewAbortController = controller;
     hideVideoPreview();
 
-    if (!isValidYouTubeUrl(url)) {
+    if (!isValidMediaUrl(url)) {
         return;
     }
 
-    const videoId = extractYouTubeVideoId(url);
-    if (!videoId) {
-        return;
+    // YouTube: show thumbnail immediately from stable img.youtube.com URL.
+    // TikTok/Instagram: show placeholder until metadata resolves.
+    const platform = detectPlatform(url);
+    const videoId = platform === PLATFORM.YOUTUBE ? extractYouTubeVideoId(url) : "";
+    if (videoId) {
+        const image = document.createElement("img");
+        image.src = `https://img.youtube.com/vi/${encodeURIComponent(videoId)}/hqdefault.jpg`;
+        image.alt = "Video Thumbnail";
+        image.addEventListener("error", () => {
+            thumbnailPreview?.replaceChildren();
+        }, { once: true });
+        thumbnailPreview?.replaceChildren(image);
+    } else {
+        thumbnailPreview?.replaceChildren();
     }
 
-    const image = document.createElement("img");
-    image.src = `https://img.youtube.com/vi/${encodeURIComponent(videoId)}/hqdefault.jpg`;
-    image.alt = "Video Thumbnail";
-    image.addEventListener("error", () => {
-        hideVideoPreview();
-    }, { once: true });
-
-    thumbnailPreview?.replaceChildren(image);
     showVideoPreview();
     setVideoMetaLoading(true);
 
@@ -730,6 +724,31 @@ async function updateVideoPreview() {
         renderPreviewSummary(info);
         renderPreviewFormats(info.formats, info.formats_total, info.formats_truncated);
         updateQualityOptions(info.formats || []);
+
+        // For non-YouTube platforms, resolve and render a server-local cached thumbnail.
+        if (platform !== PLATFORM.YOUTUBE) {
+            let thumbnailSrc = "";
+            try {
+                const resolved = await fetchResolvedThumbnail(url, { signal: controller.signal });
+                thumbnailSrc = typeof resolved.thumbnail_url === "string" ? resolved.thumbnail_url.trim() : "";
+            } catch (resolveError) {
+                reportWarning("thumbnail-resolve-failed", resolveError);
+            }
+
+            if (!thumbnailSrc && info.thumbnail) {
+                thumbnailSrc = `/api/thumbnail-proxy?url=${encodeURIComponent(info.thumbnail)}`;
+            }
+
+            if (thumbnailSrc) {
+                const image = document.createElement("img");
+                image.src = thumbnailSrc;
+                image.alt = "Video Thumbnail";
+                image.addEventListener("error", () => {
+                    thumbnailPreview?.replaceChildren();
+                }, { once: true });
+                thumbnailPreview?.replaceChildren(image);
+            }
+        }
     } catch (error) {
         if (controller.signal.aborted) {
             return;
@@ -737,7 +756,7 @@ async function updateVideoPreview() {
         // Clear stale metadata from the previous video before showing the error.
         resetVideoMeta();
         setText(metaTitle, "Metadata unavailable");
-        setText(metaSummary, "Enter a valid public YouTube URL to load preview metadata.");
+        setText(metaSummary, "Enter a valid public YouTube, TikTok, or Instagram URL to load preview metadata.");
         setText(metaFormats, "–");
     } finally {
         if (previewAbortController === controller) {
@@ -821,19 +840,21 @@ function resetDetailThumbnail() {
     fallback?.classList.remove("d-none");
 }
 
-function setDetailThumbnail(url) {
+function setDetailThumbnail(job) {
     const image = document.getElementById("mThumb");
     const fallback = document.getElementById("mThumbFallback");
     if (!(image instanceof HTMLImageElement)) {
         return;
     }
 
-    const videoId = extractYouTubeVideoId(url || "");
-    if (!videoId) {
+    const jobId = String(job?.id || "");
+    if (!jobId) {
         resetDetailThumbnail();
         return;
     }
 
+    // Use the server-cached thumbnail (downloaded by yt-dlp for every platform).
+    // Falls back to the placeholder until the worker has fetched it.
     image.onload = () => {
         fallback?.classList.add("d-none");
         image.classList.remove("d-none");
@@ -841,7 +862,7 @@ function setDetailThumbnail(url) {
     image.onerror = () => {
         resetDetailThumbnail();
     };
-    image.src = `https://img.youtube.com/vi/${encodeURIComponent(videoId)}/hqdefault.jpg`;
+    image.src = `/thumbnail/${encodeURIComponent(jobId)}`;
     image.alt = "Video thumbnail";
 }
 
@@ -917,9 +938,31 @@ function setDetailMetaLine({ channel, uploader, duration, viewCount }) {
     metaLine.textContent = parts.join(" • ") || "Unknown source";
 }
 
+function renderDetailTitle(job, text) {
+    const titleEl = document.getElementById("mTitle");
+    if (!(titleEl instanceof HTMLElement)) {
+        return;
+    }
+    titleEl.replaceChildren();
+
+    const platform = job?.platform || detectPlatform(job?.url || "");
+    const label = platformPillLabel(platform);
+    if (label) {
+        const pill = document.createElement("span");
+        pill.className = `platform-pill platform-pill--${platform}`;
+        pill.textContent = label;
+        titleEl.appendChild(pill);
+    }
+
+    const titleText = document.createElement("span");
+    titleText.className = "detail-title-text";
+    titleText.textContent = text;
+    titleEl.appendChild(titleText);
+}
+
 function populateDetailFromJob(job) {
     setText(document.getElementById("mId"), getJobById(job.id)?.id || "");
-    setText(document.getElementById("mTitle"), job.video_title || job.url || "Untitled");
+    renderDetailTitle(job, job.video_title || job.url || "Untitled");
     setText(document.getElementById("mMetaLine"), formatDetailStatus(job.status));
     setText(document.getElementById("mStatus"), formatDetailStatus(job.status));
 
@@ -935,7 +978,7 @@ function populateDetailFromJob(job) {
     setDetailChip("mQuality", job.quality || "");
     setDetailChip("mBpm", job.bpm ? `${job.bpm} BPM` : "");
     resetDetailFormats();
-    setDetailThumbnail(job.url || "");
+    setDetailThumbnail(job);
 
     const downloadBtn = document.getElementById("mDownloadBtn");
     if (downloadBtn instanceof HTMLAnchorElement) {
@@ -959,7 +1002,7 @@ async function hydrateDetailMedia(job) {
             return;
         }
 
-        setText(document.getElementById("mTitle"), info.title || job.video_title || job.url || "Untitled");
+        renderDetailTitle(job, info.title || job.video_title || job.url || "Untitled");
         setDetailMetaLine({
             channel: info.channel,
             uploader: info.uploader,
@@ -1141,8 +1184,8 @@ submitForm?.addEventListener("submit", async (event) => {
 
     try {
         const urlValue = urlInput?.value.trim() || "";
-        if (!isValidYouTubeUrl(urlValue)) {
-            setError("Invalid YouTube URL. Please enter a valid youtube.com or youtu.be link.");
+        if (!isValidMediaUrl(urlValue)) {
+            setError("Unsupported URL. Please enter a valid YouTube, TikTok, or Instagram link.");
             return;
         }
 
@@ -1272,6 +1315,7 @@ async function handleActionPost(btn, url, options = {}) {
         actionTimers.delete(btn);
     }
     btn.querySelector("[data-action-post-success='1']")?.remove();
+    const { signal, cleanup: cleanupTimeoutSignal } = createTimeoutSignal(30_000);
 
     try {
         const response = await fetch(url, {
@@ -1282,8 +1326,7 @@ async function handleActionPost(btn, url, options = {}) {
                 ...options.headers,
             },
             body: options.body,
-            // Prevent the button from staying disabled forever if the server hangs.
-            signal: AbortSignal.timeout(30_000),
+            signal,
         });
 
         const data = await response.json().catch(() => ({}));
@@ -1319,6 +1362,7 @@ async function handleActionPost(btn, url, options = {}) {
         }
         throw err;
     } finally {
+        cleanupTimeoutSignal();
         inflightActions.delete(btn);
     }
 }

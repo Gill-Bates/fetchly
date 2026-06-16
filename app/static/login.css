@@ -129,9 +129,10 @@ body::after {
 .login-card {
     width: 100%;
     max-width: 520px;
-    padding: 3.25rem 2.4rem 2.6rem;
+    padding: 3rem;
     border-radius: 24px;
     background: linear-gradient(180deg, rgba(17, 24, 39, 0.9), rgba(15, 23, 42, 0.82));
+    background-color: var(--login-card-bg);
     border: 1px solid rgba(255, 255, 255, 0.1);
     backdrop-filter: blur(10px);
     -webkit-backdrop-filter: blur(10px);

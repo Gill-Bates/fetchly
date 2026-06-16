@@ -34,14 +34,23 @@ fail() {
     exit 1
 }
 
+validate_positive_int() {
+    local name="$1"
+    local value="$2"
+
+    if ! [[ "${value}" =~ ^[0-9]+$ ]] || [[ "${value}" -lt 1 ]]; then
+        fail "${name} must be a positive integer, got: ${value}"
+    fi
+}
+
 resolve_workers() {
     if [[ "${WORKERS}" != "auto" ]]; then
-        if ! [[ "${WORKERS}" =~ ^[0-9]+$ ]]; then
-            fail "WORKERS must be numeric or 'auto', got: ${WORKERS}"
-        fi
+        validate_positive_int "WORKERS" "${WORKERS}"
         printf '%s\n' "${WORKERS}"
         return 0
     fi
+
+    validate_positive_int "MAX_WORKERS" "${MAX_WORKERS}"
 
     python - <<'PY'
 import math
@@ -130,8 +139,11 @@ bootstrap() {
             fail "User ${APP_USER} does not exist"
         fi
 
+        local app_uid
+        app_uid="$(id -u "${APP_USER}")"
+
         # only fix ownership if needed (avoid expensive recursive chown)
-        if [[ "$(stat -c %u "${DATA_DIR}")" != "$(id -u "${APP_USER}")" ]]; then
+        if [[ "$(stat -c %u "${DATA_DIR}")" != "${app_uid}" ]] || [[ "$(stat -c %u "${DATA_DIR}/downloads")" != "${app_uid}" ]]; then
             chown -R "${APP_USER}:${APP_USER}" "${DATA_DIR}" 2>/dev/null || true
         fi
     fi
@@ -160,13 +172,37 @@ if [[ "$(id -u)" -eq 0 ]] && [[ "${1:-}" != "--run" ]]; then
         fail "gosu not found in PATH"
     fi
 
+    if [[ "$#" -gt 0 ]]; then
+        exec gosu "${APP_USER}" "$@"
+    fi
+
     exec gosu "${APP_USER}" /entrypoint.sh --run
 fi
 
 bootstrap
 
+if [[ "${1:-}" == "--run" ]]; then
+    shift
+fi
+
+if [[ "$#" -gt 0 ]]; then
+    exec "$@"
+fi
+
 # --------------------------------------------------------------------------- #
-# 2. Start Gunicorn
+# 2. yt-dlp self-update (best-effort, non-blocking)
+# --------------------------------------------------------------------------- #
+if [[ "${YTDLP_AUTO_UPDATE:-true}" == "true" ]]; then
+    log "Checking for yt-dlp updates ..."
+    if pip install --quiet --no-cache-dir --upgrade yt-dlp 2>/dev/null; then
+        log "yt-dlp updated to $(yt-dlp --version 2>/dev/null || echo 'unknown')"
+    else
+        log "yt-dlp auto-update skipped (offline or failed)"
+    fi
+fi
+
+# --------------------------------------------------------------------------- #
+# 3. Start Gunicorn
 # --------------------------------------------------------------------------- #
 if ! command -v gunicorn >/dev/null 2>&1; then
     fail "gunicorn not found in PATH"

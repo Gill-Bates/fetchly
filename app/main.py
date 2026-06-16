@@ -440,6 +440,8 @@ class SecurityHeadersMiddleware:
         "img-src 'self' data: https://img.youtube.com https://i.ytimg.com",
         "font-src 'self'",
         "connect-src 'self'",
+        "media-src 'self' blob:",
+        "worker-src blob:",
         "frame-ancestors 'none'",
         "base-uri 'self'",
         "form-action 'self'",
