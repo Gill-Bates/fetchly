@@ -10,7 +10,8 @@ const TIMEOUT_DEFAULT_MS = 10_000;
 // Kept separate so the jobs polling budget can diverge later without changing all calls.
 const TIMEOUT_FETCH_JOBS_MS = TIMEOUT_DEFAULT_MS;
 const TIMEOUT_FETCH_STATS_MS = TIMEOUT_DEFAULT_MS;
-const TIMEOUT_VIDEO_INFO_MS = 15_000;
+const TIMEOUT_VIDEO_INFO_MS = 25_000;
+const TIMEOUT_THUMBNAIL_MS = 60_000;
 const TIMEOUT_SUBMIT_JOB_MS = 60_000;
 const RETRYABLE_STATUS_CODES = new Set([502, 503, 504]);
 const MAX_ERROR_TEXT_BYTES = 2_048;
@@ -27,12 +28,14 @@ class ApiHttpError extends Error {
      * @param {number} status
      * @param {string} message
      * @param {string | null} [retryAfter]
+     * @param {unknown} [body] Parsed JSON error body, when the response had one.
      */
-    constructor(status, message, retryAfter = null) {
+    constructor(status, message, retryAfter = null, body = null) {
         super(message);
         this.name = "ApiHttpError";
         this.status = status;
         this.retryAfter = retryAfter;
+        this.body = body;
     }
 }
 
@@ -101,6 +104,14 @@ function _requestKey(url, options = {}) {
         method,
         url,
         headers: _normalizeHeaders(options.headers),
+        credentials: options.credentials,
+        cache: options.cache,
+        mode: options.mode,
+        redirect: options.redirect,
+        referrer: options.referrer,
+        referrerPolicy: options.referrerPolicy,
+        integrity: options.integrity,
+        keepalive: options.keepalive,
     });
 }
 
@@ -168,6 +179,10 @@ export function toErrorMessage(value) {
     return String(value);
 }
 
+/**
+ * @param {Response} response
+ * @returns {Promise<{ message: string, data: unknown }>}
+ */
 async function parseError(response) {
     const text = await _readResponseSnippet(response, MAX_ERROR_TEXT_BYTES);
     let data;
@@ -179,11 +194,14 @@ async function parseError(response) {
 
     const message = toErrorMessage(data);
     if (message) {
-        return message;
+        return { message, data };
     }
 
     const statusText = response.statusText ? `: ${response.statusText}` : "";
-    return text ? `HTTP ${response.status}${statusText}: ${text.slice(0, 200)}` : `HTTP ${response.status}${statusText}`;
+    return {
+        message: text ? `HTTP ${response.status}${statusText}: ${text.slice(0, 200)}` : `HTTP ${response.status}${statusText}`,
+        data,
+    };
 }
 
 async function _readResponseSnippet(response, maxBytes = MAX_ERROR_TEXT_BYTES) {
@@ -314,7 +332,10 @@ async function _apiCall(url, options = {}, timeoutMs = TIMEOUT_DEFAULT_MS, retri
                 continue;
             }
 
-            throw new ApiHttpError(res.status, await parseError(res));
+            {
+                const { message, data } = await parseError(res);
+                throw new ApiHttpError(res.status, message, null, data);
+            }
         } catch (error) {
             lastError = error;
             if (_isRetryableFetchError(error) && attempt < retries && !options.signal?.aborted) {
@@ -382,13 +403,14 @@ async function _raceWithAbort(promise, signal) {
  * @returns {Promise<unknown>}
  */
 async function _apiCallDeduped(url, options = {}, timeoutMs = TIMEOUT_DEFAULT_MS) {
-    const key = _requestKey(url, options);
+    const { signal: callerSignal, ...sharedOptions } = options;
+    const key = _requestKey(url, sharedOptions);
     const cachedPromise = _inFlightRequests.get(key);
     if (cachedPromise) {
-        return _raceWithAbort(cachedPromise, options.signal);
+        return _raceWithAbort(cachedPromise, callerSignal);
     }
 
-    const sharedPromise = _apiCallWithRetry(url, options, timeoutMs).then(
+    const sharedPromise = _apiCallWithRetry(url, sharedOptions, timeoutMs).then(
         (result) => {
             _inFlightRequests.delete(key);
             return result;
@@ -400,7 +422,7 @@ async function _apiCallDeduped(url, options = {}, timeoutMs = TIMEOUT_DEFAULT_MS
     );
     _inFlightRequests.set(key, sharedPromise);
 
-    return _raceWithAbort(sharedPromise, options.signal);
+    return _raceWithAbort(sharedPromise, callerSignal);
 }
 
 /**
@@ -464,7 +486,7 @@ export async function submitJob(formData, csrf, options = {}) {
 }
 
 /**
- * Fetch metadata for a YouTube URL.
+ * Fetch metadata for a supported media URL.
  * @param {string} url
  * @param {ApiOptions} [options]
  */
@@ -485,6 +507,6 @@ export async function fetchResolvedThumbnail(url, options = {}) {
     return _apiCallDeduped(
         `/api/thumbnail/resolve?url=${encodeURIComponent(url)}`,
         options,
-        TIMEOUT_VIDEO_INFO_MS,
+        TIMEOUT_THUMBNAIL_MS,
     );
 }

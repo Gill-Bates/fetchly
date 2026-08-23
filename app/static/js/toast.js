@@ -169,7 +169,11 @@ function dismissToast(toast) {
 
     const doRemove = () => removeToast(toast, state);
 
-    toast.addEventListener("transitionend", doRemove, { once: true });
+    toast.addEventListener("transitionend", (event) => {
+        if (event.target === toast) {
+            doRemove();
+        }
+    }, { once: true });
 
     // Fallback removal if transition doesn't fire
     state.fallbackTimerId = window.setTimeout(doRemove, TOAST_DISMISS_TIMEOUT);

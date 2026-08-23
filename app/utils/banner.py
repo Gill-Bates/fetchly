@@ -9,12 +9,16 @@
 from __future__ import annotations
 
 import fcntl
+import logging
 import os
+import stat
 import sys
 import tempfile
 import time
 
 from .version import BUILD_INFO, VERSION
+
+logger = logging.getLogger(__name__)
 
 _BANNER_LOCK_FILE = os.path.join(tempfile.gettempdir(), "tubeyou_banner.lock")
 
@@ -64,16 +68,40 @@ def print_banner() -> None:
     sys.stdout.flush()
     
 
-def print_banner_once() -> None:
-    """Print startup banner at most once per process tree.
+def _open_lock_file() -> int:
+    """Open the banner lock file, refusing anything but our own regular file.
 
-    Uses a file lock so that only one worker prints the banner,
-    even when running with multiple uvicorn workers.
+    ``O_NOFOLLOW`` keeps a pre-planted symlink in the shared temp directory from
+    redirecting the later ``ftruncate()`` onto an unrelated file.
+    """
+    fd = os.open(
+        _BANNER_LOCK_FILE,
+        os.O_CREAT | os.O_RDWR | os.O_CLOEXEC | os.O_NOFOLLOW,
+        0o600,
+    )
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
+            raise OSError(f"Unsafe banner lock file: {_BANNER_LOCK_FILE}")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def print_banner_once() -> None:
+    """Print the startup banner once per parent PID within a 30-second window.
+
+    A file lock plus the recorded parent PID keeps concurrent Gunicorn workers
+    of the same startup from each printing the banner. The record is only
+    honoured for 30 seconds - long enough to cover workers starting together,
+    short enough that a later restart under the same parent (or a reused PID)
+    prints again instead of being suppressed forever.
     """
     ppid = str(os.getppid())
 
     try:
-        fd = os.open(_BANNER_LOCK_FILE, os.O_CREAT | os.O_RDWR)
+        fd = _open_lock_file()
         try:
             fcntl.flock(fd, fcntl.LOCK_EX)
 
@@ -91,8 +119,11 @@ def print_banner_once() -> None:
 
             now = time.time()
 
-            # Skip if same parent AND lock file is recent (< 30s = same startup, different worker)
-            if stored_ppid == ppid and (now - stored_ts) < 30:
+            # Skip if same parent AND lock file is recent (< 30s = same startup,
+            # different worker). A negative delta means the clock moved backwards
+            # and the record can no longer be trusted.
+            elapsed = now - stored_ts
+            if stored_ppid == ppid and 0 <= elapsed < 30:
                 return
 
             # New startup -> print banner
@@ -105,6 +136,9 @@ def print_banner_once() -> None:
         finally:
             fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
-    except OSError:
-        # Fallback: just print (better than crashing)
+    except OSError as exc:
+        # Fallback: still print, but surface *why* the lock path was skipped -
+        # e.g. unsafe lock file, permission error - so it is not silently
+        # invisible in ops when every worker ends up printing its own banner.
+        logger.warning("Startup banner lock unavailable, printing without it: %s", exc)
         print_banner()

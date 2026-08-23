@@ -27,7 +27,7 @@ from starlette.responses import Response
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
-from .common.rate_limit import get_trusted_proxy_hosts, limiter
+from .common.rate_limit import get_trusted_proxy_hosts, limiter, validate_trusted_proxy_hosts
 from .analysis_worker import (
     set_status_callback as set_analysis_status_callback,
     start_analysis_workers,
@@ -40,10 +40,10 @@ from .db import (
     close_db,
     get_settings,
     init_db,
+    job_exists,
+    list_expired_job_ids,
     list_queued_jobs,
     list_jobs_requiring_audio_analysis,
-    purge_old_jobs,
-    update_job,
 )
 from .governor import governor
 from .routes import auth_router, api_router, events_router, lalal_router, media_router, trim_router
@@ -58,7 +58,8 @@ from .routes.events import (
     signal_sse_shutdown,
 )
 from .session import SESSION_COOKIE, refresh_session_settings_cache, renew_session, set_session_cookie
-from .utils.housekeeping import cleanup_expired_jobs
+from .utils.housekeeping import cleanup_expired_jobs, cleanup_orphaned_directories, cleanup_thumbnail_cache
+from .utils.fs import get_data_dir
 from .utils.template_filters import register_filters
 from .utils.version import BUILD_INFO, VERSION
 from .worker import get_job_queue, set_status_callback, signal_shutdown, start_workers, stop_workers
@@ -74,7 +75,7 @@ type EventPayload = dict[str, Any]
 type EventQueue = asyncio.Queue[EventPayload]
 
 BASE_DIR = Path(__file__).parent.resolve()
-DATA_DIR = Path(os.environ.get("TUBEYOU_DATA_DIR", str(BASE_DIR.parent / "data"))).resolve()
+DATA_DIR = get_data_dir()
 
 _SECRET_KEY = os.environ.get("TUBEYOU_SECRET_KEY")
 if not _SECRET_KEY:
@@ -87,6 +88,7 @@ if not _DEFAULT_PASS:
 
 _CSRF_COOKIE = "tubeyou_csrf"
 _HOUSEKEEPING_INTERVAL = 3600  # Every hour
+_ANALYSIS_BACKLOG_POLL_INTERVAL = 5.0
 _EVENT_QUEUE_MAXSIZE = 10_000
 _SESSION_SETTINGS_REFRESH_INTERVAL = 60.0
 _SKIP_RENEW_EXACT = frozenset({
@@ -180,10 +182,14 @@ async def _event_broadcaster(queue: EventQueue) -> None:
 
 
 def _run_housekeeping_once() -> None:
-    """Load retention settings and purge expired jobs in one worker-thread call."""
+    """Load retention settings and clean expired job files in one worker-thread call."""
     settings = get_settings()
     keep_days = settings.get("retention_days", 7)
-    cleanup_expired_jobs(keep_days, DATA_DIR, purge_old_jobs)
+    cleanup_expired_jobs(keep_days, DATA_DIR, list_expired_job_ids)
+    cleanup_thumbnail_cache(DATA_DIR / "thumb-cache")
+    # Retained DB rows protect their directories from this orphan sweep. Only
+    # directories with no corresponding job record are removed here.
+    cleanup_orphaned_directories(DATA_DIR, job_exists)
 
 
 async def _housekeeping_daemon() -> None:
@@ -227,6 +233,45 @@ async def _requeue_pending_download_jobs() -> None:
             await asyncio.sleep(0)
 
     logger.info("Re-queued %d persisted download jobs during startup", len(pending_jobs))
+
+
+async def _fill_analysis_queue() -> None:
+    """Queue persisted analysis jobs until in-memory capacity is reached."""
+    pending_analysis_jobs = await asyncio.to_thread(list_jobs_requiring_audio_analysis)
+    for index, row in enumerate(pending_analysis_jobs):
+        raw_filename = str(row["filename"] or "").strip()
+        if not raw_filename:
+            logger.warning("Skipping analysis replay for %s without an audio filename", row["id"])
+            continue
+
+        result = submit_analysis(
+            str(row["id"]),
+            Path(raw_filename),
+            duration_seconds=int(row["duration_seconds"] or 0) or None,
+            block=False,
+        )
+        if result is SubmitResult.QUEUE_FULL:
+            logger.info("Analysis queue is full; %d jobs remain persisted for retry", len(pending_analysis_jobs) - index)
+            return
+        if result is SubmitResult.REJECTED_SHUTDOWN:
+            return
+        if index % 10 == 9:
+            await asyncio.sleep(0)
+
+
+async def _analysis_backlog_daemon() -> None:
+    """Continuously feed persisted analysis jobs into available worker slots."""
+    try:
+        while True:
+            try:
+                await _fill_analysis_queue()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Analysis backlog refill failed")
+            await asyncio.sleep(_ANALYSIS_BACKLOG_POLL_INTERVAL)
+    except asyncio.CancelledError:
+        logger.debug("Analysis backlog daemon cancelled")
 
 
 async def _session_settings_refresh_daemon() -> None:
@@ -328,40 +373,13 @@ async def lifespan(app: FastAPI):
     start_analysis_workers()
     await _requeue_pending_download_jobs()
 
-    # Re-queue pending analysis jobs (capped to avoid startup delay)
-    _MAX_REPLAY = 100
-    pending_analysis_jobs = await asyncio.to_thread(list_jobs_requiring_audio_analysis)
-    for i, row in enumerate(pending_analysis_jobs[:_MAX_REPLAY]):
-        raw_filename = str(row["filename"] or "").strip()
-        if not raw_filename:
-            continue
-        result = submit_analysis(
-            str(row["id"]),
-            Path(raw_filename),
-            duration_seconds=int(row["duration_seconds"] or 0) or None,
-            block=False,
-        )
-        if result is not SubmitResult.QUEUED:
-            msg = (
-                "Finished (audio analysis unavailable during shutdown)"
-                if result is SubmitResult.REJECTED_SHUTDOWN
-                else "Finished (audio analysis backlog full)"
-            )
-            await asyncio.to_thread(update_job, str(row["id"]), status="done", message=msg)
-        # Yield control every 10 jobs to keep event loop responsive
-        if i % 10 == 9:
-            await asyncio.sleep(0)
-
-    if len(pending_analysis_jobs) > _MAX_REPLAY:
-        logger.info(
-            "Deferred %d pending analysis jobs to housekeeping",
-            len(pending_analysis_jobs) - _MAX_REPLAY,
-        )
+    await _fill_analysis_queue()
 
     # Start background tasks that run for the full application lifespan.
     background_tasks: list[asyncio.Task[None]] = [
         asyncio.create_task(_event_broadcaster(event_queue), name="event_broadcaster"),
         asyncio.create_task(_housekeeping_daemon(), name="housekeeping_daemon"),
+        asyncio.create_task(_analysis_backlog_daemon(), name="analysis_backlog_daemon"),
         asyncio.create_task(_session_settings_refresh_daemon(), name="session_settings_refresh_daemon"),
     ]
     for task in background_tasks:
@@ -435,8 +453,12 @@ class SecurityHeadersMiddleware:
 
     _CSP = "; ".join([
         "default-src 'self'",
-        "script-src 'self' 'unsafe-inline'",
-        "style-src 'self' 'unsafe-inline'",
+        "script-src 'self'",
+        # No 'unsafe-inline': templates carry no <style> blocks or style=
+        # attributes. Progress updates assign element.style.width directly,
+        # which is CSSOM and not subject to style-src (unlike setAttribute
+        # ("style", ...) or style.cssText, which the code does not use).
+        "style-src 'self'",
         "img-src 'self' data: https://img.youtube.com https://i.ytimg.com",
         "font-src 'self'",
         "connect-src 'self'",
@@ -471,6 +493,18 @@ class SecurityHeadersMiddleware:
         await self.app(scope, receive, send_wrapper)
 
 
+class OriginalClientMiddleware:
+    """Preserve the socket peer before proxy headers rewrite ``scope['client']``."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope.get("type") in {"http", "websocket"}:
+            scope["tubeyou.original_client"] = scope.get("client")
+        await self.app(scope, receive, send)
+
+
 # Add middleware
 app.add_middleware(SessionRenewalMiddleware)
 app.add_middleware(
@@ -480,9 +514,15 @@ app.add_middleware(
 )
 app.add_middleware(SecurityHeadersMiddleware)
 app.state.limiter = limiter
+trusted_proxy_hosts = get_trusted_proxy_hosts()
+trusted_proxy_hosts = validate_trusted_proxy_hosts(trusted_proxy_hosts)
 # Decorator-based SlowAPI checks use request.client.host, so proxy headers must
 # wrap the app before route handlers run when requests come through Caddy.
-app.add_middleware(ProxyHeadersMiddleware, trusted_hosts=get_trusted_proxy_hosts())
+app.add_middleware(ProxyHeadersMiddleware, trusted_hosts=trusted_proxy_hosts)
+# This must be added after ProxyHeadersMiddleware: Starlette wraps the most
+# recently added middleware outside the earlier ones, preserving the raw peer
+# before ProxyHeadersMiddleware applies the validated X-Forwarded-* headers.
+app.add_middleware(OriginalClientMiddleware)
 
 
 @app.exception_handler(RateLimitExceeded)

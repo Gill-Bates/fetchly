@@ -6,8 +6,8 @@
 
 from __future__ import annotations
 
-import concurrent.futures
 import logging
+import multiprocessing
 import os
 import queue
 import re
@@ -16,13 +16,14 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
+from multiprocessing.connection import Connection
 from pathlib import Path
 from typing import Any
 
-from .audio_analysis import extract_analysis
+from .audio_analysis import AudioAnalysisResult, extract_analysis
 from .audio_cache import get_cached, store_cache
 from .audio_hash import compute_audio_hash
-from .db import update_job
+from .db import update_job_if_status
 from .governor import governor
 
 logger = logging.getLogger(__name__)
@@ -60,6 +61,8 @@ _MAX_ANALYSIS_DURATION_SECONDS = max(0, int(os.environ.get("TUBEYOU_MAX_ANALYSIS
 _ANALYSIS_TIMEOUT_SECONDS = max(1, int(os.environ.get("TUBEYOU_AUDIO_ANALYSIS_TIMEOUT_SECONDS", "300")))
 _analysis_queue: queue.Queue[AnalysisJob] | None = None
 _queue_lock = threading.Lock()
+_queued_job_ids: set[str] = set()
+_queued_job_ids_lock = threading.Lock()
 _worker_lock = threading.Lock()
 _shutdown_event = threading.Event()
 _workers_started = False
@@ -108,10 +111,23 @@ def set_status_callback(callback: Callable[[dict[str, Any]], None] | None) -> No
         _status_callback = callback
 
 
-def _finalize_job(job_id: str, status: JobStatus, message: str, **extra: Any) -> None:
-    """Update DB and emit WebSocket event with identical status/message (DRY helper)."""
-    update_job(job_id, status=status, message=message)
-    _emit(job_id, status, message, **extra)
+def _finalize_job(job_id: str, status: JobStatus, message: str, **extra: Any) -> bool:
+    """Finalize an analysis job only while it still owns the analysis state."""
+    if status in {JobStatus.DONE, JobStatus.ERROR, JobStatus.ANALYSIS_DONE}:
+        extra.setdefault("finished_at", _now_iso())
+    updated = update_job_if_status(
+        job_id,
+        (JobStatus.ANALYSIS,),
+        status=status,
+        message=message,
+        **extra,
+    )
+    if updated:
+        _emit(job_id, status, message, **extra)
+        return True
+
+    logger.info("Skipping analysis finalization for %s because its state changed", job_id)
+    return False
 
 
 def get_analysis_queue() -> queue.Queue[AnalysisJob]:
@@ -140,19 +156,21 @@ def _rename_with_bpm(path: Path, bpm: int | None) -> Path:
     if new_path == path:
         return path
     try:
-        path.rename(new_path)
-        logger.debug("Renamed %s -> %s", path.name, new_path.name)
-        return new_path
+        os.link(path, new_path)
     except FileExistsError:
-        if new_path.is_file():
-            logger.debug("BPM target already exists for %s, keeping %s", path.name, new_path.name)
-            return new_path
-        # Target exists but is not a regular file — leave the original in place.
-        logger.warning("Cannot rename %s: target %s exists but is not a file", path, new_path)
+        logger.warning("BPM target already exists, keeping original file: %s", new_path)
         return path
     except OSError as exc:
-        logger.warning("Could not rename %s with BPM suffix: %s", path.name, exc)
+        logger.warning("Could not create BPM target for %s: %s", path.name, exc)
         return path
+
+    try:
+        path.unlink()
+        logger.debug("Renamed %s -> %s", path.name, new_path.name)
+        return new_path
+    except OSError as exc:
+        logger.warning("Could not remove original BPM source %s: %s", path.name, exc)
+        return new_path
 
 
 def submit_analysis(
@@ -174,15 +192,20 @@ def submit_analysis(
         logger.info("Skipping analysis enqueue for %s during shutdown", job_id)
         return SubmitResult.REJECTED_SHUTDOWN
 
-    job = AnalysisJob(job_id=job_id, file_path=file_path, duration_seconds=duration_seconds)
-    try:
-        if block:
-            get_analysis_queue().put(job, timeout=timeout)
-        else:
-            get_analysis_queue().put_nowait(job)
-    except queue.Full:
-        logger.warning("Audio analysis queue is full, skipping analysis for %s", job_id)
-        return SubmitResult.QUEUE_FULL
+    with _queued_job_ids_lock:
+        if job_id in _queued_job_ids:
+            return SubmitResult.QUEUED
+
+        job = AnalysisJob(job_id=job_id, file_path=file_path, duration_seconds=duration_seconds)
+        try:
+            if block:
+                get_analysis_queue().put(job, timeout=timeout)
+            else:
+                get_analysis_queue().put_nowait(job)
+        except queue.Full:
+            logger.info("Audio analysis queue is full; deferring analysis for %s", job_id)
+            return SubmitResult.QUEUE_FULL
+        _queued_job_ids.add(job_id)
     return SubmitResult.QUEUED
 
 
@@ -196,35 +219,7 @@ def _commit_analysis(
     bpm_confidence: float | None,
 ) -> None:
     """Persist analysis results to the database and emit a WebSocket event."""
-    update_job(
-        job_id,
-        status=JobStatus.ANALYSIS_DONE,
-        message=message,
-        filename=str(final_path),
-        audio_hash=audio_hash,
-        bpm=bpm,
-        bpm_confidence=bpm_confidence,
-    )
-
-
-def _extract_analysis_with_timeout(path: Path) -> Any:
-    """Run audio analysis with a hard wall-clock timeout.
-
-    The underlying analysis runs in an isolated worker thread so the main
-    analysis worker can abandon a stuck call after the configured timeout.
-    """
-    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="audio-analysis")
-    future = executor.submit(extract_analysis, path)
-    try:
-        return future.result(timeout=_ANALYSIS_TIMEOUT_SECONDS)
-    except concurrent.futures.TimeoutError as exc:
-        future.cancel()
-        raise TimeoutError(
-            f"Audio analysis exceeded time limit ({_ANALYSIS_TIMEOUT_SECONDS}s)"
-        ) from exc
-    finally:
-        executor.shutdown(wait=False, cancel_futures=True)
-    _emit(
+    _finalize_job(
         job_id,
         JobStatus.ANALYSIS_DONE,
         message,
@@ -233,6 +228,55 @@ def _extract_analysis_with_timeout(path: Path) -> Any:
         bpm=bpm,
         bpm_confidence=bpm_confidence,
     )
+
+
+def _analysis_child(path: Path, result_connection: Connection) -> None:
+    """Run analysis in an isolated process and return its small result payload."""
+    try:
+        result_connection.send((True, extract_analysis(path)))
+    except BaseException as exc:
+        result_connection.send((False, repr(exc)))
+    finally:
+        result_connection.close()
+
+
+def _extract_analysis_with_timeout(path: Path) -> AudioAnalysisResult:
+    """Run audio analysis with a hard wall-clock timeout.
+
+    The analysis runs in a separate process so an overrun can be terminated
+    without leaking a running thread or releasing the governor too early.
+    """
+    context = multiprocessing.get_context("spawn")
+    parent_connection, child_connection = context.Pipe(duplex=False)
+    process = context.Process(target=_analysis_child, args=(path, child_connection))
+    try:
+        process.start()
+        child_connection.close()
+        process.join(_ANALYSIS_TIMEOUT_SECONDS)
+
+        if process.is_alive():
+            process.terminate()
+            process.join(5)
+            if process.is_alive():
+                process.kill()
+                process.join()
+            raise TimeoutError(f"Audio analysis exceeded time limit ({_ANALYSIS_TIMEOUT_SECONDS}s)")
+
+        if not parent_connection.poll():
+            raise RuntimeError("Audio analysis process exited without a result")
+
+        succeeded, payload = parent_connection.recv()
+        if not succeeded:
+            raise RuntimeError(f"Audio analysis failed: {payload}")
+        if not isinstance(payload, AudioAnalysisResult):
+            raise RuntimeError("Audio analysis process returned an invalid result")
+        return payload
+    finally:
+        child_connection.close()
+        parent_connection.close()
+        if process.is_alive():
+            process.terminate()
+            process.join()
 
 
 def _apply_analysis(job: AnalysisJob) -> None:
@@ -349,6 +393,8 @@ def _worker_loop() -> None:
                     "Audio analysis failed",
                 )
             finally:
+                with _queued_job_ids_lock:
+                    _queued_job_ids.discard(job.job_id)
                 queue_obj.task_done()
     finally:
         with _worker_lock:

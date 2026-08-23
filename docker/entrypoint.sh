@@ -7,26 +7,61 @@
 set -euo pipefail
 
 # --------------------------------------------------------------------------- #
-# Konfiguration
+# Configuration
 # --------------------------------------------------------------------------- #
 readonly DATA_DIR="${DATA_DIR:-/app/data}"
+# beat-this resolves checkpoint "final0" through torch.hub and downloads an
+# 81 MB .ckpt from cloud.cp.jku.at on the first BPM analysis - the one runtime
+# dependency the image does not bake in. torch's default cache is $HOME/.cache,
+# which lives in the container's writable layer and is lost on every recreate,
+# re-downloading those 81 MB each time. Pin it onto DATA_DIR so it persists
+# with the volume. Honoured if the operator already set TORCH_HOME - in which
+# case bootstrap() still has to create and chown it, since it is then outside
+# the tree DATA_DIR's own ownership handling covers.
+readonly TORCH_HOME="${TORCH_HOME:-${DATA_DIR}/.cache/torch}"
 readonly APP_USER="${APP_USER:-appuser}"
 readonly HOST="${HOST:-${UVICORN_HOST:-0.0.0.0}}"
 readonly PORT="${PORT:-${UVICORN_PORT:-8000}}"
-readonly WORKERS="${WORKERS:-${UVICORN_WORKERS:-auto}}"
+# Fixed at 1, and enforced below rather than merely defaulted: the job queue
+# and the SSE subscriber registry live in process memory with no cross-process
+# coordination (app/worker.py, app/main.py). A second Gunicorn worker means the
+# same job processed twice and clients subscribed to a process that never sees
+# their job's events - a correctness failure, not a throughput trade-off, so
+# there is no supported value other than 1 until an external queue and pub/sub
+# exist. CPU parallelism comes from the Governor's semaphores (app/governor.py)
+# and is unaffected.
+readonly WORKERS="${WORKERS:-${UVICORN_WORKERS:-1}}"
 readonly TIMEOUT="${TIMEOUT:-60}"
-readonly MAX_WORKERS="${MAX_WORKERS:-8}"
 readonly LOG_LEVEL="$(printf '%s' "${LOG_LEVEL:-info}" | tr '[:upper:]' '[:lower:]')"
-readonly FORWARDED_ALLOW_IPS="${FORWARDED_ALLOW_IPS:-127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7}"
+# Loopback only, matching Gunicorn's own default. A wider default would let any
+# workload that can reach this container forge X-Forwarded-For and thereby
+# choose its own rate-limit bucket (app/common/rate_limit.py keys on client IP,
+# which also gates the login endpoint). Operators terminating TLS on another
+# host must name that proxy explicitly, e.g.
+#   FORWARDED_ALLOW_IPS=10.30.0.1
+readonly FORWARDED_ALLOW_IPS="${FORWARDED_ALLOW_IPS:-127.0.0.1,::1}"
 readonly ACCESS_LOG_FORMAT="${ACCESS_LOG_FORMAT:-[%(t)s] %(h)s \"%(r)s\" %(s)s %(b)s}"
 
+# Directories the application must be able to write after the privilege drop.
+# Handled explicitly in bootstrap(): TORCH_HOME (and its parent) are created
+# fresh on an upgrade of an existing volume, where DATA_DIR already carries the
+# right owner and the recursive chown below therefore never fires.
+readonly -a REQUIRED_DIRS=(
+    "${DATA_DIR}"
+    "${DATA_DIR}/downloads"
+    "$(dirname "${TORCH_HOME}")"
+    "${TORCH_HOME}"
+)
+
 export FORWARDED_ALLOW_IPS
+export TORCH_HOME
 
 # --------------------------------------------------------------------------- #
 # Logging
 # --------------------------------------------------------------------------- #
 log() {
-    printf '[%s] [%s] %s\n' "$(date +'%Y-%m-%d %H:%M:%S')" "entrypoint" "$*"
+    # stderr: log()/fail() output must never land on a caller's stdout.
+    printf '[%s] [%s] %s\n' "$(date +'%Y-%m-%d %H:%M:%S')" "entrypoint" "$*" >&2
 }
 
 fail() {
@@ -43,96 +78,51 @@ validate_positive_int() {
     fi
 }
 
-resolve_workers() {
-    if [[ "${WORKERS}" != "auto" ]]; then
-        validate_positive_int "WORKERS" "${WORKERS}"
-        printf '%s\n' "${WORKERS}"
-        return 0
-    fi
+# DATA_DIR is operator-supplied and is handed to a recursive chown that runs as
+# root, so a typo like DATA_DIR=/ or DATA_DIR=/app would rewrite ownership
+# across the container - and across the host for a bind mount. Reject anything
+# that is not an absolute path below a system directory before that can happen.
+validate_data_dir() {
+    [[ "${DATA_DIR}" == /* ]] || fail "DATA_DIR must be an absolute path, got: ${DATA_DIR}"
 
-    validate_positive_int "MAX_WORKERS" "${MAX_WORKERS}"
+    local resolved
+    resolved="$(realpath -m -- "${DATA_DIR}")" || fail "cannot resolve DATA_DIR: ${DATA_DIR}"
 
-    python - <<'PY'
-import math
-import os
-from pathlib import Path
+    case "${resolved}" in
+        /|/app|/bin|/boot|/dev|/etc|/home|/lib|/opt|/proc|/root|/run|/sbin|/srv|/sys|/tmp|/usr|/var|/venv)
+            fail "refusing to use ${resolved} as DATA_DIR: recursive chown would damage the system"
+            ;;
+    esac
+}
 
+validate_config() {
+    validate_data_dir
 
-def _read_text(path: str) -> str | None:
-    try:
-        return Path(path).read_text(encoding="utf-8").strip()
-    except OSError:
-        return None
+    validate_positive_int "PORT" "${PORT}"
+    (( PORT <= 65535 )) || fail "PORT must be between 1 and 65535, got: ${PORT}"
 
+    validate_positive_int "TIMEOUT" "${TIMEOUT}"
+    validate_positive_int "WORKERS" "${WORKERS}"
 
-def _parse_cpuset(spec: str | None) -> int | None:
-    if not spec:
-        return None
-    total = 0
-    for part in spec.split(","):
-        part = part.strip()
-        if not part:
-            continue
-        if "-" in part:
-            start, end = part.split("-", 1)
-            total += int(end) - int(start) + 1
-        else:
-            total += 1
-    return total or None
+    # See the WORKERS comment above: any other value is an incorrect operating
+    # mode, so fail loudly at start instead of corrupting job state later.
+    (( WORKERS == 1 )) || fail \
+        "WORKERS must be 1 (got ${WORKERS}): the job queue and SSE subscribers are process-local"
 
-
-limits: list[float] = []
-
-try:
-    limits.append(float(len(os.sched_getaffinity(0))))
-except (AttributeError, OSError):
-    pass
-
-cpuset = _parse_cpuset(_read_text("/sys/fs/cgroup/cpuset.cpus.effective"))
-if cpuset is None:
-    cpuset = _parse_cpuset(_read_text("/sys/fs/cgroup/cpuset/cpuset.cpus"))
-if cpuset is not None:
-    limits.append(float(cpuset))
-
-cpu_max = _read_text("/sys/fs/cgroup/cpu.max")
-if cpu_max:
-    parts = cpu_max.split()
-    if len(parts) >= 2:
-        quota, period = parts[:2]
-        if quota != "max":
-            try:
-                limits.append(float(quota) / float(period))
-            except (ValueError, ZeroDivisionError):
-                pass
-else:
-    quota = _read_text("/sys/fs/cgroup/cpu/cpu.cfs_quota_us")
-    period = _read_text("/sys/fs/cgroup/cpu/cpu.cfs_period_us")
-    if quota and period:
-        quota_value = int(quota)
-        period_value = int(period)
-        if quota_value > 0 and period_value > 0:
-            limits.append(quota_value / period_value)
-
-if not limits:
-    fallback = os.cpu_count() or 1
-    limits.append(float(fallback))
-
-effective_cpus = max(0.5, min(limits))
-workers = max(1, math.ceil(effective_cpus * 2.0))
-
-# safety clamp
-max_workers = int(os.getenv("MAX_WORKERS", "8"))
-workers = min(workers, max_workers)
-
-print(workers if workers > 0 else 1)
-PY
+    # Gunicorn's own accepted set (--log-level); it does not include "trace".
+    case "${LOG_LEVEL}" in
+        critical|error|warning|info|debug) ;;
+        *) fail "invalid LOG_LEVEL: ${LOG_LEVEL}" ;;
+    esac
 }
 
 bootstrap() {
     log "Initializing ${DATA_DIR} ..."
 
-    mkdir -p \
-        "${DATA_DIR}/downloads"
+    local dir
+    for dir in "${REQUIRED_DIRS[@]}"; do
+        mkdir -p -- "${dir}" || fail "cannot create ${dir}"
+    done
 
     if [[ "$(id -u)" -eq 0 ]]; then
         if ! id "${APP_USER}" >/dev/null 2>&1; then
@@ -142,41 +132,69 @@ bootstrap() {
         local app_uid
         app_uid="$(id -u "${APP_USER}")"
 
-        # only fix ownership if needed (avoid expensive recursive chown)
+        # Recursive pass first: cheapest way to cover a fresh volume in one
+        # shot. Skipped once DATA_DIR and downloads already carry the right
+        # owner, so an existing, possibly large downloads tree is not walked
+        # on every restart.
         if [[ "$(stat -c %u "${DATA_DIR}")" != "${app_uid}" ]] || [[ "$(stat -c %u "${DATA_DIR}/downloads")" != "${app_uid}" ]]; then
-            chown -R "${APP_USER}:${APP_USER}" "${DATA_DIR}" 2>/dev/null || true
+            local chown_err
+            if ! chown_err="$(chown -R -- "${APP_USER}:${APP_USER}" "${DATA_DIR}" 2>&1)"; then
+                log "WARNING: chown of ${DATA_DIR} failed: ${chown_err}"
+            fi
         fi
+
+        # Non-recursive per-directory pass: catches any REQUIRED_DIRS entry
+        # that appeared after the recursive pass above already ran on an older
+        # volume (e.g. TORCH_HOME's cache directory showing up for the first
+        # time), and any entry that sits outside DATA_DIR entirely (an
+        # operator-set TORCH_HOME).
+        for dir in "${REQUIRED_DIRS[@]}"; do
+            if [[ "$(stat -c %u "${dir}")" != "${app_uid}" ]]; then
+                chown -- "${APP_USER}:${APP_USER}" "${dir}" 2>/dev/null \
+                    || log "WARNING: chown of ${dir} failed"
+            fi
+        done
     fi
 
-    chmod u=rwX,go-rwx \
-        "${DATA_DIR}" \
-        "${DATA_DIR}/downloads" 2>/dev/null || true
+    chmod u=rwX,go-rwx -- "${REQUIRED_DIRS[@]}" 2>/dev/null || true
 
-    if [[ ! -w "${DATA_DIR}" ]] || [[ ! -w "${DATA_DIR}/downloads" ]]; then
-        log "ERROR: ${DATA_DIR} not writable for user $(id -u):$(id -g)"
-        ls -ld "${DATA_DIR}" "${DATA_DIR}/downloads" 2>/dev/null || true
-        exit 1
-    fi
+    for dir in "${REQUIRED_DIRS[@]}"; do
+        if [[ ! -w "${dir}" ]]; then
+            ls -ld -- "${dir}" 2>/dev/null || true
+            fail "${dir} is not writable by $(id -u):$(id -g)"
+        fi
+    done
 
     log "Bootstrap complete."
 }
 
+# Validated before anything else runs, in both the root branch and the
+# already-non-root branch below - a bad DATA_DIR or WORKERS value must not
+# get as far as a recursive chown or a started server.
+validate_config
+
 # --------------------------------------------------------------------------- #
 # 1. Bootstrap
 # --------------------------------------------------------------------------- #
-if [[ "$(id -u)" -eq 0 ]] && [[ "${1:-}" != "--run" ]]; then
+# Gated on UID alone. It used to also require "$1 != --run", but argv is
+# caller-controlled - `docker run <image> --run` satisfied that check as
+# root and skipped straight to Gunicorn without ever dropping to appuser.
+# After gosu drops privileges below, UID is genuinely non-zero, so this
+# block naturally only runs once regardless of what "--run" appears in argv.
+if [[ "$(id -u)" -eq 0 ]]; then
     bootstrap
-    log "Switching to user ${APP_USER} ..."
 
     if ! command -v gosu >/dev/null 2>&1; then
         fail "gosu not found in PATH"
     fi
 
+    log "Switching to user ${APP_USER} ..."
+
     if [[ "$#" -gt 0 ]]; then
         exec gosu "${APP_USER}" "$@"
     fi
 
-    exec gosu "${APP_USER}" /entrypoint.sh --run
+    exec gosu "${APP_USER}" "$0" --run
 fi
 
 bootstrap
@@ -185,44 +203,28 @@ if [[ "${1:-}" == "--run" ]]; then
     shift
 fi
 
+# Escape hatch for e.g. `docker run <image> bash`: run the given command as
+# appuser instead of continuing to the Gunicorn startup below.
 if [[ "$#" -gt 0 ]]; then
     exec "$@"
 fi
 
 # --------------------------------------------------------------------------- #
-# 2. yt-dlp self-update (best-effort, non-blocking)
-# --------------------------------------------------------------------------- #
-if [[ "${YTDLP_AUTO_UPDATE:-true}" == "true" ]]; then
-    log "Checking for yt-dlp updates ..."
-    if pip install --quiet --no-cache-dir --upgrade yt-dlp 2>/dev/null; then
-        log "yt-dlp updated to $(yt-dlp --version 2>/dev/null || echo 'unknown')"
-    else
-        log "yt-dlp auto-update skipped (offline or failed)"
-    fi
-fi
-
-# --------------------------------------------------------------------------- #
-# 3. Start Gunicorn
+# 2. Start Gunicorn
 # --------------------------------------------------------------------------- #
 if ! command -v gunicorn >/dev/null 2>&1; then
     fail "gunicorn not found in PATH"
 fi
 
-resolved_workers="$(resolve_workers)"
-
-if ! [[ "${resolved_workers}" =~ ^[0-9]+$ ]]; then
-    fail "Resolved workers is not numeric: ${resolved_workers}"
-fi
-
 # Print startup banner
 python -c "from app.utils.banner import print_banner; print_banner()" 2>/dev/null || true
 
-log "Starting Gunicorn on ${HOST}:${PORT} with ${resolved_workers} workers ..."
+log "Starting Gunicorn on ${HOST}:${PORT} with ${WORKERS} worker ..."
 
 exec gunicorn app.main:app \
     --bind "${HOST}:${PORT}" \
-    --workers "${resolved_workers}" \
-    --worker-class uvicorn.workers.UvicornWorker \
+    --workers "${WORKERS}" \
+    --worker-class uvicorn_worker.UvicornWorker \
     --log-level "${LOG_LEVEL}" \
     --timeout "${TIMEOUT}" \
     --access-logfile - \

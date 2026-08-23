@@ -11,6 +11,7 @@
 
 import asyncio
 import logging
+import os
 import re
 import time
 from collections.abc import AsyncIterator, Callable
@@ -25,6 +26,11 @@ logger = logging.getLogger(__name__)
 LALAL_API_BASE = "https://www.lalal.ai"
 LALAL_API_PREFIX = "/api/v1"
 _TRANSFER_CHUNK_SIZE = 65536
+_MAX_RESULT_DOWNLOAD_BYTES = int(
+    os.environ.get("TUBEYOU_LALAL_MAX_DOWNLOAD_BYTES", str(4 * 1024 * 1024 * 1024))
+)
+if _MAX_RESULT_DOWNLOAD_BYTES <= 0:
+    raise RuntimeError("TUBEYOU_LALAL_MAX_DOWNLOAD_BYTES must be positive")
 
 type ProgressCallback = Callable[[int], None]
 type StageProgressCallback = Callable[[str, int], None]
@@ -185,6 +191,20 @@ async def _iter_file_chunks(file_path: Path, chunk_size: int = _TRANSFER_CHUNK_S
             yield chunk
 
 
+def _content_length(response: httpx.Response) -> int | None:
+    """Return a validated response length, when the server provided one."""
+    raw_length = response.headers.get("content-length")
+    if raw_length is None:
+        return None
+    try:
+        length = int(raw_length)
+    except ValueError as exc:
+        raise LalalError("Invalid Content-Length returned by provider") from exc
+    if length < 0:
+        raise LalalError("Invalid Content-Length returned by provider")
+    return length
+
+
 def _is_safe_download_url(url: str) -> bool:
     """Return True only for HTTPS URLs on known Lalal.ai / CDN hosts."""
     try:
@@ -296,24 +316,33 @@ class _BaseLalalClient:
         if not _is_safe_download_url(url):
             raise LalalError("Unsafe download URL returned by API")
 
-        client = await self._get_client()
-        async with client.stream("GET", url) as response:
-            response.raise_for_status()
-            total = int(response.headers.get("content-length", 0) or 0)
-            downloaded = 0
+        part_path = output_path.with_suffix(f"{output_path.suffix}.part")
+        downloaded = 0
+        try:
+            async with httpx.AsyncClient(timeout=120.0, follow_redirects=False) as transfer_client:
+                async with transfer_client.stream("GET", url) as response:
+                    response.raise_for_status()
+                    total = _content_length(response)
+                    if total is not None and total > _MAX_RESULT_DOWNLOAD_BYTES:
+                        raise LalalError("Download exceeds configured size limit")
 
-            with output_path.open("wb") as output_file:
-                async for chunk in response.aiter_bytes(chunk_size=_TRANSFER_CHUNK_SIZE):
-                    await asyncio.to_thread(output_file.write, chunk)
-                    downloaded += len(chunk)
+                    with part_path.open("wb") as output_file:
+                        async for chunk in response.aiter_bytes(chunk_size=_TRANSFER_CHUNK_SIZE):
+                            downloaded += len(chunk)
+                            if downloaded > _MAX_RESULT_DOWNLOAD_BYTES:
+                                raise LalalError("Download exceeds configured size limit")
+                            await asyncio.to_thread(output_file.write, chunk)
 
-                    if progress_callback and total > 0:
-                        try:
-                            progress_callback(downloaded, total)
-                        except Exception:
-                            logger.debug("Download progress callback failed", exc_info=True)
+                            if progress_callback and total is not None:
+                                try:
+                                    progress_callback(downloaded, total)
+                                except Exception:
+                                    logger.debug("Download progress callback failed", exc_info=True)
 
-        return output_path
+            part_path.replace(output_path)
+            return output_path
+        finally:
+            part_path.unlink(missing_ok=True)
 
 
 class LalalClient(_BaseLalalClient):
@@ -555,7 +584,8 @@ class LalalClient(_BaseLalalClient):
 
         result = response.json()
         if response.status_code >= 400:
-            raise LalalError(self._extract_error(result))
+            payload = result if isinstance(result, dict) else {}
+            raise LalalError(_extract_api_error(payload))
 
         result_map = result.get("result", {}) if isinstance(result, dict) else {}
         if not isinstance(result_map, dict):
@@ -768,18 +798,18 @@ class LalalWebSessionClient(_BaseLalalClient):
             raise LalalUploadFailed("Multipart create failed: missing upload metadata")
 
         upload_url = str(upload_urls[0]).strip()
-        if not upload_url:
-            raise LalalUploadFailed("Multipart create failed: missing upload URL")
+        if not _is_safe_download_url(upload_url):
+            raise LalalUploadFailed("Unsafe upload URL returned by API")
 
-        put_resp = await client.put(
-            upload_url,
-            content=_iter_file_chunks(file_path),
-            headers={
-                "Content-Type": "application/octet-stream",
-                "Content-Length": str(file_size),
-            },
-            timeout=120.0,
-        )
+        async with httpx.AsyncClient(timeout=120.0, follow_redirects=False) as transfer_client:
+            put_resp = await transfer_client.put(
+                upload_url,
+                content=_iter_file_chunks(file_path),
+                headers={
+                    "Content-Type": "application/octet-stream",
+                    "Content-Length": str(file_size),
+                },
+            )
         if put_resp.status_code >= 400:
             raise LalalUploadFailed(f"Multipart upload failed: HTTP {put_resp.status_code}")
 
@@ -889,7 +919,7 @@ def get_lalal_client() -> LalalClient | None:
     from .db import get_settings
     from .utils.template_filters import is_lalala_configured
 
-    settings = get_settings()
+    settings = get_settings(include_secrets=True)
     if not is_lalala_configured(settings):
         return None
 

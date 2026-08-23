@@ -4,7 +4,7 @@
     "type": "module",
     "scripts": {
         "audit": "node run-ui-lint.mjs",
-        "install:browsers": "playwright install chromium"
+        "install:browsers": "playwright install chromium webkit"
     },
     "dependencies": {
         "pixelmatch": "^7.1.0",

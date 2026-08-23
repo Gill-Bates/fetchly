@@ -4,16 +4,15 @@
 //
 
 import { CONFIG } from "./config.js";
-import { fetchJob } from "./api.js";
+import { fetchJob, fetchJobs } from "./api.js";
 import { reportError, reportWarning } from "./errors.js";
-import { applyJobUpdate, hasNonTerminalJobs, upsertJobSnapshot } from "./jobs.js";
+import { applyJobUpdate, upsertJobSnapshot } from "./jobs.js?v=20260823d";
 
 export const EVENT_NAMES = Object.freeze({
     JOB_UPDATE: "tubeyou:job-update",
     LALAL_PROGRESS: "tubeyou:lalal-progress",
 });
 
-const INDICATOR_STATE_CLASSES = Object.freeze(["bg-success", "bg-secondary", "bg-danger", "live", "text-dark"]);
 const queuedJobUpdates = new Map();
 const latestSequences = new Map();
 
@@ -49,6 +48,7 @@ let reconnectAttempt = 0;
 let shouldReconnect = true;
 let streamEnabled = true;
 const recoveryRequestsInFlight = new Set();
+let reconciliationInFlight = false;
 
 export function dispatchAppEvent(name, detail) {
     document.dispatchEvent(new CustomEvent(name, { detail }));
@@ -128,43 +128,6 @@ function clearReconnectTimer() {
 }
 
 /**
- * Update the connection indicator badge.
- * @param {HTMLElement | null} indicator - The indicator element
- * @param {"processing" | "idle" | "offline"} state - Desired indicator state
- */
-function setIndicator(indicator, state) {
-    if (!indicator) return;
-
-    if (indicator.dataset.wsState === state) {
-        return;
-    }
-
-    indicator.classList.remove(...INDICATOR_STATE_CLASSES);
-    indicator.classList.add("ws-indicator", "badge");
-
-    switch (state) {
-        case "processing":
-            indicator.textContent = "● Processing";
-            indicator.classList.add("bg-success", "live");
-            break;
-        case "offline":
-            indicator.textContent = "● Reconnecting";
-            indicator.classList.add("bg-danger");
-            break;
-        default:
-            indicator.textContent = "● Idle";
-            indicator.classList.add("bg-secondary");
-            state = "idle";
-            break;
-    }
-    indicator.dataset.wsState = state;
-}
-
-function syncIndicatorState(indicator = document.getElementById("wsIndicator")) {
-    setIndicator(indicator, hasNonTerminalJobs() ? "processing" : "idle");
-}
-
-/**
  * Tear down an EventSource cleanly.
  * @param {EventSource | null} stream - The stream to tear down
  */
@@ -203,10 +166,9 @@ function scheduleReconnect() {
     }
 
     clearReconnectTimer();
-    setIndicator(document.getElementById("wsIndicator"), "offline");
 
     reconnectAttempt += 1;
-    const baseDelay = Math.min(CONFIG.WS_RECONNECT_MS * (2 ** (reconnectAttempt - 1)), 30_000);
+    const baseDelay = Math.min(CONFIG.SSE_RECONNECT_MS * (2 ** (reconnectAttempt - 1)), 30_000);
     const jitter = Math.random() * Math.min(baseDelay * 0.5, 5_000);
 
     reconnectTimer = window.setTimeout(() => {
@@ -234,8 +196,6 @@ function applyUpdate(payload) {
         return null;
     }
 
-    syncIndicatorState();
-
     dispatchJobUpdate(updatedJob);
     return updatedJob;
 }
@@ -259,7 +219,6 @@ async function recoverUnknownJobUpdate(payload) {
             return;
         }
 
-        syncIndicatorState();
         dispatchJobUpdate(updatedJob);
     } catch (error) {
         if (error?.status === 404) {
@@ -276,6 +235,66 @@ async function recoverUnknownJobUpdate(payload) {
     }
 }
 
+async function reconcileVisibleJobs() {
+    if (reconciliationInFlight) {
+        return;
+    }
+    reconciliationInFlight = true;
+    try {
+        const jobs = await fetchJobs(0);
+        if (!Array.isArray(jobs)) {
+            return;
+        }
+
+        for (const job of jobs) {
+            const updatedJob = applyJobUpdate(job) || upsertJobSnapshot(job);
+            if (updatedJob) {
+                dispatchJobUpdate(updatedJob);
+            }
+        }
+    } catch (error) {
+        reportWarning("Failed to reconcile jobs after SSE reconnect", {
+            module: "events",
+            action: "reconcileVisibleJobs",
+            error: error?.message || String(error),
+        });
+    } finally {
+        reconciliationInFlight = false;
+    }
+}
+
+function resetEventSequenceState() {
+    latestSequences.clear();
+    queuedJobUpdates.clear();
+    if (queuedJobUpdateFrame !== null) {
+        window.cancelAnimationFrame(queuedJobUpdateFrame);
+        queuedJobUpdateFrame = null;
+    }
+}
+
+async function recoverStreamFailure(stream) {
+    if (activeStream !== stream) {
+        return;
+    }
+
+    teardown(stream);
+
+    try {
+        // EventSource does not expose the HTTP status that caused `error`.
+        // A normal authenticated API request lets us distinguish an expired
+        // session from a transient network/server failure.
+        await fetchJobs(0);
+    } catch (error) {
+        if (error?.status === 401 || error?.status === 403) {
+            shouldReconnect = false;
+            window.location.replace("/login");
+            return;
+        }
+    }
+
+    scheduleReconnect();
+}
+
 /**
  * Handle incoming SSE message and process job updates.
  * @param {string} data - The raw message data
@@ -286,10 +305,24 @@ function handleMessage(data) {
 
         // Server shutdown signal - close connection gracefully
         if (payload.type === "shutdown") {
+            shouldReconnect = true;
+            if (activeStream) {
+                teardown(activeStream);
+            }
+            scheduleReconnect();
+            return;
+        }
+
+        if (payload.type === "authentication_required") {
             shouldReconnect = false;
             if (activeStream) {
                 teardown(activeStream);
             }
+            return;
+        }
+
+        if (payload.type === "resync_required") {
+            void reconcileVisibleJobs();
             return;
         }
 
@@ -322,9 +355,6 @@ export function connectEventStream() {
 
     clearReconnectTimer();
 
-    const indicator = document.getElementById("wsIndicator");
-    syncIndicatorState(indicator);
-
     if (activeStream && activeStream.readyState !== EventSource.CLOSED) {
         return activeStream;
     }
@@ -337,8 +367,12 @@ export function connectEventStream() {
     activeStream = stream;
 
     stream.onopen = () => {
+        const wasReconnect = reconnectAttempt > 0;
         reconnectAttempt = 0;
-        syncIndicatorState(indicator);
+        if (wasReconnect) {
+            resetEventSequenceState();
+            void reconcileVisibleJobs();
+        }
     };
 
     stream.onmessage = (event) => {
@@ -346,13 +380,7 @@ export function connectEventStream() {
     };
 
     stream.onerror = () => {
-        syncIndicatorState(indicator);
-        if (activeStream !== stream) {
-            return;
-        }
-
-        teardown(stream);
-        scheduleReconnect();
+        void recoverStreamFailure(stream);
     };
 
     return stream;
@@ -370,11 +398,9 @@ export function setEventStreamEnabled(enabled) {
         if (activeStream) {
             teardown(activeStream);
         }
-        setIndicator(document.getElementById("wsIndicator"), "idle");
         return;
     }
 
-    syncIndicatorState();
     if (shouldReconnect) {
         connectEventStream();
     }

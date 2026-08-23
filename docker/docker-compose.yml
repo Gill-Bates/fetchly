@@ -4,7 +4,9 @@ services:
     container_name: tubeyou
     restart: always
     stop_grace_period: 20s
-    cpus: 1.0
+    # No cpus: limit -> the container sees all host cores and the app's
+    # Governor scales its download/transcode thread pool accordingly.
+    # Set `cpus:` here to throttle it.
     environment:
       LOG_LEVEL: DEBUG
       TZ: Europe/Berlin
@@ -24,16 +26,9 @@ services:
     volumes:
       - ./data:/app/data
 
-    healthcheck:
-      test: ["CMD", "curl", "--fail", "--silent", "--max-time", "5", "http://127.0.0.1:8000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 15s
     networks:
       cloudnet:
         ipv4_address: 10.30.0.153
-        ipv6_address: 2a02:2479:cf:7600:d0c0::153
 
 networks:
   cloudnet:

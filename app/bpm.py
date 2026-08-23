@@ -355,9 +355,15 @@ def extract_bpm_cascade(
     """
     _ensure_file_exists(file_path)
 
-    # Step 1: Run Essentia
+    # Step 1: Run Essentia.
     logger.debug("Cascade step 1: Running Essentia BPM detection for %s", file_path.name)
-    essentia_result = extract_bpm(file_path, max_duration=max_duration)
+    try:
+        essentia_result = extract_bpm(file_path, max_duration=max_duration)
+    except MemoryError:
+        raise
+    except (ImportError, RuntimeError, OSError, ValueError) as exc:
+        logger.warning("Essentia BPM detection failed: %s", exc)
+        essentia_result = BPMResult(bpm=0.0, confidence=0.0)
 
     # Step 2: Run beat_this with optional DBN postprocessing
     logger.debug("Cascade step 2: Running beat_this for %s", file_path.name)
@@ -368,11 +374,16 @@ def extract_bpm_cascade(
             logger.debug("beat_this not available, using Essentia result only")
             return essentia_result
 
-        beat_this_result = extract_bpm_beat_this(file_path)
+        with tempfile.TemporaryDirectory(prefix="beat_this_") as tmp:
+            bounded_audio = Path(tmp) / "input.wav"
+            _run_ffmpeg(file_path, bounded_audio, duration=max_duration)
+            beat_this_result = extract_bpm_beat_this(bounded_audio)
+    except MemoryError:
+        raise
     except ImportError:
         logger.debug("beat_this import failed, using Essentia result only")
         return essentia_result
-    except Exception as exc:
+    except (RuntimeError, OSError, ValueError) as exc:
         logger.warning("beat_this failed: %s, using Essentia result only", exc)
         return essentia_result
 

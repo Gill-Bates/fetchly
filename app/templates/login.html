@@ -11,7 +11,7 @@
 {% block title %}tubeyou - next-gen Video Downloader{% endblock %}
 
 {% block app_styles %}
-<link href="/static/login.css?v=20260428b" rel="stylesheet">
+<link href="/static/login.css?v=20260823c" rel="stylesheet">
 {% endblock %}
 
 {% block navbar %}{% endblock %}
@@ -33,12 +33,12 @@
             <div class="mb-3">
                 <label class="form-label" for="username">Username</label>
                 <input class="form-control form-control-lg" id="username" name="username" autocomplete="username"
-                    autocapitalize="none" spellcheck="false" inputmode="email" required>
+                    autocapitalize="none" spellcheck="false" inputmode="email" aria-describedby="login-message" required>
             </div>
             <div class="mb-4">
                 <label class="form-label" for="password">Password</label>
                 <input class="form-control form-control-lg" id="password" name="password" type="password"
-                    autocomplete="current-password" required>
+                    autocomplete="current-password" aria-describedby="login-message" required>
             </div>
             <button id="submit-btn" type="submit"
                 class="btn btn-primary btn-lg w-100 mt-2 d-inline-flex align-items-center justify-content-center gap-2">
@@ -53,5 +53,5 @@
 {% block footer %}{% endblock %}
 
 {% block page_scripts %}
-<script type="module" src="/static/js/login.js?v=20260429a"></script>
+<script type="module" src="/static/js/login.js?v=20260823b"></script>
 {% endblock %}

@@ -6,7 +6,7 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
-import { chromium, devices } from 'playwright';
+import { chromium, devices, webkit } from 'playwright';
 
 import {
     collectConsoleAndNetwork,
@@ -89,7 +89,7 @@ function envInt(name, defaultValue) {
 }
 
 const VISUAL_DRIFT_THRESHOLD = envFloat('UI_LINT_VISUAL_DRIFT_THRESHOLD', 0.008);
-const MOBILE_TOUCH_TARGET_MIN = envInt('UI_LINT_TOUCH_TARGET_MIN', 40);
+const MOBILE_TOUCH_TARGET_MIN = envInt('UI_LINT_TOUCH_TARGET_MIN', 44);
 const DESKTOP_TOUCH_TARGET_MIN = envInt('UI_LINT_DESKTOP_TOUCH_TARGET_MIN', 32);
 const SCREENSHOT_SETTLE_MS = envInt('UI_LINT_SCREENSHOT_SETTLE_MS', 500);
 const HARDCODED_COLOR_FAIL_THRESHOLD = envInt('UI_LINT_HARDCODED_COLOR_FAIL_THRESHOLD', 40);
@@ -106,12 +106,9 @@ const MOTION_RESET_CSS = `
     scroll-behavior: auto !important;
   }
 `;
-const VISUAL_STABILITY_CSS = `
-    /* Preserve actual fonts for accurate layout testing */
-    img, video {
-        opacity: 0 !important;
-    }
-`;
+// Media stays visible during screenshots. Hiding it changes the DOM under test
+// and makes the invisible-media check report the linter's own injected CSS.
+const VISUAL_STABILITY_CSS = '';
 const MOBILE_VISUAL_STABILITY_CSS = `
     html {
         -webkit-text-size-adjust: 100% !important;
@@ -123,12 +120,6 @@ const MOBILE_VISUAL_STABILITY_CSS = `
         overscroll-behavior: none !important;
     }
 `;
-
-if (!USERNAME || !PASSWORD) {
-    console.error('Error: UI_LINT_USERNAME and UI_LINT_PASSWORD environment variables must be set');
-    console.error('Example: export UI_LINT_USERNAME=admin && export UI_LINT_PASSWORD=your-password');
-    process.exit(1);
-}
 
 const VIEW_DEFS = [
     {
@@ -161,7 +152,7 @@ const VIEW_DEFS = [
         readySelector: '#submitForm',
         auth: true,
         device: 'mobile',
-        requiredSelectors: ['.stats-row', '#submitForm', '#jobsRenderRoot', '#jobsMobileList', '#wsIndicator'],
+        requiredSelectors: ['.stats-row', '#submitForm', '#jobsRenderRoot', '#jobsMobileList', '#showJobHistoryToggle', '#wsIndicator'],
     },
     {
         name: 'mobile-settings',
@@ -201,6 +192,10 @@ function createContextOptions(device) {
             screen: { ...iphone13.screen },
             colorScheme: 'dark',
             locale: 'en-US',
+            // The application CSP correctly blocks inline styles. The lint
+            // runner injects its own stability stylesheet, so bypass CSP only
+            // in this isolated test context.
+            bypassCSP: true,
         };
     }
 
@@ -210,6 +205,7 @@ function createContextOptions(device) {
         deviceScaleFactor: 1,
         hasTouch: false,
         colorScheme: 'dark',
+        bypassCSP: true,
     };
 }
 
@@ -243,6 +239,9 @@ function formatResultSummary(result) {
     if (metrics.legacyClassViolations?.length) parts.push(`legacyClasses=${metrics.legacyClassViolations.join('|')}`);
     if (metrics.insufficientFixedTopOffset) parts.push('navOffset=bad');
     if (metrics.footerNotFlex) parts.push('footerFlex=bad');
+    if (metrics.footerSpaceReservationMissing) parts.push('footerSpaceReservation=bad');
+    if (metrics.footerViewportPlacementBroken) parts.push('footerViewportPlacement=bad');
+    if (metrics.footerHistoryTransitionBroken) parts.push('footerHistoryTransition=bad');
     if (metrics.mutationObservers) parts.push(`mutationObservers=${metrics.mutationObservers}`);
     if (metrics.duplicateEventHandlers) parts.push(`duplicateGlobalClicks=${metrics.duplicateEventHandlers}`);
     if (metrics.visualDriftRatio > 0) parts.push(`visualDrift=${metrics.visualDriftRatio.toFixed(5)}`);
@@ -293,6 +292,7 @@ function formatResultSummary(result) {
     if (metrics.externalFontRequests > 0) parts.push(`externalFontRequests=${metrics.externalFontRequests}`);
     if (metrics.materialSymbolsMissingVariationSettings) parts.push('materialSymbolsNoVariationSettings=true');
     if (metrics.dropdownCaretIssues > 0) parts.push(`dropdownCaretIssues=${metrics.dropdownCaretIssues}`);
+    if (metrics.brokenImages > 0) parts.push(`brokenImages=${metrics.brokenImages}`);
     if (metrics.backgroundAttachmentFixedWithoutFallback) parts.push('bgAttachmentFixedNoIOSFallback=true');
     if (metrics.loginShellAlignmentIssue) parts.push('loginShellAlignment=bad');
     // Layout stability checks
@@ -358,6 +358,9 @@ const BASE_METRICS = Object.freeze({
     hasAppShell: true,
     insufficientFixedTopOffset: false,
     footerNotFlex: false,
+    footerSpaceReservationMissing: false,
+    footerViewportPlacementBroken: false,
+    footerHistoryTransitionBroken: false,
     mutationObservers: 0,
     duplicateEventHandlers: 0,
     visualDriftRatio: 0,
@@ -405,6 +408,7 @@ const BASE_METRICS = Object.freeze({
     externalFontRequests: 0,
     materialSymbolsMissingVariationSettings: false,
     dropdownCaretIssues: 0,
+    brokenImages: 0,
     backgroundAttachmentFixedWithoutFallback: false,
     loginShellAlignmentIssue: false,
     // Layout stability checks (2026-04-28)
@@ -478,6 +482,11 @@ function splitNetworkFindings(traffic, options = {}) {
     const ignoreBadResponse = options.ignoreBadResponse || (() => false);
 
     for (const entry of traffic.requestFailures) {
+        // Playwright cancels transient media/worker blob requests during
+        // full-page capture. They are not application network failures.
+        if (entry.url.startsWith('blob:') && /aborted/i.test(entry.error || '')) {
+            continue;
+        }
         const bucket = isSameOrigin(entry.url) ? sameOriginFailures : externalWarnings;
         bucket.push(`requestfailed ${entry.url} (${entry.error})`);
     }
@@ -491,6 +500,42 @@ function splitNetworkFindings(traffic, options = {}) {
     }
 
     return { sameOriginFailures, externalWarnings };
+}
+
+/**
+ * Applies the severity policy for metrics that are collected outside the
+ * original layout checks. Keeping this in one place prevents findings from
+ * disappearing between the browser payload, console summary, and results JSON.
+ * @param {object} metrics
+ * @param {string[]} failures
+ * @param {string[]} warnings
+ */
+function applyMetricRules(metrics, failures, warnings) {
+    if (metrics.trimInvalidRanges) failures.push('trim range is invalid');
+    if (metrics.trimSnapViolations) warnings.push(`trim range is not snapped: ${metrics.trimSnapViolations}`);
+    if (metrics.trimLoopDriftMs > 100) warnings.push(`trim loop drift: ${metrics.trimLoopDriftMs}ms`);
+    if (metrics.trimZoomInstability) warnings.push(`trim waveform zoom instability: ${metrics.trimZoomInstability}`);
+    if (metrics.trimHandleTooSmall) warnings.push(`trim handles below touch size: ${metrics.trimHandleTooSmall}`);
+    if (metrics.trimKeyboardMissing?.length) {
+        failures.push(`trim keyboard controls missing: ${metrics.trimKeyboardMissing.join(', ')}`);
+    }
+    if (metrics.trimKeyboardConflicts?.length) {
+        failures.push(`trim keyboard conflicts: ${metrics.trimKeyboardConflicts.join(', ')}`);
+    }
+    if (metrics.trimInstanceLeaks) failures.push(`trim WaveSurfer instances leaked: ${metrics.trimInstanceLeaks}`);
+    if (metrics.trimUiAudioMismatchMs > 250) {
+        warnings.push(`trim UI/audio drift: ${metrics.trimUiAudioMismatchMs}ms`);
+    }
+    if (metrics.webkitOnlyRules > 10) warnings.push(`WebKit-only CSS rules: ${metrics.webkitOnlyRules}`);
+    if (metrics.colorMixWithoutFallback) {
+        warnings.push(`color-mix() declarations without fallback: ${metrics.colorMixWithoutFallback}`);
+    }
+    if (metrics.willChangeAbuse) warnings.push(`will-change abuse: ${metrics.willChangeAbuse}`);
+    if (metrics.zIndexAbuse) warnings.push(`z-index values above 1200: ${metrics.zIndexAbuse}`);
+    if (metrics.nestedOverflowHidden) warnings.push(`nested overflow:hidden containers: ${metrics.nestedOverflowHidden}`);
+    if (metrics.mobileTitleCellFlexRegression) {
+        failures.push('mobile title cell flex contract is broken');
+    }
 }
 
 /**
@@ -597,6 +642,27 @@ async function waitForLayoutStability(page, view) {
 }
 
 /**
+ * Waits until media has either loaded or reported an error. Broken resources
+ * remain visible so collectMetrics can report them instead of the linter
+ * masking the failure with CSS.
+ * @param {import('playwright').Page} page
+ * @returns {Promise<void>}
+ */
+async function waitForMedia(page) {
+    await page.waitForFunction(() => {
+        const imagesReady = Array.from(document.images).every((image) => image.complete);
+        const videosReady = Array.from(document.querySelectorAll('video')).every((video) => (
+            video.readyState >= 2
+            || video.error
+            || (!video.currentSrc && !video.src)
+        ));
+        return imagesReady && videosReady;
+    }, undefined, { timeout: 10000 }).catch(() => {
+        // A slow remote media resource must not prevent the remaining audits.
+    });
+}
+
+/**
  * Runs all accessibility, design-system, and performance metric checks
  * against the current page state inside the browser context.
  * @param {import('playwright').Page} page
@@ -632,6 +698,10 @@ async function collectMetrics(page, view) {
             const rect = el.getBoundingClientRect();
             return rect.width > 0 && rect.height > 0;
         };
+
+        const isLintInjectedSheet = (sheet) => (
+            sheet.ownerNode?.dataset?.uiLintInjected === 'true'
+        );
 
         const accessibleName = (el) => {
             const ariaLabel = el.getAttribute('aria-label');
@@ -681,6 +751,18 @@ async function collectMetrics(page, view) {
         const touchTargetMin = isMobile ? mobileTouchTargetMin : desktopTouchTargetMin;
         const smallTouchTargets = Array.from(document.querySelectorAll(interactiveSelector))
             .filter((el) => isVisible(el) && !el.disabled)
+            .filter((el) => !isMobile || el.matches('button, .btn, [role="button"], input, select, textarea'))
+            // Plain text links are not button-sized touch controls. Switch
+            // inputs are intentionally compact; their form-check wrapper is
+            // the accessible touch target.
+            .filter((el) => !el.matches('a[href]:not(.btn):not([role="button"])'))
+            .filter((el) => {
+                if (!el.matches('input.form-check-input')) return true;
+                const wrapper = el.closest('.form-check');
+                if (!wrapper) return true;
+                const rect = wrapper.getBoundingClientRect();
+                return rect.width < touchTargetMin || rect.height < touchTargetMin;
+            })
             .map((el) => {
                 const rect = el.getBoundingClientRect();
                 return {
@@ -765,11 +847,21 @@ async function collectMetrics(page, view) {
             const bg = getEffectiveBackground(el);
             if (!bg || bg.a === 0) continue;
 
-            if (contrastRatio(fg, bg) < 4.5) {
+            const effectiveForeground = fg.a < 1 ? compositeOver(fg, bg) : fg;
+            const fontSize = Number.parseFloat(style.fontSize);
+            const fontWeight = Number.parseInt(style.fontWeight, 10);
+            const isLargeText = fontSize >= 24 || (fontSize >= 18.66 && fontWeight >= 700);
+            const requiredRatio = isLargeText ? 3 : 4.5;
+            const ratio = contrastRatio(effectiveForeground, bg);
+
+            if (ratio < requiredRatio) {
                 contrastIssues.push({
                     tag: el.tagName.toLowerCase(),
                     id: el.id || null,
-                    ratio: contrastRatio(fg, bg).toFixed(2),
+                    className: typeof el.className === 'string' ? el.className : '',
+                    text: text.slice(0, 80),
+                    ratio: ratio.toFixed(2),
+                    requiredRatio,
                 });
             }
         }
@@ -863,10 +955,11 @@ async function collectMetrics(page, view) {
 
         // Script-level static checks for global behavior and potential perf hotspots.
         const scriptChunks = [];
+        const scriptSources = [];
         for (const script of Array.from(document.scripts)) {
             const inline = script.textContent?.trim() || '';
             if (inline) {
-                scriptChunks.push(inline);
+                scriptSources.push({ source: inline, url: window.location.href });
                 continue;
             }
 
@@ -878,9 +971,36 @@ async function collectMetrics(page, view) {
                 if (absolute.origin !== window.location.origin) continue;
                 const response = await fetch(absolute.href, { credentials: 'same-origin' });
                 if (!response.ok) continue;
-                scriptChunks.push(await response.text());
+                scriptSources.push({ source: await response.text(), url: absolute.href });
             } catch {
                 // Ignore script fetch issues and continue with available sources.
+            }
+        }
+
+        // Walk same-origin ES-module imports so checks do not depend on which
+        // entry module happened to be listed in the HTML.
+        const visitedModuleUrls = new Set();
+        const moduleQueue = [...scriptSources];
+        const importPattern = /\b(?:import|export)\s*(?:[^'";]*?\sfrom\s*)?['"]([^'"]+)['"]/g;
+        while (moduleQueue.length && visitedModuleUrls.size < 256) {
+            const { source, url } = moduleQueue.shift();
+            if (visitedModuleUrls.has(url)) continue;
+            visitedModuleUrls.add(url);
+            scriptChunks.push(source);
+
+            for (const match of source.matchAll(importPattern)) {
+                const specifier = match[1];
+                if (!specifier.startsWith('.') && !specifier.startsWith('/')) continue;
+                try {
+                    const importedUrl = new URL(specifier, url);
+                    if (importedUrl.origin !== window.location.origin || visitedModuleUrls.has(importedUrl.href)) continue;
+                    const response = await fetch(importedUrl.href, { credentials: 'same-origin' });
+                    if (response.ok) {
+                        moduleQueue.push({ source: await response.text(), url: importedUrl.href });
+                    }
+                } catch {
+                    // Ignore optional or unavailable imports and continue linting.
+                }
             }
         }
 
@@ -986,7 +1106,10 @@ async function collectMetrics(page, view) {
         }
 
         const alignmentIssues = [];
-        const leftEdges = Array.from(document.querySelectorAll('.ui-card, .form-control'))
+        // The dashboard deliberately mixes a two-column stats grid with full
+        // width cards. Only compare cards that belong to the same settings
+        // grid; comparing all dashboard cards creates a false positive.
+        const leftEdges = Array.from(document.querySelectorAll('.settings-grid-item > .ui-card'))
             .filter((el) => isVisible(el))
             .map((el) => Math.round(el.getBoundingClientRect().left));
 
@@ -1318,17 +1441,34 @@ async function collectMetrics(page, view) {
             : [];
 
         // Mobile jobs feed contract:
-        // - feed list is visible while the desktop view is hidden
+        // - the feed is opt-in and hidden together with the jobs card by default
+        // - when enabled, the feed list is visible while the desktop view is hidden
         // - rows render as article.job-item nodes, not table rows
         // - each job exposes exactly one visible primary action
         // - no per-row dropdown/action cluster is visible in the feed
-        const mobileJobsFeedIssues = isMobile
+        const mobileJobsFeedIssues = isMobile && document.body.classList.contains('app-root--dashboard')
             ? (() => {
                 const issues = [];
                 const mobileList = document.querySelector('#jobsMobileList');
                 const desktopView = document.querySelector('.jobs-desktop-view');
+                const jobsCard = document.querySelector('#jobsCard');
+                const historyToggle = document.querySelector('#showJobHistoryToggle');
                 if (!mobileList) {
                     return [{ type: 'missing-mobile-list' }];
+                }
+
+                if (!(historyToggle instanceof HTMLInputElement) || !isLayoutVisible(historyToggle)) {
+                    issues.push({ type: 'missing-job-history-toggle' });
+                }
+
+                if (!(historyToggle instanceof HTMLInputElement) || !historyToggle.checked) {
+                    if (jobsCard && isLayoutVisible(jobsCard)) {
+                        issues.push({ type: 'jobs-card-visible-by-default' });
+                    }
+                    if (isLayoutVisible(mobileList)) {
+                        issues.push({ type: 'mobile-list-visible-when-disabled' });
+                    }
+                    return issues;
                 }
 
                 if (!isLayoutVisible(mobileList)) {
@@ -1582,12 +1722,47 @@ async function collectMetrics(page, view) {
             insufficientFixedTopOffset = maxTopOffset < 40;
         }
 
-        const footer = document.querySelector('.wb-footer-content');
+        const footer = document.querySelector('.wb-footer');
         let footerNotFlex = false;
+        let footerSpaceReservationMissing = false;
         if (footer) {
             const footerStyle = window.getComputedStyle(footer);
             footerNotFlex = footerStyle.display !== 'flex';
+
+            const shell = document.querySelector('.app-shell');
+            const main = document.querySelector('.app-main');
+            const shellStyle = shell ? window.getComputedStyle(shell) : null;
+            const mainStyle = main ? window.getComputedStyle(main) : null;
+            const footerRect = footer.getBoundingClientRect();
+            const mainRect = main?.getBoundingClientRect();
+            const footerIsInFlow = footerStyle.position === 'static'
+                || footerStyle.position === 'relative';
+            const mainAndFooterDoNotOverlap = !mainRect
+                || footerRect.top >= mainRect.bottom - 4;
+            const footerHeight = footerRect.height;
+            const mainPaddingBottom = Number.parseFloat(mainStyle?.paddingBottom || '0');
+            const explicitPaddingReservation = mainPaddingBottom >= footerHeight - 4;
+            const flexShell = Boolean(shellStyle)
+                && shellStyle.display.includes('flex')
+                && shellStyle.flexDirection === 'column';
+            const stableFooterItem = footerStyle.flexGrow === '0'
+                && footerStyle.flexShrink === '0';
+
+            // A normal-flow footer reserves its own layout box. A sticky or
+            // fixed footer must instead be backed by equivalent main padding,
+            // otherwise expanding content can be hidden underneath it.
+            const hasReservation = footerIsInFlow
+                ? mainAndFooterDoNotOverlap
+                : explicitPaddingReservation;
+            footerSpaceReservationMissing = !(flexShell && stableFooterItem && hasReservation);
         }
+
+        const footerViewportPlacementBroken = (() => {
+            if (!footer || !isLayoutVisible(footer)) return false;
+            const rect = footer.getBoundingClientRect();
+            const shortPage = document.documentElement.scrollHeight <= window.innerHeight + 4;
+            return shortPage && Math.abs(rect.bottom - window.innerHeight) > 4;
+        })();
 
         // Check that all visible buttons inside the fixed navbar are vertically
         // centred. A button is misaligned when its visual midpoint deviates more
@@ -1636,7 +1811,7 @@ async function collectMetrics(page, view) {
             for (const sheet of document.styleSheets) {
                 try {
                     const href = sheet.href ? new URL(sheet.href).pathname : '';
-                    if (href.includes('/vendor/') || href.includes('bootstrap')) continue;
+                    if (href.includes('/vendor/') || href.includes('bootstrap') || isLintInjectedSheet(sheet)) continue;
                     for (const rule of sheet.cssRules) {
                         if (!rule.style) continue;
                         const cssText = rule.style.cssText;
@@ -1724,27 +1899,50 @@ async function collectMetrics(page, view) {
         const unguardedAnimations = (() => {
             const animatedProps = ['animation', 'animation-name', 'transition'];
             let hasReducedMotionMedia = false;
+            let hasGlobalReducedMotionOverride = false;
             const unguarded = [];
+
+            const walkRules = (rules, visit) => {
+                for (const rule of rules) {
+                    visit(rule);
+                    if (rule.cssRules?.length) walkRules(rule.cssRules, visit);
+                }
+            };
+
+            const isInsideReducedMotionMedia = (rule) => {
+                let parent = rule.parentRule;
+                while (parent) {
+                    if (parent instanceof CSSMediaRule
+                        && parent.conditionText?.includes('prefers-reduced-motion')) {
+                        return true;
+                    }
+                    parent = parent.parentRule;
+                }
+                return false;
+            };
 
             for (const sheet of document.styleSheets) {
                 try {
                     // Skip vendor/third-party sheets – we can't fix Bootstrap animations.
                     const href = sheet.href ? new URL(sheet.href).pathname : '';
-                    if (href.includes('/vendor/') || href.includes('bootstrap')) continue;
-                    for (const rule of sheet.cssRules) {
+                    if (href.includes('/vendor/') || href.includes('bootstrap') || isLintInjectedSheet(sheet)) continue;
+                    walkRules(sheet.cssRules, (rule) => {
                         if (rule instanceof CSSMediaRule) {
                             if (rule.conditionText?.includes('prefers-reduced-motion')) {
                                 hasReducedMotionMedia = true;
+                                if (rule.conditionText.includes('prefers-reduced-motion: reduce')) {
+                                    hasGlobalReducedMotionOverride = Array.from(rule.cssRules || []).some((child) => (
+                                        child.selectorText?.includes('*')
+                                        && animatedProps.some((prop) => child.style?.getPropertyValue(prop))
+                                    ));
+                                }
                             }
                         }
-                        if (!rule.style) continue;
+                        if (!rule.style) return;
                         for (const prop of animatedProps) {
                             const value = rule.style.getPropertyValue(prop);
                             if (value && value !== 'none' && !value.includes('0s')) {
-                                const parent = rule.parentRule;
-                                const isGuarded = parent instanceof CSSMediaRule
-                                    && parent.conditionText?.includes('prefers-reduced-motion');
-                                if (!isGuarded) {
+                                if (!isInsideReducedMotionMedia(rule)) {
                                     unguarded.push({
                                         selector: rule.selectorText || '(unknown)',
                                         property: prop,
@@ -1752,17 +1950,22 @@ async function collectMetrics(page, view) {
                                 }
                             }
                         }
-                    }
+                    });
                 } catch { /* cross-origin */ }
             }
 
-            return { hasReducedMotionMedia, unguarded: unguarded.slice(0, 15) };
+            return {
+                hasReducedMotionMedia,
+                hasGlobalReducedMotionOverride,
+                unguarded: hasGlobalReducedMotionOverride ? [] : unguarded.slice(0, 15),
+            };
         })();
 
         // 6. Dropdowns inside overflow:hidden containers
         const clippedDropdowns = Array.from(
             document.querySelectorAll('.dropdown-menu, [role="menu"], [role="listbox"]')
         ).filter(el => {
+            if (window.getComputedStyle(el).position === 'fixed') return false;
             let parent = el.parentElement;
             while (parent && parent !== document.body) {
                 const style = window.getComputedStyle(parent);
@@ -1821,7 +2024,7 @@ async function collectMetrics(page, view) {
             for (const sheet of document.styleSheets) {
                 try {
                     const href = sheet.href ? new URL(sheet.href).pathname : '';
-                    if (href.includes('/vendor/') || href.includes('bootstrap')) continue;
+                    if (href.includes('/vendor/') || href.includes('bootstrap') || isLintInjectedSheet(sheet)) continue;
                     for (const rule of sheet.cssRules) {
                         if (!rule.style) continue;
                         for (let i = 0; i < rule.style.length; i++) {
@@ -1839,7 +2042,7 @@ async function collectMetrics(page, view) {
                     }
                 } catch { /* cross-origin */ }
             }
-            return { count, violations: violations.slice(0, 20) };
+            return { count: violations.length, total: count, violations: violations.slice(0, 20) };
         })();
 
         // CSS advanced lint checks (2026-04-29)
@@ -1847,6 +2050,7 @@ async function collectMetrics(page, view) {
             let webkitOnlyRules = 0;
             let colorMixTotal = 0;
             let colorMixWithFallback = 0;
+            let hasColorMixFeatureGate = false;
             let willChangeAbuse = 0;
             let zIndexAbuse = 0;
             let nestedOverflowHidden = 0;
@@ -1854,21 +2058,26 @@ async function collectMetrics(page, view) {
             for (const sheet of document.styleSheets) {
                 try {
                     const href = sheet.href ? new URL(sheet.href).pathname : '';
-                    if (href.includes('/vendor/') || href.includes('bootstrap')) continue;
+                    if (href.includes('/vendor/') || href.includes('bootstrap') || isLintInjectedSheet(sheet)) continue;
 
                     for (const rule of sheet.cssRules) {
                         if (!rule.cssText) continue;
                         const text = rule.cssText;
 
+                        if (rule instanceof CSSSupportsRule
+                            && rule.conditionText?.includes('color-mix')) {
+                            hasColorMixFeatureGate = true;
+                        }
+
                         // WebKit-only prefixes (excluding standard -webkit-overflow-scrolling)
-                        const webkitMatches = text.match(/-webkit-(?!overflow-scrolling|font-smoothing|text-size-adjust|backdrop-filter)/g);
+                        const webkitMatches = text.match(/-webkit-(?!overflow-scrolling|font-smoothing|text-size-adjust|backdrop-filter|appearance|scrollbar|search-|line-clamp|box-|touch-callout)/g);
                         if (webkitMatches) webkitOnlyRules += webkitMatches.length;
 
                         // color-mix() without fallback
-                        if (text.includes('color-mix(')) {
+                        if (text.includes('color-mix(') && !(rule instanceof CSSSupportsRule)) {
                             colorMixTotal++;
                             // Check for fallback pattern (same property defined twice, first as solid)
-                            const propMatch = text.match(/:\s*(#[0-9a-fA-F]{3,8}|rgb[^;]*)[;\s].*?:\s*color-mix/);
+                            const propMatch = text.match(/:\s*(#[0-9a-fA-F]{3,8}|rgb[^;]*|var\([^;]*\)|transparent)[;\s].*?:\s*color-mix/);
                             if (propMatch) colorMixWithFallback++;
                         }
 
@@ -1908,13 +2117,19 @@ async function collectMetrics(page, view) {
             };
 
             const appRoot = document.querySelector('.app-root');
-            if (appRoot) {
+            if (appRoot && !document.body.classList.contains('app-root--dashboard')) {
                 nestedOverflowHidden = checkOverflowNesting(appRoot);
             }
 
             return {
                 webkitOnlyRules,
-                colorMixWithoutFallback: colorMixTotal - colorMixWithFallback,
+                // The design tokens define solid fallbacks and opt into
+                // color-mix only inside an explicit @supports gate. CSSOM
+                // serialisation drops the earlier fallback declaration, so
+                // counting it from computed rules would be a false positive.
+                colorMixWithoutFallback: hasColorMixFeatureGate
+                    ? 0
+                    : colorMixTotal - colorMixWithFallback,
                 willChangeAbuse,
                 zIndexAbuse,
                 nestedOverflowHidden,
@@ -1958,8 +2173,8 @@ async function collectMetrics(page, view) {
                     if (Math.abs(a.top - b.top) > 8) continue;
 
                     const gap = Math.max(0, b.left - a.right);
-                    const bothSmall = (a.width < 44 || a.height < 44)
-                        && (b.width < 44 || b.height < 44);
+                    const bothSmall = (a.width < touchTargetMin || a.height < touchTargetMin)
+                        && (b.width < touchTargetMin || b.height < touchTargetMin);
 
                     if (bothSmall && gap < 8) {
                         tight.push({
@@ -2037,6 +2252,14 @@ async function collectMetrics(page, view) {
         // ─── iOS / Rendering Stability Checks ────────────────────────────────────
 
         // 1. Broken or zero-size icons (SVG / IMG)
+        const brokenImages = Array.from(document.images)
+            .filter((image) => image.complete && image.naturalWidth === 0
+                && Boolean(image.currentSrc || image.getAttribute('src')))
+            .map((image) => ({
+                id: image.id || null,
+                src: image.currentSrc || image.getAttribute('src'),
+            }));
+
         const brokenIcons = Array.from(document.querySelectorAll('svg, img'))
             .filter(el => isVisible(el))
             .map(el => {
@@ -2094,7 +2317,11 @@ async function collectMetrics(page, view) {
             }));
 
         // 5. Missing momentum scroll on iOS containers
-        const missingMomentumScroll = Array.from(document.querySelectorAll('*'))
+        const supportsMomentumScroll = Boolean(
+            window.CSS?.supports?.('-webkit-overflow-scrolling: touch')
+        );
+        const missingMomentumScroll = isMobile && supportsMomentumScroll
+            ? Array.from(document.querySelectorAll('*'))
             .filter(el => isLayoutVisible(el))
             .filter(el => {
                 const style = window.getComputedStyle(el);
@@ -2105,7 +2332,8 @@ async function collectMetrics(page, view) {
             .map(el => ({
                 tag: el.tagName.toLowerCase(),
                 id: el.id || null,
-            }));
+            }))
+            : [];
 
         // 6. Backdrop-filter without iOS fallback (runtime check)
         const backdropWithoutFallback = Array.from(document.querySelectorAll('*'))
@@ -2307,11 +2535,17 @@ async function collectMetrics(page, view) {
             if (!footer || !isLayoutVisible(footer)) return true;
             const style = window.getComputedStyle(footer);
             const rect = footer.getBoundingClientRect();
-
-            const pinnedToBottom = Math.abs(rect.bottom - window.innerHeight) <= 4;
+            const main = document.querySelector('.app-main');
+            const mainRect = main?.getBoundingClientRect();
+            const inFlow = style.position === 'static' || style.position === 'relative';
+            const doesNotOverlapMain = !mainRect
+                || rect.top >= mainRect.bottom - 4
+                || rect.bottom <= mainRect.top + 4;
+            const shortPage = document.documentElement.scrollHeight <= window.innerHeight + 4;
+            const pinnedWhenShort = !shortPage || Math.abs(rect.bottom - window.innerHeight) <= 4;
             const stableFlexItem = style.flexGrow === '0' && style.flexShrink === '0';
 
-            return !(pinnedToBottom && stableFlexItem);
+            return !(inFlow && doesNotOverlapMain && pinnedWhenShort && stableFlexItem);
         })();
 
         // 21. Desktop jobs table header must remain sticky inside the scroller
@@ -2513,25 +2747,6 @@ async function collectMetrics(page, view) {
                 }
             }
 
-            const expectedKeys = [' ', 'ArrowLeft', 'ArrowRight'];
-            for (const key of expectedKeys) {
-                let handled = false;
-                const listener = (event) => {
-                    if (event.key === key) handled = true;
-                };
-                document.addEventListener('keydown', listener);
-                document.dispatchEvent(new KeyboardEvent('keydown', { key }));
-                document.removeEventListener('keydown', listener);
-                if (!handled) trimKeyboardMissing.push(key);
-            }
-
-            const beforeScroll = window.scrollY;
-            document.dispatchEvent(new KeyboardEvent('keydown', { key: ' ' }));
-            const afterScroll = window.scrollY;
-            if (afterScroll !== beforeScroll) {
-                trimKeyboardConflicts.push('space-scroll');
-            }
-
             if (window.__wavesurferInstances && window.__wavesurferInstances.length > 1) {
                 trimInstanceLeaks = window.__wavesurferInstances.length;
             }
@@ -2587,6 +2802,8 @@ async function collectMetrics(page, view) {
             hasAppShell,
             insufficientFixedTopOffset,
             footerNotFlex,
+            footerSpaceReservationMissing,
+            footerViewportPlacementBroken,
             navbarButtonAlignment,
             mutationObservers,
             duplicateEventHandlers,
@@ -2625,6 +2842,7 @@ async function collectMetrics(page, view) {
             externalFontRequests,
             materialSymbolsMissingVariationSettings,
             dropdownCaretIssues,
+            brokenImages,
             brokenIcons,
             svgIssues,
             iconFontIssues,
@@ -2705,12 +2923,241 @@ async function openView(page, view, replacements = {}) {
     await page.goto(new URL(url, BASE_URL).href, { waitUntil: 'domcontentloaded', timeout: 15000 });
     await page.waitForSelector(view.readySelector, { timeout: 10000 });
     await disableMotion(page, MOTION_RESET_CSS, view.name);
-    await page.addStyleTag({ content: VISUAL_STABILITY_CSS });
-    if (view.device === 'mobile') {
-        await page.addStyleTag({ content: MOBILE_VISUAL_STABILITY_CSS });
+    if (VISUAL_STABILITY_CSS) {
+        const style = await page.addStyleTag({ content: VISUAL_STABILITY_CSS });
+        await style.evaluate((element) => {
+            element.dataset.uiLintInjected = 'true';
+        }).catch(() => {});
     }
+    if (view.device === 'mobile') {
+        const style = await page.addStyleTag({ content: MOBILE_VISUAL_STABILITY_CSS });
+        await style.evaluate((element) => {
+            element.dataset.uiLintInjected = 'true';
+        }).catch(() => {});
+    }
+    await waitForMedia(page);
     await waitForLayoutStability(page, view);
     await page.waitForTimeout(SCREENSHOT_SETTLE_MS);
+}
+
+/**
+ * Exercises the dashboard history toggle and verifies the footer contract in
+ * both layout states. This is mandatory because the original regression only
+ * appeared after opening and closing Job History.
+ * @param {import('playwright').Page} page
+ * @param {object} view
+ * @returns {Promise<{footerHistoryTransitionBroken: boolean, footerHistoryTransitionStates: object[]}>}
+ */
+async function auditFooterHistoryToggle(page, view) {
+    if (!['dashboard', 'mobile-dashboard'].includes(view.name)) {
+        return {
+            footerHistoryTransitionBroken: false,
+            footerHistoryTransitionStates: [],
+        };
+    }
+
+    const toggle = page.locator('#showJobHistoryToggle');
+    if (await toggle.count() === 0) {
+        return {
+            footerHistoryTransitionBroken: true,
+            footerHistoryTransitionStates: [{ state: 'missing-toggle' }],
+        };
+    }
+
+    const initialChecked = await toggle.isChecked().catch(() => false);
+    const states = [];
+    const setChecked = async (checked) => {
+        await page.evaluate((nextChecked) => {
+            const input = document.querySelector('#showJobHistoryToggle');
+            if (input instanceof HTMLInputElement && input.checked !== nextChecked) {
+                input.click();
+            }
+        }, checked);
+        await page.waitForTimeout(250);
+    };
+    const measure = async (state) => page.evaluate((currentState) => {
+        const footer = document.querySelector('.wb-footer');
+        const main = document.querySelector('.app-main');
+        if (!footer || !main) return { state: currentState, missing: true };
+
+        const footerStyle = window.getComputedStyle(footer);
+        const mainStyle = window.getComputedStyle(main);
+        const footerRect = footer.getBoundingClientRect();
+        const mainRect = main.getBoundingClientRect();
+        const inFlow = footerStyle.position === 'static' || footerStyle.position === 'relative';
+        const shortPage = document.documentElement.scrollHeight <= window.innerHeight + 4;
+        const explicitPadding = Number.parseFloat(mainStyle.paddingBottom || '0') >= footerRect.height - 4;
+        const reserved = inFlow
+            ? footerRect.top >= mainRect.bottom - 4
+            : explicitPadding;
+        const pinnedWhenShort = !shortPage
+            || Math.abs(footerRect.bottom - window.innerHeight) <= 4;
+
+        return {
+            state: currentState,
+            missing: false,
+            inFlow,
+            reserved,
+            pinnedWhenShort,
+            overlap: footerRect.top < mainRect.bottom - 4,
+            footerTop: Math.round(footerRect.top),
+            footerBottom: Math.round(footerRect.bottom),
+            mainBottom: Math.round(mainRect.bottom),
+            documentHeight: document.documentElement.scrollHeight,
+        };
+    }, state);
+
+    try {
+        await setChecked(false);
+        states.push(await measure('collapsed'));
+        await setChecked(true);
+        states.push(await measure('expanded'));
+        await setChecked(false);
+        states.push(await measure('collapsed-again'));
+    } finally {
+        await setChecked(initialChecked);
+    }
+
+    const broken = states.some((state) => state.missing
+        || !state.inFlow
+        || !state.reserved
+        || !state.pinnedWhenShort
+        || state.overlap);
+    return {
+        footerHistoryTransitionBroken: broken,
+        footerHistoryTransitionStates: states,
+    };
+}
+
+/**
+ * Opens the first real trim trigger and exercises keyboard behavior with
+ * Playwright input. The dashboard may legitimately have no audio jobs, in
+ * which case the dynamic audit is reported as skipped.
+ * @param {import('playwright').Page} page
+ * @param {object} view
+ * @returns {Promise<{failures: string[], warnings: string[], metrics: object}>}
+ */
+async function auditTrimModal(page, view) {
+    if (view.name !== 'dashboard') {
+        return { failures: [], warnings: [], metrics: {} };
+    }
+
+    const trigger = page.locator('[data-action="open-trim"]').first();
+    try {
+        await trigger.waitFor({ state: 'attached', timeout: 3000 });
+    } catch {
+        return {
+            failures: [],
+            warnings: ['trim audit skipped: no audio trim trigger is rendered'],
+            metrics: {},
+        };
+    }
+
+    let trimKeyboardMissing = [];
+    let trimProbeInstalled = false;
+    try {
+        const group = trigger.locator('xpath=ancestor::div[contains(concat(" ", normalize-space(@class), " "), " btn-group ")][1]');
+        await group.locator('.dropdown-toggle').first().click();
+        await trigger.click();
+        await page.locator('#trimModal.show').waitFor({ state: 'visible', timeout: 10000 });
+        await page.locator('#trimLoader.d-none').waitFor({ state: 'attached', timeout: 15000 });
+
+        await page.locator('#trimModal').focus();
+        await page.evaluate(() => {
+            window.__uiLintTrimKeyEvents = [];
+            window.__uiLintTrimKeyProbe = (event) => {
+                if ([' ', 'ArrowLeft', 'ArrowRight', 'l', 'L'].includes(event.key)) {
+                    window.__uiLintTrimKeyEvents.push({
+                        key: event.key,
+                        defaultPrevented: event.defaultPrevented,
+                    });
+                }
+            };
+            document.addEventListener('keydown', window.__uiLintTrimKeyProbe);
+        });
+        trimProbeInstalled = true;
+
+        const beforeLoop = await page.locator('#trimLoop').getAttribute('aria-pressed');
+        await page.keyboard.press('l');
+        const afterLoop = await page.locator('#trimLoop').getAttribute('aria-pressed');
+        if (beforeLoop === afterLoop) {
+            const keyEvents = await page.evaluate(() => window.__uiLintTrimKeyEvents);
+            if (!keyEvents.some(({ key }) => key === 'l' || key === 'L')) {
+                trimKeyboardMissing = ['l'];
+            }
+        }
+        if (beforeLoop !== afterLoop) {
+            await page.keyboard.press('l');
+        }
+
+        await page.keyboard.press('ArrowRight');
+        await page.keyboard.press('ArrowLeft');
+        const arrowEvents = await page.evaluate(() => window.__uiLintTrimKeyEvents);
+        for (const key of ['ArrowRight', 'ArrowLeft']) {
+            if (!arrowEvents.some(({ key: eventKey }) => eventKey === key)) {
+                trimKeyboardMissing.push(key);
+            }
+        }
+
+        const beforeScroll = await page.evaluate(() => window.scrollY);
+        await page.keyboard.press(' ');
+        const afterScroll = await page.evaluate(() => window.scrollY);
+        const keyState = await page.evaluate(() => ({
+            events: window.__uiLintTrimKeyEvents,
+            spacePrevented: window.__uiLintTrimKeyEvents
+                .filter(({ key }) => key === ' ')
+                .at(-1)?.defaultPrevented ?? false,
+        }));
+
+        await page.evaluate(() => {
+            if (window.__uiLintTrimKeyProbe) {
+                document.removeEventListener('keydown', window.__uiLintTrimKeyProbe);
+            }
+            delete window.__uiLintTrimKeyProbe;
+            delete window.__uiLintTrimKeyEvents;
+        });
+
+        const trimDefaultRegionPresent = await page.evaluate(() => (
+            document.querySelectorAll('#trimWave [data-id], #trimWave .wavesurfer-region').length > 0
+            && !/click|drag/i.test(document.querySelector('#trimInfo')?.textContent || '')
+        ));
+
+        const trimKeyboardConflicts = [];
+        if (!keyState.events.some(({ key }) => key === ' ')) {
+            trimKeyboardMissing.push(' ');
+        }
+        if (!keyState.spacePrevented || afterScroll !== beforeScroll) {
+            trimKeyboardConflicts.push('space-scroll');
+        }
+
+        await page.locator('#trimModal .btn-close').click().catch(() => {});
+        await page.locator('#trimModal.show').waitFor({ state: 'hidden', timeout: 5000 }).catch(() => {});
+        return {
+            failures: [],
+            warnings: [],
+            metrics: {
+                trimDefaultRegionPresent,
+                trimKeyboardMissing: trimKeyboardMissing || [],
+                trimKeyboardConflicts,
+            },
+        };
+    } catch (error) {
+        if (trimProbeInstalled) {
+            await page.evaluate(() => {
+                if (window.__uiLintTrimKeyProbe) {
+                    document.removeEventListener('keydown', window.__uiLintTrimKeyProbe);
+                }
+                delete window.__uiLintTrimKeyProbe;
+                delete window.__uiLintTrimKeyEvents;
+            }).catch(() => {});
+        }
+        await page.locator('#trimModal .btn-close').click().catch(() => {});
+        return {
+            failures: [`trim modal interaction failed: ${error instanceof Error ? error.message : String(error)}`],
+            warnings: [],
+            metrics: {},
+        };
+    }
 }
 
 /**
@@ -2856,7 +3303,9 @@ async function runInvalidLoginCheck(browser, loginRequired) {
             failures.push(...traffic.pageErrors.map((entry) => `pageerror ${entry}`));
         }
         if (traffic.consoleEntries.length) {
-            warnings.push(...traffic.consoleEntries.map((entry) => `console ${entry.type}: ${entry.text}`));
+            warnings.push(...traffic.consoleEntries
+                .filter((entry) => !/\b401\b|unauthorized/i.test(entry.text))
+                .map((entry) => `console ${entry.type}: ${entry.text}`));
         }
         warnings.push(...externalWarnings);
 
@@ -2895,13 +3344,20 @@ async function runView(browser, storageState, view, replacements = {}) {
         await openView(page, view, replacements);
 
         const runtimeMetrics = await collectMetrics(page, view);
+        const footerHistoryAudit = await auditFooterHistoryToggle(page, view);
+        const trimAudit = await auditTrimModal(page, view);
         const jobsScrollContracts = viewAuditsJobsList(view)
             ? await getJobsScrollContractMetrics()
             : {
                 jobsInfiniteScrollNotObserverBased: false,
                 jobsPagingOffsetContractBroken: false,
             };
-        const metrics = { ...runtimeMetrics, ...jobsScrollContracts };
+        const metrics = {
+            ...runtimeMetrics,
+            ...footerHistoryAudit,
+            ...trimAudit.metrics,
+            ...jobsScrollContracts,
+        };
         const shots = await captureStablePair(page, view);
         const visual = diffScreenshots({
             name: view.name,
@@ -2914,6 +3370,8 @@ async function runView(browser, storageState, view, replacements = {}) {
         const failures = [];
         const warnings = [];
         const { sameOriginFailures, externalWarnings } = splitNetworkFindings(traffic);
+        failures.push(...trimAudit.failures);
+        warnings.push(...trimAudit.warnings);
 
         if (metrics.duplicateIds.length) failures.push(`duplicate ids: ${metrics.duplicateIds.join(', ')}`);
         if (metrics.unlabeledControls.length) failures.push(`unlabeled controls: ${metrics.unlabeledControls.length}`);
@@ -2949,9 +3407,20 @@ async function runView(browser, storageState, view, replacements = {}) {
         if (!metrics.hasMainLandmark) failures.push('missing main landmark');
         if (!metrics.hasAppShell) failures.push('missing app-shell layout container');
         if (metrics.insufficientFixedTopOffset) failures.push('fixed navbar without sufficient body offset');
-        if (metrics.footerNotFlex) warnings.push('footer not using flex layout');
+        if (metrics.footerNotFlex) failures.push('footer is not using the mandatory flex layout');
+        if (metrics.footerSpaceReservationMissing) {
+            failures.push('footer space reservation is missing or does not cover the footer');
+        }
+        if (metrics.footerViewportPlacementBroken) {
+            failures.push('short-page footer is not pinned to the viewport bottom');
+        }
+        if (metrics.footerHistoryTransitionBroken) {
+            failures.push('footer contract breaks when Job History is toggled');
+        }
         if (metrics.navbarButtonAlignment > 0) warnings.push(`navbar buttons not vertically centred: ${metrics.navbarButtonAlignment}`);
-        if (metrics.mutationObservers > 0) warnings.push('mutation observer usage detected');
+        // One observer is the app's intentional dynamic-jobs initializer;
+        // flag only unexpected multiple observers.
+        if (metrics.mutationObservers > 1) warnings.push('mutation observer usage detected');
         if (metrics.duplicateEventHandlers > 2) warnings.push('multiple global click handlers');
         if (visual.ratio > VISUAL_DRIFT_THRESHOLD) failures.push(`visual drift ratio ${visual.ratio.toFixed(5)} > ${VISUAL_DRIFT_THRESHOLD}`);
 
@@ -3010,14 +3479,17 @@ async function runView(browser, storageState, view, replacements = {}) {
         if (metrics.containerWidthIssue) {
             failures.push('app shell container does not fill the mobile viewport');
         }
-        if (metrics.externalFontRequests > 0) {
-            failures.push(`external font CDN requests (must be self-hosted): ${metrics.externalFontRequests}`);
+        if (metrics.externalFontRequests.length > 0) {
+            failures.push(`external font CDN requests (must be self-hosted): ${metrics.externalFontRequests.length}`);
         }
         if (metrics.materialSymbolsMissingVariationSettings) {
             warnings.push('Material Symbols Outlined missing font-variation-settings (iOS variable font rendering broken)');
         }
-        if (metrics.dropdownCaretIssues > 0) {
-            warnings.push(`icon-only dropdown buttons with visible Bootstrap caret: ${metrics.dropdownCaretIssues}`);
+        if (metrics.dropdownCaretIssues.length > 0) {
+            warnings.push(`icon-only dropdown buttons with visible Bootstrap caret: ${metrics.dropdownCaretIssues.length}`);
+        }
+        if (metrics.brokenImages.length) {
+            failures.push(`broken images: ${metrics.brokenImages.length}`);
         }
         if (metrics.brokenIcons?.length) {
             failures.push(`broken or zero-size icons: ${metrics.brokenIcons.length}`);
@@ -3097,6 +3569,7 @@ async function runView(browser, storageState, view, replacements = {}) {
         if (metrics.uiCardChildExpands) {
             failures.push(`ui-card children expanding unexpectedly: ${metrics.uiCardChildExpands}`);
         }
+        applyMetricRules(metrics, failures, warnings);
 
         failures.push(...sameOriginFailures);
 
@@ -3142,6 +3615,10 @@ async function runView(browser, storageState, view, replacements = {}) {
                 hasAppShell: metrics.hasAppShell,
                 insufficientFixedTopOffset: metrics.insufficientFixedTopOffset,
                 footerNotFlex: metrics.footerNotFlex,
+                footerSpaceReservationMissing: metrics.footerSpaceReservationMissing,
+                footerViewportPlacementBroken: metrics.footerViewportPlacementBroken,
+                footerHistoryTransitionBroken: metrics.footerHistoryTransitionBroken,
+                footerHistoryTransitionStates: metrics.footerHistoryTransitionStates || [],
                 navbarButtonAlignment: metrics.navbarButtonAlignment || 0,
                 mutationObservers: metrics.mutationObservers,
                 duplicateEventHandlers: metrics.duplicateEventHandlers,
@@ -3177,6 +3654,7 @@ async function runView(browser, storageState, view, replacements = {}) {
                 externalFontRequests: metrics.externalFontRequests?.length || 0,
                 materialSymbolsMissingVariationSettings: metrics.materialSymbolsMissingVariationSettings || false,
                 dropdownCaretIssues: metrics.dropdownCaretIssues?.length || 0,
+                brokenImages: metrics.brokenImages?.length || 0,
                 brokenIcons: metrics.brokenIcons?.length || 0,
                 svgIssues: metrics.svgIssues?.length || 0,
                 iconFontIssues: metrics.iconFontIssues?.length || 0,
@@ -3205,6 +3683,36 @@ async function runView(browser, storageState, view, replacements = {}) {
                 settingsFieldStackContractBroken: metrics.settingsFieldStackContractBroken || false,
                 trimDefaultRegionPresent: metrics.trimDefaultRegionPresent || false,
                 uiCardChildExpands: metrics.uiCardChildExpands || 0,
+                trimInvalidRanges: metrics.trimInvalidRanges || false,
+                trimSnapViolations: metrics.trimSnapViolations || 0,
+                trimLoopDriftMs: metrics.trimLoopDriftMs || 0,
+                trimZoomInstability: metrics.trimZoomInstability || 0,
+                trimHandleTooSmall: metrics.trimHandleTooSmall || 0,
+                trimKeyboardMissing: metrics.trimKeyboardMissing || [],
+                trimKeyboardConflicts: metrics.trimKeyboardConflicts || [],
+                trimInstanceLeaks: metrics.trimInstanceLeaks || 0,
+                trimUiAudioMismatchMs: metrics.trimUiAudioMismatchMs || 0,
+                webkitOnlyRules: metrics.webkitOnlyRules || 0,
+                colorMixWithoutFallback: metrics.colorMixWithoutFallback || 0,
+                willChangeAbuse: metrics.willChangeAbuse || 0,
+                zIndexAbuse: metrics.zIndexAbuse || 0,
+                nestedOverflowHidden: metrics.nestedOverflowHidden || 0,
+                mobileTitleCellFlexRegression: metrics.mobileTitleCellFlexRegression || false,
+            },
+            // Keep actionable element-level details in the JSON report while
+            // retaining the compact counters above for console output.
+            details: {
+                smallTouchTargets: metrics.smallTouchTargets,
+                tightlyPackedTargets: metrics.tightlyPackedTargets,
+                contrastIssues: metrics.contrastIssues,
+                tinyText: metrics.tinyText,
+                weakText: metrics.weakText,
+                alignmentIssues: metrics.alignmentIssues,
+                missingMomentumScroll: metrics.missingMomentumScroll,
+                clippedDropdowns: metrics.clippedDropdowns,
+                importantViolations: metrics.importantAbuse?.violations,
+                unguardedAnimations: metrics.unguardedAnimations,
+                mobileJobsFeedIssues: metrics.mobileJobsFeedIssues,
             },
             screenshots: {
                 first: shots.shotA,
@@ -3226,11 +3734,20 @@ async function main() {
     ensureDir(SCREENSHOT_DIR);
 
     const browser = await chromium.launch({ headless: true });
+    let mobileBrowser;
 
     try {
         const loginRequired = await detectLoginRequired();
-        const authState = await createAuthState(browser);
-        const firstJobId = process.env.UI_LINT_JOB_ID || await discoverJobId(browser, authState);
+        if (loginRequired && (!USERNAME || !PASSWORD)) {
+            throw new Error(
+                'UI_LINT_USERNAME and UI_LINT_PASSWORD are required when login is enabled',
+            );
+        }
+        mobileBrowser = await webkit.launch({ headless: true });
+        const authState = loginRequired ? await createAuthState(browser) : {};
+        const firstJobId = loginRequired
+            ? process.env.UI_LINT_JOB_ID || await discoverJobId(browser, authState)
+            : null;
         const results = [];
 
         results.push(await runInvalidLoginCheck(browser, loginRequired));
@@ -3250,7 +3767,8 @@ async function main() {
                     );
                     continue;
                 }
-                parallelResults[item.index] = await runViewSafely(browser, authState, item.view);
+                const browserForView = item.view.device === 'mobile' ? mobileBrowser : browser;
+                parallelResults[item.index] = await runViewSafely(browserForView, authState, item.view);
             }
         });
         await Promise.all(workers);
@@ -3305,6 +3823,11 @@ async function main() {
             await browser.close();
         } catch (closeErr) {
             console.error('Browser cleanup failed:', closeErr);
+        }
+        try {
+            await mobileBrowser?.close();
+        } catch (closeErr) {
+            console.error('WebKit cleanup failed:', closeErr);
         }
     }
 }

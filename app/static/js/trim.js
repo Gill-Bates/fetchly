@@ -12,7 +12,6 @@
 
 import { showToast } from "./toast.js";
 import { reportError } from "./errors.js";
-import { getJobById } from "./jobs.js";
 import { CSRF_COOKIE_NAME, LALAL_MAX_DURATION_SECONDS } from "./config.js";
 import {
     buildTrimId,
@@ -24,7 +23,7 @@ import {
     triggerDownload,
     SNAP_INTERVAL_SECONDS,
 } from "./utils.js";
-import { isLalalEnabled, isLalalDurationGuardEnabled, isDurationBlocked as isJobDurationBlocked } from "./ui.js";
+import { isLalalEnabled, isLalalDurationGuardEnabled } from "./ui.js?v=20260823c";
 
 // WaveSurfer imports (loaded dynamically)
 let WaveSurfer = null;
@@ -35,6 +34,7 @@ let trimWs = null;
 let trimRegion = null;
 let trimJobId = null;
 let trimId = null;  // Current trim ID (e.g., "5000_30000")
+let trimDurationSeconds = null;
 let trimReady = false;
 let trimModal = null;
 let regionPlugin = null;
@@ -72,11 +72,20 @@ const DEFAULT_ZOOM_LEVEL = 50;
 const MAX_ZOOM_LEVEL = 2000;
 const PAN_THRESHOLD_PX = 4;
 const SELECTION_REGION_COLOR = "rgba(99, 102, 241, 0.55)";
-const LALAL_REQUEST_TIMEOUT_MS = 60_000;
+const TRIM_REQUEST_TIMEOUT_MS = 120_000;
+const LALAL_REQUEST_TIMEOUT_MS = 15 * 60_000;
+const MIN_BPM = 20;
+const MAX_BPM = 400;
+const MAX_VISIBLE_BEAT_LINES = 2_000;
+let trimRequestBusy = false;
 
-function isDurationBlocked(jobId) {
-    const job = getJobById(jobId);
-    return job ? isJobDurationBlocked(job) : false;
+function isTrimDurationBlocked() {
+    if (!isLalalDurationGuardEnabled()) {
+        return false;
+    }
+
+    return !Number.isFinite(trimDurationSeconds)
+        || trimDurationSeconds > LALAL_MAX_DURATION_SECONDS;
 }
 
 // DOM Elements (lazy-loaded)
@@ -140,6 +149,7 @@ function isValidJobId(jobId) {
 
 
 function resetButtons() {
+    trimDurationSeconds = null;
     setPlaybackControlsEnabled(false);
     setButtonState(btnApply, { disabled: true, text: "Use Selection" });
     setButtonState(btnVocals, { disabled: true });
@@ -196,7 +206,7 @@ function resetBeatGridState() {
 
 function applyBeatOptions(options = {}) {
     const rawBpm = Number(options.bpm);
-    bpm = Number.isFinite(rawBpm) && rawBpm > 0 ? rawBpm : null;
+    bpm = Number.isFinite(rawBpm) && rawBpm >= MIN_BPM && rawBpm <= MAX_BPM ? rawBpm : null;
 
     const rawBeatOffset = Number(options.beatOffset);
     beatOffset = Number.isFinite(rawBeatOffset) ? rawBeatOffset : 0;
@@ -250,7 +260,8 @@ function drawBeatGrid() {
 
     const fragment = document.createDocumentFragment();
 
-    for (let beatIndex = firstBeatIndex; ; beatIndex += 1) {
+    let renderedLines = 0;
+    for (let beatIndex = firstBeatIndex; renderedLines < MAX_VISIBLE_BEAT_LINES; beatIndex += 1) {
         const time = beatOffset + beatIndex * beatInterval;
         if (time > endTime) {
             break;
@@ -269,6 +280,7 @@ function drawBeatGrid() {
         line.style.left = "0";
         line.style.transform = `translateX(${x}px)`;
         fragment.appendChild(line);
+        renderedLines += 1;
     }
 
     beatGridEl.appendChild(fragment);
@@ -886,11 +898,6 @@ export async function openTrimModal(jobId, options = {}) {
             plugins: [regionPlugin]
         });
 
-        // Load the audio file
-        const fileUrl = `/audio-source/${encodeURIComponent(jobId)}`;
-        if (session !== trimSession) return;
-        trimWs.load(fileUrl);
-
         // Setup ready handler
         trimWs.on("ready", () => {
             if (session !== trimSession) return;
@@ -968,7 +975,14 @@ export async function openTrimModal(jobId, options = {}) {
             if (trimInfoEl) trimInfoEl.textContent = "Failed to load audio";
         });
 
+        // Register all handlers before starting the asynchronous load so an
+        // early WaveSurfer failure is observed and its promise is handled.
+        const fileUrl = `/audio-source/${encodeURIComponent(jobId)}`;
+        if (session !== trimSession) return;
+        await trimWs.load(fileUrl);
+
     } catch (err) {
+        if (session !== trimSession) return;
         setLoading(false);
         showToast(`Failed to initialize waveform: ${err?.message || err}`, "danger");
     } finally {
@@ -1005,6 +1019,7 @@ function handlePause() {
  * Apply trim and prepare for Lalal processing
  */
 async function handleApplyTrim() {
+    if (trimRequestBusy) return;
     if (!trimJobId) return;
     if (!trimRegion) {
         showToast("Please select a range in the waveform first", "info");
@@ -1040,6 +1055,12 @@ async function handleApplyTrim() {
 
     setButtonState(btnApply, { disabled: true, text: "Processing..." });
 
+    trimRequestBusy = true;
+    const requestController = new AbortController();
+    const timeoutId = window.setTimeout(() => requestController.abort(), TRIM_REQUEST_TIMEOUT_MS);
+    const abortRequest = () => requestController.abort();
+    abortController.signal.addEventListener("abort", abortRequest, { once: true });
+
     try {
         const res = await fetch(`/api/trim/${encodeURIComponent(trimJobId)}`, {
             method: "POST",
@@ -1048,16 +1069,21 @@ async function handleApplyTrim() {
                 "X-CSRF-Token": csrfToken,
             },
             body: JSON.stringify({ start, end }),
-            signal: abortController.signal,
+            signal: requestController.signal,
         });
         const data = await parseApiResponse(res, "Trim failed");
         if (session !== trimSession) return;
 
         // Store trim_id for Lalal processing
         trimId = data.trim_id || buildTrimId(start, end);
+        const normalizedTrimDuration = Number(data.duration);
+        trimDurationSeconds = Number.isFinite(normalizedTrimDuration)
+            && normalizedTrimDuration >= 0
+            ? normalizedTrimDuration
+            : null;
 
         // Enable Lalal buttons only when the integration is configured and duration is not blocked.
-        const durationBlockedForLalal = isDurationBlocked(trimJobId);
+        const durationBlockedForLalal = isTrimDurationBlocked();
         if (isLalalEnabled() && !durationBlockedForLalal && btnVocals) btnVocals.disabled = false;
         if (isLalalEnabled() && !durationBlockedForLalal && btnInstr) btnInstr.disabled = false;
 
@@ -1072,10 +1098,20 @@ async function handleApplyTrim() {
         setButtonState(btnApply, { text: "✓ Ready" });
 
     } catch (err) {
-        if (err?.name === "AbortError") return;
+        if (err?.name === "AbortError") {
+            if (session === trimSession) {
+                showToast("Trim timed out. Please try again.", "warning");
+                setButtonState(btnApply, { disabled: false, text: "Use Selection" });
+            }
+            return;
+        }
         if (session !== trimSession) return;
         showToast(`Trim failed: ${err.message}`, "danger");
         setButtonState(btnApply, { disabled: false, text: "Use Selection" });
+    } finally {
+        window.clearTimeout(timeoutId);
+        abortController.signal.removeEventListener("abort", abortRequest);
+        trimRequestBusy = false;
     }
 }
 
@@ -1088,13 +1124,18 @@ async function runLalal(stem) {
         return;
     }
 
-    if (isDurationBlocked(trimJobId)) {
-        showToast("Track exceeds 10 min — blocked by Duration Guard", "warning");
+    if (!trimJobId || !trimId) {
+        showToast("Please trim the audio first", "warning");
         return;
     }
 
-    if (!trimJobId || !trimId) {
-        showToast("Please trim the audio first", "warning");
+    if (isTrimDurationBlocked()) {
+        showToast(
+            trimDurationSeconds === null
+                ? "Trim duration is unavailable — blocked by Duration Guard"
+                : "Trim duration exceeds 10 min — blocked by Duration Guard",
+            "warning",
+        );
         return;
     }
 
@@ -1208,6 +1249,7 @@ function cleanup() {
     destroyWaveSurfer();
     trimJobId = null;
     trimId = null;
+    trimDurationSeconds = null;
     trimReady = false;
     regionPlugin = null;
     pendingStart = null;

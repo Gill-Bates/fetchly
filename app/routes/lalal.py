@@ -16,16 +16,17 @@ import re
 import stat as stat_module
 import uuid
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager
 from pathlib import Path
 from time import time
 from typing import Any, Callable
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
 
 from ..common.rate_limit import limiter
-from ..db import COMPLETED_STATUSES, get_job, get_settings, set_settings, update_job
+from ..db import DOWNLOADABLE_STATUSES, get_job, get_settings, set_settings, update_job
 from ..utils.fs import TRIM_ID_RE, get_json_body, path_is_file
 from ..utils.template_filters import is_lalala_configured
 from .auth import require_user, require_user_json
@@ -38,6 +39,7 @@ router = APIRouter(prefix="/api/lalal", tags=["lalal"])
 # Constants
 _LALAL_AUTH_VALIDATION_CACHE_SECONDS = 300
 _MAX_EMAIL_LENGTH = 320
+_MAX_ACTIVATION_KEY_LENGTH = 1024
 _EMAIL_RE = re.compile(r"^[^@]+@[^@]+\.[^@]+$")
 _STEM_VOCALS = "vocals"
 _STEM_INSTRUMENTAL = "instrumental"
@@ -114,14 +116,23 @@ async def _acquire_processing_lock(lock_file: Path) -> AsyncIterator[None]:
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
         finally:
             os.close(lock_fd)
-            with suppress(OSError):
-                os.unlink(lock_file)
 
     lock_fd = await asyncio.to_thread(_lock)
     try:
         yield
     finally:
         await asyncio.to_thread(_unlock, lock_fd)
+
+
+async def _remove_split_outputs(*paths: Path) -> None:
+    """Remove any outputs left by a failed split attempt."""
+    async def _remove(path: Path) -> None:
+        try:
+            await asyncio.to_thread(path.unlink, missing_ok=True)
+        except OSError:
+            logger.warning("Unable to remove failed Lalal output %s", path, exc_info=True)
+
+    await asyncio.gather(*(_remove(path) for path in paths))
 
 
 async def _get_cached_split_response(
@@ -267,7 +278,7 @@ async def _mark_lalal_split_done_if_ready(
 async def api_lalal_status(request: Request, force_refresh: bool = False, _user: str = Depends(require_user)):
     """Return saved Lalal.ai auth status and validation state."""
     _ = request
-    settings = await asyncio.to_thread(get_settings)
+    settings = await asyncio.to_thread(get_settings, include_secrets=True)
     email = str(settings.get("lalalaai_email", "")).strip()
     auth_key = str(settings.get("lalalaai_auth_key", "")).strip()
 
@@ -338,18 +349,27 @@ async def api_lalal_auth_activation_key(request: Request, _user: str = Depends(r
     activation_key = str(payload.get("activation_key", "")).strip()
 
     _validate_email(email)
-    if not activation_key:
-        raise HTTPException(status_code=400, detail="Activation key is required")
+    if not 1 <= len(activation_key) <= _MAX_ACTIVATION_KEY_LENGTH:
+        raise HTTPException(status_code=400, detail="Activation key has an invalid length")
 
-    from ..lalal import LalalClient
+    from ..lalal import LalalClient, LalalError
 
     client = LalalClient(activation_key)
     try:
         async with client:
             await asyncio.wait_for(client.check_quota(), timeout=20.0)
-    except Exception:
-        logger.exception("Invalid Lalal activation key")
-        raise HTTPException(status_code=400, detail="Invalid activation key")
+    except TimeoutError as exc:
+        raise HTTPException(status_code=504, detail="Lalal.ai validation timed out") from exc
+    except httpx.TimeoutException as exc:
+        raise HTTPException(status_code=504, detail="Lalal.ai validation timed out") from exc
+    except LalalError as exc:
+        raise HTTPException(status_code=400, detail="Invalid activation key") from exc
+    except (httpx.RequestError, OSError) as exc:
+        logger.warning("Lalal activation-key validation unavailable: %s", exc)
+        raise HTTPException(status_code=503, detail="Lalal.ai is temporarily unavailable") from exc
+    except Exception as exc:
+        logger.exception("Unexpected Lalal activation-key validation failure")
+        raise HTTPException(status_code=503, detail="Lalal.ai is temporarily unavailable") from exc
 
     await asyncio.to_thread(
         set_settings,
@@ -410,7 +430,7 @@ async def lalal_split(
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    if job["status"] not in COMPLETED_STATUSES:
+    if job["status"] not in DOWNLOADABLE_STATUSES:
         raise HTTPException(status_code=400, detail="Job not ready")
 
     if job["type"] != "audio":
@@ -447,13 +467,15 @@ async def lalal_split(
     lock_file = output_dir / f".lalal_{base_name}.lock"
 
     try:
-        from ..lalal import LalalClient, LalalError, StemType, get_lalal_client
+        from ..lalal import LalalClient, LalalError, StemType
     except ImportError as exc:
         raise HTTPException(status_code=500, detail="Lalal.ai module not available") from exc
 
-    client = get_lalal_client()
-    if not client:
+    settings = await asyncio.to_thread(get_settings, include_secrets=True)
+    auth_key = settings.get("lalalaai_auth_key")
+    if not isinstance(auth_key, str) or not auth_key.strip():
         raise HTTPException(status_code=400, detail="Lalal.ai API key not configured")
+    client = LalalClient(auth_key.strip())
 
     loop = asyncio.get_running_loop()
     queue_event = _queue_event
@@ -522,14 +544,18 @@ async def lalal_split(
         )
 
     except TimeoutError:
+        await _remove_split_outputs(vocals_path, instrumental_path)
         logger.error("Lalal.ai processing timed out for job %s", job_id)
         raise HTTPException(status_code=504, detail="Lalal.ai processing timed out")
     except LalalError:
+        await _remove_split_outputs(vocals_path, instrumental_path)
         logger.exception("Lalal.ai error for job %s", job_id)
-        raise HTTPException(status_code=500, detail="Lalal.ai processing failed")
+        raise HTTPException(status_code=502, detail="Lalal.ai processing failed")
     except HTTPException:
+        await _remove_split_outputs(vocals_path, instrumental_path)
         raise
     except Exception:
+        await _remove_split_outputs(vocals_path, instrumental_path)
         logger.exception("Unexpected error in Lalal.ai processing for job %s", job_id)
         raise HTTPException(status_code=500, detail="Processing failed")
 

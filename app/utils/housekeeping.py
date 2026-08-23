@@ -6,8 +6,7 @@
 
 """Centralized housekeeping utilities for tubeyou.
 
-This module provides functions for cleaning up job artifacts,
-including database records and filesystem directories.
+This module provides functions for cleaning up job artifacts on the filesystem.
 """
 
 import logging
@@ -19,22 +18,51 @@ from time import time
 
 logger = logging.getLogger(__name__)
 
-# Callable(keep_days: int) -> deleted job IDs.
-type PurgeDbFunc = Callable[[int], list[str]]
+# Callable(keep_days: int) -> expired job IDs.
+type ExpiredJobIdsFunc = Callable[[int], list[str]]
 
 # Callable(job_id: str) -> True if the job exists in the database.
 type JobExistsFunc = Callable[[str], bool]
 
 _UUID_RE = re.compile(
     r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
-    re.IGNORECASE,
 )
 _ORPHAN_DIR_GRACE_PERIOD_SECONDS = 900
+_THUMBNAIL_CACHE_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
 
 
 def _is_job_uuid(name: str) -> bool:
     """Return True if the directory name uses canonical UUID formatting."""
     return _UUID_RE.fullmatch(name) is not None
+
+
+def cleanup_thumbnail_cache(cache_dir: Path, *, now: float | None = None) -> int:
+    """Remove thumbnail cache entries older than the configured TTL."""
+    if not cache_dir.exists():
+        return 0
+
+    current_time = time() if now is None else now
+    removed = 0
+    try:
+        entries = tuple(cache_dir.iterdir())
+    except OSError as exc:
+        logger.warning("Unable to scan thumbnail cache %s: %s", cache_dir, exc)
+        return 0
+
+    for path in entries:
+        if not path.is_file() and not path.is_symlink():
+            continue
+        try:
+            if current_time - path.stat().st_mtime <= _THUMBNAIL_CACHE_MAX_AGE_SECONDS:
+                continue
+            path.unlink()
+            removed += 1
+        except OSError as exc:
+            logger.warning("Unable to clean thumbnail cache file %s: %s", path, exc)
+
+    if removed:
+        logger.info("Thumbnail cache cleanup: removed %d expired file(s)", removed)
+    return removed
 
 
 def cleanup_job_directory(job_id: str, data_dir: Path) -> bool:
@@ -70,12 +98,15 @@ def cleanup_job_directory(job_id: str, data_dir: Path) -> bool:
         )
         return False
 
-    if not job_dir.exists():
-        return True
-
+    # Checked before exists(): a dangling symlink makes exists() report False
+    # (it follows the link and finds nothing), which would return success here
+    # without ever removing the symlink itself.
     if job_dir.is_symlink():
         logger.warning("Refusing to delete symlinked job path: %s", job_dir)
         return False
+
+    if not job_dir.exists():
+        return True
 
     if not job_dir.is_dir():
         logger.warning("Job path is not a directory: %s", job_dir)
@@ -93,36 +124,42 @@ def cleanup_job_directory(job_id: str, data_dir: Path) -> bool:
 def cleanup_expired_jobs(
     keep_days: int,
     data_dir: Path,
-    purge_db_func: PurgeDbFunc,
+    expired_job_ids_func: ExpiredJobIdsFunc,
 ) -> tuple[int, int]:
-    """Delete expired jobs from the database and clean their filesystem artifacts.
+    """Clean filesystem artifacts for expired jobs without deleting DB rows.
 
     Args:
         keep_days: Number of days to retain completed jobs.
         data_dir: Base data directory containing job folders.
-        purge_db_func: Callable that purges DB records and returns deleted IDs.
+        expired_job_ids_func: Callable that returns expired IDs without changing
+            the database.
 
     Returns:
-        Tuple of `(db_records_deleted, filesystem_cleanup_ok)`.
-        The second count includes job IDs for which `cleanup_job_directory()`
-        returned True, including directories that were already absent.
+        Tuple of `(expired_jobs_found, filesystem_cleanup_ok)`. The first count
+        is every expired ID returned by the selector. The second count includes
+        job IDs for which `cleanup_job_directory()` returned True, including
+        directories that were already absent.
 
     Raises:
+        TypeError: If keep_days is not an integer.
         ValueError: If keep_days is negative.
     """
+    if isinstance(keep_days, bool) or not isinstance(keep_days, int):
+        raise TypeError("keep_days must be a non-negative integer")
     if keep_days < 0:
         raise ValueError("keep_days must be non-negative")
 
-    # Purge from database first
-    deleted_ids = purge_db_func(keep_days)
-    if not deleted_ids:
+    expired_ids = expired_job_ids_func(keep_days)
+    if not expired_ids:
         return (0, 0)
 
-    valid_ids = [job_id for job_id in deleted_ids if _is_job_uuid(job_id)]
-    invalid_count = len(deleted_ids) - len(valid_ids)
+    expired_jobs_found = len(expired_ids)
+
+    valid_ids = [job_id for job_id in expired_ids if _is_job_uuid(job_id)]
+    invalid_count = len(expired_ids) - len(valid_ids)
     if invalid_count:
         logger.warning(
-            "Housekeeping: DB purge returned %d invalid job ID(s); processing %d valid ID(s)",
+            "Housekeeping: expiry selector returned %d invalid job ID(s); processing %d valid ID(s)",
             invalid_count,
             len(valid_ids),
         )
@@ -131,7 +168,7 @@ def cleanup_expired_jobs(
         data_dir_resolved = data_dir.resolve()
     except OSError as exc:
         logger.warning("Failed to resolve data directory %s: %s", data_dir, exc)
-        return (len(valid_ids), 0)
+        return (expired_jobs_found, 0)
 
     # Clean up filesystem artifacts
     dirs_ok = 0
@@ -140,13 +177,13 @@ def cleanup_expired_jobs(
             dirs_ok += 1
 
     logger.info(
-        "Housekeeping: %d job(s) older than %d days removed (%d filesystem cleanup outcomes ok)",
-        len(valid_ids),
+        "Housekeeping: %d expired job(s) found older than %d days; filesystem cleanup succeeded for %d",
+        expired_jobs_found,
         keep_days,
         dirs_ok,
     )
 
-    return (len(valid_ids), dirs_ok)
+    return (expired_jobs_found, dirs_ok)
 
 
 def cleanup_orphaned_directories(
@@ -182,28 +219,27 @@ def cleanup_orphaned_directories(
 
     now = time()
 
-    # Snapshot candidates first to reduce races with concurrent directory creation.
-    candidates: list[Path] = []
-    for entry in data_dir_resolved.iterdir():
-        if not entry.is_dir() or not _is_job_uuid(entry.name):
-            continue
-        try:
-            if (now - entry.stat().st_mtime) < _ORPHAN_DIR_GRACE_PERIOD_SECONDS:
+    try:
+        for entry in data_dir_resolved.iterdir():
+            if not entry.is_dir() or not _is_job_uuid(entry.name):
                 continue
-        except OSError as exc:
-            logger.debug("Skipping orphan candidate %s due to stat failure: %s", entry, exc)
-            continue
-        candidates.append(entry)
+            try:
+                if (now - entry.stat().st_mtime) < _ORPHAN_DIR_GRACE_PERIOD_SECONDS:
+                    continue
+            except OSError as exc:
+                logger.debug("Skipping orphan candidate %s due to stat failure: %s", entry, exc)
+                continue
 
-    for entry in candidates:
-        name = entry.name
-        if not job_exists_func(name):
-            orphans.append(name)
+            name = entry.name
+            if job_exists_func(name):
+                continue
+
             if dry_run:
+                orphans.append(name)
                 continue
 
-            # Re-check right before deletion to narrow the race window with
-            # concurrent job creation after the snapshot/orphan decision.
+            # Re-check immediately before deletion to avoid reporting a job
+            # that appeared after the first database lookup.
             if job_exists_func(name):
                 logger.debug(
                     "Skipping orphan cleanup for %s because it appeared in the DB before deletion",
@@ -211,9 +247,12 @@ def cleanup_orphaned_directories(
                 )
                 continue
 
+            orphans.append(name)
             if cleanup_job_directory(name, data_dir_resolved):
                 cleaned += 1
                 logger.info("Cleaned orphaned directory: %s", name)
+    except OSError as exc:
+        logger.warning("Unable to scan data directory %s: %s", data_dir_resolved, exc)
 
     if orphans:
         if dry_run:

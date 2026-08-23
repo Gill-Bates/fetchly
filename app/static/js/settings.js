@@ -5,10 +5,10 @@
 
 import { showToast } from "./toast.js";
 import { getCookie } from "./utils.js";
+import { CSRF_COOKIE_NAME } from "./config.js";
 
 const AUTO_SAVE_DELAY_MS = 800;
 const REQUEST_TIMEOUT_MS = 10_000;
-const CSRF_COOKIE_NAME = "tubeyou_csrf";
 
 const AUTO_SAVE_STATE = Object.freeze({
     HIDDEN: "hidden",
@@ -102,16 +102,6 @@ async function fetchWithTimeout(url, options = {}) {
     }
 }
 
-function randomHexPlaceholder() {
-    if (!window.crypto?.getRandomValues) {
-        return "";
-    }
-
-    return Array.from(window.crypto.getRandomValues(new Uint8Array(8)))
-        .map((byte) => byte.toString(16).padStart(2, "0"))
-        .join("");
-}
-
 const bootstrapData = getBootstrapData();
 
 const formEl = document.getElementById("settingsForm");
@@ -120,8 +110,8 @@ const settingsSaveBtn = document.getElementById("settingsSaveBtn");
 const autoSaveIndicator = document.getElementById("autoSaveIndicator");
 const autoSaveIndicatorText = document.getElementById("autoSaveIndicatorText");
 const autoSaveSpinner = document.getElementById("autoSaveSpinner");
+const resetStatsBtn = document.getElementById("resetStatsBtn");
 const passwordSaveBtn = document.getElementById("passwordSaveBtn");
-const currentPasswordEl = document.getElementById("currentPassword");
 const adminPasswordEl = document.getElementById("adminPassword");
 const adminPasswordConfirmEl = document.getElementById("adminPasswordConfirm");
 const passwordErrorEl = document.getElementById("passwordError");
@@ -138,11 +128,14 @@ const lalalAuthUseKeyBtn = document.getElementById("lalalAuthUseKeyBtn");
 const lalalAuthUseKeySpinner = document.getElementById("lalalAuthUseKeySpinner");
 const lalalActivationKey = document.getElementById("lalalActivationKey");
 const lalalDurationGuard = document.getElementById("lalalDurationGuard");
+const mp4PresetEl = document.getElementById("mp4Preset");
 
 let saveTimeoutId = null;
 let isSaving = false;
 let pendingSave = false;
+let settingsDirty = false;
 let isAuthUseKeyBusy = false;
+let isResettingStats = false;
 
 function setAutoSaveState(state, message = "") {
     if (!autoSaveIndicator || !autoSaveIndicatorText || !autoSaveSpinner) {
@@ -186,7 +179,7 @@ function updateLalalAuthButtonLabel(statusText) {
     if (!lalalAuthBtnLabel) return;
     const normalized = String(statusText || "").trim().toLowerCase();
     const shouldReconnect = normalized.startsWith("connected") || normalized === "token invalid";
-    lalalAuthBtnLabel.textContent = shouldReconnect ? "Reconnect" : "Authenticate";
+    lalalAuthBtnLabel.textContent = shouldReconnect ? "Reconnect" : "Click to Connect";
 }
 
 function setLalalStatus(text, type = "secondary") {
@@ -308,23 +301,26 @@ function validateSettings() {
         return { valid: false, error: "Retention must be between 1 and 365 days" };
     }
 
+    const fragments = parseInt(String(form.get("download_concurrent_fragments") || ""), 10);
+    if (!Number.isFinite(fragments) || fragments < 1 || fragments > 16) {
+        return { valid: false, error: "Parallel fragments must be between 1 and 16" };
+    }
+
     return {
         valid: true,
         data: {
             retention_days: retention,
+            download_concurrent_fragments: fragments,
+            download_mp4_preset: mp4PresetEl ? mp4PresetEl.checked : true,
             lalalaai_duration_guard: lalalDurationGuard ? lalalDurationGuard.checked : true,
         },
     };
 }
 
 function validatePasswordChange() {
-    const currentPassword = currentPasswordEl?.value || "";
     const nextPassword = adminPasswordEl?.value || "";
     const confirmPassword = adminPasswordConfirmEl?.value || "";
 
-    if (!currentPassword) {
-        return { valid: false, error: "Current password is required" };
-    }
     if (!nextPassword) {
         return { valid: false, error: "New password is required" };
     }
@@ -338,14 +334,13 @@ function validatePasswordChange() {
     return {
         valid: true,
         data: {
-            current_password: currentPassword,
             admin_password: nextPassword,
         },
     };
 }
 
 function setPasswordError(message) {
-    if (!adminPasswordEl || !adminPasswordConfirmEl || !currentPasswordEl || !passwordErrorEl) {
+    if (!adminPasswordEl || !adminPasswordConfirmEl || !passwordErrorEl) {
         return;
     }
 
@@ -354,7 +349,6 @@ function setPasswordError(message) {
         passwordErrorEl.classList.remove("d-none");
         adminPasswordConfirmEl.classList.add("is-invalid");
         adminPasswordEl.classList.add("is-invalid");
-        currentPasswordEl.classList.toggle("is-invalid", message.toLowerCase().includes("current password"));
         return;
     }
 
@@ -362,7 +356,6 @@ function setPasswordError(message) {
     passwordErrorEl.textContent = "";
     adminPasswordConfirmEl.classList.remove("is-invalid");
     adminPasswordEl.classList.remove("is-invalid");
-    currentPasswordEl.classList.remove("is-invalid");
 
     const pw = adminPasswordEl.value;
     const confirm = adminPasswordConfirmEl.value;
@@ -392,6 +385,7 @@ function validatePasswordFields() {
 }
 
 function scheduleAutoSave(delay = AUTO_SAVE_DELAY_MS) {
+    settingsDirty = true;
     if (saveTimeoutId) {
         clearTimeout(saveTimeoutId);
     }
@@ -435,6 +429,9 @@ async function saveSettings() {
         }
 
         setAutoSaveState(AUTO_SAVE_STATE.SUCCESS, `Saved ${TIME_FORMATTER.format(new Date())}`);
+        if (!pendingSave) {
+            settingsDirty = false;
+        }
     } catch (err) {
         const message = err?.name === "AbortError"
             ? "Request timed out"
@@ -478,7 +475,6 @@ async function changePassword() {
             throw new Error(payload.detail || `HTTP ${res.status}`);
         }
 
-        if (currentPasswordEl) currentPasswordEl.value = "";
         if (adminPasswordEl) adminPasswordEl.value = "";
         if (adminPasswordConfirmEl) adminPasswordConfirmEl.value = "";
         setPasswordError("");
@@ -500,9 +496,114 @@ async function changePassword() {
     }
 }
 
+async function resetStatistics() {
+    if (isResettingStats || !window.confirm("Reset all dashboard statistics to 0?")) {
+        return;
+    }
+
+    isResettingStats = true;
+    if (resetStatsBtn) {
+        resetStatsBtn.disabled = true;
+    }
+
+    try {
+        const res = await fetchWithTimeout("/api/stats/reset", {
+            method: "POST",
+            credentials: "same-origin",
+            headers: {
+                "X-CSRF-Token": requireCsrfToken(),
+            },
+        });
+
+        const payload = await parseResponsePayload(res);
+        if (!res.ok) {
+            throw new Error(payload.detail || `HTTP ${res.status}`);
+        }
+
+        showToast(payload.message || "Statistics reset", "success");
+    } catch (err) {
+        const message = err?.name === "AbortError" ? "Request timed out" : (err?.message || "Request failed");
+        showToast(`Error: ${message}`, "danger");
+    } finally {
+        isResettingStats = false;
+        if (resetStatsBtn) {
+            resetStatsBtn.disabled = false;
+        }
+    }
+}
+
+function bindPasswordVisibilityToggles() {
+    document.querySelectorAll(".password-toggle-btn").forEach((btn) => {
+        const input = document.getElementById(btn.dataset.target);
+        if (!input) return;
+
+        btn.addEventListener("click", () => {
+            const showing = input.type === "text";
+            input.type = showing ? "password" : "text";
+            btn.setAttribute("aria-pressed", String(!showing));
+            btn.setAttribute("aria-label", showing ? "Show password" : "Hide password");
+            btn.querySelector(".material-symbols-outlined").textContent = showing
+                ? "visibility"
+                : "visibility_off";
+        });
+    });
+}
+
+window.addEventListener("beforeunload", (event) => {
+    if (!settingsDirty && !isSaving && saveTimeoutId === null) {
+        return;
+    }
+    event.preventDefault();
+    event.returnValue = "";
+});
+
+function clearSensitiveInputs() {
+    if (adminPasswordEl) adminPasswordEl.value = "";
+    if (adminPasswordConfirmEl) adminPasswordConfirmEl.value = "";
+    if (lalalActivationKey) lalalActivationKey.value = "";
+}
+
+function persistPendingSettingsOnPageHide() {
+    clearSensitiveInputs();
+
+    if (saveTimeoutId !== null) {
+        clearTimeout(saveTimeoutId);
+        saveTimeoutId = null;
+    }
+
+    if (!settingsDirty) {
+        return;
+    }
+
+    const validation = validateSettings();
+    const csrfToken = getCookie(CSRF_COOKIE_NAME);
+    if (!validation.valid || !csrfToken) {
+        return;
+    }
+
+    // iOS/Safari may suspend the page before the debounced save runs. The
+    // request is intentionally small and idempotent so keepalive can finish
+    // it during navigation or BFCache entry.
+    void fetch("/api/settings", {
+        method: "POST",
+        credentials: "same-origin",
+        keepalive: true,
+        headers: {
+            "Content-Type": "application/json",
+            "X-CSRF-Token": csrfToken,
+        },
+        body: JSON.stringify(validation.data),
+    }).catch(() => {
+        // Navigation is already in progress; the normal page state cannot be
+        // updated reliably here.
+    });
+}
+
+window.addEventListener("pagehide", persistPendingSettingsOnPageHide);
+
 function bindSettingsInputs() {
     formEl?.querySelectorAll("input, select, textarea").forEach((input) => {
-        if (input === currentPasswordEl || input === adminPasswordEl || input === adminPasswordConfirmEl) {
+        if (input === adminPasswordEl || input === adminPasswordConfirmEl) {
             return;
         }
 
@@ -611,6 +712,8 @@ function bindLalalEvents() {
         renderAuthUseKeyButton();
     });
 
+    lalalAuthModal?.addEventListener("hidden.bs.modal", clearSensitiveInputs);
+
     lalalAuthModal?.addEventListener("shown.bs.modal", () => {
         lalalAuthEmail?.focus();
     });
@@ -630,6 +733,49 @@ function bindLalalEvents() {
     });
 }
 
+function applyUpdateBadge(cell, info) {
+    const badge = cell.querySelector("[data-update-badge]");
+    if (!badge) return;
+
+    if (!info?.update_available || !info.latest) {
+        badge.hidden = true;
+        return;
+    }
+
+    // Informational only — updating means rebuilding the container image.
+    const hint = `Version ${info.latest} is available — rebuild the image to update`;
+    badge.href = info.url || "#";
+    badge.title = hint;
+    badge.setAttribute("aria-label", `${info.label || "Component"}: ${hint}`);
+    badge.hidden = false;
+}
+
+async function loadUpdateStatus() {
+    const cells = document.querySelectorAll("[data-update-component]");
+    if (!cells.length) {
+        return;
+    }
+
+    try {
+        const res = await fetchWithTimeout("/api/updates", { credentials: "same-origin" });
+        if (!res.ok) {
+            return;
+        }
+
+        const payload = await parseResponsePayload(res);
+        const components = payload?.components;
+        if (!components || typeof components !== "object") {
+            return;
+        }
+
+        cells.forEach((cell) => {
+            applyUpdateBadge(cell, components[cell.dataset.updateComponent]);
+        });
+    } catch {
+        // Update checks are best-effort — a failed check simply shows no badge.
+    }
+}
+
 function init() {
     if (!formEl) {
         return;
@@ -640,18 +786,20 @@ function init() {
     renderAuthUseKeyButton();
     updateLalalAuthButtonLabel(lalalStatusBadge?.textContent || bootstrapData.lalal_status);
     void loadLalalStatus();
+    void loadUpdateStatus();
 
     adminPasswordEl?.addEventListener("input", validatePasswordFields);
     adminPasswordConfirmEl?.addEventListener("input", validatePasswordFields);
-    currentPasswordEl?.addEventListener("input", () => {
-        currentPasswordEl.classList.remove("is-invalid");
-    });
     passwordSaveBtn?.addEventListener("click", () => {
         void changePassword();
+    });
+    resetStatsBtn?.addEventListener("click", () => {
+        void resetStatistics();
     });
 
     bindSettingsInputs();
     bindLalalEvents();
+    bindPasswordVisibilityToggles();
 
     settingsSaveBtn?.addEventListener("click", () => {
         if (saveTimeoutId) {

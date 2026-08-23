@@ -20,12 +20,12 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from ..common.rate_limit import limiter
-from ..db import COMPLETED_STATUSES, get_job
+from ..db import DOWNLOADABLE_STATUSES, get_job
 from ..governor import governor
-from ..utils.fs import LOSSLESS_AUDIO_SOURCE_EXTENSIONS, TRIM_ID_RE, path_is_file
+from ..utils.fs import AUDIO_SOURCE_EXTENSIONS, TRIM_ID_RE, path_is_file
 from ..worker import sanitize_filename
 from .auth import require_user_json
 
@@ -38,6 +38,8 @@ _DATA_DIR: Path | None = None
 _resolve_job_path: Callable[[str | None], Path] | None = None
 
 class TrimRequest(BaseModel):
+    model_config = ConfigDict(allow_inf_nan=False, extra="forbid")
+
     start: float = Field(ge=0, description="Start time in seconds")
     end: float = Field(gt=0, description="End time in seconds")
 
@@ -121,8 +123,6 @@ async def _acquire_trim_lock(lock_file: Path) -> AsyncIterator[None]:
             fcntl.flock(lock_fd, fcntl.LOCK_UN)
         finally:
             os.close(lock_fd)
-            with suppress(OSError):
-                os.unlink(lock_file)
 
     lock_fd = await asyncio.to_thread(_lock)
     try:
@@ -140,6 +140,13 @@ async def trim_audio(request: Request, job_id: uuid.UUID, body: TrimRequest, _us
 
     start = body.start
     end = body.end
+
+    # Use the same millisecond quantisation for validation, cache identity,
+    # and ffmpeg so equal trim IDs always mean equal media ranges.
+    start_ms = round(start * 1000)
+    end_ms = round(end * 1000)
+    start = start_ms / 1000
+    end = end_ms / 1000
     
     # Validate selection
     if end <= start:
@@ -161,12 +168,12 @@ async def trim_audio(request: Request, job_id: uuid.UUID, body: TrimRequest, _us
     if job["type"] != "audio":
         return JSONResponse(status_code=400, content={"error": "Trim only works with audio jobs"})
     
-    if job["status"] not in COMPLETED_STATUSES:
+    if job["status"] not in DOWNLOADABLE_STATUSES:
         return JSONResponse(status_code=400, content={"error": "Job not ready"})
     
     # Validate end against known duration (if available)
     # sqlite3.Row doesn't have .get(), use bracket access with fallback
-    job_duration = job["duration"] if "duration" in job else None
+    job_duration = job["duration_seconds"] if "duration_seconds" in job else None
     if job_duration is not None and end > float(job_duration):
         return JSONResponse(status_code=400, content={"error": f"End time ({end:.1f}s) exceeds track duration ({job_duration:.1f}s)"})
     
@@ -180,8 +187,8 @@ async def trim_audio(request: Request, job_id: uuid.UUID, body: TrimRequest, _us
     if not await path_is_file(source_path):
         return JSONResponse(status_code=404, content={"error": "Source file not found"})
     
-    # Check if source is an audio file (lossless preferred, MP3 also accepted for trim).
-    if source_path.suffix.lower() not in (LOSSLESS_AUDIO_SOURCE_EXTENSIONS | {".mp3"}):
+    # Check if source is an audio file (native source preferred, MP3 also accepted for trim).
+    if source_path.suffix.lower() not in (AUDIO_SOURCE_EXTENSIONS | {".mp3"}):
         return JSONResponse(status_code=400, content={"error": "Not an audio file"})
     
     # Prepare output with unique trim_id based on timestamps
@@ -189,7 +196,7 @@ async def trim_audio(request: Request, job_id: uuid.UUID, body: TrimRequest, _us
     await _ensure_directory(output_dir)
     
     # Generate deterministic trim_id from start/end (millisecond precision)
-    trim_id = f"{int(start * 1000)}_{int(end * 1000)}"
+    trim_id = f"{start_ms}_{end_ms}"
     
     # Lock to prevent parallel trims for the same requested segment.
     lock_file = output_dir / f".trim_{trim_id}.lock"
@@ -249,9 +256,9 @@ async def trim_audio(request: Request, job_id: uuid.UUID, body: TrimRequest, _us
 
                 if proc.returncode != 0:
                     err_text = (stderr.decode(errors="replace") if stderr else "unknown error").strip()
-                    logger.error("FFmpeg trim failed: %s", err_text)
+                    logger.error("FFmpeg trim failed: %.4000s", err_text)
                     await _unlink_file(temp_file)
-                    return JSONResponse(status_code=500, content={"error": f"Trim failed: {err_text[:500]}"})
+                    return JSONResponse(status_code=500, content={"error": "Trim operation failed"})
 
                 # Atomic rename after ffmpeg finished successfully.
                 await _replace_file(temp_file, out_file)
@@ -282,10 +289,10 @@ async def trim_audio(request: Request, job_id: uuid.UUID, body: TrimRequest, _us
         logger.error("FFmpeg binary not found while trimming job %s", job_id)
         return JSONResponse(status_code=500, content={"error": "FFmpeg is not installed on the server"})
 
-    except OSError as exc:
+    except OSError:
         await _unlink_file(temp_file)
         logger.exception("Trim failed for job %s", job_id)
-        return JSONResponse(status_code=500, content={"error": f"Trim failed: {exc}"})
+        return JSONResponse(status_code=500, content={"error": "Trim operation failed"})
     finally:
         await _unlink_file(temp_file)
 

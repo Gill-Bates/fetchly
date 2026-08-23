@@ -29,8 +29,8 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 from ..common.rate_limit import limiter
 from ..bpm_cluster import cluster_bpms
 from ..db import (
-    COMPLETED_STATUSES,
     TERMINAL_JOB_STATUSES,
+    find_active_job_for_submission,
     get_job,
     get_settings,
     get_stats,
@@ -42,11 +42,18 @@ from ..db import (
     update_job_if_status,
     utc_timestamp,
 )
-from ..utils.fs import get_json_body
+from ..utils.fs import get_data_dir, get_json_body
 from ..session import delete_session_cookie, refresh_session_settings_cache
 from ..utils.template_filters import is_lalala_configured, public_settings
 from ..utils.platform import detect_platform, validate_media_url
-from ..utils.version import get_ytdlp_version
+from ..utils.updates import get_update_status
+from ..utils.version import (
+    get_ffmpeg_version,
+    get_js_runtime_version,
+    get_wavesurfer_version,
+    get_ytdlp_ejs_version,
+    get_ytdlp_version,
+)
 from ..utils.youtube import (
     empty_info_payload,
     extract_video_meta_async,
@@ -60,7 +67,6 @@ from .auth import (
     require_session,
     require_user,
     require_user_json,
-    verify_login,
 )
 
 if TYPE_CHECKING:
@@ -196,6 +202,24 @@ async def api_stats(request: Request, _: str = Depends(require_user_json)) -> di
     return await asyncio.to_thread(get_stats)
 
 
+@router.post("/api/stats/reset")
+@limiter.limit("5/minute")
+async def api_reset_stats(request: Request, _user: str = Depends(require_session)):
+    """Reset dashboard statistics without deleting jobs or their files."""
+    _ = request
+
+    async with _get_stats_lock():
+        await asyncio.to_thread(
+            set_settings,
+            {"statistics_reset_at": utc_timestamp()},
+            allow_internal=True,
+        )
+        _stats_cache["data"] = None
+        _stats_cache["ts"] = 0.0
+
+    return {"ok": True, "message": "Statistics reset"}
+
+
 @router.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     """Dashboard home page."""
@@ -208,7 +232,7 @@ async def index(request: Request):
     raw_jobs = await asyncio.to_thread(paginate_jobs, limit=50, offset=0)
     jobs = [job_to_dict(job) for job in raw_jobs]
     stats = await get_cached_stats()
-    settings = await asyncio.to_thread(get_settings)
+    settings = await asyncio.to_thread(get_settings, include_secrets=True)
     lalal_enabled = is_lalala_configured(settings)
     lalal_duration_guard = str(settings.get("lalalaai_duration_guard", "true")).lower() in ("true", "1", "yes")
     return templates.TemplateResponse(request=request, name="index.html", context={
@@ -229,9 +253,13 @@ async def settings_page(request: Request):
 
     templates = _require_templates()
 
-    settings = await asyncio.to_thread(get_settings)
+    settings = await asyncio.to_thread(get_settings, include_secrets=True)
     lalal_configured = is_lalala_configured(settings)
     ytdlp_version = await asyncio.to_thread(get_ytdlp_version)
+    ytdlp_ejs_version = get_ytdlp_ejs_version()
+    js_runtime_version = await asyncio.to_thread(get_js_runtime_version)
+    ffmpeg_version = await asyncio.to_thread(get_ffmpeg_version)
+    wavesurfer_version = get_wavesurfer_version()
     return templates.TemplateResponse(
         request=request,
         name="settings.html",
@@ -241,9 +269,35 @@ async def settings_page(request: Request):
             "lalal_status": "Connected" if lalal_configured else "Not configured",
             "lalal_email": str(settings.get("lalalaai_email", "") or ""),
             "ytdlp_version": ytdlp_version,
+            "ytdlp_ejs_version": ytdlp_ejs_version,
+            "js_runtime_version": js_runtime_version,
+            "ffmpeg_version": ffmpeg_version,
+            "wavesurfer_version": wavesurfer_version,
             "csrf_token": getattr(request.state, "csrf_token", ""),
         },
     )
+
+
+@router.get("/api/updates")
+@limiter.limit("30/minute")
+async def api_updates(request: Request, _user: str = Depends(require_user)):
+    """Report whether newer upstream releases exist for the installed tools.
+
+    Purely informational: nothing here updates anything, since these tools are
+    baked into the image and only a rebuild can change them. The upstream
+    lookup is cached for 24 hours, so reloading the settings page does not
+    trigger another request.
+    """
+    _ = request
+
+    current = {
+        "ytdlp": await asyncio.to_thread(get_ytdlp_version),
+        "ytdlp_ejs": get_ytdlp_ejs_version(),
+        "js_runtime": await asyncio.to_thread(get_js_runtime_version),
+        "ffmpeg": await asyncio.to_thread(get_ffmpeg_version),
+        "wavesurfer": get_wavesurfer_version(),
+    }
+    return await get_update_status(current)
 
 
 @router.get("/api/jobs")
@@ -277,7 +331,7 @@ async def api_job(request: Request, job_id: uuid.UUID, _user: str = Depends(requ
 async def api_bpm_clusters(request: Request, _user: str = Depends(require_user), limit: int = 1000):
     """Get BPM clusters for visualization."""
     _ = request
-    safe_limit = min(max(1, limit), 5000)
+    safe_limit = min(max(1, limit), 2000)
     bpms = await asyncio.to_thread(list_completed_bpms, safe_limit)
     clusters = await asyncio.to_thread(cluster_bpms, bpms)
     return [
@@ -415,17 +469,33 @@ _THUMBNAIL_ALLOWED_SUFFIXES: frozenset[str] = frozenset({
     ".facebook.com",
 })
 _THUMBNAIL_MAX_BYTES = 2 * 1024 * 1024  # 2 MiB
-_THUMB_CACHE_DIR = Path(__file__).parent.parent.parent / "data" / "thumb-cache"
+_THUMBNAIL_ALLOWED_TYPES: frozenset[str] = frozenset({
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+})
+_THUMB_CACHE_DIR = get_data_dir() / "thumb-cache"
 _THUMB_CACHE_KEY_RE = re.compile(r"^[a-f0-9]{64}$")
 _THUMB_EXTRACTION_TIMEOUT_SECONDS = 30
 _THUMB_ALLOWED_EXTENSIONS: frozenset[str] = frozenset({".jpg", ".jpeg", ".png", ".webp"})
 _COOKIES_DIR = Path(__file__).parent.parent.parent
-_COOKIES_DATA_DIR = _COOKIES_DIR / "data"
+_COOKIES_DATA_DIR = get_data_dir()
 _PLATFORM_COOKIE_FILENAMES: dict[str, str] = {
     "youtube": "youtube_cookies.txt",
     "instagram": "instagram_cookies.txt",
     "tiktok": "tiktok_cookies.txt",
 }
+
+
+def _thumbnail_signature_matches(data: bytes, content_type: str) -> bool:
+    """Reject payloads whose bytes do not match their declared raster type."""
+    if content_type == "image/jpeg":
+        return data.startswith(b"\xff\xd8\xff")
+    if content_type == "image/png":
+        return data.startswith(b"\x89PNG\r\n\x1a\n")
+    if content_type == "image/webp":
+        return len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP"
+    return False
 
 
 def _is_allowed_thumbnail_url(url: str) -> bool:
@@ -498,10 +568,12 @@ def _read_cached_thumbnail(cache_key: str) -> tuple[bytes, str] | None:
     except OSError:
         return None
 
-    if not data:
+    if not data or len(data) > _THUMBNAIL_MAX_BYTES:
         return None
-    if not content_type.startswith("image/"):
-        content_type = "image/jpeg"
+    if content_type not in _THUMBNAIL_ALLOWED_TYPES:
+        return None
+    if not _thumbnail_signature_matches(data, content_type):
+        return None
     return data, content_type
 
 
@@ -521,23 +593,41 @@ async def _fetch_thumbnail_payload(url: str) -> tuple[bytes, str]:
         raise HTTPException(status_code=400, detail="Thumbnail URL not allowed")
 
     try:
-        async with httpx.AsyncClient(timeout=8.0, follow_redirects=True, max_redirects=3) as client:
-            resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
+        async with httpx.AsyncClient(timeout=8.0, follow_redirects=False) as client:
+            async with client.stream("GET", url, headers={"User-Agent": "tubeyou"}) as resp:
+                if 300 <= resp.status_code < 400:
+                    raise HTTPException(status_code=502, detail="Thumbnail redirects are not accepted")
+                if resp.status_code != 200:
+                    raise HTTPException(status_code=502, detail="Thumbnail fetch failed")
+
+                content_type = resp.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+                if content_type not in _THUMBNAIL_ALLOWED_TYPES:
+                    raise HTTPException(status_code=502, detail="Unsupported thumbnail type")
+
+                content_length = resp.headers.get("content-length")
+                if content_length is not None:
+                    try:
+                        declared_length = int(content_length)
+                        if declared_length < 0:
+                            raise HTTPException(status_code=502, detail="Invalid thumbnail size")
+                        if declared_length > _THUMBNAIL_MAX_BYTES:
+                            raise HTTPException(status_code=502, detail="Thumbnail too large")
+                    except ValueError:
+                        raise HTTPException(status_code=502, detail="Invalid thumbnail size")
+
+                data = bytearray()
+                async for chunk in resp.aiter_bytes():
+                    if len(data) + len(chunk) > _THUMBNAIL_MAX_BYTES:
+                        raise HTTPException(status_code=502, detail="Thumbnail too large")
+                    data.extend(chunk)
     except httpx.RequestError as exc:
         logger.warning("Thumbnail fetch failed for %s: %s", url, exc)
         raise HTTPException(status_code=502, detail="Thumbnail unavailable") from exc
-
-    if resp.status_code != 200:
-        raise HTTPException(status_code=502, detail="Thumbnail fetch failed")
-
-    content_type = resp.headers.get("content-type", "image/jpeg").split(";")[0].strip().lower()
-    if not content_type.startswith("image/"):
-        raise HTTPException(status_code=502, detail="Unexpected content type")
-
-    data = resp.content[:_THUMBNAIL_MAX_BYTES]
     if not data:
         raise HTTPException(status_code=502, detail="Thumbnail unavailable")
-    return data, content_type
+    if not _thumbnail_signature_matches(data, content_type):
+        raise HTTPException(status_code=502, detail="Invalid thumbnail payload")
+    return bytes(data), content_type
 
 
 def _content_type_from_suffix(suffix: str) -> str:
@@ -590,13 +680,14 @@ def _extract_thumbnail_with_ytdlp(url: str) -> tuple[bytes, str] | None:
 
         thumb_path = candidates[0]
         try:
+            if thumb_path.stat().st_size > _THUMBNAIL_MAX_BYTES:
+                return None
             data = thumb_path.read_bytes()
         except OSError:
             return None
 
         if not data:
             return None
-        data = data[:_THUMBNAIL_MAX_BYTES]
         return data, _content_type_from_suffix(thumb_path.suffix)
 
 
@@ -685,7 +776,10 @@ async def api_thumbnail_cache(
     return Response(
         content=data,
         media_type=content_type,
-        headers={"Cache-Control": "public, max-age=604800, immutable"},
+        headers={
+            "Cache-Control": "private, max-age=604800, immutable",
+            "X-Content-Type-Options": "nosniff",
+        },
     )
 
 
@@ -699,7 +793,14 @@ async def api_thumbnail_proxy(
     """Proxy an external thumbnail URL server-side (CSP-safe for TikTok/Instagram)."""
     _ = request
     data, content_type = await _fetch_thumbnail_payload(url)
-    return Response(content=data, media_type=content_type, headers={"Cache-Control": "public, max-age=3600"})
+    return Response(
+        content=data,
+        media_type=content_type,
+        headers={
+            "Cache-Control": "private, max-age=3600",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @router.get("/api/settings")
@@ -707,7 +808,7 @@ async def api_thumbnail_proxy(
 async def api_get_settings(request: Request, _user: str = Depends(require_user)):
     """Get all settings."""
     _ = request
-    settings = await asyncio.to_thread(get_settings)
+    settings = await asyncio.to_thread(get_settings, include_secrets=True)
     return public_settings(settings)
 
 
@@ -727,7 +828,7 @@ def _parse_bool(value: Any, name: str) -> bool:
 @router.post("/api/settings")
 @limiter.limit("5/minute")
 async def api_set_settings(request: Request, _user: str = Depends(require_session)):
-    """Update retention/session settings and optional admin password."""
+    """Update retention/download/session settings and optional admin password."""
     payload = await get_json_body(request)
 
     settings_to_update: dict[str, Any] = {}
@@ -735,6 +836,15 @@ async def api_set_settings(request: Request, _user: str = Depends(require_sessio
 
     if "retention_days" in payload:
         settings_to_update["retention_days"] = _clamp_int(payload["retention_days"], 1, 365, "retention_days")
+
+    if "download_concurrent_fragments" in payload:
+        settings_to_update["download_concurrent_fragments"] = _clamp_int(
+            payload["download_concurrent_fragments"], 1, 16, "download_concurrent_fragments"
+        )
+
+    if "download_mp4_preset" in payload:
+        enabled = _parse_bool(payload["download_mp4_preset"], "download_mp4_preset")
+        settings_to_update["download_mp4_preset"] = "true" if enabled else "false"
 
     if "lalalaai_duration_guard" in payload:
         enabled = _parse_bool(payload["lalalaai_duration_guard"], "lalalaai_duration_guard")
@@ -746,12 +856,7 @@ async def api_set_settings(request: Request, _user: str = Depends(require_sessio
             if len(new_password) < 8:
                 raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
 
-            current_password = str(payload.get("current_password", ""))
-            is_valid_current_password = await asyncio.to_thread(verify_login, _DEFAULT_USER, current_password)
-            if not is_valid_current_password:
-                raise HTTPException(status_code=403, detail="Current password is invalid")
-
-            current_settings = await asyncio.to_thread(get_settings)
+            current_settings = await asyncio.to_thread(get_settings, include_internal=True)
             current_session_version = int(current_settings.get("session_version", 0) or 0)
 
             settings_to_update["admin_password_hash"] = await asyncio.to_thread(
@@ -792,6 +897,7 @@ async def api_submit(
     url: str = Form(...),
     media_type: str = Form(..., alias="type"),
     quality: str = Form(...),
+    confirm_duplicate: bool = Form(False),
     _user: str = Depends(require_user),
 ):
     """Submit a new download job."""
@@ -809,15 +915,31 @@ async def api_submit(
     if not is_valid:
         raise HTTPException(status_code=400, detail=error_msg)
 
+    clean_url = url.strip()
+
+    # Same (url, type, quality) already downloaded or in flight: surface it to
+    # the caller as a conflict instead of silently creating a second job (see
+    # find_active_job_for_submission - errored/cancelled jobs don't count, so a
+    # retry after failure is never blocked). The frontend re-submits with
+    # confirm_duplicate=true once the user confirms they want it anyway.
+    if not confirm_duplicate:
+        existing_job = await asyncio.to_thread(
+            find_active_job_for_submission, clean_url, media_type, quality_value
+        )
+        if existing_job is not None:
+            return JSONResponse(
+                status_code=409,
+                content={"detail": "duplicate_job", "existing_job": job_to_dict(existing_job)},
+            )
+
     # Try to extract metadata with short timeout - don't block job creation if it fails
     meta: dict[str, object] = {"video_title": None, "video_meta_hover": None}
     try:
-        meta = await asyncio.wait_for(extract_video_meta_async(url.strip()), timeout=8.0)
+        meta = await asyncio.wait_for(extract_video_meta_async(clean_url), timeout=8.0)
     except Exception as exc:
         logger.debug("Metadata extraction skipped for submit (will be fetched by worker): %s", exc)
 
     job_id = str(uuid.uuid4())
-    clean_url = url.strip()
     job_queue = get_job_queue()
     if job_queue.full():
         raise HTTPException(status_code=503, detail="Job queue is full, please try again later")
@@ -865,9 +987,6 @@ async def cancel_job(request: Request, job_id: uuid.UUID, _user: str = Depends(r
     if status in TERMINAL_JOB_STATUSES:
         raise HTTPException(status_code=400, detail=f"Cannot cancel job with status: {status}")
 
-    # Mark job for cancellation
-    cancel_worker_job(job_id_str)
-
     cancelled = await asyncio.to_thread(
         update_job_if_status,
         job_id_str,
@@ -877,10 +996,11 @@ async def cancel_job(request: Request, job_id: uuid.UUID, _user: str = Depends(r
         finished_at=utc_timestamp(),
     )
 
-    if cancelled:
-        logger.info("Cancellation requested for job %s (status: %s)", job_id_str, status)
-    else:
-        logger.info("Cancellation request for job %s lost race to a later status transition", job_id_str)
+    if not cancelled:
+        raise HTTPException(status_code=409, detail="Job state changed before cancellation")
+
+    cancel_worker_job(job_id_str)
+    logger.info("Cancellation requested for job %s (status: %s)", job_id_str, status)
 
     job = await asyncio.to_thread(get_job, job_id_str)
     return job_to_dict(job)

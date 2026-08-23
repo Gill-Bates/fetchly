@@ -15,6 +15,7 @@ __pycache__/
 
 # Coverage
 .coverage
+.coverage.*
 coverage.xml
 htmlcov/
 
@@ -25,6 +26,7 @@ htmlcov/
 # Environment
 .env
 .env.*
+!.env.example
 .venv/
 
 # Logs / traces
@@ -33,6 +35,7 @@ htmlcov/
 *.log
 
 # Local tooling / runtime artifacts
+.claude/settings.local.json
 .codex
 .omx/
 app/static/vendor/wavesurfer/
@@ -46,4 +49,3 @@ BUILD_INFO
 
 # Python bytecode
 *.py[cod]
-*.pyo

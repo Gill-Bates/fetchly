@@ -4,7 +4,7 @@
 //
 
 import { CANCELLABLE_STATUSES, DOWNLOADABLE_STATUSES, LALAL_MAX_DURATION_SECONDS } from "./config.js";
-import { humanSize } from "./utils.js";
+import { EMPTY_VALUE, humanSize } from "./utils.js";
 
 export const ACTION_CATEGORY = Object.freeze({
     DOWNLOAD: "download",
@@ -13,16 +13,18 @@ export const ACTION_CATEGORY = Object.freeze({
 });
 
 export const STATUS_META = Object.freeze({
-    analysis: { color: "primary", label: "ANALYSIS" },
-    analysis_done: { color: "success", label: "DONE" },
-    cancelled: { color: "secondary", label: "CANCELLED" },
-    done: { color: "success", label: "DONE" },
-    downloading: { color: "primary", label: "DOWNLOADING" },
-    error: { color: "danger", label: "ERROR" },
-    processing: { color: "primary", label: "PROCESSING" },
-    queued: { color: "primary", label: "QUEUED" },
-    transcoding: { color: "primary", label: "TRANSCODING" },
+    analysis: { color: "primary", label: "Analyzing" },
+    analysis_done: { color: "success", label: "Done" },
+    cancelled: { color: "secondary", label: "Cancelled" },
+    done: { color: "success", label: "Done" },
+    downloading: { color: "primary", label: "Running" },
+    error: { color: "danger", label: "Error" },
+    processing: { color: "primary", label: "Running" },
+    queued: { color: "primary", label: "Queued" },
+    transcoding: { color: "primary", label: "Running" },
 });
+
+const PROGRESS_STATUSES = new Set(["analysis", "downloading", "processing", "transcoding"]);
 
 export function getStatusMeta(status) {
     const normalizedStatus = status || "queued";
@@ -37,7 +39,7 @@ export function getStatusText(status, progress = null) {
     const meta = getStatusMeta(normalizedStatus);
     const parsedProgress = Number(progress);
 
-    if (normalizedStatus === "transcoding" && Number.isFinite(parsedProgress) && parsedProgress >= 0) {
+    if (PROGRESS_STATUSES.has(normalizedStatus) && Number.isFinite(parsedProgress) && parsedProgress >= 0) {
         return `${meta.label} ${Math.round(parsedProgress)}%`;
     }
 
@@ -61,12 +63,22 @@ export function isLalalDurationGuardEnabled() {
     return document.documentElement.dataset.lalalDurationGuard !== "false";
 }
 
+function getKnownDurationSeconds(job) {
+    const rawDuration = job?.duration_seconds;
+    if (rawDuration == null || String(rawDuration).trim() === "") {
+        return null;
+    }
+
+    const durationSeconds = Number(rawDuration);
+    return Number.isFinite(durationSeconds) && durationSeconds >= 0 ? durationSeconds : null;
+}
+
 export function isDurationBlocked(job) {
     if (!isLalalDurationGuardEnabled()) {
         return false;
     }
-    const durationSeconds = job?.duration_seconds ?? 0;
-    return durationSeconds > LALAL_MAX_DURATION_SECONDS;
+    const durationSeconds = getKnownDurationSeconds(job);
+    return durationSeconds === null || durationSeconds > LALAL_MAX_DURATION_SECONDS;
 }
 
 export function buildDownloadUrl(jobId) {
@@ -206,7 +218,9 @@ function appendAudioDownloadActions(menu, job) {
         if (!lalalEnabled) {
             title = "Lalal.ai is not connected";
         } else if (durationBlocked) {
-            title = "Track exceeds 10 min — blocked by Duration Guard";
+            title = getKnownDurationSeconds(job) === null
+                ? "Track duration unknown — blocked by Duration Guard"
+                : "Track exceeds 10 min — blocked by Duration Guard";
         }
         menu.appendChild(createDropdownButton(
             iconName,
@@ -287,7 +301,10 @@ export function getActionButtonCategory(status) {
 export function resolveJobAction(job) {
     const category = getActionButtonCategory(job?.status);
     const jobId = getJobId(job);
-    const durationBucket = Number(job?.duration_seconds || 0) > 600 ? "long" : "ok";
+    const knownDuration = getKnownDurationSeconds(job);
+    const durationBucket = knownDuration === null
+        ? "unknown"
+        : knownDuration > LALAL_MAX_DURATION_SECONDS ? "long" : "ok";
     const lalalState = job?.type === "audio"
         ? `${isLalalEnabled() ? "lalal-on" : "lalal-off"}:${isLalalDurationGuardEnabled() ? "guard-on" : "guard-off"}`
         : "none";
@@ -301,7 +318,7 @@ export function resolveJobAction(job) {
 }
 
 /**
- * Build a status pill and optional file-size badge.
+ * Build a status pill, optional file-size badge, and an error tooltip.
  * Returns a <div class="status-inline">, which events.js relies on for live updates.
  * @param {string} status
  * @param {number | null | undefined} sizeBytes
@@ -309,18 +326,19 @@ export function resolveJobAction(job) {
  * @param {string | null | undefined} message
  * @returns {HTMLDivElement} Element with class "status-inline"
  */
-export function createStatusElement(status, sizeBytes, progress = null, message = null) {
+export function createStatusElement(status, sizeBytes, progress = null, message = null, { showSize = true } = {}) {
     const wrapper = document.createElement("div");
     wrapper.className = "status-inline";
 
     const pill = document.createElement("span");
     pill.className = getStatusPillClass(status);
-    pill.textContent = getStatusText(status, progress);
+    const statusText = getStatusText(status, progress);
+    pill.textContent = statusText;
 
     wrapper.appendChild(pill);
 
     const renderedSize = humanSize(sizeBytes);
-    if (renderedSize !== "-") {
+    if (showSize && renderedSize !== EMPTY_VALUE) {
         const size = document.createElement("span");
         size.className = "status-size";
         size.setAttribute("title", "File size");
@@ -330,11 +348,8 @@ export function createStatusElement(status, sizeBytes, progress = null, message 
 
     const normalizedMessage = typeof message === "string" ? message.trim() : "";
     if (normalizedStatus(status) === "error" && normalizedMessage) {
-        const detail = document.createElement("span");
-        detail.className = "status-message";
-        detail.textContent = normalizedMessage;
-        detail.title = normalizedMessage;
-        wrapper.appendChild(detail);
+        pill.title = normalizedMessage;
+        pill.setAttribute("aria-label", `${statusText}: ${normalizedMessage}`);
     }
 
     return wrapper;
@@ -398,9 +413,6 @@ export function createPrimaryActionButton(job) {
 
 function renderPrimaryAction(action) {
     if (action.category === ACTION_CATEGORY.DOWNLOAD) {
-        if (action.job?.type === "audio") {
-            return createDesktopDownloadAction(action.job);
-        }
         return createDownloadLink("btn jobs-mobile-action", action.jobId);
     }
 

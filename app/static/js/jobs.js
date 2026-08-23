@@ -8,7 +8,8 @@
  *
  * Manages the jobs collection DOM for both desktop and mobile renderers.
  * Desktop remains table-based, while mobile renders a feed of articles from
- * the same in-memory job list so the UI does not duplicate per-job DOM.
+ * the same in-memory job list while maintaining parallel desktop and mobile
+ * DOM representations.
  */
 
 import { CONFIG, TERMINAL_STATUSES } from "./config.js";
@@ -18,13 +19,19 @@ import {
     createActionButton,
     createPrimaryActionButton,
     resolveJobAction,
-} from "./ui.js";
-import { detectPlatform, platformPillLabel } from "./utils.js";
+} from "./ui.js?v=20260823c";
+import { detectPlatform, humanSize, platformPillLabel } from "./utils.js";
 
-const MOBILE_BREAKPOINT = "(max-width: 768px)";
+const MOBILE_BREAKPOINT = "(max-width: 1024px)";
 const FALLBACK_JOBS_TABLE_COLUMN_COUNT = 8;
 const HARD_MAX_ROWS = CONFIG.MAX_ROWS * 2;
 const EMPTY_VALUE = "–";
+
+function parseUtcTimestamp(value) {
+    const text = value == null ? "" : String(value).trim();
+    const sqliteUtc = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
+    return new Date(sqliteUtc.test(text) ? `${text.replace(" ", "T")}Z` : text);
+}
 
 const STATUS = Object.freeze({
     DOWNLOADING: "downloading",
@@ -38,18 +45,6 @@ const STATUS = Object.freeze({
     TRANSCODING: "transcoding",
 });
 
-const STATUS_TEXT = Object.freeze({
-    analysis: "analyzing",
-    analysis_done: "done",
-    cancelled: "cancelled",
-    done: "done",
-    downloading: "downloading",
-    error: "error",
-    processing: "processing",
-    queued: "queued",
-    transcoding: "transcoding",
-});
-
 const JOB_TYPE = Object.freeze({
     AUDIO: "audio",
 });
@@ -61,6 +56,13 @@ const DATE_FORMATTER = new Intl.DateTimeFormat(undefined, {
 });
 
 const TIME_FORMATTER = new Intl.DateTimeFormat(undefined, {
+    hour: "2-digit",
+    minute: "2-digit",
+});
+
+const MOBILE_DATE_TIME_FORMATTER = new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
     hour: "2-digit",
     minute: "2-digit",
 });
@@ -116,10 +118,18 @@ function getTitleText(job) {
 
 function getQualityLabel(job) {
     if (job?.type === JOB_TYPE.AUDIO) {
-        return job?.quality || job?.codec || "MP3";
+        return String(job?.quality || job?.codec || "MP3").toUpperCase();
     }
 
-    return job?.quality || EMPTY_VALUE;
+    const quality = String(job?.quality || EMPTY_VALUE);
+    return quality === "max" ? "Max" : quality;
+}
+
+function getTypeLabel(job) {
+    const type = String(job?.type || "").toLowerCase();
+    if (type === "audio") return "Audio";
+    if (type === "video") return "Video";
+    return type ? type.charAt(0).toUpperCase() + type.slice(1) : EMPTY_VALUE;
 }
 
 function formatBpmValue(value) {
@@ -147,26 +157,24 @@ export function formatCompactJobMeta(jobLike) {
     return parts.join(" · ") || EMPTY_VALUE;
 }
 
-function formatStatusText(status) {
-    if (!status) {
-        return "queued";
-    }
-
-    return STATUS_TEXT[status] || String(status).toLowerCase();
-}
-
-function formatMobileJobMeta(jobLike) {
+function formatMobileMediaLine(jobLike) {
     const parts = [
-        jobLike?.type || "",
+        getTypeLabel(jobLike),
         getQualityLabel(jobLike),
-        formatStatusText(jobLike?.status),
+        humanSize(jobLike?.filesize_bytes),
     ].filter((part) => part && part !== EMPTY_VALUE);
     return parts.join(" · ") || EMPTY_VALUE;
 }
 
-function formatCreatedText(isoOrFormatted) {
+function formatMobileTimeLine(isoOrFormatted) {
     const text = isoOrFormatted == null ? "" : String(isoOrFormatted);
-    const dt = new Date(text);
+    const dt = parseUtcTimestamp(text);
+    return Number.isNaN(dt.getTime()) ? text : MOBILE_DATE_TIME_FORMATTER.format(dt);
+}
+
+export function formatCreatedText(isoOrFormatted) {
+    const text = isoOrFormatted == null ? "" : String(isoOrFormatted);
+    const dt = parseUtcTimestamp(text);
     if (Number.isNaN(dt.getTime())) {
         return text;
     }
@@ -375,7 +383,7 @@ function renderDesktopTitle(job) {
 }
 
 function formatDesktopMediaPrimary(job) {
-    const parts = [job?.type || "", getQualityLabel(job)].filter((part) => part && part !== EMPTY_VALUE);
+    const parts = [getTypeLabel(job), getQualityLabel(job)].filter((part) => part && part !== EMPTY_VALUE);
     return parts.join(" · ") || EMPTY_VALUE;
 }
 
@@ -405,10 +413,20 @@ function renderDesktopMeta(job) {
 
 function renderMobileMeta(job) {
     const meta = document.createElement("p");
-    meta.className = "job-item__meta jobs-mobile-meta";
+    meta.className = "job-item__meta jobs-mobile-meta jobs-mobile-media";
     meta.dataset.role = "job-meta-summary";
-    meta.textContent = formatMobileJobMeta(job);
+    meta.textContent = formatMobileMediaLine(job);
     return meta;
+}
+
+function renderMobileTime(job) {
+    const time = document.createElement("p");
+    time.className = "job-item__time";
+    time.dataset.role = "job-time";
+    const value = formatMobileTimeLine(job?.created_at) || EMPTY_VALUE;
+    time.textContent = value;
+    time.setAttribute("aria-label", `Added ${value}`);
+    return time;
 }
 
 function createMobileDetailItem(label, value) {
@@ -429,25 +447,30 @@ function createMobileDetailItem(label, value) {
 
 function renderMobileDetails(job) {
     const details = document.createElement("div");
-    details.className = "job-item__details";
+    details.className = "job-item__details visually-hidden";
     details.dataset.role = "job-details";
 
-    const specs = formatDesktopMediaSecondary(job);
     details.append(
-        createMobileDetailItem("Media", formatDesktopMediaPrimary(job)),
-        createMobileDetailItem("Details", specs || "Metadata updates while the job runs"),
+        createMobileDetailItem("Codec", job?.codec || EMPTY_VALUE),
+        createMobileDetailItem("Bitrate", formatBitrateText(job?.bitrate_kbps)),
         createMobileDetailItem("Added", formatCreatedText(job?.created_at) || EMPTY_VALUE),
     );
 
     return details;
 }
 
-function renderJobStatus(job, { mobile = false } = {}) {
+function renderJobStatus(job, { mobile = false, showSize = true } = {}) {
     const container = document.createElement(mobile ? "div" : "td");
     container.dataset.label = "Status";
     container.dataset.role = "job-status";
     container.className = mobile ? "job-item__status" : "col-status";
-    container.append(createStatusElement(job?.status, job?.filesize_bytes, job?.progress, job?.message));
+    container.append(createStatusElement(
+        job?.status,
+        job?.filesize_bytes,
+        job?.progress,
+        job?.message,
+        { showSize },
+    ));
     return container;
 }
 
@@ -495,7 +518,7 @@ function buildCreatedCell(isoOrFormatted) {
     td.className = "text-nowrap col-date";
 
     const text = isoOrFormatted == null ? "" : String(isoOrFormatted);
-    const dt = new Date(text);
+    const dt = parseUtcTimestamp(text);
     if (Number.isNaN(dt.getTime())) {
         td.textContent = text;
         return td;
@@ -515,6 +538,7 @@ function buildCreatedCell(isoOrFormatted) {
 
 function buildDesktopEmptyState(message, id = "emptyRow") {
     const row = document.createElement("tr");
+    row.id = id;
 
     const td = document.createElement("td");
     td.colSpan = getJobsTableColumnCount();
@@ -522,9 +546,10 @@ function buildDesktopEmptyState(message, id = "emptyRow") {
     const wrapper = document.createElement("div");
     wrapper.className = "empty-state";
 
-    const iconDiv = document.createElement("div");
-    iconDiv.className = "icon";
-    iconDiv.textContent = "📥";
+    const iconDiv = document.createElement("span");
+    iconDiv.className = "material-symbols-outlined icon";
+    iconDiv.setAttribute("aria-hidden", "true");
+    iconDiv.textContent = "inbox";
 
     const p = document.createElement("p");
     p.textContent = message;
@@ -540,9 +565,10 @@ function buildMobileEmptyState(message, id = "jobsEmptyState") {
     emptyState.id = id;
     emptyState.className = "jobs-mobile-empty empty-state empty-state--mobile";
 
-    const iconDiv = document.createElement("div");
-    iconDiv.className = "icon";
-    iconDiv.textContent = "📥";
+    const iconDiv = document.createElement("span");
+    iconDiv.className = "material-symbols-outlined icon";
+    iconDiv.setAttribute("aria-hidden", "true");
+    iconDiv.textContent = "inbox";
 
     const p = document.createElement("p");
     p.textContent = message;
@@ -580,7 +606,16 @@ function buildMobileJob(job) {
     titleWrap.className = "job-item__title-wrap";
     titleWrap.append(renderJobTitle(job));
 
-    body.append(titleWrap, renderMobileMeta(job), renderMobileDetails(job));
+    const titleRow = document.createElement("div");
+    titleRow.className = "job-item__title-row";
+    titleRow.append(titleWrap, renderJobStatus(job, { mobile: true, showSize: false }));
+
+    body.dataset.action = "open-detail";
+    body.dataset.jobId = getJobId(job);
+    body.setAttribute("role", "button");
+    body.setAttribute("tabindex", "0");
+    body.setAttribute("aria-label", `View details for ${getTitleText(job) || "this job"}`);
+    body.append(titleRow, renderMobileMeta(job), renderMobileTime(job), renderMobileDetails(job));
 
     const actionWrap = document.createElement("div");
     actionWrap.className = "job-item__primary-action";
@@ -643,19 +678,38 @@ function patchMobileJobNode(article, job) {
     applyJobDataset(article, job);
     applyRowStatusClasses(article, job?.status || STATUS.QUEUED);
 
-    const titleText = article.querySelector(".job-title-text");
-    if (titleText instanceof HTMLElement) {
-        titleText.textContent = getTitleText(job);
+    const titleWrap = article.querySelector('[data-role="job-title"]');
+    if (titleWrap instanceof HTMLElement) {
+        titleWrap.replaceChildren(renderJobTitle(job));
+        titleWrap.setAttribute("aria-label", getTitleText(job));
     }
 
     const meta = article.querySelector('[data-role="job-meta-summary"]');
     if (meta instanceof HTMLElement) {
-        meta.textContent = formatMobileJobMeta(job);
+        meta.textContent = formatMobileMediaLine(job);
+    }
+
+    const time = article.querySelector('[data-role="job-time"]');
+    if (time instanceof HTMLElement) {
+        const value = formatMobileTimeLine(job?.created_at) || EMPTY_VALUE;
+        time.textContent = value;
+        time.setAttribute("aria-label", `Added ${value}`);
     }
 
     const details = article.querySelector('[data-role="job-details"]');
     if (details instanceof HTMLElement) {
         details.replaceWith(renderMobileDetails(job));
+    }
+
+    const status = article.querySelector('[data-role="job-status"]');
+    if (status instanceof HTMLElement) {
+        status.replaceWith(renderJobStatus(job, { mobile: true, showSize: false }));
+    }
+
+    const body = article.querySelector(".job-item__body");
+    if (body instanceof HTMLElement) {
+        body.dataset.jobId = getJobId(job);
+        body.setAttribute("aria-label", `View details for ${getTitleText(job) || "this job"}`);
     }
 
     const actionWrap = article.querySelector(".job-item__primary-action");
@@ -848,27 +902,18 @@ export function renderStoredJob(jobId) {
 }
 
 /**
- * Return whether any stored jobs are still in a non-terminal state.
- * @returns {boolean}
- */
-export function hasNonTerminalJobs() {
-    return state.jobs.some((job) => {
-        const status = String(job?.status || "");
-        return status !== "" && !TERMINAL_STATUSES.has(status);
-    });
-}
-
-/**
- * Apply the title filter using store data as the source of truth.
+ * Apply the title and status filters using store data as the source of truth.
  * @param {string} query
+ * @param {string} statusFilter - all, done, or error
  * @returns {{ totalCount: number, visibleCount: number }}
  */
-export function applyStoredJobTitleFilter(query) {
+export function applyStoredJobTitleFilter(query, statusFilter = "all") {
     if (state.desktopNodes.size === 0 && state.mobileNodes.size === 0) {
         return { totalCount: 0, visibleCount: 0 };
     }
 
     const normalizedQuery = String(query || "").trim().toLowerCase();
+    const normalizedStatusFilter = String(statusFilter || "all").trim().toLowerCase();
     let totalCount = 0;
     let visibleCount = 0;
     const changes = [];
@@ -877,7 +922,13 @@ export function applyStoredJobTitleFilter(query) {
         const jobId = getJobId(job);
         totalCount += 1;
 
-        const shouldHide = normalizedQuery !== "" && !getTitleText(job).toLowerCase().includes(normalizedQuery);
+        const searchableText = [getTitleText(job), job?.url || ""].join(" ").toLowerCase();
+        const status = String(job?.status || "").toLowerCase();
+        const matchesStatus = normalizedStatusFilter === "all"
+            || (normalizedStatusFilter === "done" && (status === STATUS.DONE || status === STATUS.ANALYSIS_DONE))
+            || (normalizedStatusFilter === "error" && status === STATUS.ERROR);
+        const matchesQuery = normalizedQuery === "" || searchableText.includes(normalizedQuery);
+        const shouldHide = !(matchesStatus && matchesQuery);
         for (const nodes of [state.desktopNodes, state.mobileNodes]) {
             const row = nodes.get(jobId);
             if (!(row instanceof HTMLElement)) {
@@ -951,14 +1002,15 @@ function trimJobs() {
         return;
     }
 
-    const trimmedCount = state.jobs.length - maxRows;
     const removedJobs = state.jobs.splice(maxRows);
     for (const job of removedJobs) {
         state.jobIds.delete(getJobId(job));
     }
 
     if (state.preserveHistory) {
-        state.nextOffset = Math.max(0, state.nextOffset - trimmedCount);
+        // `nextOffset` belongs to the server's complete result set. Local
+        // trimming must not move it backwards and fetch the same page again.
+        state.done = true;
     }
 }
 

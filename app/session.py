@@ -41,6 +41,7 @@ _SECRET_KEY_BYTES = _SECRET_KEY.encode("utf-8")
 _COOKIE_SECURE_ENV: Final = "TUBEYOU_BEHIND_HTTPS"
 _SESSION_SETTINGS_DEFAULTS: Final[dict[str, Any]] = {
     "session_version": 0,
+    "session_idle_minutes": _DEFAULT_IDLE_MINUTES,
 }
 _SESSION_SETTINGS_CACHE: dict[str, Any] = dict(_SESSION_SETTINGS_DEFAULTS)
 _SESSION_SETTINGS_LOCK = threading.Lock()
@@ -89,13 +90,14 @@ def _is_session_expired(session: SessionData, now: int) -> bool:
 def refresh_session_settings_cache() -> None:
     """Refresh the small session-related settings snapshot from the database."""
     try:
-        settings = get_settings()
+        settings = get_settings(include_internal=True)
     except (sqlite3.Error, OSError) as exc:
         logger.warning("Failed to refresh session settings cache: %s", exc)
-        settings = {}
+        return
 
     refreshed = {
         "session_version": settings.get("session_version", 0),
+        "session_idle_minutes": settings.get("session_idle_minutes", _DEFAULT_IDLE_MINUTES),
     }
     with _SESSION_SETTINGS_LOCK:
         _SESSION_SETTINGS_CACHE.clear()
@@ -108,8 +110,12 @@ def _get_cached_session_setting(key: str, default: Any) -> Any:
 
 
 def _get_idle_timeout_seconds() -> int:
-    """Return the fixed sliding idle timeout in seconds."""
-    return _DEFAULT_IDLE_MINUTES * 60
+    """Return the validated sliding idle timeout in seconds."""
+    try:
+        minutes = int(_get_cached_session_setting("session_idle_minutes", _DEFAULT_IDLE_MINUTES))
+    except (TypeError, ValueError):
+        minutes = _DEFAULT_IDLE_MINUTES
+    return max(1, min(minutes, 24 * 60)) * 60
 
 
 def _get_session_version() -> int:
@@ -302,4 +308,3 @@ def delete_session_cookie(
         httponly=True,
         samesite="lax",
     )
-

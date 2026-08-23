@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -26,7 +27,6 @@ __all__ = [
     "filesize",
     "is_lalala_configured",
     "localtime",
-    "mask_secret",
     "platform_id",
     "platform_pill",
     "public_settings",
@@ -36,12 +36,23 @@ __all__ = [
 ]
 
 
+logger = logging.getLogger(__name__)
+
+
 def _resolve_local_tz() -> ZoneInfo:
-    """Resolve the local timezone from the ``TZ`` environment variable."""
-    tz_name = os.environ.get("TZ", "UTC")
+    """Resolve the local timezone from the ``TZ`` environment variable.
+
+    An unset ``TZ`` means UTC. A configured but unusable ``TZ`` still falls back
+    to UTC, but is logged: silently showing UTC timestamps as local time makes
+    every displayed time wrong without any visible symptom.
+    """
+    tz_name = os.environ.get("TZ", "").strip()
+    if not tz_name:
+        return ZoneInfo("UTC")
     try:
         return ZoneInfo(tz_name)
-    except ZoneInfoNotFoundError:
+    except (ZoneInfoNotFoundError, ValueError, OSError) as exc:
+        logger.warning("Invalid TZ setting %r (%s); falling back to UTC", tz_name, exc)
         return ZoneInfo("UTC")
 
 
@@ -68,19 +79,20 @@ _FILESIZE_UNITS: tuple[tuple[str, int], ...] = (
     ("KiB", 1_024),
 )
 
-_SENSITIVE_KEY_SUFFIXES: tuple[str, ...] = (
-    "_key",
-    "_secret",
-    "_password",
-    "_hash",
-    "_token",
-)
-_SENSITIVE_KEY_SUBSTRINGS: tuple[str, ...] = ("secret", "password", "token")
-
-_INTERNAL_PUBLIC_EXCLUDE: frozenset[str] = frozenset({
-    "admin_password_hash",
-    "lalalaai_auth_last_error",
-    "session_version",
+# Explicit allowlist rather than a denylist copy-then-mask: a setting added to
+# _SETTINGS_DEFAULTS (app/db.py) without a matching entry here simply never
+# reaches a template or the JSON /api/settings response, instead of relying on
+# every future secret's name containing "key"/"secret"/"password"/"token".
+_PUBLIC_SETTING_KEYS: frozenset[str] = frozenset({
+    "retention_days",
+    "login_required",
+    "session_idle_minutes",
+    "download_concurrent_fragments",
+    "download_mp4_preset",
+    "lalalaai_email",
+    "lalalaai_auth_checked_at",
+    "lalalaai_auth_is_valid",
+    "lalalaai_duration_guard",
 })
 
 
@@ -155,48 +167,27 @@ def platform_id(url: str | None) -> str:
     return detect_platform(url) or ""
 
 
-def mask_secret(value: str | None) -> str:
-    """Mask a sensitive credential value.
-
-    Values longer than 8 characters keep the first and last 4 characters.
-    """
-    if not value:
-        return ""
-    secret = str(value).strip()
-    if not secret:
-        return ""
-    if len(secret) <= 8:
-        return "****"
-    return f"{secret[:4]}...{secret[-4:]}"
-
-
-def _is_sensitive_key(key: str) -> bool:
-    lowered = key.lower()
-    return (
-        lowered.endswith(_SENSITIVE_KEY_SUFFIXES)
-        or any(token in lowered for token in _SENSITIVE_KEY_SUBSTRINGS)
-    )
-
-
 def public_settings(settings: dict[str, Any]) -> dict[str, Any]:
-    """Create a public-safe shallow copy of settings with sensitive fields masked."""
-    public = dict(settings)
-    for key in _INTERNAL_PUBLIC_EXCLUDE:
-        public.pop(key, None)
-    for key, value in list(public.items()):
-        if _is_sensitive_key(key):
-            public[key] = mask_secret(value)
-    # Use the original settings so the configured flag is based on the real
-    # auth key, not the masked copy in `public`.
+    """Build the public-safe view of settings for templates and /api/settings.
+
+    Allowlisted keys only - credentials such as lalalaai_auth_key are never
+    included, not even partially. Callers that need to know whether Lalal.ai
+    is configured get the boolean flag instead of any part of the key.
+    """
+    public = {key: settings[key] for key in _PUBLIC_SETTING_KEYS if key in settings}
     public["lalalaai_configured"] = is_lalala_configured(settings)
     return public
 
 
 def is_lalala_configured(settings: dict[str, Any]) -> bool:
     """Check if Lalal.ai credentials are present."""
-    return bool(
-        str(settings.get("lalalaai_email", "")).strip()
-        and str(settings.get("lalalaai_auth_key", "")).strip()
+    email = settings.get("lalalaai_email")
+    auth_key = settings.get("lalalaai_auth_key")
+    return (
+        isinstance(email, str)
+        and bool(email.strip())
+        and isinstance(auth_key, str)
+        and bool(auth_key.strip())
     )
 
 

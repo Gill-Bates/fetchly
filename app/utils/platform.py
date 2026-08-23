@@ -29,7 +29,10 @@ _PLATFORM_LABELS = {
 }
 
 _INSTAGRAM_EXACT_HOSTS = frozenset({"instagr.am", "www.instagr.am"})
-_TIKTOK_ID_RE = re.compile(r"^\d{8,}$")
+# ASCII digits only (\d also matches Unicode digits) and a non-empty username
+# after "@" (plain .startswith("@") also accepts the bare "@" segment itself).
+_TIKTOK_ID_RE = re.compile(r"^[0-9]{8,}$")
+_TIKTOK_USERNAME_RE = re.compile(r"^@[A-Za-z0-9._]{1,24}$")
 _TIKTOK_SHARE_CODE_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
@@ -82,16 +85,16 @@ def _validate_tiktok_url(url: str) -> tuple[bool, str]:
         return False, "Invalid TikTok URL. Expected a TikTok video, photo, or share link."
 
     # Long form: /@user/video/<id> and /@user/photo/<id>
-    if len(segments) >= 3 and segments[0].startswith("@") and segments[1] in {"video", "photo"}:
+    if len(segments) == 3 and _TIKTOK_USERNAME_RE.fullmatch(segments[0]) and segments[1] in {"video", "photo"}:
         if _TIKTOK_ID_RE.fullmatch(segments[2]):
             return True, ""
 
     # Share hosts: vm.tiktok.com/<code>, vt.tiktok.com/<code>
-    if host.startswith(("vm.", "vt.")) and _TIKTOK_SHARE_CODE_RE.fullmatch(segments[0]):
+    if host in {"vm.tiktok.com", "vt.tiktok.com"} and len(segments) == 1 and _TIKTOK_SHARE_CODE_RE.fullmatch(segments[0]):
         return True, ""
 
     # Redirect/share path: /t/<code>
-    if segments[0] == "t" and len(segments) >= 2 and _TIKTOK_SHARE_CODE_RE.fullmatch(segments[1]):
+    if host in {"tiktok.com", "www.tiktok.com"} and len(segments) == 2 and segments[0] == "t" and _TIKTOK_SHARE_CODE_RE.fullmatch(segments[1]):
         return True, ""
 
     return False, "Invalid TikTok URL. Expected a TikTok video, photo, or share link."
@@ -102,7 +105,7 @@ def _validate_instagram_url(url: str) -> tuple[bool, str]:
     parsed = urlparse(url)
     segments = [seg for seg in (parsed.path or "").strip("/").split("/") if seg]
     # Accept /p/<code>, /reel/<code>, /tv/<code>.
-    if segments and segments[0] in {"p", "reel", "tv"} and len(segments) > 1:
+    if len(segments) == 2 and segments[0] in {"p", "reel", "tv"} and re.fullmatch(r"[A-Za-z0-9_-]+", segments[1]):
         return True, ""
     return False, "Invalid Instagram URL. Expected an instagram.com post, reel, or tv link."
 
@@ -121,8 +124,23 @@ def validate_media_url(url: str | None) -> tuple[bool, str]:
         return False, "URL is required"
     if len(value) > 2048:
         return False, "URL is too long"
-    if not value.lower().startswith(("http://", "https://")):
-        return False, "URL must start with http:// or https://"
+    if not value.lower().startswith("https://"):
+        return False, "URL must start with https://"
+
+    try:
+        parsed = urlparse(value)
+        port = parsed.port
+    except ValueError:
+        return False, "Invalid URL"
+
+    # yt-dlp is handed platform cookie files for this URL, so the *submitted*
+    # URL must use encrypted transport, carry no embedded credentials, and use
+    # the default HTTPS port - this does not constrain redirect targets, which
+    # would need outbound network-level enforcement to control.
+    if parsed.username is not None or parsed.password is not None:
+        return False, "URL must not contain credentials"
+    if port not in (None, 443):
+        return False, "URL must not use a custom port"
 
     platform = detect_platform(value)
     if platform == PLATFORM_YOUTUBE:

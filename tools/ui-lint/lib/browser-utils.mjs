@@ -18,7 +18,7 @@ export function ensureDir(dirPath) {
 }
 
 export async function disableMotion(page, motionResetCss, viewName = 'unknown') {
-    await page.addStyleTag({
+    const style = await page.addStyleTag({
         content: `
         ${motionResetCss}
 
@@ -37,7 +37,16 @@ export async function disableMotion(page, motionResetCss, viewName = 'unknown') 
             text-rendering: geometricPrecision !important;
         }
         `,
-    }).catch((err) => console.warn(`[${viewName}] Failed to inject motion reset CSS: ${err.message}`));
+    }).catch((err) => {
+        console.warn(`[${viewName}] Failed to inject motion reset CSS: ${err.message}`);
+        return null;
+    });
+
+    if (style) {
+        await style.evaluate((element) => {
+            element.dataset.uiLintInjected = 'true';
+        }).catch(() => {});
+    }
 
     await page.emulateMedia({ reducedMotion: 'reduce' }).catch(() => {});
 }

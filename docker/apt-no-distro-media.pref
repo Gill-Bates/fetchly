@@ -1,0 +1,21 @@
+# docker/apt-no-distro-media.pref -> /etc/apt/preferences.d/no-distro-media
+#
+# ffmpeg/ffprobe and yt-dlp are core functionality of this application and are
+# installed from upstream at build time (BtbN static ffmpeg build, yt-dlp from
+# PyPI) so the image is never tied to whatever Debian froze at release time.
+#
+# Pin-Priority below 0 makes these packages uninstallable: no later
+# `apt-get install`, no recommended/dependency pull-in, and no `apt-get upgrade`
+# can put a distro build of ffmpeg or yt-dlp back into the image and shadow the
+# upstream binaries.
+
+Package: ffmpeg ffmpeg-* libav-tools yt-dlp python3-yt-dlp youtube-dl
+Pin: release *
+Pin-Priority: -1
+
+# The ffmpeg build is fully static, so nothing in the image needs the distro
+# libav* shared libraries either. Blocking them keeps a stray dependency from
+# dragging half of Debian's media stack back in.
+Package: libavcodec* libavdevice* libavfilter* libavformat* libavutil* libpostproc* libswresample* libswscale*
+Pin: release *
+Pin-Priority: -1

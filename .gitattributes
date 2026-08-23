@@ -1,0 +1,4 @@
+# Shell scripts run as a Docker ENTRYPOINT/CMD, where a stray CRLF (e.g. from
+# a Windows checkout or editor) breaks the shebang and every line ending in a
+# line continuation, and fails at container start rather than at commit time.
+*.sh text eol=lf

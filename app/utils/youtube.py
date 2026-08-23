@@ -9,20 +9,22 @@
 import asyncio
 import json
 import logging
+import math
 import os
 import re
 import subprocess
 from functools import lru_cache
 from pathlib import Path
-import threading
 from time import monotonic
 from typing import Any, TypedDict
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlparse, urlsplit, urlunsplit
+
+from .fs import get_data_dir
 
 logger = logging.getLogger(__name__)
 
 _COOKIES_DIR: Path = Path(__file__).parent.parent.parent
-_COOKIES_DATA_DIR: Path = _COOKIES_DIR / "data"
+_COOKIES_DATA_DIR: Path = get_data_dir()
 _PLATFORM_COOKIE_FILENAMES: dict[str, str] = {
     "youtube": "youtube_cookies.txt",
     "instagram": "instagram_cookies.txt",
@@ -39,10 +41,22 @@ _YOUTUBE_HOSTS = frozenset(
     }
 )
 _ZWSP_RE = re.compile(r"[\u200B-\u200D\uFEFF]")
-_VIDEO_ID_RE = re.compile(r"[\w-]{11}")
+_VIDEO_ID_RE = re.compile(r"[A-Za-z0-9_-]{11}", re.ASCII)
 _CACHE_TTL_SECONDS = 300
 _INFO_CACHE_MAXSIZE = 256
-_yt_dlp_local = threading.local()
+_YOUTUBE_FALLBACK_PLAYER_CLIENT = "android"
+_SUBPROCESS_TIMEOUT_SECONDS = 20
+
+# Cap how many extractions can be in flight. subprocess.run()'s own timeout
+# below is what actually bounds each one (see _load_video_info_uncached) - a
+# yt_dlp.YoutubeDL().extract_info() call in-process was tried first here, but
+# a genuinely hung extraction cannot be killed from the Python side: an
+# asyncio.wait_for() around asyncio.to_thread() stops *awaiting* the result,
+# it does not stop the underlying OS thread, which keeps running and holding
+# a slot in the default thread pool shared by every asyncio.to_thread() call
+# in the app (DB writes, housekeeping, ...) forever. A subprocess can actually
+# be killed on timeout, so extraction goes through subprocess.run() only.
+_METADATA_SLOTS = asyncio.Semaphore(4)
 
 
 class InfoPayload(TypedDict):
@@ -60,18 +74,15 @@ def strip_zwsp(text: str) -> str:
     return _ZWSP_RE.sub("", text)
 
 
-# Backward-compatible alias for older imports.
-_strip_zwsp = strip_zwsp
-
-
-def _clean_video_id(value: str) -> str:
-    """Strip zero-width chars and non-ID characters from video ID."""
-    cleaned = strip_zwsp(value.strip())
-    return re.sub(r"[^\w-]", "", cleaned)
-
-
 def _is_video_id(value: str) -> bool:
-    return bool(_VIDEO_ID_RE.fullmatch(value))
+    """Return True if *value* is exactly a YouTube video ID.
+
+    Only zero-width characters and surrounding whitespace are stripped; the ID
+    is validated, never repaired. Silently deleting invalid characters would
+    turn a malformed ID into an accepted one while the rest of the pipeline
+    keeps working with the original, unrepaired string.
+    """
+    return _VIDEO_ID_RE.fullmatch(strip_zwsp(value).strip()) is not None
 
 
 def _is_youtube_host(host: str) -> bool:
@@ -101,21 +112,23 @@ def _resolve_cookie_path(url: str) -> Path | None:
     return None
 
 
-def _build_ydl_opts(url: str = "") -> dict[str, Any]:
-    opts: dict[str, Any] = {
-        "quiet": True,
-        "no_warnings": True,
-        "noplaylist": True,
-        "socket_timeout": 15,
-    }
-    cookie_path = _resolve_cookie_path(url) if url else None
-    if cookie_path is not None:
-        opts["cookiefile"] = str(cookie_path)
-    return opts
+def _url_for_log(url: str) -> str:
+    """Strip query and fragment before a URL reaches the log.
+
+    TikTok/Instagram share links commonly carry tracking or signed query
+    parameters that do not belong in operational logs.
+    """
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        return "<unparsable URL>"
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))
 
 
-def _build_yt_dlp_cmd(url: str) -> list[str]:
+def _build_yt_dlp_cmd(url: str, *, player_client: str | None = None) -> list[str]:
     cmd = ["yt-dlp", "--no-playlist", "--skip-download", "--dump-single-json"]
+    if player_client is not None:
+        cmd.extend(["--extractor-args", f"youtube:player_client={player_client}"])
     cookie_path = _resolve_cookie_path(url)
     if cookie_path is not None:
         cmd.extend(["--cookies", str(cookie_path)])
@@ -126,6 +139,24 @@ def _build_yt_dlp_cmd(url: str) -> list[str]:
 
 def _cache_bucket() -> int:
     return int(monotonic() // _CACHE_TTL_SECONDS)
+
+
+def _non_negative_int(value: object) -> int | None:
+    """Coerce a yt-dlp numeric field to InfoPayload's declared int type.
+
+    yt-dlp commonly returns duration/view_count as float (or omits them, or -
+    for some extractors - returns a negative placeholder); InfoPayload
+    promises int | None, and callers rely on that: extract_video_meta() only
+    renders "Duration: ..." behind isinstance(duration, int), so a float here
+    silently drops the line instead of raising anything.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int) and value >= 0:
+        return value
+    if isinstance(value, float) and math.isfinite(value) and value >= 0:
+        return int(value)
+    return None
 
 
 def _prune_info(info: dict[str, Any] | None) -> InfoPayload | None:
@@ -155,29 +186,12 @@ def _prune_info(info: dict[str, Any] | None) -> InfoPayload | None:
         "title": info.get("title"),
         "channel": info.get("channel"),
         "uploader": info.get("uploader"),
-        "duration": info.get("duration"),
-        "view_count": info.get("view_count"),
+        "duration": _non_negative_int(info.get("duration")),
+        "view_count": _non_negative_int(info.get("view_count")),
         "thumbnail": info.get("thumbnail"),
         "formats": formats,
         "unavailable": False,
     }
-
-
-def _ydl_opts_signature(ydl_opts: dict[str, Any]) -> tuple[tuple[str, str], ...]:
-    return tuple(sorted((key, str(value)) for key, value in ydl_opts.items()))
-
-
-def _get_yt_dlp_instance(ydl_opts: dict[str, Any]) -> Any:
-    import yt_dlp
-
-    signature = _ydl_opts_signature(ydl_opts)
-    cached_signature = getattr(_yt_dlp_local, "signature", None)
-    cached_ydl = getattr(_yt_dlp_local, "ydl", None)
-    if cached_ydl is None or cached_signature != signature:
-        cached_ydl = yt_dlp.YoutubeDL(ydl_opts)
-        _yt_dlp_local.signature = signature
-        _yt_dlp_local.ydl = cached_ydl
-    return cached_ydl
 
 
 def validate_youtube_url(url: str) -> tuple[bool, str]:
@@ -205,9 +219,9 @@ def validate_youtube_url(url: str) -> tuple[bool, str]:
     if len(url) > 2048:
         return False, "URL is too long"
     
-    # Must start with http:// or https://
-    if not url.startswith(('http://', 'https://')):
-        return False, "URL must start with http:// or https://"
+    # Metadata requests must use encrypted transport.
+    if not url.startswith("https://"):
+        return False, "URL must start with https://"
 
     try:
         parsed = urlparse(url)
@@ -220,19 +234,19 @@ def validate_youtube_url(url: str) -> tuple[bool, str]:
     # Check if it's a YouTube video URL. Allow extra query parameters such as
     # playlist context (list/start_radio), but require a real video ID.
     if host == "youtu.be" or host == "www.youtu.be":
-        segment = _clean_video_id(path.strip("/").split("/")[0])
-        if _is_video_id(segment):
+        segment = path.strip("/").split("/")[0]
+        if len(path.strip("/").split("/")) == 1 and _is_video_id(segment):
             return True, ""
     elif _is_youtube_host(host):
         segments = path.strip("/").split("/") if path.strip("/") else []
         if path == "/watch":
             params = parse_qs(parsed.query, keep_blank_values=False)
-            video_id = _clean_video_id((params.get("v") or [""])[0])
+            video_id = (params.get("v") or [""])[0]
             if _is_video_id(video_id):
                 return True, ""
         elif segments and segments[0] in {"shorts", "embed", "v"}:
-            segment = _clean_video_id(segments[1]) if len(segments) > 1 else ""
-            if _is_video_id(segment):
+            segment = segments[1] if len(segments) > 1 else ""
+            if len(segments) == 2 and _is_video_id(segment):
                 return True, ""
 
     return False, "Invalid YouTube URL. Supported formats: youtube.com/watch?v=..., youtu.be/..., youtube.com/shorts/..."
@@ -276,74 +290,74 @@ def normalize_info_url(url: str) -> str:
 
 
 def _load_video_info_uncached(url: str) -> InfoPayload | None:
-    """Load video metadata from YouTube using yt-dlp.
-    
-    Tries the Python library first, falls back to subprocess.
-    
+    """Load video metadata for a URL by shelling out to yt-dlp.
+
+    Best-effort: every failure mode - timeout, missing binary, bad JSON,
+    non-zero exit - is swallowed and reported as None so callers degrade
+    gracefully instead of surfacing a server error for what is, from the
+    caller's perspective, just "no metadata available yet".
+
     Args:
         url: YouTube video URL
-        
+
     Returns:
         Video info dict or None if extraction fails
     """
-    info: InfoPayload | None = None
-    ydl_opts = _build_ydl_opts(url)
-    
-    try:
-        from yt_dlp.utils import DownloadError, ExtractorError
+    from .platform import detect_platform
 
-        ydl = _get_yt_dlp_instance(ydl_opts)
-        extracted = ydl.extract_info(url, download=False)
-        if isinstance(extracted, dict):
-            info = _prune_info(extracted)
-    except ImportError:
-        info = None
-    except (DownloadError, ExtractorError, ValueError) as exc:
-        logger.debug("yt-dlp library extraction failed for %s: %s", url, exc)
-        info = None
-    except OSError:
-        logger.exception("System-level yt-dlp library error for %s", url)
-        info = None
+    player_clients: tuple[str | None, ...]
+    if detect_platform(url) == "youtube":
+        # Older yt-dlp releases can fail the default web client with
+        # "The page needs to be reloaded". Android still provides metadata in
+        # that case; newer releases continue to use the default client first.
+        player_clients = (None, _YOUTUBE_FALLBACK_PLAYER_CLIENT)
+    else:
+        player_clients = (None,)
 
-    if info is None:
+    for player_client in player_clients:
+        info: InfoPayload | None = None
+
         try:
-            cmd = _build_yt_dlp_cmd(url)
+            cmd = _build_yt_dlp_cmd(url, player_client=player_client)
             result = subprocess.run(
                 cmd,
                 check=True,
                 capture_output=True,
                 text=True,
-                timeout=15,
+                timeout=_SUBPROCESS_TIMEOUT_SECONDS,
             )
-            if not result.stdout:
-                return None
-
-            parsed = json.loads(result.stdout)
-            if isinstance(parsed, dict):
-                info = _prune_info(parsed)
+            if result.stdout:
+                parsed = json.loads(result.stdout)
+                if isinstance(parsed, dict):
+                    info = _prune_info(parsed)
         except subprocess.TimeoutExpired:
-            logger.warning("yt-dlp subprocess timed out for %s", url)
-            return None
+            logger.warning("yt-dlp subprocess timed out for %s", _url_for_log(url))
         except FileNotFoundError:
+            # main.py's startup check refuses to run without yt-dlp on PATH,
+            # so this should be unreachable in a running instance - but this
+            # function's contract (like every sibling except-branch here) is
+            # to degrade to None, not to raise past a best-effort caller.
             logger.error("yt-dlp command not found in PATH")
-            raise
         except subprocess.CalledProcessError as exc:
             stderr = exc.stderr[:500] if exc.stderr else None
             logger.debug(
                 "yt-dlp subprocess extraction failed for %s: rc=%s stderr=%s",
-                url,
+                _url_for_log(url),
                 exc.returncode,
                 stderr,
             )
-            return None
         except json.JSONDecodeError as exc:
-            logger.debug("yt-dlp subprocess returned invalid JSON for %s: %s", url, exc)
-            return None
-        except Exception:
-            logger.exception("Unexpected yt-dlp subprocess error for %s", url)
-            return None
+            logger.debug("yt-dlp subprocess returned invalid JSON for %s: %s", _url_for_log(url), exc)
+        except (OSError, UnicodeError) as exc:
+            logger.warning("yt-dlp subprocess failed for %s: %s", _url_for_log(url), exc)
 
-    return info
+        if info is not None:
+            return info
+
+        if player_client is None and len(player_clients) > 1:
+            logger.debug("Retrying YouTube metadata extraction with %s client", _YOUTUBE_FALLBACK_PLAYER_CLIENT)
+
+    return None
 
 
 @lru_cache(maxsize=_INFO_CACHE_MAXSIZE)
@@ -353,24 +367,36 @@ def _cached_load_video_info(normalized_url: str, cache_bucket: int) -> InfoPaylo
 
 
 def load_video_info(url: str) -> InfoPayload | None:
-    """Load video metadata from YouTube using yt-dlp.
-    
+    """Load video metadata for a supported platform URL using yt-dlp.
+
+    The allowlist is enforced here as well as in the routes: this is the point
+    where yt-dlp performs the outbound request, so an unvalidated URL must
+    never reach it.
+
     This function is blocking; async callers should use
     :func:`load_video_info_async` or offload it via ``asyncio.to_thread()``.
-    
+
     Args:
-        url: YouTube video URL
-        
+        url: Media URL of a supported platform
+
     Returns:
-        Video info dict or None if extraction fails
+        Video info dict or None if the URL is rejected or extraction fails
     """
+    from .platform import validate_media_url
+
+    is_valid, error = validate_media_url(url)
+    if not is_valid:
+        logger.error("Refusing metadata extraction for unsupported URL: %s", error)
+        return None
+
     normalized_url = normalize_info_url(url)
     return _cached_load_video_info(normalized_url, _cache_bucket())
 
 
 async def load_video_info_async(url: str) -> InfoPayload | None:
     """Async wrapper around :func:`load_video_info`."""
-    return await asyncio.to_thread(load_video_info, url)
+    async with _METADATA_SLOTS:
+        return await asyncio.to_thread(load_video_info, url)
 
 
 def extract_video_meta(url: str) -> dict[str, object]:
@@ -415,7 +441,8 @@ def extract_video_meta(url: str) -> dict[str, object]:
 
 async def extract_video_meta_async(url: str) -> dict[str, object]:
     """Async wrapper around :func:`extract_video_meta`."""
-    return await asyncio.to_thread(extract_video_meta, url)
+    async with _METADATA_SLOTS:
+        return await asyncio.to_thread(extract_video_meta, url)
 
 
 def empty_info_payload() -> InfoPayload:

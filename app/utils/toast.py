@@ -4,23 +4,29 @@
 # Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 #
 
-"""Server-side toast message utilities.
+"""Request-local toast message utilities.
 
-This module provides helpers to pass toast notifications from Python
-to the frontend via template context or response headers.
+Toasts live in ``request.state`` and are therefore only available while the
+current request is being rendered; they do not survive a redirect.
 
 Usage in routes:
-    from app.utils.toast import add_toast, get_toasts
+    from app.utils.toast import add_toast, get_toasts_json
 
     @app.get("/example")
     def example(request: Request):
         add_toast(request, "Settings saved", "success")
-        return templates.TemplateResponse(...)
+        return templates.TemplateResponse(
+            request, "example.html", {"toasts": get_toasts_json(request)}
+        )
 
-In templates:
-    {% for t in toasts %}
-    <script>showToast("{{ t.message }}", "{{ t.type }}");</script>
-    {% endfor %}
+In templates, hand the payload to the frontend as data — never interpolate a
+message into a JavaScript string literal, since HTML escaping is not a valid
+JavaScript escaping and would break out of the quotes:
+
+    <div id="toast-data" data-toasts="{{ toasts | tojson | forceescape }}"></div>
+
+A script can then parse that attribute and call ``showToast()`` from
+``app/static/js/toast.js`` for each entry.
 """
 
 from __future__ import annotations

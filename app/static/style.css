@@ -117,10 +117,11 @@
     --radius-pill: 999px;
 
     /* Colors */
-    --primary: #6366f1;
+    --primary: #5b5fdc;
     --primary-hover: #4f46e5;
     --success: #22c55e;
     --danger: #ef4444;
+    --warning: #f59e0b;
 
     --bg-gradient: radial-gradient(circle at 20% 20%, #20384f 0%, #0f172a 50%, #0b1222 100%);
     --border: rgb(255 255 255 / 0.08);
@@ -128,7 +129,7 @@
     --text-default: #e5e7eb;
     --text: var(--text-default);
     /* Stronger muted text for readability */
-    --text-muted: #c6d1e4;
+    --text-muted: #d0d9e8;
 
     --card-radius: 18px;
 
@@ -140,6 +141,9 @@
     /* Deterministic solid surfaces (no drift) */
     --surface-solid: #0f172a;
     --surface-elevated: #111827;
+    --surface-hover: #1e293b;
+    --surface-success-row: #142b24;
+    --surface-danger-row: #2b1e2d;
 }
 
 @supports (color: color-mix(in srgb, white, black)) {
@@ -167,6 +171,7 @@
 }
 
 .btn:focus-visible {
+    box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.4);
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 40%, transparent);
 }
 
@@ -175,6 +180,7 @@ button:focus-visible,
 input:focus-visible,
 select:focus-visible,
 textarea:focus-visible {
+    box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.35);
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 35%, transparent);
 }
 
@@ -282,18 +288,20 @@ body {
     overflow: visible;
 }
 
-.settings-page-icon {
-    font-size: 32px;
-}
+/* ── Footer ──────────────────────────────────────────────────────────────── */
 
-/* ── Footer (Sticky) ─────────────────────────────────────────────────────── */
+/* Flex sticky footer: it stays at the viewport bottom when the page is short,
+   but remains in normal flow when the content grows past the viewport. */
 
 .wb-footer {
+    position: static;
     flex: 0 0 auto;
-    padding: 0.75rem 1rem;
+    margin-top: auto;
+    padding: 0.4rem 1rem;
     display: flex;
     align-items: center;
     justify-content: center;
+    background: var(--surface-solid);
     background: color-mix(in srgb, var(--surface-95) 96%, transparent);
     border-top: 1px solid var(--border);
     backdrop-filter: var(--blur-md);
@@ -370,6 +378,7 @@ body {
     height: var(--nav-height);
     padding-top: 0;
     padding-bottom: 0;
+    background: var(--surface-solid);
     background: color-mix(in srgb, var(--surface) 70%, transparent);
     backdrop-filter: var(--blur-md);
     -webkit-backdrop-filter: var(--blur-md);
@@ -402,6 +411,18 @@ body {
     padding: 0;
 }
 
+@media (max-width: 768px) {
+    .top-navbar .btn {
+        height: 44px;
+        min-height: 44px;
+    }
+
+    .top-navbar .btn-icon {
+        width: 44px;
+        min-width: 44px;
+    }
+}
+
 .top-navbar .navbar-brand {
     letter-spacing: 0.02em;
     margin: 0;
@@ -429,6 +450,7 @@ body {
 .hero-main {
     padding: 48px 32px;
     border-radius: var(--card-radius);
+    background: var(--surface-solid);
     background: linear-gradient(135deg, color-mix(in srgb, var(--primary) 15%, transparent), var(--surface-90));
     border: 1px solid var(--border);
 }
@@ -556,13 +578,13 @@ body {
 .btn-group>.btn.dropdown-toggle-split {
     padding-left: 0.4rem !important;
     padding-right: 0.4rem !important;
-    min-width: 28px !important;
+    min-width: 36px !important;
     width: auto !important;
 }
 
-.btn-sm.dropdown-toggle-split {
+.btn-group>.btn.btn-sm.dropdown-toggle-split {
     padding: 0 0.4rem !important;
-    min-width: 28px !important;
+    min-width: 36px !important;
     width: auto !important;
     height: var(--control-height-sm);
     min-height: var(--control-height-sm);
@@ -642,11 +664,11 @@ button .material-symbols-outlined,
     gap: 0.375rem;
 }
 
-.jobs-card-header {
+.ui-card-header.jobs-card-header {
     gap: var(--space-3);
-    flex: 0 0 auto !important;
-    height: auto !important;
-    min-height: 0 !important;
+    flex: 0 0 auto;
+    height: auto;
+    min-height: 0;
 }
 
 .jobs-card-heading {
@@ -657,7 +679,7 @@ button .material-symbols-outlined,
 
 .jobs-card-kicker {
     color: var(--text-muted);
-    font-size: 0.72rem;
+    font-size: 0.75rem;
     letter-spacing: 0.14em;
     text-transform: uppercase;
 }
@@ -678,6 +700,86 @@ button .material-symbols-outlined,
     gap: var(--space-2);
     margin-left: auto;
     min-width: 0;
+}
+
+.jobs-quick-filter {
+    position: relative;
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    flex: 0 0 auto;
+    align-items: center;
+    gap: 0.15rem;
+    padding: 0;
+    border: 0;
+    border-radius: var(--radius-pill);
+    background: var(--surface-strong);
+    box-shadow: inset 0 0 0 1px var(--border);
+    isolation: isolate;
+    overflow: hidden;
+}
+
+.jobs-quick-filter__indicator {
+    position: absolute;
+    z-index: 0;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: calc((100% - 0.3rem) / 3);
+    border-radius: var(--radius-pill);
+    background: var(--primary);
+    pointer-events: none;
+    transform: translateX(0);
+    transition: transform 180ms ease;
+}
+
+.jobs-quick-filter[data-active-filter="done"] .jobs-quick-filter__indicator {
+    transform: translateX(calc(100% + 0.15rem));
+}
+
+.jobs-quick-filter[data-active-filter="error"] .jobs-quick-filter__indicator {
+    transform: translateX(calc((100% + 0.15rem) * 2));
+}
+
+.jobs-quick-filter__btn {
+    min-width: 3.25rem;
+    min-height: var(--control-height-sm);
+    padding: 0.25rem 0.7rem;
+    border: 0;
+    border-radius: var(--radius-pill);
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 0.78rem;
+    font-weight: 600;
+    line-height: 1;
+    transition: background-color 150ms ease, color 150ms ease;
+    position: relative;
+    z-index: 1;
+}
+
+.jobs-quick-filter__btn:hover,
+.jobs-quick-filter__btn:focus-visible {
+    background: var(--surface-hover);
+    color: var(--text-strong);
+}
+
+.jobs-quick-filter__btn.is-active,
+.jobs-quick-filter__btn[aria-pressed="true"] {
+    background: transparent;
+    color: #ffffff;
+}
+
+.jobs-quick-filter__btn.is-active:hover,
+.jobs-quick-filter__btn.is-active:focus-visible,
+.jobs-quick-filter__btn[aria-pressed="true"]:hover,
+.jobs-quick-filter__btn[aria-pressed="true"]:focus-visible {
+    background: transparent;
+    color: #ffffff;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .jobs-quick-filter__indicator {
+        transition: none;
+    }
 }
 
 /* ── Input with leading icon ────────────────────────────────────────────── */
@@ -707,18 +809,61 @@ button .material-symbols-outlined,
     min-width: 0;
 }
 
-/* !important needed: .form-control-sm shorthand padding overrides descendant-specificity */
-.input-icon .input-icon__field {
-    padding-left: 2.5rem !important;
+/* Keep the icon inset after Bootstrap's form-control-sm padding rules. */
+.input-icon > .input-icon__field {
+    padding-left: 2.5rem;
 }
 
 .jobs-search-wrap {
+    position: relative;
     min-width: 260px;
     width: 100%;
 }
 
-.jobs-search-input {
+.jobs-search-wrap > .jobs-search-input {
     width: 100%;
+    padding-right: 2.25rem;
+}
+
+/* Keep the placeholder clear of the leading search glyph. The extra
+   specificity wins over Bootstrap's .form-control-sm padding shorthand. */
+.jobs-search-wrap > input.jobs-search-input.form-control-sm {
+    padding-left: 2.75rem;
+    padding-right: 2.25rem;
+}
+
+.jobs-search-clear {
+    position: absolute;
+    top: 50%;
+    right: 0.35rem;
+    display: inline-grid;
+    width: 1.75rem;
+    height: 1.75rem;
+    padding: 0;
+    transform: translateY(-50%);
+    place-items: center;
+    border: 0;
+    border-radius: 999px;
+    background: transparent;
+    color: var(--text-muted);
+}
+
+.jobs-search-clear:hover,
+.jobs-search-clear:focus-visible {
+    background: rgba(229, 231, 235, 0.12);
+    background: color-mix(in srgb, var(--text) 12%, transparent);
+    color: var(--text);
+}
+
+.jobs-search-clear .material-symbols-outlined {
+    font-size: 1.05rem;
+}
+
+.jobs-search-results {
+    flex: 0 0 auto;
+    color: var(--text-muted);
+    font-size: 0.75rem;
+    white-space: nowrap;
 }
 
 /* ── Form ────────────────────────────────────────────────────────────────── */
@@ -748,7 +893,13 @@ button .material-symbols-outlined,
     color: var(--text-muted);
 }
 
-.text-muted {
+/* Keep the URL example visible but slightly softer than entered values. */
+#urlInput::placeholder {
+    color: var(--text-muted);
+    opacity: 0.68;
+}
+
+html body .text-muted {
     color: var(--text-muted) !important;
 }
 
@@ -784,9 +935,16 @@ button .material-symbols-outlined,
     color: var(--text-muted);
 }
 
+/* Search guidance should use the same restrained placeholder treatment. */
+.jobs-search-input::placeholder {
+    color: var(--text-muted);
+    opacity: 0.68;
+}
+
 /* Make Lalal auth suggestions clearly look like placeholders, not typed input. */
 #lalalAuthEmail::placeholder,
 #lalalActivationKey::placeholder {
+    color: rgba(198, 209, 228, 0.65);
     color: color-mix(in srgb, var(--text-muted) 65%, transparent);
     opacity: 0.45;
 }
@@ -794,7 +952,9 @@ button .material-symbols-outlined,
 .form-control:focus,
 .form-select:focus {
     border-color: var(--primary);
+    box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.35);
     box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary) 35%, transparent);
+    background: var(--surface);
     background: color-mix(in srgb, var(--surface) 92%, transparent);
     color: var(--text);
 }
@@ -802,6 +962,7 @@ button .material-symbols-outlined,
 /* Disabled controls: keep dark-theme look and avoid bright browser defaults */
 .form-control:disabled,
 .form-select:disabled {
+    background: var(--surface-strong);
     background: color-mix(in srgb, var(--surface-strong) 86%, transparent);
     color: var(--text-muted);
     border: 1px solid var(--border);
@@ -819,6 +980,7 @@ button .material-symbols-outlined,
 }
 
 .form-select.is-disabled {
+    background: var(--surface-strong);
     background: color-mix(in srgb, var(--surface-strong) 86%, transparent);
     color: var(--text-muted);
     border: 1px solid var(--border);
@@ -828,6 +990,7 @@ button .material-symbols-outlined,
 /* Optional readonly state for better UX than disabled */
 .form-control[readonly],
 .form-select[readonly] {
+    background: var(--surface-strong);
     background: color-mix(in srgb, var(--surface-strong) 92%, transparent);
     color: var(--text);
     cursor: default;
@@ -867,6 +1030,7 @@ button .material-symbols-outlined,
 }
 
 .btn-outline-secondary:hover {
+    background: rgba(255, 255, 255, 0.08);
     background: color-mix(in srgb, white 8%, transparent);
     border-color: var(--border);
     color: #fff;
@@ -883,6 +1047,17 @@ button .material-symbols-outlined,
     color: #fbbf24;
 }
 
+.btn-outline-danger {
+    color: #ff9aa2;
+    border-color: #ff9aa2;
+}
+
+.btn-outline-danger:hover,
+.btn-outline-danger:focus-visible {
+    color: #fff;
+    border-color: #ff9aa2;
+}
+
 /* Checkbox consistency */
 .form-check-input:checked {
     background-color: var(--primary);
@@ -893,11 +1068,6 @@ button .material-symbols-outlined,
 
 .settings-form-layout {
     margin-bottom: 2.5rem;
-}
-
-/* Add vertical spacing above Settings page heading */
-.settings-form-layout>h1 {
-    margin-top: var(--space-4);
 }
 
 .ui-card {
@@ -930,6 +1100,7 @@ button .material-symbols-outlined,
 }
 
 .ui-card:hover {
+    border-color: var(--primary);
     border-color: color-mix(in srgb, var(--primary) 50%, var(--border));
 }
 
@@ -938,9 +1109,11 @@ button .material-symbols-outlined,
 }
 
 .ui-card--primary {
+    background: var(--surface-solid);
     background: linear-gradient(135deg,
             color-mix(in srgb, var(--primary) 15%, rgba(15, 23, 42, 0.92)),
             rgba(15, 23, 42, 0.88));
+    border-color: var(--border);
     border-color: color-mix(in srgb, var(--primary) 40%, var(--border));
 }
 
@@ -976,19 +1149,135 @@ button .material-symbols-outlined,
     gap: 0.5rem;
 }
 
-.settings-group-copy {
-    margin: 0 0 var(--space-3);
-    max-width: 42rem;
-    font-size: 0.95rem;
+.settings-panel-title {
+    font-size: 1.35rem;
 }
 
-.settings-group-title {
-    font-size: 0.85rem;
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
+.settings-tabs {
+    flex-wrap: nowrap;
+    gap: 0.5rem;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+}
+
+.settings-tabs::-webkit-scrollbar {
+    display: none;
+}
+
+.settings-tabs .nav-link {
+    flex: 0 0 auto;
+    padding: 0.3rem 0.85rem;
+    min-height: 44px;
+    display: inline-flex;
+    align-items: center;
+    border-radius: var(--radius-pill);
+    border: 1px solid var(--border);
+    background: var(--surface-elevated);
     color: var(--text-muted);
-    margin-bottom: 0.25rem;
+    font-size: 0.85rem;
+    font-weight: 500;
+    white-space: nowrap;
+}
+
+.settings-tabs .nav-link:hover,
+.settings-tabs .nav-link:focus-visible {
+    color: var(--text);
+    border-color: var(--primary);
+    border-color: color-mix(in srgb, var(--primary) 50%, var(--border));
+}
+
+.settings-tabs .nav-link.active {
+    color: #fff;
+    background: #5b5fdc;
+    border-color: #5b5fdc;
+}
+
+.settings-info-row-group {
+    margin: 0;
+}
+
+.settings-info-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: var(--space-3);
+    font-size: 0.9rem;
+    padding: var(--space-2) 0;
+}
+
+.settings-info-row+.settings-info-row {
+    border-top: 1px solid var(--border);
+}
+
+.settings-info-row dt {
+    color: var(--text-muted);
+    font-weight: 500;
+}
+
+.settings-info-row dd {
+    margin: 0;
+    text-align: right;
+    color: var(--text);
+}
+
+.settings-version-cell {
+    display: inline-flex;
+    align-items: center;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+}
+
+/* Shown only when the update check found a newer upstream release. */
+.settings-update-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    padding: 0.25rem 0.55rem;
+    border: 1px solid var(--warning);
+    border: 1px solid color-mix(in srgb, var(--warning) 45%, transparent);
+    border-radius: var(--radius-sm);
+    background: var(--surface);
+    background: color-mix(in srgb, var(--warning) 18%, var(--surface));
+    color: var(--warning);
+    font-size: 0.75rem;
     font-weight: 600;
+    line-height: 1.2;
+    white-space: nowrap;
+    text-decoration: none;
+}
+
+.settings-update-badge:hover,
+.settings-update-badge:focus-visible {
+    background: var(--surface);
+    background: color-mix(in srgb, var(--warning) 28%, var(--surface));
+    color: var(--warning);
+}
+
+.settings-update-badge .icon-inline {
+    font-size: 15px;
+    line-height: 1;
+}
+
+.settings-update-badge[hidden] {
+    display: none;
+}
+
+.settings-version-badge {
+    display: inline-flex;
+    align-items: center;
+    max-width: 100%;
+    padding: 0.25rem 0.55rem;
+    border: 1px solid var(--border);
+    border: 1px solid color-mix(in srgb, var(--primary) 28%, var(--border));
+    border-radius: var(--radius-sm);
+    background: var(--surface);
+    background: color-mix(in srgb, var(--primary) 12%, var(--surface));
+    color: var(--text);
+    font-size: 0.8rem;
+    line-height: 1.2;
+    white-space: nowrap;
 }
 
 .settings-group .row {
@@ -1075,6 +1364,10 @@ button .material-symbols-outlined,
     font-weight: 600;
 }
 
+.settings-group > h2 {
+    margin-bottom: var(--space-5) !important;
+}
+
 /* Settings form controls */
 .ui-card .form-control {
     height: var(--control-height-sm);
@@ -1093,6 +1386,7 @@ button .material-symbols-outlined,
 /* Focus state for accessibility + structure */
 .ui-card:focus-within {
     border-color: var(--primary);
+    box-shadow: 0 0 0 1px rgba(99, 102, 241, 0.3);
     box-shadow: 0 0 0 1px color-mix(in srgb, var(--primary) 30%, transparent);
 }
 
@@ -1186,6 +1480,7 @@ button .material-symbols-outlined,
     display: inline-block;
     font-size: 0.85em;
     font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+    background: var(--surface-elevated);
     background: color-mix(in srgb, var(--surface-elevated) 92%, transparent);
     color: var(--text-default);
     padding: 0.12rem 0.45rem;
@@ -1225,12 +1520,12 @@ button .material-symbols-outlined,
 /* ─── Collapse when empty ───────────────────────────────────────────── */
 
 /* If container has no actual content → remove it visually */
-.video-preview-grid:empty {
+#videoPreviewGrid:empty {
     display: none !important;
 }
 
 /* If JS keeps nodes but no data → also collapse */
-.video-preview-grid.is-empty {
+#videoPreviewGrid.is-empty {
     display: none !important;
 }
 
@@ -1294,6 +1589,7 @@ button .material-symbols-outlined,
     padding: clamp(1rem, 2vw, 1.45rem);
     border-radius: calc(var(--radius-lg) + 2px);
     background: linear-gradient(180deg, rgba(255, 255, 255, 0.02), rgba(255, 255, 255, 0));
+    box-shadow: 0 0 0 1px rgba(229, 231, 235, 0.04) inset;
     box-shadow: 0 0 0 1px color-mix(in srgb, var(--text) 4%, transparent) inset;
 }
 
@@ -1369,7 +1665,7 @@ button .material-symbols-outlined,
 
 .video-meta__eyebrow {
     color: var(--text-muted);
-    font-size: 0.73rem;
+    font-size: 0.75rem;
     text-transform: uppercase;
     letter-spacing: 0.08em;
     font-weight: 700;
@@ -1396,12 +1692,13 @@ button .material-symbols-outlined,
     flex-direction: column;
     gap: 0.55rem;
     padding-top: 0.7rem;
+    border-top: 1px solid rgba(229, 231, 235, 0.1);
     border-top: 1px solid color-mix(in srgb, var(--text) 10%, transparent);
 }
 
 .video-meta__label {
     color: var(--text-muted);
-    font-size: 0.72rem;
+    font-size: 0.75rem;
     text-transform: uppercase;
     letter-spacing: 0.08em;
     font-weight: 600;
@@ -1464,7 +1761,7 @@ button .material-symbols-outlined,
     margin-right: 0.45rem;
     padding: 0.12rem 0.45rem;
     border-radius: var(--radius-pill, 999px);
-    font-size: 0.68rem;
+    font-size: 0.75rem;
     font-weight: 700;
     line-height: 1.25;
     letter-spacing: 0.02em;
@@ -1477,8 +1774,9 @@ button .material-symbols-outlined,
 }
 
 .platform-pill--youtube {
-    background: #ff0033;
-    border-color: #ff0033;
+    /* Dark enough for white YT text to meet AA contrast on the badge. */
+    background: #dc002a;
+    border-color: #dc002a;
 }
 
 .platform-pill--tiktok {
@@ -1614,7 +1912,7 @@ button .material-symbols-outlined,
 }
 
 .table tbody tr:hover {
-    background: rgba(99, 102, 241, 0.12);
+    background: var(--surface-hover);
 }
 
 .table tbody td {
@@ -1635,7 +1933,7 @@ td[data-label="Title"] {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    font-family: "Roboto Flex", system-ui, sans-serif !important;
+    font-family: "Roboto Flex", system-ui, sans-serif;
     font-stretch: 100%;
     font-variation-settings: "wdth" 100;
     letter-spacing: -0.01em;
@@ -1661,8 +1959,10 @@ td[data-label="Title"] {
     height: 1.75rem;
     flex: 0 0 auto;
     padding: 0;
+    border: 1px solid var(--border);
     border: 1px solid color-mix(in srgb, var(--border) 92%, transparent);
     border-radius: var(--radius-sm);
+    background: var(--surface-elevated);
     background: color-mix(in srgb, var(--surface-elevated) 92%, transparent);
     color: var(--text-muted);
     transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
@@ -1671,11 +1971,14 @@ td[data-label="Title"] {
 .job-copy-url-btn:hover,
 .job-copy-url-btn:focus-visible {
     color: var(--text);
+    border-color: var(--primary);
     border-color: color-mix(in srgb, var(--primary) 45%, var(--border));
+    background: var(--surface-elevated);
     background: color-mix(in srgb, var(--primary) 14%, var(--surface-elevated));
 }
 
 .job-copy-url-btn:focus-visible {
+    outline: 2px solid rgba(99, 102, 241, 0.4);
     outline: 2px solid color-mix(in srgb, var(--primary) 40%, transparent);
     outline-offset: 2px;
 }
@@ -1734,11 +2037,23 @@ td[data-label="Title"] {
 }
 
 .table tbody tr.row-done {
-    background: color-mix(in srgb, var(--success) 8%, transparent);
+    background: var(--surface-success-row);
 }
 
 .table tbody tr.row-error {
-    background: color-mix(in srgb, var(--danger) 8%, transparent);
+    background: var(--surface-danger-row);
+}
+
+/* Bootstrap's table-hover paints every cell on hover. Keep that state
+   transparent so the row owns one continuous background without seams. */
+.jobs-table.table-hover > tbody > tr:hover > * {
+    --bs-table-bg-state: transparent;
+    background-color: transparent;
+}
+
+.table tbody tr.row-done:hover,
+.table tbody tr.row-error:hover {
+    background: var(--surface-hover);
 }
 
 /* ── Jobs Card Bounds ───────────────────────────────────────────────────── */
@@ -1839,11 +2154,16 @@ td[data-label="Title"] {
 /* File size badge in status display — matches .meta-sub */
 .status-size {
     display: block;
-    font-size: 0.7rem;
-    color: var(--text-muted);
+    font-size: 0.75rem;
+    color: var(--text);
     margin-top: 2px;
-    opacity: 0.7;
+    opacity: 1;
     line-height: 1.2;
+}
+
+.form-check.form-switch {
+    min-height: 44px;
+    align-items: center;
 }
 
 .jobs-table .col-status {
@@ -1881,6 +2201,7 @@ td[data-label="Title"] {
 }
 
 .jobs-table tbody tr {
+    border-bottom: 1px solid rgba(229, 231, 235, 0.06);
     border-bottom: 1px solid color-mix(in srgb, var(--text) 6%, transparent);
 }
 
@@ -1916,10 +2237,10 @@ td[data-label="Title"] {
 }
 
 .jobs-mobile-action {
-    width: 2rem;
-    height: 2rem;
-    min-width: 2rem;
-    min-height: 2rem;
+    width: 44px;
+    height: 44px;
+    min-width: 44px;
+    min-height: 44px;
     padding: 0;
     display: inline-grid;
     place-items: center;
@@ -1932,12 +2253,17 @@ td[data-label="Title"] {
 
 .jobs-mobile-action:hover,
 .jobs-mobile-action:focus-visible {
+    background: rgba(229, 231, 235, 0.1);
     background: color-mix(in srgb, var(--text) 10%, transparent);
     color: var(--text);
 }
 
 .jobs-mobile-action .material-symbols-outlined {
     font-size: 1.1rem;
+}
+
+.mobile-job-history-option {
+    display: none;
 }
 
 .job-item {
@@ -1947,8 +2273,10 @@ td[data-label="Title"] {
     min-height: 4.7rem;
     margin-top: 0.8rem;
     padding: 0.9rem 0.95rem;
+    border: 1px solid var(--border);
     border: 1px solid color-mix(in srgb, var(--text) 8%, transparent);
     border-radius: 18px;
+    background: var(--surface-elevated);
     background:
         linear-gradient(180deg, rgba(255, 255, 255, 0.02), rgba(255, 255, 255, 0)),
         color-mix(in srgb, var(--surface-elevated) 88%, transparent);
@@ -1956,6 +2284,7 @@ td[data-label="Title"] {
 }
 
 .job-item:last-child {
+    border-bottom: 1px solid var(--border);
     border-bottom: 1px solid color-mix(in srgb, var(--text) 8%, transparent);
 }
 
@@ -1990,6 +2319,63 @@ td[data-label="Title"] {
     opacity: 0.72;
 }
 
+.job-item__title-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: start;
+    gap: 0.55rem;
+    min-width: 0;
+}
+
+.job-item__title-row .job-item__title-wrap {
+    display: flex;
+    align-items: flex-start;
+    min-width: 0;
+}
+
+.job-item__title-row .job-title-text {
+    flex: 1 1 auto;
+}
+
+.job-item__body[data-action="open-detail"] {
+    cursor: pointer;
+    border-radius: var(--radius-sm);
+}
+
+.job-item__body[data-action="open-detail"]:focus-visible {
+    outline: 2px solid rgba(99, 102, 241, 0.7);
+    outline: 2px solid color-mix(in srgb, var(--primary) 70%, transparent);
+    outline-offset: 4px;
+}
+
+.job-item__status {
+    display: flex;
+    align-items: flex-start;
+    justify-content: flex-end;
+    min-width: 0;
+}
+
+.job-item__status .status-inline {
+    min-width: 0;
+    gap: 0;
+    align-items: flex-end;
+}
+
+.jobs-mobile-media {
+    color: var(--text);
+    font-size: 0.8rem;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    opacity: 0.9;
+}
+
+.job-item__time {
+    margin: 0;
+    color: var(--text-muted);
+    font-size: 0.75rem;
+    line-height: 1.2;
+}
+
 .job-item__primary-action {
     display: flex;
     align-items: center;
@@ -2004,10 +2390,10 @@ td[data-label="Title"] {
 
 .job-item__primary-action .btn-icon,
 .job-item__primary-action .dropdown-toggle-split {
-    width: 40px;
-    height: 40px;
-    min-width: 40px;
-    min-height: 40px;
+    width: 44px;
+    height: 44px;
+    min-width: 44px;
+    min-height: 44px;
     padding: 0;
 }
 
@@ -2030,8 +2416,9 @@ td[data-label="Title"] {
 }
 
 .job-item__detail-label {
+    color: var(--text-muted);
     color: color-mix(in srgb, var(--text-muted) 88%, white 12%);
-    font-size: 0.66rem;
+    font-size: 0.75rem;
     font-weight: 650;
     letter-spacing: 0.08em;
     text-transform: uppercase;
@@ -2040,7 +2427,7 @@ td[data-label="Title"] {
 .job-item__detail-value {
     min-width: 0;
     color: var(--text);
-    font-size: 0.76rem;
+    font-size: 0.8125rem;
     line-height: 1.35;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -2102,27 +2489,19 @@ td[data-label="Title"] {
 
 .detail-modal__body {
     display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    min-width: 0;
     line-height: 1.35;
     gap: 0.9rem;
     padding: 0.95rem;
 }
 
-.job-item__detail-value {
-    white-space: normal;
-}
-
-.job-item__details {
-    grid-template-columns: minmax(0, 1fr);
-}
-
-.job-item__detail:last-child {
-    grid-column: auto;
-    gap: 0.5rem;
-}
-
 .detail-hero {
     display: flex;
     flex-direction: column;
+    width: 100%;
+    min-width: 0;
     gap: 0.75rem;
 }
 
@@ -2136,7 +2515,9 @@ td[data-label="Title"] {
     aspect-ratio: 16 / 9;
     overflow: hidden;
     border-radius: 12px;
+    background: var(--surface-elevated);
     background: color-mix(in srgb, var(--surface-elevated) 92%, transparent);
+    border: 1px solid var(--border);
     border: 1px solid color-mix(in srgb, var(--text) 8%, transparent);
 }
 
@@ -2161,10 +2542,15 @@ td[data-label="Title"] {
 .detail-hero__content {
     display: flex;
     flex-direction: column;
+    min-width: 0;
     gap: 0.38rem;
 }
 
 .detail-title {
+    display: flex;
+    align-items: flex-start;
+    flex-wrap: wrap;
+    gap: 0.45rem;
     margin: 0;
     font-size: 1.02rem;
     font-weight: 600;
@@ -2187,18 +2573,40 @@ td[data-label="Title"] {
 }
 
 .detail-status-text {
-    font-size: 0.72rem;
+    display: inline-flex;
+    align-items: center;
+    min-height: 28px;
+    padding: 0.22rem 0.6rem;
+    border: 1px solid currentColor;
+    border: 1px solid color-mix(in srgb, currentColor 32%, transparent);
+    border-radius: 999px;
+    background: transparent;
+    background: color-mix(in srgb, currentColor 12%, transparent);
+    font-size: 0.78rem;
     line-height: 1.1;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
+    letter-spacing: 0.01em;
     color: var(--text-muted);
     font-weight: 600;
+}
+
+.detail-status-text[data-status="done"],
+.detail-status-text[data-status="analysis_done"] {
+    color: var(--success);
+}
+
+.detail-status-text[data-status="error"] {
+    color: var(--danger);
+}
+
+.detail-status-date {
+    color: var(--text-muted);
+    font-size: 0.78rem;
 }
 
 .detail-message {
     margin: 0;
     color: var(--text-muted);
-    font-size: 0.76rem;
+    font-size: 0.75rem;
     line-height: 1.25;
 }
 
@@ -2207,6 +2615,7 @@ td[data-label="Title"] {
     flex-direction: column;
     gap: 0.45rem;
     padding-top: 0.65rem;
+    border-top: 1px solid rgba(229, 231, 235, 0.08);
     border-top: 1px solid color-mix(in srgb, var(--text) 8%, transparent);
 }
 
@@ -2217,10 +2626,23 @@ td[data-label="Title"] {
     color: var(--text-muted);
 }
 
+.detail-core-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    min-width: 0;
+}
+
 .detail-chip-row {
     display: flex;
     flex-wrap: wrap;
     gap: 0.4rem;
+}
+
+.detail-format-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0.5rem;
 }
 
 .detail-chip {
@@ -2229,11 +2651,21 @@ td[data-label="Title"] {
     min-height: 24px;
     padding: 0 0.55rem;
     border-radius: 999px;
+    border: 1px solid var(--border);
     border: 1px solid color-mix(in srgb, var(--text) 10%, transparent);
+    background: var(--surface-elevated);
     background: color-mix(in srgb, var(--surface-elevated) 96%, transparent);
     color: var(--text);
-    font-size: 0.72rem;
+    font-size: 0.75rem;
     line-height: 1;
+}
+
+.detail-format-chip {
+    justify-content: flex-start;
+    width: 100%;
+    min-width: 0;
+    border-radius: var(--radius-sm);
+    font-size: 0.78rem;
 }
 
 .detail-chip--muted {
@@ -2251,7 +2683,87 @@ td[data-label="Title"] {
     line-height: 1.35;
 }
 
+.detail-source-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.65rem;
+    min-width: 0;
+}
+
+.detail-source-host {
+    min-width: 0;
+    overflow: hidden;
+    color: var(--text);
+    font-size: 0.82rem;
+    font-weight: 600;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.detail-source-actions {
+    display: flex;
+    flex: 0 0 auto;
+    gap: 0.4rem;
+}
+
+.detail-source-action,
+.detail-copy-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.3rem;
+    min-height: 36px;
+}
+
+.detail-disclosure {
+    min-width: 0;
+}
+
+.detail-disclosure > summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    min-height: 32px;
+    color: var(--text-muted);
+    cursor: pointer;
+    font-size: 0.78rem;
+    font-weight: 600;
+    list-style: none;
+}
+
+.detail-disclosure > summary::-webkit-details-marker {
+    display: none;
+}
+
+.detail-disclosure > summary::after {
+    content: "expand_more";
+    font-family: "Material Symbols Outlined";
+    font-size: 1.1rem;
+}
+
+.detail-disclosure[open] > summary::after {
+    content: "expand_less";
+}
+
+.detail-source-full {
+    margin-top: 0.65rem;
+}
+
+.detail-job-id-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.65rem;
+    min-width: 0;
+    margin-top: 0.65rem;
+}
+
 .detail-job-id {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
     font-size: 0.7rem;
     line-height: 1.2;
     color: var(--text-muted);
@@ -2263,7 +2775,7 @@ td[data-label="Title"] {
 .action-cell-wrap {
     display: flex;
     align-items: center;
-    gap: 0.25rem;
+    gap: 0.5rem;
     position: relative;
     justify-content: flex-end;
     min-width: 72px;
@@ -2334,17 +2846,6 @@ td[data-label="Title"] {
     min-width: 80px;
 }
 
-.status-message {
-    display: block;
-    max-width: min(42ch, 26vw);
-    font-size: 0.72rem;
-    line-height: 1.25;
-    color: var(--text-muted);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-}
-
 .status-pill {
     display: inline-flex;
     align-items: center;
@@ -2359,6 +2860,10 @@ td[data-label="Title"] {
     line-height: 1.2;
 }
 
+.status-pill[title] {
+    cursor: help;
+}
+
 .status-pill .material-symbols-outlined,
 .status-pill .icon-inline {
     font-size: 14px;
@@ -2370,7 +2875,7 @@ td[data-label="Title"] {
 }
 
 .status-pill-success {
-    color: #86efac;
+    color: #bbf7d0;
     background: rgba(34, 197, 94, 0.16);
 }
 
@@ -2389,45 +2894,15 @@ td[data-label="Title"] {
     border-radius: var(--radius-pill);
     font-weight: 600;
     padding: 0.35em 0.7em;
+    background: var(--surface);
     background: color-mix(in srgb, var(--surface) 85%, transparent);
     border: 1px solid var(--border);
 }
 
 .badge.bg-success {
+    background: rgba(34, 197, 94, 0.2);
     background: color-mix(in srgb, var(--success) 20%, transparent);
     color: #86efac;
-}
-
-/* ── Indicators & Buttons ───────────────────────────────────────────────── */
-
-.ws-indicator {
-    font-size: 0.75rem;
-    font-weight: 500;
-    padding: 0.35rem 0.75rem;
-    border-radius: var(--radius-pill);
-}
-
-.ws-indicator.live {
-    will-change: opacity;
-}
-
-/* Pulse animation only when motion is allowed */
-@media (prefers-reduced-motion: no-preference) {
-    .ws-indicator.live {
-        animation: pulse 2s infinite;
-    }
-}
-
-@keyframes pulse {
-
-    0%,
-    100% {
-        opacity: 1;
-    }
-
-    50% {
-        opacity: 0.6;
-    }
 }
 
 /* Action buttons in tables */
@@ -2485,7 +2960,7 @@ td[data-label="Title"] {
     border-radius: var(--radius-md);
     box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
     min-width: 11rem;
-    z-index: 2000;
+    z-index: var(--z-popover);
 }
 
 /* Bootstrap/Popper positions table dropdowns inline. */
@@ -2560,6 +3035,7 @@ td:last-child {
 }
 
 .modal-content {
+    background: var(--surface);
     background: color-mix(in srgb, var(--surface) 88%, transparent);
     backdrop-filter: var(--blur-md);
     -webkit-backdrop-filter: var(--blur-md);
@@ -2569,6 +3045,7 @@ td:last-child {
 }
 
 #lalalAuthModal .modal-body {
+    background: var(--surface-strong);
     background: linear-gradient(180deg,
             color-mix(in srgb, var(--surface-strong) 92%, transparent),
             color-mix(in srgb, var(--surface) 75%, transparent));
@@ -2589,8 +3066,10 @@ td:last-child {
 }
 
 .auth-step-badge {
+    background: rgba(99, 102, 241, 0.22);
     background: color-mix(in srgb, var(--primary) 22%, transparent);
     color: #c7d2fe;
+    border-color: var(--primary);
     border-color: color-mix(in srgb, var(--primary) 42%, var(--border));
     margin-bottom: 0.25rem;
 }
@@ -2607,18 +3086,22 @@ td:last-child {
 }
 
 .auth-method-panel:hover {
+    border-color: var(--primary);
     border-color: color-mix(in srgb, var(--primary) 40%, var(--border));
 }
 
 .auth-method-panel--alt {
+    background: var(--surface-elevated);
     background: linear-gradient(135deg,
             color-mix(in srgb, var(--primary) 12%, var(--surface-elevated)),
             color-mix(in srgb, var(--primary) 4%, var(--surface-elevated)));
+    border-color: var(--border);
     border-color: color-mix(in srgb, var(--primary) 25%, var(--border));
     box-shadow: 0 0 0 1px rgba(99, 102, 241, 0.25);
 }
 
 .auth-method-panel--alt:hover {
+    border-color: var(--primary);
     border-color: color-mix(in srgb, var(--primary) 45%, var(--border));
 }
 
@@ -2813,15 +3296,15 @@ td:last-child {
 
     .stat-card {
         height: 100%;
-        min-height: 110px;
-        padding: 1rem;
+        min-height: 80px;
+        padding: 0.65rem;
         background: var(--surface-60);
         border: 1px solid var(--border);
         box-shadow: none;
     }
 
     .stat-value {
-        font-size: 2rem;
+        font-size: 1.6rem;
         font-weight: 700;
         line-height: 1.1;
     }
@@ -2847,13 +3330,9 @@ td:last-child {
         font-weight: 700;
     }
 
-    .status-size {
-        display: none !important;
-    }
-
     .status-pill {
-        font-size: 0.65rem;
-        padding: 0.1rem 0.35rem;
+        font-size: 0.75rem;
+        padding: 0.22rem 0.5rem;
         white-space: nowrap;
         max-width: 100%;
         overflow: hidden;
@@ -2861,8 +3340,34 @@ td:last-child {
     }
 
     #jobsCard {
+        display: none;
         flex: 1 0 16rem;
         min-height: 0;
+    }
+
+    html.mobile-job-history-enabled #jobsCard {
+        display: flex;
+    }
+
+    .mobile-job-history-option {
+        display: flex;
+        align-items: center;
+        min-height: 3.25rem;
+        margin: -0.5rem 0 1rem;
+        padding: 0.75rem 1rem;
+        border: 1px solid var(--border);
+        border-radius: var(--radius-md);
+        background: var(--surface-60);
+    }
+
+    .mobile-job-history-option .form-check-input {
+        flex: 0 0 auto;
+        margin-top: 0;
+        margin-left: 1rem !important;
+    }
+
+    .mobile-job-history-option .form-check {
+        padding-left: 0;
     }
 
     #jobsCard .jobs-list-shell {
@@ -2898,6 +3403,15 @@ td:last-child {
         margin-left: 0;
         order: 3;
         flex: 1 0 100%;
+        flex-wrap: wrap;
+    }
+
+    .jobs-quick-filter {
+        width: 100%;
+    }
+
+    .jobs-quick-filter__btn {
+        flex: 1 1 0;
     }
 
     .jobs-search-wrap {
@@ -2907,10 +3421,6 @@ td:last-child {
 
     .jobs-card-title {
         flex: 0 1 auto;
-    }
-
-    #wsIndicator {
-        margin-left: auto;
     }
 
     #jobsCard .jobs-list-shell {
@@ -2952,6 +3462,19 @@ td:last-child {
         width: 100%;
         max-width: 100%;
         min-width: 0;
+        min-height: 44px;
+    }
+
+    .settings-grid .form-control,
+    .settings-grid .form-select {
+        min-height: 44px;
+        font-size: 1rem;
+    }
+
+    .settings-grid .input-group .btn {
+        width: auto;
+        min-width: 44px;
+        flex: 0 0 auto;
     }
 
     .settings-grid form,
@@ -3012,6 +3535,7 @@ td:last-child {
     gap: 0.625rem;
     padding: 0.75rem 1rem;
     border-radius: var(--radius-md);
+    background: var(--surface);
     background: color-mix(in srgb, var(--surface) 90%, transparent);
     border: 1px solid var(--border);
     backdrop-filter: var(--blur-md);
@@ -3152,7 +3676,7 @@ td:last-child {
         padding: 0 var(--space-3) var(--space-2);
     }
 
-    .jobs-mobile-meta {
+.jobs-mobile-meta {
         min-width: 0;
         overflow: hidden;
         text-overflow: ellipsis;
@@ -3170,23 +3694,23 @@ td:last-child {
     }
 
     .job-item__actions .btn-group>.dropdown-toggle-split {
-        width: 32px !important;
-        height: 32px !important;
-        min-width: 32px !important;
-        min-height: 32px !important;
+        width: 44px !important;
+        height: 44px !important;
+        min-width: 44px !important;
+        min-height: 44px !important;
         padding: 0 !important;
         line-height: 1;
-        flex: 0 0 32px;
+        flex: 0 0 44px;
     }
 
     .job-item__actions .btn-icon {
-        width: 32px !important;
-        height: 32px !important;
-        min-width: 32px !important;
-        min-height: 32px !important;
+        width: 44px !important;
+        height: 44px !important;
+        min-width: 44px !important;
+        min-height: 44px !important;
         padding: 0;
         border-radius: var(--radius-sm);
-        flex: 0 0 32px;
+        flex: 0 0 44px;
         overflow: visible;
     }
 
@@ -3197,31 +3721,107 @@ td:last-child {
     }
 
     #detailModal .modal-dialog {
-        margin: 0.75rem;
+        width: 100%;
+        max-width: none;
+        min-height: 100dvh;
+        margin: 0;
+    }
+
+    #detailModal .modal-content {
+        display: flex;
+        flex-direction: column;
+        height: 100dvh;
+        max-height: 100dvh;
+        border-radius: 0;
     }
 
     .detail-modal {
-        border-radius: 12px;
+        border-radius: 0;
     }
 
     .detail-modal__body {
-        padding: 0.8rem;
-        gap: 0.8rem;
+        flex: 1 1 auto;
+        min-height: 0;
+        overflow-y: auto;
+        gap: 1rem;
+        padding: 1rem;
     }
 
-    .detail-modal__footer {
-        padding: 0.7rem 0.8rem 0.8rem;
+    .detail-hero {
+        display: grid;
+        grid-template-columns: 72px minmax(0, 1fr);
+        align-items: start;
+        gap: 0.75rem;
     }
 
-    .detail-modal__footer .btn {
-        min-height: 36px;
-        padding: 0.45rem 0.7rem;
+    .detail-hero__thumb {
+        width: 72px;
+        height: 72px;
+        max-height: none;
+        aspect-ratio: 1;
+    }
+
+    .detail-title {
+        font-size: 1rem;
+        line-height: 1.3;
+    }
+
+    .detail-meta-line {
+        font-size: 0.8rem;
     }
 
     .detail-chip {
-        min-height: 22px;
-        font-size: 0.7rem;
-        }
+        min-height: 32px;
+        font-size: 0.8125rem;
+    }
+
+    .detail-format-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .detail-source-row {
+        align-items: flex-start;
+        flex-wrap: wrap;
+    }
+
+    .detail-source-actions {
+        width: 100%;
+    }
+
+    .detail-source-action {
+        flex: 1 1 0;
+        min-height: 40px;
+    }
+
+    .detail-job-id-row {
+        align-items: flex-start;
+        flex-direction: column;
+    }
+
+    .detail-copy-button {
+        width: 100%;
+        min-height: 40px;
+    }
+
+    .detail-modal__footer {
+        flex: 0 0 auto;
+        gap: 0.6rem;
+        padding: 0.75rem 1rem 1rem;
+    }
+
+    .detail-modal__footer .btn {
+        min-height: 44px;
+        padding: 0.45rem 0.7rem;
+    }
+
+    .detail-modal__footer #mDownloadBtn {
+        order: 2;
+        flex: 1 1 auto;
+    }
+
+    .detail-modal__footer [data-bs-dismiss="modal"] {
+        order: 1;
+    }
 
         .toast {
             transform: translateY(-20px);
@@ -3233,8 +3833,163 @@ td:last-child {
 
         .toast--hiding {
             transform: translateY(-20px);
-        }
     }
+}
+
+/* ── Jobs feed and tablet fallback ───────────────────────────────────────── */
+
+@media (max-width: 1024px) {
+    .jobs-mobile-list {
+        display: flex;
+        flex-direction: column;
+    }
+
+    .jobs-desktop-view {
+        display: none;
+    }
+
+    #jobsCard {
+        display: none;
+        flex: 1 0 auto;
+        min-height: 0;
+    }
+
+    html.mobile-job-history-enabled #jobsCard {
+        display: flex;
+    }
+
+    .mobile-job-history-option {
+        display: flex;
+        align-items: center;
+        min-height: 3.25rem;
+        margin: -0.5rem 0 1rem;
+        padding: 0.75rem 1rem;
+        border: 1px solid var(--border);
+        border-radius: var(--radius-md);
+        background: var(--surface-60);
+    }
+
+    .mobile-job-history-option .form-check {
+        padding-left: 0;
+    }
+
+    .mobile-job-history-option .form-check-input {
+        flex: 0 0 auto;
+        margin-top: 0;
+        margin-left: 1rem !important;
+    }
+
+    #jobsCard .ui-card-body,
+    #jobsCard .jobs-list-shell {
+        overflow: visible;
+    }
+
+    #jobsCard .jobs-list-shell {
+        flex: 0 0 auto;
+        min-height: auto;
+    }
+
+    .jobs-card-header {
+        align-items: center !important;
+        flex-wrap: wrap;
+    }
+
+    .jobs-card-controls {
+        width: 100%;
+        margin-left: 0;
+        order: 3;
+        flex: 1 0 100%;
+        flex-wrap: wrap;
+    }
+
+    .jobs-quick-filter {
+        width: 100%;
+    }
+
+    .jobs-quick-filter__btn {
+        flex: 1 1 0;
+    }
+
+    .jobs-search-wrap {
+        flex: 1 1 auto;
+        min-width: 0;
+    }
+
+    .stat-card {
+        min-height: 84px;
+        padding: 0.7rem;
+    }
+
+    .stat-value {
+        font-size: 1.75rem;
+    }
+
+    .jobs-mobile-media {
+        color: var(--text);
+        font-size: 0.8rem;
+        font-weight: 600;
+        opacity: 0.9;
+    }
+
+    .job-item {
+        align-items: flex-start;
+        gap: 0.75rem;
+    }
+
+    .job-item .platform-pill--youtube {
+        color: #fecdd3;
+        background: rgba(255, 0, 51, 0.18);
+        border-color: rgba(255, 0, 51, 0.38);
+    }
+
+    .job-item .platform-pill--tiktok {
+        background: rgba(37, 244, 238, 0.1);
+        border-color: rgba(37, 244, 238, 0.3);
+    }
+
+    .job-item .platform-pill--instagram {
+        background: linear-gradient(45deg, rgba(240, 148, 51, 0.22), rgba(188, 24, 136, 0.22));
+        border-color: rgba(220, 39, 67, 0.35);
+    }
+
+    .job-item__status .status-pill {
+        border-color: currentColor;
+        border: 1px solid color-mix(in srgb, currentColor 32%, transparent);
+        font-size: 0.75rem;
+        padding: 0.25rem 0.55rem;
+    }
+
+    .job-item.row-error {
+        border-color: var(--danger);
+        border-color: color-mix(in srgb, var(--danger) 42%, var(--border));
+    }
+
+    .job-item.row-error .job-item__status .status-pill-danger {
+        box-shadow: 0 0 0 2px rgba(239, 68, 68, 0.14);
+        box-shadow: 0 0 0 2px color-mix(in srgb, var(--danger) 14%, transparent);
+    }
+
+    .job-item.row-done .job-item__status .status-pill-success {
+        box-shadow: 0 0 0 2px rgba(34, 197, 94, 0.12);
+        box-shadow: 0 0 0 2px color-mix(in srgb, var(--success) 12%, transparent);
+    }
+}
+
+@media (min-width: 769px) and (max-width: 1024px) {
+    .app-root--dashboard,
+    .app-root--dashboard .app-shell {
+        height: auto;
+        min-height: 100dvh;
+        overflow: visible;
+    }
+
+    .app-root--dashboard .app-main,
+    .app-root--dashboard .dashboard-layout,
+    #jobsCard,
+    #jobsCard .ui-card-body {
+        overflow: visible;
+    }
+}
 
     /* ── iOS Safari overrides ─────────────────────────────────────────────────
    Restrict to actual touch devices: -webkit-touch-callout is iOS only,
@@ -3244,6 +3999,16 @@ td:last-child {
         /* background-attachment: fixed is broken on iOS (repaint on scroll) */
         .app-root {
             background-attachment: scroll;
+        }
+
+        /* Keep the footer in the flex flow on iOS too. A sticky-positioned
+           footer would overlay expanded dashboard content while scrolling. */
+        .wb-footer {
+            position: static;
+        }
+
+        .app-main {
+            padding-bottom: 0;
         }
 
         /* backdrop-filter is GPU-expensive on iOS and can cause layout shifts */
@@ -3280,6 +4045,19 @@ td:last-child {
    Base rules already allow vertical scroll; these are additional mobile tweaks. */
     @media (max-width: 768px) {
 
+        /* .btn-sm.btn-icon is more specific than the base navbar rule. Keep
+           icon controls at the full mobile touch target size. */
+        .top-navbar .btn,
+        .top-navbar .btn-sm {
+            height: 44px;
+            min-height: 44px;
+        }
+
+        .top-navbar .btn-sm.btn-icon {
+            width: 44px;
+            min-width: 44px;
+        }
+
         html,
         body {
             height: auto !important;
@@ -3289,12 +4067,29 @@ td:last-child {
             overscroll-behavior-y: auto;
         }
 
+        .app-main,
+        .settings-tabs,
+        .modal-body,
+        .detail-modal__body,
+        .jobs-list-shell {
+            -webkit-overflow-scrolling: touch;
+        }
+
+        .wb-footer-link {
+            min-height: 44px;
+        }
+
         .app-root,
         .app-root--dashboard,
         .app-shell {
             height: auto !important;
-            min-height: auto !important;
             overflow: visible !important;
+        }
+
+        /* Keep enough flex height for the footer when job history is collapsed. */
+        .app-root--dashboard,
+        .app-root--dashboard .app-shell {
+            min-height: 100dvh !important;
         }
 
         #jobsCard,

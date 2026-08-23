@@ -9,15 +9,17 @@
 import asyncio
 import json
 import logging
+import uuid
 from collections import defaultdict
 from collections.abc import Callable
+from contextlib import suppress
 from itertools import count
 from typing import Any
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
-from .auth import require_user
+from .auth import current_user, require_user
 from ..common.rate_limit import limiter
 
 logger = logging.getLogger(__name__)
@@ -27,6 +29,7 @@ router = APIRouter(tags=["events"])
 _shutdown_event: asyncio.Event | None = None
 _SSE_KEEPALIVE_SECONDS = 5.0
 _SSE_QUEUE_MAXSIZE = 32
+_MAX_SSE_CONNECTIONS = 200
 # NOTE: This broker is in-memory and process-local. Connected clients only
 # receive events published by the same Python process. If deployment ever moves
 # beyond a single process, replace this with a shared broker (for example Redis).
@@ -63,22 +66,28 @@ def broadcast_shutdown() -> None:
 
 
 def _enqueue_sse_payload(subscriber: asyncio.Queue[dict[str, Any]], payload: dict[str, Any]) -> None:
-    """Best-effort delivery: drop the oldest event when a subscriber queue is full."""
+    """Deliver an event and request a REST resync when the queue overflows."""
     try:
         subscriber.put_nowait(payload)
         return
     except asyncio.QueueFull:
         pass
 
-    try:
+    with suppress(asyncio.QueueEmpty):
         subscriber.get_nowait()
-    except asyncio.QueueEmpty:
-        return
 
+    if payload.get("type") == "shutdown":
+        replacement = payload
+    else:
+        replacement = {
+            "type": "resync_required",
+            "seq": payload.get("seq"),
+            "job_id": payload.get("id") or payload.get("job_id"),
+        }
     try:
-        subscriber.put_nowait(payload)
+        subscriber.put_nowait(replacement)
     except asyncio.QueueFull:
-        logger.debug("Dropping SSE event because subscriber queue stayed full")
+        logger.debug("Dropping SSE resync marker because subscriber queue stayed full")
 
 
 def _prune_empty_job_subscribers(job_id: str) -> None:
@@ -118,6 +127,9 @@ async def _sse_stream(request: Request, subscriber: asyncio.Queue[dict[str, Any]
     yield "retry: 2000\n\n"
     try:
         while True:
+            if current_user(request) is None:
+                yield _format_sse({"type": "authentication_required"})
+                return
             if _shutdown_event is not None and _shutdown_event.is_set():
                 yield _format_sse({"type": "shutdown"})
                 return
@@ -161,6 +173,9 @@ async def _sse_stream(request: Request, subscriber: asyncio.Queue[dict[str, Any]
                     await get_task
                 except asyncio.CancelledError:
                     pass
+                if current_user(request) is None:
+                    yield _format_sse({"type": "authentication_required"})
+                    return
                 yield ": keepalive\n\n"
                 continue
 
@@ -177,6 +192,9 @@ async def _sse_stream(request: Request, subscriber: asyncio.Queue[dict[str, Any]
             if get_task in done:
                 # Got a message
                 payload = get_task.result()
+                if current_user(request) is None:
+                    yield _format_sse({"type": "authentication_required"})
+                    return
                 yield _format_sse(payload)
     except asyncio.CancelledError:
         logger.debug("SSE stream cancelled during shutdown")
@@ -210,6 +228,9 @@ def _build_sse_response(
 @limiter.limit("30/minute")
 async def sse_events(request: Request, _user: str = Depends(require_user)):
     """Server-sent event stream for dashboard job updates."""
+    if _active_connection_count() >= _MAX_SSE_CONNECTIONS:
+        raise HTTPException(status_code=503, detail="Too many event streams")
+
     subscriber = _subscribe_sse(_sse_connections)
     return _build_sse_response(
         request,
@@ -220,19 +241,30 @@ async def sse_events(request: Request, _user: str = Depends(require_user)):
 
 @router.get("/api/jobs/{job_id}/events")
 @limiter.limit("30/minute")
-async def sse_job_events(job_id: str, request: Request, _user: str = Depends(require_user)):
+async def sse_job_events(job_id: uuid.UUID, request: Request, _user: str = Depends(require_user)):
     """Server-sent event stream for a single job detail page."""
-    subscribers = _job_sse_connections[job_id]
+    if _active_connection_count() >= _MAX_SSE_CONNECTIONS:
+        raise HTTPException(status_code=503, detail="Too many event streams")
+
+    job_id_str = str(job_id)
+    subscribers = _job_sse_connections[job_id_str]
     subscriber = _subscribe_sse(subscribers)
 
     def _cleanup() -> None:
         _unsubscribe_sse(subscribers, subscriber)
-        _prune_empty_job_subscribers(job_id)
+        _prune_empty_job_subscribers(job_id_str)
 
     return _build_sse_response(
         request,
         subscriber,
         _cleanup,
+    )
+
+
+def _active_connection_count() -> int:
+    """Return the number of currently subscribed SSE streams."""
+    return len(_sse_connections) + sum(
+        len(subscribers) for subscribers in _job_sse_connections.values()
     )
 
 

@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import logging
 import os
@@ -16,7 +17,7 @@ from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 from ..db import get_settings
 from ..common.rate_limit import limiter
@@ -84,16 +85,18 @@ def hash_password(username: str, password: str) -> str:
 
 def verify_login(username: str, password: str) -> bool:
     """Verify login credentials against stored hash."""
-    stored_hash = _DEFAULT_HASH
-
     # Check if a custom password hash is stored in settings.
     try:
         settings = get_settings(include_internal=True)
-        custom_hash = settings.get("admin_password_hash")
-        if custom_hash and str(custom_hash).strip():
-            stored_hash = str(custom_hash).strip()
     except Exception:
-        logger.warning("Could not load password hash from settings; falling back to default", exc_info=True)
+        # Never fall back to the bootstrap password when the persisted
+        # credential cannot be read. That would turn a storage failure into an
+        # authentication bypass after the password has been changed.
+        logger.exception("Unable to load authentication settings")
+        return False
+
+    custom_hash = settings.get("admin_password_hash")
+    stored_hash = str(custom_hash).strip() if custom_hash and str(custom_hash).strip() else _DEFAULT_HASH
 
     password_ok = hmac.compare_digest(hash_password(_DEFAULT_USER, password), stored_hash)
     username_ok = hmac.compare_digest(username, _DEFAULT_USER)
@@ -170,15 +173,17 @@ async def login_page(request: Request):
 
 class LoginRequest(BaseModel):
     """JSON body for login API."""
-    username: str
-    password: str
+    model_config = ConfigDict(extra="forbid")
+
+    username: str = Field(min_length=1, max_length=128)
+    password: str = Field(min_length=1, max_length=1024)
 
 
 @router.post("/login")
 @limiter.limit("5/minute")
 async def login(request: Request, body: LoginRequest):
     """Process login (JSON API)."""
-    if not verify_login(body.username, body.password):
+    if not await asyncio.to_thread(verify_login, body.username, body.password):
         return JSONResponse(
             status_code=401,
             content={"ok": False, "detail": "Invalid credentials"},

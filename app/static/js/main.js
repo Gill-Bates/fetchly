@@ -7,13 +7,10 @@ import { AUDIO_TYPE, CONFIG, CSRF_COOKIE_NAME, DOWNLOADABLE_STATUSES, TERMINAL_S
 import { fetchJobs, fetchResolvedThumbnail, fetchStats, submitJob, fetchVideoInfo, toErrorMessage } from "./api.js";
 import { reportWarning } from "./errors.js";
 import { createTimeoutSignal, getCookie, humanSize, isValidMediaUrl, detectPlatform, platformPillLabel, PLATFORM, extractYouTubeVideoId, formatDuration, isSafeRedirect, subscribeToLalalProgress, triggerDownload } from "./utils.js";
-import { prependJob, loadMore, applyJobUpdate, getJobById, applyStoredJobTitleFilter, hasNonTerminalJobs } from "./jobs.js";
-import { EVENT_NAMES, dispatchJobUpdate, setEventStreamEnabled } from "./events.js";
-import { showToast, toast } from "./toast.js";
+import { prependJob, loadMore, applyJobUpdate, getJobById, applyStoredJobTitleFilter, formatCreatedText } from "./jobs.js?v=20260823d";
+import { EVENT_NAMES, dispatchJobUpdate, setEventStreamEnabled } from "./events.js?v=20260823e";
+import { showToast } from "./toast.js";
 import { initTrim } from "./trim.js";
-
-// Expose toast globally for inline scripts
-window.__tubeyou__ = Object.freeze({ toast, showToast });
 
 const submitForm = document.getElementById("submitForm");
 const urlInput = document.getElementById("urlInput");
@@ -29,6 +26,8 @@ const submitBtn = document.getElementById("submitBtn");
 const btnText = document.getElementById("btnText");
 const formError = document.getElementById("formError");
 const jobsSearchInput = document.getElementById("jobsSearchInput");
+const jobsSearchClear = document.getElementById("jobsSearchClear");
+const jobsQuickFilter = document.getElementById("jobsQuickFilter");
 const jobsTbody = document.getElementById("jobsTbody");
 const jobsMobileList = document.getElementById("jobsMobileList");
 const jobsRenderRoot = document.getElementById("jobsRenderRoot");
@@ -37,9 +36,15 @@ const jobsSentinel = document.getElementById("jobsSentinel");
 const detailModalEl = document.getElementById("detailModal");
 const settingsBtn = document.getElementById("settingsBtn");
 const titlePopover = document.getElementById("titlePopover");
+const duplicateJobModalEl = document.getElementById("duplicateJobModal");
+const duplicateJobMessage = document.getElementById("duplicateJobMessage");
+const duplicateJobConfirmBtn = document.getElementById("duplicateJobConfirmBtn");
 const DROPDOWN_TOGGLE_SELECTOR = "[data-bs-toggle='dropdown']";
+const MOBILE_JOB_HISTORY_STORAGE_KEY = "tubeyou.showJobHistory";
+const MOBILE_JOB_HISTORY_CLASS = "mobile-job-history-enabled";
 
 const detailModal = detailModalEl ? bootstrap.Modal.getOrCreateInstance(detailModalEl) : null;
+const duplicateJobModal = duplicateJobModalEl ? bootstrap.Modal.getOrCreateInstance(duplicateJobModalEl) : null;
 const statCards = new Map(
     [...document.querySelectorAll(".stat-card[data-stat-key]")].map((card) => [card.dataset.statKey, card]),
 );
@@ -54,10 +59,12 @@ let activeDetailId = null;
 let lastFocusedBeforeModal = null;
 let isLoadingMore = false;
 let isSubmitting = false;
+let pendingDuplicateFormData = null;
 let previewDebounceId = null;
 let previewAbortController = null;
 let previewRequestUrl = "";
 let filterRafId = null;
+let activeJobStatusFilter = "all";
 let activeTitleCell = null;
 let statsRefreshTimer = null;
 let detailInfoAbortController = null;
@@ -70,6 +77,63 @@ const COMPACT_NUMBER_FORMATTER = new Intl.NumberFormat(undefined, {
     notation: "compact",
     maximumFractionDigits: 1,
 });
+const DETAIL_DATE_FORMATTER = new Intl.DateTimeFormat("en-GB", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+});
+const DETAIL_STATUS_LABELS = Object.freeze({
+    analysis: "Processing",
+    analysis_done: "Completed",
+    cancelled: "Cancelled",
+    done: "Completed",
+    downloading: "Processing",
+    error: "Failed",
+    processing: "Processing",
+    queued: "Queued",
+    transcoding: "Processing",
+});
+
+function readMobileJobHistoryPreference() {
+    try {
+        return window.localStorage.getItem(MOBILE_JOB_HISTORY_STORAGE_KEY) === "true";
+    } catch (_) {
+        return false;
+    }
+}
+
+function writeMobileJobHistoryPreference(enabled) {
+    try {
+        window.localStorage.setItem(MOBILE_JOB_HISTORY_STORAGE_KEY, String(enabled));
+    } catch (_) {
+        // Storage can be unavailable in private or restricted browser contexts.
+    }
+}
+
+function syncMobileJobHistoryVisibility(enabled) {
+    document.documentElement.classList.toggle(MOBILE_JOB_HISTORY_CLASS, enabled);
+
+    const toggle = document.getElementById("showJobHistoryToggle");
+    if (toggle instanceof HTMLInputElement) {
+        toggle.checked = enabled;
+    }
+}
+
+function initMobileJobHistoryToggle() {
+    const toggle = document.getElementById("showJobHistoryToggle");
+    if (!(toggle instanceof HTMLInputElement)) {
+        return;
+    }
+
+    syncMobileJobHistoryVisibility(readMobileJobHistoryPreference());
+    toggle.addEventListener("change", () => {
+        const enabled = toggle.checked;
+        writeMobileJobHistoryPreference(enabled);
+        syncMobileJobHistoryVisibility(enabled);
+    });
+}
 
 
 function getCsrfToken() {
@@ -203,7 +267,7 @@ function scheduleDashboardStatsRefresh() {
 }
 
 function syncDashboardEventStream() {
-    setEventStreamEnabled(hasNonTerminalJobs());
+    setEventStreamEnabled(true);
 }
 
 jobsRenderRoot?.addEventListener("mouseover", (event) => {
@@ -320,7 +384,7 @@ function removeFilterEmptyState() {
 }
 
 function getOrCreateFilterEmptyState() {
-    if (window.matchMedia("(max-width: 768px)").matches) {
+    if (window.matchMedia("(max-width: 1024px)").matches) {
         if (!jobsMobileList) return null;
 
         let state = document.getElementById("jobsFilterEmptyState");
@@ -335,7 +399,7 @@ function getOrCreateFilterEmptyState() {
         iconDiv.textContent = "🔎";
 
         const p = document.createElement("p");
-        p.textContent = "No jobs match this title search.";
+        p.textContent = "No jobs match this title or URL search.";
 
         state.append(iconDiv, p);
         jobsMobileList.append(state);
@@ -362,7 +426,7 @@ function getOrCreateFilterEmptyState() {
     iconDiv.textContent = "🔎";
 
     const p = document.createElement("p");
-    p.textContent = "No jobs match this title search.";
+    p.textContent = "No jobs match this title or URL search.";
 
     wrapper.append(iconDiv, p);
 
@@ -372,17 +436,40 @@ function getOrCreateFilterEmptyState() {
     return row;
 }
 
+function getJobStatusFilterLabel(statusFilter) {
+    return statusFilter === "done" ? "done" : statusFilter === "error" ? "error" : "job";
+}
+
+function getJobFilterEmptyMessage(query, statusFilter) {
+    const hasQuery = query.trim() !== "";
+    const hasStatusFilter = statusFilter !== "all";
+    if (hasQuery && hasStatusFilter) {
+        return "No jobs match this search and status filter.";
+    }
+    if (hasStatusFilter) {
+        return `No ${getJobStatusFilterLabel(statusFilter)} jobs found.`;
+    }
+    return "No jobs match this title or URL search.";
+}
+
 function applyJobTitleFilter() {
     if (!jobsRenderRoot) return;
 
     const query = jobsSearchInput?.value || "";
-    const { totalCount, visibleCount } = applyStoredJobTitleFilter(query);
+    const { totalCount, visibleCount } = applyStoredJobTitleFilter(query, activeJobStatusFilter);
+    const hasQuery = query.trim() !== "";
+    const hasStatusFilter = activeJobStatusFilter !== "all";
 
+    if (jobsSearchClear instanceof HTMLButtonElement) {
+        jobsSearchClear.hidden = !hasQuery;
+    }
     removeFilterEmptyState();
     const emptySearchRow = getOrCreateFilterEmptyState();
     if (emptySearchRow) {
         const hasRows = totalCount > 0;
-        emptySearchRow.classList.toggle("d-none", !(query && hasRows && visibleCount === 0));
+        const message = emptySearchRow.querySelector("p");
+        if (message) message.textContent = getJobFilterEmptyMessage(query, activeJobStatusFilter);
+        emptySearchRow.classList.toggle("d-none", !((hasQuery || hasStatusFilter) && hasRows && visibleCount === 0));
     }
 }
 
@@ -687,13 +774,15 @@ async function updateVideoPreview() {
     previewRequestUrl = url;
 
     abortPreviewRequest();
-    const controller = new AbortController();
-    previewAbortController = controller;
     hideVideoPreview();
 
     if (!isValidMediaUrl(url)) {
+        previewRequestUrl = "";
         return;
     }
+
+    const controller = new AbortController();
+    previewAbortController = controller;
 
     // YouTube: show thumbnail immediately from stable img.youtube.com URL.
     // TikTok/Instagram: show placeholder until metadata resolves.
@@ -793,8 +882,68 @@ function abortDetailInfoRequest() {
 }
 
 function formatDetailStatus(status) {
-    const raw = String(status || "queued").replaceAll("_", " ");
+    const normalized = String(status || "queued").trim().toLowerCase();
+    if (DETAIL_STATUS_LABELS[normalized]) {
+        return DETAIL_STATUS_LABELS[normalized];
+    }
+
+    const raw = normalized.replaceAll("_", " ");
     return raw.charAt(0).toUpperCase() + raw.slice(1);
+}
+
+function formatDetailDate(value) {
+    const text = value == null ? "" : String(value).trim();
+    if (!text) return "";
+
+    const sqliteUtc = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
+    const date = new Date(sqliteUtc.test(text) ? `${text.replace(" ", "T")}Z` : text);
+    return Number.isNaN(date.getTime()) ? "" : DETAIL_DATE_FORMATTER.format(date);
+}
+
+function formatDetailBitrate(value) {
+    const bitrate = Number(value);
+    return Number.isFinite(bitrate) && bitrate > 0 ? `${Math.round(bitrate)} kb/s` : "";
+}
+
+function formatDetailHost(value) {
+    const text = value == null ? "" : String(value).trim();
+    if (!text) return "";
+
+    try {
+        return new URL(text).hostname.replace(/^www\./i, "");
+    } catch (_) {
+        return "";
+    }
+}
+
+function formatShortJobId(value) {
+    const id = value == null ? "" : String(value).trim();
+    return id.length > 16 ? `${id.slice(0, 8)}…${id.slice(-5)}` : id;
+}
+
+function setDetailSourceActions(url, jobId) {
+    const sourceUrl = url == null ? "" : String(url).trim();
+    const host = formatDetailHost(sourceUrl);
+    setText(document.getElementById("mUrlHost"), host || "Source unavailable");
+
+    const openUrl = document.getElementById("mOpenUrl");
+    const canOpen = /^https:\/\//i.test(sourceUrl);
+    if (openUrl instanceof HTMLAnchorElement) {
+        openUrl.href = canOpen ? sourceUrl : "#";
+        openUrl.classList.toggle("d-none", !canOpen);
+    }
+
+    const copyUrl = document.getElementById("mCopyUrl");
+    if (copyUrl instanceof HTMLButtonElement) {
+        copyUrl.dataset.copyValue = sourceUrl;
+        copyUrl.disabled = !sourceUrl;
+    }
+
+    const copyId = document.getElementById("mCopyId");
+    if (copyId instanceof HTMLButtonElement) {
+        copyId.dataset.copyValue = String(jobId || "");
+        copyId.disabled = !jobId;
+    }
 }
 
 function formatDetailViewCount(viewCount) {
@@ -813,8 +962,9 @@ function setDetailChip(id, text) {
     }
 
     const value = typeof text === "string" ? text.trim() : "";
-    chip.textContent = value || "";
-    chip.classList.toggle("d-none", value === "");
+    const hasValue = Boolean(value) && value !== "–";
+    chip.textContent = hasValue ? value : "";
+    chip.classList.toggle("d-none", !hasValue);
 }
 
 function resetDetailFormats() {
@@ -868,11 +1018,11 @@ function setDetailThumbnail(job) {
 
 function createDetailFormatChip(format) {
     const chip = document.createElement("span");
-    chip.className = "detail-chip";
+    chip.className = "detail-chip detail-format-chip";
 
     const resolution = typeof format?.resolution === "string" ? format.resolution.trim() : "";
     const ext = typeof format?.ext === "string" ? format.ext.trim().toUpperCase() : "";
-    chip.textContent = [ext, resolution].filter(Boolean).join(" ");
+    chip.textContent = [ext, resolution].filter(Boolean).join(" · ");
     return chip;
 }
 
@@ -960,31 +1110,61 @@ function renderDetailTitle(job, text) {
     titleEl.appendChild(titleText);
 }
 
-function populateDetailFromJob(job) {
-    setText(document.getElementById("mId"), getJobById(job.id)?.id || "");
-    renderDetailTitle(job, job.video_title || job.url || "Untitled");
-    setText(document.getElementById("mMetaLine"), formatDetailStatus(job.status));
-    setText(document.getElementById("mStatus"), formatDetailStatus(job.status));
+function updateOpenDetailStatus(job) {
+    const normalizedStatus = String(job?.status || "queued").trim().toLowerCase();
+    const statusEl = document.getElementById("mStatus");
+    setText(statusEl, formatDetailStatus(normalizedStatus));
+    statusEl?.setAttribute("data-status", normalizedStatus);
 
-    const message = (job.message || "").trim();
+    const statusDate = formatDetailDate(job?.finished_at || job?.created_at);
+    const statusDateEl = document.getElementById("mStatusDate");
+    setText(statusDateEl, statusDate);
+    statusDateEl?.classList.toggle("d-none", !statusDate);
+
+    const message = String(job.message || "").trim();
     const messageEl = document.getElementById("mMessage");
     if (messageEl instanceof HTMLElement) {
-        messageEl.textContent = message || "";
-        messageEl.classList.toggle("d-none", message === "");
+        const redundantMessage = /^(finished|completed|done)$/i.test(message);
+        const showMessage = Boolean(message) && (!redundantMessage || normalizedStatus === "error");
+        messageEl.textContent = showMessage ? message : "";
+        messageEl.classList.toggle("d-none", !showMessage);
     }
 
-    setText(document.getElementById("mUrl"), job.url || "");
-    setDetailChip("mType", job.type || "");
-    setDetailChip("mQuality", job.quality || "");
+    setDetailChip("mFileSize", humanSize(job.filesize_bytes));
+    setDetailChip("mCodec", job.codec || "");
+    setDetailChip("mBitrate", formatDetailBitrate(job.bitrate_kbps));
     setDetailChip("mBpm", job.bpm ? `${job.bpm} BPM` : "");
+
+    const downloadBtn = document.getElementById("mDownloadBtn");
+    if (downloadBtn instanceof HTMLAnchorElement) {
+        downloadBtn.classList.toggle("d-none", !DOWNLOADABLE_STATUSES.has(job.status || ""));
+    }
+}
+
+function populateDetailFromJob(job) {
+    const jobId = getJobById(job.id)?.id || job.id || "";
+    renderDetailTitle(job, job.video_title || job.url || "Untitled");
+
+    setText(document.getElementById("mMetaLine"), job.url ? "Loading metadata…" : "Unknown source");
+    setText(document.getElementById("mUrl"), job.url || "");
+    const typeLabel = String(job.type || "");
+    const qualityLabel = String(job.quality || "");
+    setDetailChip("mType", typeLabel ? typeLabel.charAt(0).toUpperCase() + typeLabel.slice(1) : "");
+    setDetailChip("mQuality", qualityLabel === "max" ? "Max" : qualityLabel);
+    setDetailChip("mFileSize", humanSize(job.filesize_bytes));
+    setDetailChip("mCodec", job.codec || "");
+    setDetailChip("mBitrate", formatDetailBitrate(job.bitrate_kbps));
+    setText(document.getElementById("mId"), formatShortJobId(jobId));
+    document.getElementById("mId")?.setAttribute("title", jobId);
+    setDetailSourceActions(job.url, jobId);
     resetDetailFormats();
     setDetailThumbnail(job);
 
     const downloadBtn = document.getElementById("mDownloadBtn");
     if (downloadBtn instanceof HTMLAnchorElement) {
         downloadBtn.href = `/download/${encodeURIComponent(job.id)}`;
-        downloadBtn.classList.toggle("d-none", !DOWNLOADABLE_STATUSES.has(job.status || ""));
     }
+    updateOpenDetailStatus(job);
 }
 
 async function hydrateDetailMedia(job) {
@@ -1056,6 +1236,7 @@ async function handleLalalSplit(btn) {
         const data = await handleActionPost(
             btn,
             `/api/lalal/${encodeURIComponent(jobId)}?stem=${encodeURIComponent(stem)}`,
+            { timeoutMs: 15 * 60_000 },
         );
         if (!data.download_url) {
             showToast("No download URL returned", "warning");
@@ -1103,6 +1284,32 @@ async function handleCancelJob(btn) {
     }
 }
 
+async function copyDetailValue(btn) {
+    const value = String(btn?.dataset.copyValue || "");
+    if (!value) return;
+
+    try {
+        if (navigator.clipboard?.writeText) {
+            await navigator.clipboard.writeText(value);
+        } else {
+            const input = document.createElement("textarea");
+            input.value = value;
+            input.setAttribute("readonly", "");
+            input.style.position = "fixed";
+            input.style.opacity = "0";
+            document.body.appendChild(input);
+            input.select();
+            const copied = document.execCommand("copy");
+            input.remove();
+            if (!copied) throw new Error("Clipboard unavailable");
+        }
+
+        showToast("Copied to clipboard", "success", 1800);
+    } catch (error) {
+        showToast("Could not copy to clipboard", "warning", 2200);
+    }
+}
+
 const ACTION_HANDLERS = Object.freeze({
     "open-detail": (btn, event) => {
         event.preventDefault();
@@ -1116,6 +1323,10 @@ const ACTION_HANDLERS = Object.freeze({
         event.preventDefault();
         void handleCancelJob(btn);
     },
+    "copy-detail": (btn, event) => {
+        event.preventDefault();
+        void copyDetailValue(btn);
+    },
 });
 
 document.addEventListener("click", (event) => {
@@ -1128,6 +1339,17 @@ document.addEventListener("click", (event) => {
     handler?.(actionBtn, event);
 });
 
+document.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    if (!(event.target instanceof Element)) return;
+
+    const detailTarget = event.target.closest('.job-item__body[data-action="open-detail"]');
+    if (!(detailTarget instanceof HTMLElement)) return;
+
+    event.preventDefault();
+    ACTION_HANDLERS["open-detail"]?.(detailTarget, event);
+});
+
 document.addEventListener(EVENT_NAMES.JOB_UPDATE, (event) => {
     const payload = event.detail;
     if (!payload) return;
@@ -1135,7 +1357,7 @@ document.addEventListener(EVENT_NAMES.JOB_UPDATE, (event) => {
     if (payload.id === activeDetailId) {
         const activeJob = getJobById(payload.id);
         if (activeJob) {
-            populateDetailFromJob(activeJob);
+            updateOpenDetailStatus(activeJob);
         }
     }
 
@@ -1150,6 +1372,29 @@ window.addEventListener("jobs-layout-change", () => {
 });
 
 jobsSearchInput?.addEventListener("input", scheduleJobTitleFilter);
+jobsQuickFilter?.addEventListener("click", (event) => {
+    if (!(event.target instanceof Element)) return;
+    const button = event.target.closest("[data-job-filter]");
+    if (!(button instanceof HTMLButtonElement) || !jobsQuickFilter.contains(button)) return;
+
+    const requestedFilter = button.dataset.jobFilter;
+    if (!["all", "done", "error"].includes(requestedFilter)) return;
+
+    activeJobStatusFilter = requestedFilter;
+    jobsQuickFilter.dataset.activeFilter = requestedFilter;
+    jobsQuickFilter.querySelectorAll("[data-job-filter]").forEach((filterButton) => {
+        const isActive = filterButton === button;
+        filterButton.classList.toggle("is-active", isActive);
+        filterButton.setAttribute("aria-pressed", String(isActive));
+    });
+    scheduleJobTitleFilter();
+});
+jobsSearchClear?.addEventListener("click", () => {
+    if (!(jobsSearchInput instanceof HTMLInputElement)) return;
+    jobsSearchInput.value = "";
+    scheduleJobTitleFilter();
+    jobsSearchInput.focus();
+});
 
 if (detailModalEl) {
     detailModalEl.addEventListener("show.bs.modal", () => {
@@ -1173,6 +1418,33 @@ if (detailModalEl) {
 
         urlInput?.focus();
     });
+}
+
+function isDuplicateJobError(error) {
+    return error?.status === 409 && error?.body?.detail === "duplicate_job";
+}
+
+function describeDuplicateJob(existingJob) {
+    const title = existingJob?.video_title ? `"${existingJob.video_title}"` : "This video";
+    if (existingJob?.status && TERMINAL_STATUSES.has(existingJob.status)) {
+        const when = formatCreatedText(existingJob.created_at);
+        return when
+            ? `${title} was already downloaded on ${when}. Do you want to download it again?`
+            : `${title} was already downloaded. Do you want to download it again?`;
+    }
+    return `${title} is already being processed. Do you want to start it again anyway?`;
+}
+
+function onSubmitSuccess(job) {
+    prependJob(job);
+    syncDashboardEventStream();
+    scheduleJobTitleFilter();
+    showToast("Download job started", "success", 2500);
+
+    submitForm.reset();
+    typeSelect?.dispatchEvent(new Event("change"));
+    hideVideoPreview();
+    urlInput?.focus();
 }
 
 submitForm?.addEventListener("submit", async (event) => {
@@ -1200,21 +1472,47 @@ submitForm?.addEventListener("submit", async (event) => {
         }
 
         const job = await submitJob(formData, getCsrfToken());
-        prependJob(job);
-        syncDashboardEventStream();
-        scheduleJobTitleFilter();
-        showToast("Download job started", "success", 2500);
-
-        submitForm.reset();
-        typeSelect?.dispatchEvent(new Event("change"));
-        hideVideoPreview();
-        urlInput?.focus();
+        onSubmitSuccess(job);
     } catch (error) {
+        if (isDuplicateJobError(error) && duplicateJobModal) {
+            pendingDuplicateFormData = new FormData(submitForm);
+            if (typeSelect?.value === AUDIO_TYPE) {
+                pendingDuplicateFormData.set("quality", "max");
+            }
+            if (duplicateJobMessage) {
+                duplicateJobMessage.textContent = describeDuplicateJob(error.body.existing_job);
+            }
+            duplicateJobModal.show();
+            return;
+        }
         setError(`Error: ${error.message}`);
     } finally {
         isSubmitting = false;
         setSubmitBusy(false);
     }
+});
+
+duplicateJobConfirmBtn?.addEventListener("click", async () => {
+    if (!pendingDuplicateFormData || isSubmitting) return;
+    isSubmitting = true;
+    duplicateJobConfirmBtn.disabled = true;
+
+    try {
+        pendingDuplicateFormData.set("confirm_duplicate", "true");
+        const job = await submitJob(pendingDuplicateFormData, getCsrfToken());
+        duplicateJobModal?.hide();
+        onSubmitSuccess(job);
+    } catch (error) {
+        duplicateJobModal?.hide();
+        setError(`Error: ${error.message}`);
+    } finally {
+        isSubmitting = false;
+        duplicateJobConfirmBtn.disabled = false;
+    }
+});
+
+duplicateJobModalEl?.addEventListener("hidden.bs.modal", () => {
+    pendingDuplicateFormData = null;
 });
 
 // input alone is sufficient; paste fires before input anyway
@@ -1279,6 +1577,14 @@ window.addEventListener("pagehide", () => {
     abortPreviewRequest();
 });
 
+window.addEventListener("pageshow", (event) => {
+    if (event.persisted) {
+        observeJobDropdowns();
+        syncDashboardEventStream();
+        scheduleJobTitleFilter();
+    }
+});
+
 window.addEventListener("beforeunload", cleanupDropdownObserver);
 
 /**
@@ -1291,7 +1597,7 @@ window.addEventListener("beforeunload", cleanupDropdownObserver);
  *
  * @param {HTMLElement} btn - Triggering button used as the inflight lock key.
  * @param {string} url - Endpoint URL for the POST request.
- * @param {{ headers?: Record<string, string>, body?: BodyInit }} [options]
+ * @param {{ timeoutMs?: number, headers?: Record<string, string>, body?: BodyInit }} [options]
  * @returns {Promise<object>} Parsed JSON response body.
  * @throws {Error} If the button is missing, already busy, or the request fails.
  */
@@ -1315,7 +1621,12 @@ async function handleActionPost(btn, url, options = {}) {
         actionTimers.delete(btn);
     }
     btn.querySelector("[data-action-post-success='1']")?.remove();
-    const { signal, cleanup: cleanupTimeoutSignal } = createTimeoutSignal(30_000);
+    const {
+        timeoutMs = 30_000,
+        headers = {},
+        body,
+    } = options;
+    const { signal, cleanup: cleanupTimeoutSignal } = createTimeoutSignal(timeoutMs);
 
     try {
         const response = await fetch(url, {
@@ -1323,9 +1634,9 @@ async function handleActionPost(btn, url, options = {}) {
             credentials: "same-origin",
             headers: {
                 "X-CSRF-Token": getCsrfToken(),
-                ...options.headers,
+                ...headers,
             },
-            body: options.body,
+            body,
             signal,
         });
 
@@ -1367,6 +1678,7 @@ async function handleActionPost(btn, url, options = {}) {
     }
 }
 
+initMobileJobHistoryToggle();
 syncDashboardEventStream();
 applyJobTitleFilter();
 setupInfiniteJobsScroll();

@@ -4,6 +4,10 @@
 
 {% block body_class %} app-root--dashboard{% endblock %}
 
+{% block head_extra %}
+<script src="/static/js/boot-flags.js?v=20260823a"></script>
+{% endblock %}
+
 {% block navbar %}
 {% from "macros/navbar.html" import navbar %}
 {{ navbar(show_back=False, show_settings=True, csrf_token=csrf_token) }}
@@ -88,20 +92,39 @@
         </div>
     </div>
 
+    <div class="mobile-job-history-option" id="mobileJobHistoryOption">
+        <div class="form-check form-switch d-flex align-items-center justify-content-between w-100 m-0">
+            <label class="form-check-label" for="showJobHistoryToggle">Show Job History</label>
+            <input class="form-check-input ms-3" type="checkbox" id="showJobHistoryToggle"
+                aria-controls="jobsCard">
+        </div>
+    </div>
+
     <section class="ui-card ui-card--flush" id="jobsCard">
         <div class="ui-card-header d-flex align-items-center jobs-card-header">
             <div class="jobs-card-heading">
                 <span class="jobs-card-kicker">Recent downloads</span>
                 <span class="fw-semibold jobs-card-title">Processing Queue</span>
             </div>
-            <span id="wsIndicator" class="ws-indicator badge bg-secondary" role="status" aria-live="polite"
-                aria-atomic="true" data-ws-state="idle">● Idle</span>
             <div class="jobs-card-controls">
-                <label for="jobsSearchInput" class="visually-hidden">Search jobs by title</label>
+                <div class="jobs-quick-filter" id="jobsQuickFilter" data-active-filter="all" role="group"
+                    aria-label="Filter jobs by status">
+                    <span class="jobs-quick-filter__indicator" aria-hidden="true"></span>
+                    <button type="button" class="jobs-quick-filter__btn is-active" data-job-filter="all"
+                        aria-pressed="true">All</button>
+                    <button type="button" class="jobs-quick-filter__btn" data-job-filter="done"
+                        aria-pressed="false">Done</button>
+                    <button type="button" class="jobs-quick-filter__btn" data-job-filter="error"
+                        aria-pressed="false">Error</button>
+                </div>
+                <label for="jobsSearchInput" class="visually-hidden">Search jobs by title or URL</label>
                 <div class="input-icon jobs-search-wrap">
                     <span class="material-symbols-outlined input-icon__icon" aria-hidden="true">search</span>
                     <input id="jobsSearchInput" class="form-control form-control-sm input-icon__field jobs-search-input"
-                        type="search" placeholder="Search queue..." autocomplete="off">
+                        type="search" placeholder="Search title or URL…" autocomplete="off">
+                    <button id="jobsSearchClear" class="jobs-search-clear" type="button" aria-label="Clear search" hidden>
+                        <span class="material-symbols-outlined" aria-hidden="true">close</span>
+                    </button>
                 </div>
             </div>
         </div>
@@ -204,7 +227,7 @@
     <div class="modal-dialog modal-dialog-centered">
         <div class="modal-content detail-modal">
             <div class="modal-header">
-                <h5 class="modal-title" id="detailModalLabel">Now Playing</h5>
+                <h5 class="modal-title" id="detailModalLabel">Download details</h5>
                 <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close dialog"></button>
             </div>
             <div class="modal-body detail-modal__body">
@@ -218,8 +241,14 @@
                     <div class="detail-hero__content">
                         <h2 class="detail-title" id="mTitle">–</h2>
                         <p class="detail-meta-line" id="mMetaLine">–</p>
+                        <div class="detail-core-row" aria-label="Download format">
+                            <span class="detail-chip detail-chip--muted" id="mType">–</span>
+                            <span class="detail-chip detail-chip--muted" id="mQuality">–</span>
+                            <span class="detail-chip detail-chip--muted" id="mFileSize">–</span>
+                        </div>
                         <div class="detail-status-line">
-                            <span class="detail-status-text" id="mStatus">–</span>
+                            <span class="detail-status-text" id="mStatus" data-status="queued">–</span>
+                            <span class="detail-status-date" id="mStatusDate">–</span>
                             <span class="detail-message" id="mMessage">–</span>
                         </div>
                     </div>
@@ -227,22 +256,47 @@
 
                 <section class="detail-section d-none" id="mAudioFormatsSection">
                     <h3 class="detail-section__title">Audio</h3>
-                    <div class="detail-chip-row" id="mAudioFormats"></div>
+                    <div class="detail-chip-row detail-format-grid" id="mAudioFormats"></div>
                 </section>
 
                 <section class="detail-section d-none" id="mVideoFormatsSection">
                     <h3 class="detail-section__title">Video</h3>
-                    <div class="detail-chip-row" id="mVideoFormats"></div>
+                    <div class="detail-chip-row detail-format-grid" id="mVideoFormats"></div>
                 </section>
 
                 <section class="detail-section detail-section--technical">
-                    <div class="detail-chip-row detail-chip-row--technical">
-                        <span class="detail-chip detail-chip--muted" id="mType">–</span>
-                        <span class="detail-chip detail-chip--muted" id="mQuality">–</span>
-                        <span class="detail-chip detail-chip--muted" id="mBpm">–</span>
+                    <div class="detail-source-row">
+                        <span class="detail-source-host" id="mUrlHost">–</span>
+                        <div class="detail-source-actions">
+                            <a class="btn btn-sm btn-outline-secondary detail-source-action d-none" id="mOpenUrl"
+                                href="#" target="_blank" rel="noopener noreferrer">
+                                <span class="material-symbols-outlined icon-inline" aria-hidden="true">open_in_new</span>
+                                Open
+                            </a>
+                            <button class="btn btn-sm btn-outline-secondary detail-source-action" id="mCopyUrl"
+                                type="button" data-action="copy-detail" aria-label="Copy source URL">
+                                <span class="material-symbols-outlined icon-inline" aria-hidden="true">content_copy</span>
+                                Copy
+                            </button>
+                        </div>
                     </div>
-                    <p class="detail-source text-break" id="mUrl">–</p>
-                    <code class="detail-job-id" id="mId"></code>
+                    <details class="detail-disclosure">
+                        <summary>Technical details</summary>
+                        <div class="detail-chip-row detail-chip-row--technical">
+                            <span class="detail-chip detail-chip--muted" id="mCodec">–</span>
+                            <span class="detail-chip detail-chip--muted" id="mBitrate">–</span>
+                            <span class="detail-chip detail-chip--muted" id="mBpm">–</span>
+                        </div>
+                        <p class="detail-source detail-source-full text-break" id="mUrl">–</p>
+                        <div class="detail-job-id-row">
+                            <code class="detail-job-id" id="mId"></code>
+                            <button class="btn btn-sm btn-outline-secondary detail-copy-button" id="mCopyId"
+                                type="button" data-action="copy-detail" aria-label="Copy full job ID">
+                                <span class="material-symbols-outlined icon-inline" aria-hidden="true">content_copy</span>
+                                Copy ID
+                            </button>
+                        </div>
+                    </details>
                 </section>
             </div>
             <div class="modal-footer detail-modal__footer">
@@ -255,8 +309,32 @@
         </div>
     </div>
 </div>
+
+<div class="modal fade" id="duplicateJobModal" tabindex="-1" aria-labelledby="duplicateJobModalLabel" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="duplicateJobModalLabel">
+                    <span class="material-symbols-outlined icon-inline" aria-hidden="true">info</span>
+                    Video already processed
+                </h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close dialog"></button>
+            </div>
+            <div class="modal-body">
+                <p id="duplicateJobMessage">This video has already been processed. Do you want to download it again?</p>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
+                <button type="button" class="btn btn-primary" id="duplicateJobConfirmBtn">
+                    <span class="material-symbols-outlined icon-inline" aria-hidden="true">download</span>
+                    Download Again
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
 {% endblock %}
 
 {% block page_scripts %}
-<script type="module" src="/static/js/main.js?v=20260519f"></script>
+<script type="module" src="/static/js/main.js?v=20260823j"></script>
 {% endblock %}

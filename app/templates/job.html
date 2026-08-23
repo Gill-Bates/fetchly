@@ -96,117 +96,13 @@
         </div>
     </div>
 
-    <script type="module">
-        import { DOWNLOADABLE_STATUSES, TERMINAL_STATUSES } from "/static/js/config.js?v=20260616a";
-        import { getStatusPillClass, getStatusText } from "/static/js/ui.js?v=20260616a";
-
-        {
-            const jobId = {{ job['id'] | tojson
-        }};
-        const statusEl = document.getElementById("status");
-        const messageEl = document.getElementById("message");
-        const bpmEl = document.getElementById("bpmValue");
-        const bpmRowEl = document.getElementById("bpmRow");
-        const confidenceEl = document.getElementById("bpmConfidence");
-        const linkEl = document.getElementById("downloadLink");
-        const progressBar = document.getElementById("progressBar");
-        const progressRow = document.getElementById("progressRow");
-        const progressLabel = document.getElementById("progressLabel");
-        const etaText = document.getElementById("etaText");
-        const statusText = document.getElementById("statusText");
-        const initialStatus = {{ job['status'] | tojson }};
-
-        let shouldReconnect = !TERMINAL_STATUSES.has(initialStatus);
-        let stream = null;
-
-        function updateStatus(payload) {
-            statusText.textContent = getStatusText(payload.status, payload.progress);
-            statusEl.className = getStatusPillClass(payload.status);
-        }
-
-        function updateProgress(payload) {
-            if (payload.progress != null) {
-                progressRow.classList.remove("d-none");
-                progressLabel.classList.remove("d-none");
-                const pct = Math.max(0, Math.min(100, Number(payload.progress) || 0));
-                progressBar.style.width = `${pct}%`;
-                progressBar.setAttribute("aria-valuenow", String(pct));
-            }
-
-            if (payload.eta_seconds != null) {
-                const seconds = Math.max(0, Math.round(Number(payload.eta_seconds) || 0));
-                etaText.textContent = seconds > 60
-                    ? `~${Math.round(seconds / 60)} min remaining`
-                    : `~${seconds}s remaining`;
-            }
-        }
-
-        function handleMessage(event) {
-            let payload;
-            try { payload = JSON.parse(event.data); } catch { return; }
-            if (payload.id !== jobId) return;
-
-            updateStatus(payload);
-            messageEl.textContent = payload.message || "–";
-
-            if (payload.bpm != null) {
-                bpmEl.textContent = String(payload.bpm);
-                bpmRowEl.classList.remove("text-muted");
-            }
-
-            if (payload.bpm_confidence != null) {
-                confidenceEl.textContent = Number(payload.bpm_confidence).toFixed(2);
-            }
-
-            updateProgress(payload);
-
-            if (payload.status && TERMINAL_STATUSES.has(payload.status)) {
-                shouldReconnect = false;
-                try { stream?.close(); } catch (_) { }
-                linkEl.classList.toggle("d-none", !DOWNLOADABLE_STATUSES.has(payload.status));
-            }
-        }
-
-        function connect() {
-            if (!shouldReconnect) {
-                return;
-            }
-
-            if (stream && stream.readyState !== EventSource.CLOSED) {
-                return;
-            }
-
-            stream = new EventSource(`/api/jobs/${encodeURIComponent(jobId)}/events`, { withCredentials: true });
-            stream.onmessage = handleMessage;
-            stream.onerror = () => {
-                if (!shouldReconnect) {
-                    return;
-                }
-
-                const reconnectSuffix = " · RECONNECTING";
-                if (!statusText.textContent.endsWith(reconnectSuffix)) {
-                    statusText.textContent = `${statusText.textContent}${reconnectSuffix}`;
-                }
-            };
-        }
-
-        if (shouldReconnect) {
-            connect();
-        }
-
-        window.addEventListener("pagehide", () => {
-            try { stream?.close(); } catch (_) { }
-        });
-
-        window.addEventListener("pageshow", (event) => {
-            if (!event.persisted || !shouldReconnect) {
-                return;
-            }
-
-            connect();
-        });
-            }
-    </script>
+    <script
+        id="jobStatusScript"
+        type="module"
+        src="/static/js/job.js?v=20260823b"
+        data-job-id="{{ job['id'] | e }}"
+        data-initial-status="{{ job['status'] | e }}"
+    ></script>
     {% endif %}
 </div>
 {% endblock %}

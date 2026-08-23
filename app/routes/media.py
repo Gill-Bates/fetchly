@@ -4,13 +4,21 @@
 # Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 #
 
-"""Media routes for downloads, thumbnails, and job pages."""
+"""Media routes for downloads, thumbnails, and job pages.
+
+Single-identity application: there is exactly one credential (``_DEFAULT_USER``
+plus the ``admin_password_hash`` setting in app/routes/auth.py) and the ``jobs``
+table has no owner column. Every job therefore belongs to the only account that
+can authenticate, and ``current_user(request)`` is the complete authorization
+check for these routes - there is no second principal to isolate a job from.
+Introducing additional accounts would require an owner column plus per-job
+filtering here before that stays true.
+"""
 
 from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import UTC, datetime
 import logging
 import mimetypes
 import threading
@@ -23,8 +31,8 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 
 from ..common.rate_limit import limiter
-from ..db import COMPLETED_STATUSES, get_job
-from ..utils.fs import LOSSLESS_AUDIO_SOURCE_EXTENSIONS, path_is_file
+from ..db import DOWNLOADABLE_STATUSES, get_job
+from ..utils.fs import AUDIO_SOURCE_EXTENSIONS, path_is_file
 from ..governor import governor
 from .api import job_to_dict
 from .auth import current_user, require_html_auth
@@ -48,6 +56,11 @@ _AUDIO_MIME_TYPES = {
     ".aac": "audio/aac",
     ".mp3": "audio/mpeg",
 }
+# Download table. ".webm" deliberately overrides the audio entry above: audio
+# jobs are always stored as "<stem>.source.<ext>" and ".webm" is an internal
+# source extension, so an audio .webm never reaches this table - it is served
+# as MP3 by download() or via _AUDIO_MIME_TYPES by audio_source(). A .webm
+# that does reach here came from the video merge fallback.
 _KNOWN_MEDIA_TYPES = {
     **_AUDIO_MIME_TYPES,
     ".mp4": "video/mp4",
@@ -57,7 +70,6 @@ _KNOWN_MEDIA_TYPES = {
     ".webm": "video/webm",
 }
 _NOSNIFF_HEADER = {"X-Content-Type-Options": "nosniff"}
-MAX_MP3_CACHE_AGE_SECONDS = 7 * 24 * 3600
 
 
 @dataclass(slots=True, frozen=True)
@@ -115,27 +127,33 @@ def _guess_media_type(file_path: Path) -> str:
     return media_type or "application/octet-stream"
 
 
-async def _has_fresh_mp3_cache(cache_path: Path) -> bool:
+async def _mp3_cache_is_valid(cache_path: Path, source_path: Path) -> bool:
+    """Return True when the cached MP3 is at least as new as its source.
+
+    The transcode is deterministic, so a cache that postdates its source stays
+    valid for the life of the job; job retention removes both together. An
+    absolute age limit would only re-run ffmpeg for an identical result.
+    """
     if not await path_is_file(cache_path):
         return False
 
     try:
-        cache_stat = await asyncio.to_thread(cache_path.stat)
+        cache_mtime = (await asyncio.to_thread(cache_path.stat)).st_mtime
+        source_mtime = (await asyncio.to_thread(source_path.stat)).st_mtime
     except OSError:
         return False
 
-    cache_age_seconds = datetime.now(UTC).timestamp() - cache_stat.st_mtime
-    if cache_age_seconds <= MAX_MP3_CACHE_AGE_SECONDS:
+    if cache_mtime >= source_mtime:
         return True
 
-    logger.info("Removing stale MP3 cache: %s", cache_path.name)
+    logger.info("Removing outdated MP3 cache: %s", cache_path.name)
     await asyncio.to_thread(cache_path.unlink, missing_ok=True)
     return False
 
 
 async def _get_ready_job(job_id: uuid.UUID) -> dict[str, object]:
     job = await asyncio.to_thread(get_job, str(job_id))
-    if not job or job["status"] not in COMPLETED_STATUSES:
+    if not job or job["status"] not in DOWNLOADABLE_STATUSES:
         raise HTTPException(status_code=404, detail="not ready")
     return job
 
@@ -191,20 +209,21 @@ def resolve_job_path(raw_filename: str | None) -> Path:
     return file_path
 
 
-def is_lossless_audio_source(file_path: Path) -> bool:
-    """Check if the file is a lossless audio source (internal format).
+def is_internal_audio_source(file_path: Path) -> bool:
+    """Return whether the file uses the internal ``<stem>.source.<ext>`` format.
 
-    Lossless source files are stored as '<stem>.source.<ext>'.
+    The marker describes storage provenance, not codec quality. Some supported
+    source codecs are lossy even though they are kept without a second encode.
     """
-    return file_path.stem.endswith(".source") and file_path.suffix.lower() in LOSSLESS_AUDIO_SOURCE_EXTENSIONS
+    return file_path.stem.endswith(".source") and file_path.suffix.lower() in AUDIO_SOURCE_EXTENSIONS
 
 
 def get_mp3_cache_path(source_path: Path) -> Path:
-    """Get the cached MP3 path for a lossless audio source file.
+    """Get the cached MP3 path for an internal audio source file.
 
     Example: 'track.source.opus' -> 'track.mp3'
     """
-    stem = source_path.stem.replace(".source", "")
+    stem = source_path.stem.removesuffix(".source")
     return source_path.parent / f"{stem}.mp3"
 
 
@@ -213,27 +232,44 @@ def needs_browser_audio_fallback(file_path: Path) -> bool:
 
     iOS Safari is stricter than Chromium and will reject common containers like
     WebM/Opus or Ogg even though desktop Chrome can play them.
+
+    The extension alone decides this because the inputs are not arbitrary: every
+    audio file here comes from yt-dlp's ``-f ba/b -x`` path (app/worker.py), so
+    the container implies the codec (.m4a -> AAC, .webm -> Opus/Vorbis). A
+    ffprobe call per request would cost more than the occasional needless
+    transcode it would avoid. Widen this to a codec check if audio ever enters
+    from an uncontrolled source.
     """
     return file_path.suffix.lower() not in _BROWSER_SAFE_AUDIO_EXTENSIONS
 
 
+async def _stop_transcode_process(proc: asyncio.subprocess.Process) -> None:
+    """Stop and reap a still-running ffmpeg process."""
+    if proc.returncode is None:
+        with suppress(ProcessLookupError):
+            proc.kill()
+    with suppress(ProcessLookupError):
+        await asyncio.shield(proc.wait())
+
+
 async def transcode_to_mp3(source_path: Path, output_path: Path) -> Path:
-    """Transcode a lossless audio file to high-quality MP3.
+    """Transcode an internal audio source to high-quality MP3.
 
     Uses ffmpeg with -q:a 0 (VBR ~320kbps) for best quality.
     The transcoded file is cached for subsequent downloads.
 
     Args:
-        source_path: Path to lossless source audio
+        source_path: Path to internal source audio
         output_path: Path where MP3 will be written
 
     Returns:
         Path to the MP3 file
 
     Raises:
-        RuntimeError: If ffmpeg transcoding fails
+        RuntimeError: If ffmpeg is missing, fails, or times out.
+        OSError: If the temporary file cannot be written, replaced, or removed.
     """
-    if await _has_fresh_mp3_cache(output_path):
+    if await _mp3_cache_is_valid(output_path, source_path):
         return output_path
 
     with _transcode_locks_guard:
@@ -246,7 +282,7 @@ async def transcode_to_mp3(source_path: Path, output_path: Path) -> Path:
 
     try:
         async with lock:
-            if await _has_fresh_mp3_cache(output_path):
+            if await _mp3_cache_is_valid(output_path, source_path):
                 return output_path
 
             temp_path = output_path.with_name(f"{output_path.name}.tmp.{uuid.uuid4().hex[:8]}")
@@ -261,11 +297,9 @@ async def transcode_to_mp3(source_path: Path, output_path: Path) -> Path:
                 "-f", "mp3",
                 str(temp_path),
             ]
-            proc: asyncio.subprocess.Process | None = None
-
             try:
                 async with governor.transcode_semaphore:
-                    if await path_is_file(output_path):
+                    if await _mp3_cache_is_valid(output_path, source_path):
                         return output_path
 
                     try:
@@ -277,7 +311,14 @@ async def transcode_to_mp3(source_path: Path, output_path: Path) -> Path:
                     except FileNotFoundError as exc:
                         raise RuntimeError("ffmpeg not found") from exc
 
-                    _, stderr = await asyncio.wait_for(proc.communicate(), timeout=600)
+                    try:
+                        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=600)
+                    except BaseException:
+                        # BaseException, not Exception: CancelledError (client
+                        # disconnect, server shutdown) is the case that would
+                        # otherwise leave ffmpeg running past its request.
+                        await _stop_transcode_process(proc)
+                        raise
 
                     if proc.returncode != 0:
                         logger.error(
@@ -291,10 +332,6 @@ async def transcode_to_mp3(source_path: Path, output_path: Path) -> Path:
                 return output_path
 
             except asyncio.TimeoutError as exc:
-                if proc is not None and proc.returncode is None:
-                    proc.kill()
-                    with suppress(ProcessLookupError):
-                        await proc.wait()
                 raise RuntimeError("Audio transcoding timed out") from exc
             finally:
                 if await path_is_file(temp_path):
@@ -312,7 +349,7 @@ async def transcode_to_mp3(source_path: Path, output_path: Path) -> Path:
 async def _ensure_mp3(file_path: Path) -> Path:
     """Return an MP3 path, transcoding the source when the cache is missing."""
     mp3_path = get_mp3_cache_path(file_path)
-    if await _has_fresh_mp3_cache(mp3_path):
+    if await _mp3_cache_is_valid(mp3_path, file_path):
         return mp3_path
 
     await transcode_to_mp3(file_path, mp3_path)
@@ -342,6 +379,7 @@ async def job_page(request: Request, job_id: uuid.UUID):
             request=request,
             name="job.html",
             context={"job": None, "job_id": job_id_str, "csrf_token": csrf_token},
+            status_code=404,
         )
 
     return templates.TemplateResponse(
@@ -363,10 +401,10 @@ async def download(request: Request, job_id: uuid.UUID):
     except HTTPException as exc:
         return JSONResponse(status_code=exc.status_code, content={"error": exc.detail})
 
-    if job["type"] == "audio" and is_lossless_audio_source(file_path):
+    if job["type"] == "audio" and is_internal_audio_source(file_path):
         try:
             mp3_path = await _ensure_mp3(file_path)
-        except RuntimeError as exc:
+        except (RuntimeError, OSError) as exc:
             logger.error("Failed to transcode audio for job %s: %s", job_id, exc)
             return JSONResponse(status_code=500, content={"error": "Audio transcoding failed"})
 
@@ -391,22 +429,27 @@ async def audio_source(request: Request, job_id: uuid.UUID):
     """Serve the job's stored audio file for trimming.
 
     The X-Audio-Quality header indicates whether the served file is the
-    original source or a cached MP3 fallback for browser playback.
+    original source or a cached MP3 fallback for browser playback. The
+    response is served inline: it feeds the waveform/trim UI in the page,
+    unlike /download/{job_id}, which is an attachment.
     """
     if not current_user(request):
         return JSONResponse(status_code=401, content={"error": "unauthorized"})
 
     try:
-        _, file_path = await _get_ready_job_file(job_id)
+        job, file_path = await _get_ready_job_file(job_id)
     except HTTPException as exc:
         return JSONResponse(status_code=exc.status_code, content={"error": exc.detail})
 
-    quality = "lossless" if is_lossless_audio_source(file_path) else "lossy"
+    if job["type"] != "audio":
+        return JSONResponse(status_code=400, content={"error": "Audio source is only available for audio jobs"})
+
+    quality = "lossless" if is_internal_audio_source(file_path) else "lossy"
 
     if needs_browser_audio_fallback(file_path):
         try:
             mp3_path = await _ensure_mp3(file_path)
-        except RuntimeError as exc:
+        except (RuntimeError, OSError) as exc:
             logger.error("Failed to transcode audio source for job %s: %s", job_id, exc)
             return JSONResponse(status_code=500, content={"error": "Audio transcoding failed"})
 
@@ -414,6 +457,7 @@ async def audio_source(request: Request, job_id: uuid.UUID):
             path=mp3_path,
             filename=mp3_path.name,
             media_type="audio/mpeg",
+            content_disposition_type="inline",
             headers={**_NOSNIFF_HEADER, "X-Audio-Quality": f"{quality}-mp3-fallback"},
         )
 
@@ -423,6 +467,7 @@ async def audio_source(request: Request, job_id: uuid.UUID):
         path=file_path,
         filename=file_path.name,
         media_type=media_type,
+        content_disposition_type="inline",
         headers={**_NOSNIFF_HEADER, "X-Audio-Quality": quality},
     )
 

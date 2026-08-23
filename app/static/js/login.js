@@ -63,6 +63,19 @@ function initLogin() {
         }
     }
 
+    function setFieldInvalid(input, invalid) {
+        if (invalid) {
+            input.setAttribute("aria-invalid", "true");
+        } else {
+            input.removeAttribute("aria-invalid");
+        }
+    }
+
+    function clearFieldErrors() {
+        setFieldInvalid(usernameIn, false);
+        setFieldInvalid(passwordIn, false);
+    }
+
     /**
      * Validates that a redirect URL targets the current origin.
      * Rejects external URLs, protocol-relative URLs, and
@@ -82,6 +95,12 @@ function initLogin() {
 
     let isSubmitting = false;
 
+    function clearSensitiveInput() {
+        passwordIn.value = "";
+    }
+
+    window.addEventListener("pagehide", clearSensitiveInput);
+
     async function submitLogin(event) {
         event.preventDefault();
 
@@ -91,12 +110,16 @@ function initLogin() {
         isSubmitting = true;
 
         setMessage(null);
+        clearFieldErrors();
 
         const username = usernameIn.value.trim();
         const password = passwordIn.value;
 
         if (!username || !password) {
+            setFieldInvalid(usernameIn, !username);
+            setFieldInvalid(passwordIn, !password);
             setMessage("Please enter username and password.", "error");
+            (!username ? usernameIn : passwordIn).focus();
             isSubmitting = false;
             return;
         }
@@ -113,6 +136,7 @@ function initLogin() {
         let success = false;
         const controller = new AbortController();
         const timeoutId = window.setTimeout(() => controller.abort(), 10_000);
+        let focusAfterSubmit = null;
 
         try {
             const response = await fetch("/login", {
@@ -141,17 +165,36 @@ function initLogin() {
 
             if (response.status === 429) {
                 setMessage("Too many login attempts. Please wait a minute and try again.", "error");
-                passwordIn.focus();
+                focusAfterSubmit = passwordIn;
                 return;
             }
 
-            if (!response.ok || data.ok === false) {
+            if (response.status === 401) {
+                setFieldInvalid(passwordIn, true);
                 setMessage("Invalid username or password.", "error");
-                passwordIn.focus();
+                focusAfterSubmit = passwordIn;
+                return;
+            }
+
+            if (response.status === 403) {
+                setMessage("The login page expired. Reload the page and try again.", "error");
+                return;
+            }
+
+            if (!response.ok) {
+                setMessage("Login service unavailable. Please try again later.", "error");
+                return;
+            }
+
+            if (data.ok === false) {
+                setFieldInvalid(passwordIn, true);
+                setMessage("Invalid username or password.", "error");
+                focusAfterSubmit = passwordIn;
                 return;
             }
 
             success = true;
+            clearSensitiveInput();
             const redirect = isSafeLocalRedirect(data.redirect) ? data.redirect : "/";
             window.location.assign(redirect);
         } catch (err) {
@@ -169,9 +212,9 @@ function initLogin() {
             }
         } finally {
             window.clearTimeout(timeoutId);
-            if (passwordIn) passwordIn.value = "";
 
             if (!success) {
+                if (passwordIn) passwordIn.value = "";
                 isSubmitting = false;
                 submitBtn.disabled = false;
                 usernameIn.disabled = false;
@@ -181,11 +224,14 @@ function initLogin() {
                 if (submitBtnLabel) {
                     submitBtnLabel.textContent = originalLabel;
                 }
+                focusAfterSubmit?.focus();
             }
         }
     }
 
     form.addEventListener("submit", submitLogin);
+    usernameIn.addEventListener("input", () => setFieldInvalid(usernameIn, false));
+    passwordIn.addEventListener("input", () => setFieldInvalid(passwordIn, false));
 
     function setupIOSKeyboardStabilization() {
         if (!window.visualViewport) return;
@@ -247,6 +293,11 @@ function initLogin() {
     }
 
     setupIOSKeyboardStabilization();
+    window.addEventListener("pageshow", (event) => {
+        if (event.persisted) {
+            setupIOSKeyboardStabilization();
+        }
+    });
 }
 
 if (document.readyState === "loading") {

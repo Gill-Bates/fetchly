@@ -14,6 +14,7 @@ from typing import TextIO
 import uvicorn
 
 from app.utils.banner import print_banner_once
+from app.common.rate_limit import validate_trusted_proxy_hosts
 
 _VALID_LOG_LEVELS = frozenset(logging.getLevelNamesMapping())
 
@@ -182,15 +183,19 @@ def main() -> None:
     graceful_shutdown_timeout = _env_float("UVICORN_TIMEOUT_GRACEFUL_SHUTDOWN", 10.0)
     forwarded_allow_ips = _env_str(
         "FORWARDED_ALLOW_IPS",
-        "127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7",
+        "127.0.0.1,::1",
     )
+    forwarded_allow_ips = validate_trusted_proxy_hosts(forwarded_allow_ips)
 
     uvicorn.run(
         "app.main:app",
         host=host,
         port=port,
         reload=reload_enabled,
-        proxy_headers=True,
+        # The application installs the single validated proxy-header middleware
+        # itself. Keeping Uvicorn's duplicate middleware disabled preserves the
+        # actual socket peer for the rate-limit trust decision.
+        proxy_headers=False,
         forwarded_allow_ips=forwarded_allow_ips,
         timeout_graceful_shutdown=graceful_shutdown_timeout,
         log_config=_build_log_config(log_level=log_level, use_colors=use_colors),

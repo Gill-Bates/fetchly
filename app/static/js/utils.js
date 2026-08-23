@@ -14,7 +14,7 @@
  * - {@link isSafeRedirect}, which reads `window.location`
  * - {@link subscribeToLalalProgress}, which subscribes to DOM events
  *
- * NOTE: Keep YOUTUBE_URL_REGEX in sync with app/main.py:_YOUTUBE_URL_PATTERN.
+ * NOTE: Keep media URL validation aligned with app/utils/platform.py.
  * Prefer {@link isValidYouTubeUrl} and {@link extractYouTubeVideoId} for app logic.
  */
 
@@ -126,8 +126,8 @@ export function normalizeTimeRange(start, end, duration) {
 
     if (e < s) [s, e] = [e, s];
 
-    s = snapTime(s);
-    e = snapTime(e);
+    s = clamp(snapTime(s), 0, duration);
+    e = clamp(snapTime(e), 0, duration);
 
     if (s === e && duration > 0) {
         const interval = SNAP_INTERVAL_SECONDS;
@@ -149,7 +149,7 @@ export function buildTrimId(start, end) {
 // Regex for YouTube URL validation (exact video ID matching).
 // Exported for parity checks and low-level validation only; callers should prefer
 // isValidYouTubeUrl() or extractYouTubeVideoId(), which also normalize input.
-export const YOUTUBE_URL_REGEX = /^https?:\/\/(?:www\.|m\.)?(?:youtube\.com\/(?:watch\?(?:[^#]*&)?v=|embed\/|v\/|shorts\/)|youtu\.be\/)[\w-]{11}(?:[?#&][^\s]*)?$/i;
+export const YOUTUBE_URL_REGEX = /^https:\/\/(?:www\.|m\.|music\.)?(?:youtube\.com\/(?:watch\?(?:[^#]*&)?v=|embed\/|v\/|shorts\/)|youtu\.be\/)[A-Za-z0-9_-]{11}(?:[?#&][^\s]*)?$/i;
 
 const SIZE_UNITS = Object.freeze([
     { unit: "TiB", divisor: 1_099_511_627_776, precision: 2 },
@@ -267,8 +267,34 @@ function normalizeYouTubeUrl(url) {
         .replace(/[\u200B-\u200D\uFEFF]/g, "");
 
     if (!value || value.length > 2048) return null;
-    // Test with case-insensitive check (video IDs are case-sensitive but host is not)
-    if (!YOUTUBE_URL_REGEX.test(value)) return null;
+    let parsed;
+    try {
+        parsed = new URL(value);
+    } catch {
+        return null;
+    }
+
+    if (parsed.protocol !== "https:" || parsed.username || parsed.password || (parsed.port && parsed.port !== "443")) {
+        return null;
+    }
+
+    const host = parsed.hostname.toLowerCase();
+    const segments = parsed.pathname.split("/").filter(Boolean);
+    const videoId = parsed.searchParams.get("v");
+    const validVideoId = (candidate) => typeof candidate === "string" && VIDEO_ID_REGEX.test(candidate);
+
+    if (host === "youtu.be" || host === "www.youtu.be") {
+        if (segments.length !== 1 || !validVideoId(segments[0])) return null;
+    } else if (["youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com"].includes(host)) {
+        const isWatch = parsed.pathname === "/watch" && validVideoId(videoId);
+        const isPathVideo = segments.length === 2
+            && YOUTUBE_PATH_PREFIXES.has(segments[0])
+            && validVideoId(segments[1]);
+        if (!isWatch && !isPathVideo) return null;
+    } else {
+        return null;
+    }
+
     return value;
 }
 
@@ -303,7 +329,7 @@ const PLATFORM_PILL_LABELS = Object.freeze({
 export function detectPlatform(url) {
     if (!url || typeof url !== "string") return null;
     const value = url.trim().replace(/&amp;/g, "&").replace(/[\u200B-\u200D\uFEFF]/g, "");
-    if (!/^https?:\/\//i.test(value)) return null;
+    if (!/^https:\/\//i.test(value)) return null;
 
     let host;
     try {
@@ -313,7 +339,7 @@ export function detectPlatform(url) {
     }
     if (!host) return null;
 
-    if (host === "youtu.be" || host.endsWith(".youtu.be") || host === "youtube.com" || host.endsWith(".youtube.com")) {
+    if (host === "youtu.be" || host === "www.youtu.be" || ["youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com"].includes(host)) {
         return PLATFORM.YOUTUBE;
     }
     if (host === "tiktok.com" || host.endsWith(".tiktok.com")) {
@@ -347,12 +373,36 @@ export function isValidMediaUrl(url) {
         return isValidYouTubeUrl(url);
     }
     if (platform === PLATFORM.TIKTOK || platform === PLATFORM.INSTAGRAM) {
+        let parsed;
         try {
-            const parsed = new URL(String(url).trim());
-            return parsed.pathname.replace(/^\/+|\/+$/g, "").length > 0;
+            parsed = new URL(String(url).trim());
         } catch {
             return false;
         }
+
+        if (parsed.protocol !== "https:" || parsed.username || parsed.password || (parsed.port && parsed.port !== "443")) {
+            return false;
+        }
+
+        const segments = parsed.pathname.split("/").filter(Boolean);
+        if (platform === PLATFORM.INSTAGRAM) {
+            return segments.length === 2
+                && ["p", "reel", "tv"].includes(segments[0])
+                && /^[A-Za-z0-9_-]+$/.test(segments[1]);
+        }
+
+        const host = parsed.hostname.toLowerCase();
+        const isLongVideo = segments.length === 3
+            && /^@[A-Za-z0-9._]{1,24}$/.test(segments[0])
+            && ["video", "photo"].includes(segments[1])
+            && /^\d{8,}$/.test(segments[2]);
+        const isShareHost = ["vm.tiktok.com", "vt.tiktok.com"].includes(host)
+            && segments.length === 1
+            && /^[A-Za-z0-9_-]+$/.test(segments[0]);
+        const isSharePath = ["tiktok.com", "www.tiktok.com"].includes(host) && segments.length === 2
+            && segments[0] === "t"
+            && /^[A-Za-z0-9_-]+$/.test(segments[1]);
+        return isLongVideo || isShareHost || isSharePath;
     }
     return false;
 }

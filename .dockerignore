@@ -1,4 +1,4 @@
-# App data (wird als Volume gemountet)
+# App data (mounted as a volume)
 *.db
 data/
 
@@ -12,26 +12,33 @@ __pycache__/
 .idea/
 .vscode/
 
-# Git
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Git metadata
 .git/
 .gitignore
 
-# Local tooling
+# Local tooling and setup
+.claude/settings.local.json
+.codex
+.omx/
+setup.conf
 tools/
 
 # Python
 *.py[cod]
 .venv/
 
-# Runtime / Dev artifacts
+# Runtime and development artifacts
 *.backup
 *.har
 *.log
 .coverage
-.codex
-.omx/
+.coverage.*
 app/static/vendor/wavesurfer/
 cookies.txt
 coverage.xml
 htmlcov/
-setup.conf
