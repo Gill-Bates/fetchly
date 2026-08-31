@@ -461,6 +461,17 @@ jobs:
           ignore-unfixed: true
           vuln-type: 'os,library'
           severity: 'CRITICAL,HIGH'
+          # Vulnerabilities only. trivy-action also runs the secret scanner by
+          # default, and pointing that at a venv full of third-party code is a
+          # false-positive generator: yt-dlp hardcodes the public API
+          # credentials of the sites it supports, so the scan trips on e.g.
+          # yt_dlp/extractor/shahid.py, where Shahid's own AWS API Gateway key
+          # has sat in upstream's public source for years and ships in every
+          # yt-dlp release. Those are neither fetchly's secrets nor secret at
+          # all, and there is no useful gate to build on them here - this step
+          # exists to fail the release on a fixable CVE. It is also what
+          # Trivy's own log recommends for scan time.
+          scanners: 'vuln'
           # Longer than the 10m upstream default: the venv this image ships
           # (torch, essentia, madmom, beat-this and their transitive deps) is a
           # large library surface to walk.
