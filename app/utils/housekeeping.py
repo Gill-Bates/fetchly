@@ -4,7 +4,7 @@
 # Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 #
 
-"""Centralized housekeeping utilities for tubeyou.
+"""Centralized housekeeping utilities for fetchly.
 
 This module provides functions for cleaning up job artifacts on the filesystem.
 """

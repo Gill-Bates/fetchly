@@ -11,6 +11,7 @@
  */
 
 import { reportError, reportWarning } from "./errors.js";
+import { isSafeSameOriginRedirect } from "./utils.js";
 
 let iosKeyboardController = null;
 
@@ -21,6 +22,8 @@ function initLogin() {
     const submitBtnLabel = document.getElementById("submit-btn-label");
     const usernameIn = document.getElementById("username");
     const passwordIn = document.getElementById("password");
+    const honeypotIn = document.getElementById("hp-field");
+    const captchaTokenIn = document.getElementById("captcha-token");
     const messageEl = document.getElementById("login-message");
     const messageText = document.getElementById("message-text");
 
@@ -76,23 +79,6 @@ function initLogin() {
         setFieldInvalid(passwordIn, false);
     }
 
-    /**
-     * Validates that a redirect URL targets the current origin.
-     * Rejects external URLs, protocol-relative URLs, and
-     * javascript: schemes by parsing via the URL constructor.
-     * @param {unknown} url
-     * @returns {boolean}
-     */
-    function isSafeLocalRedirect(url) {
-        if (typeof url !== "string" || !url) return false;
-        try {
-            const parsed = new URL(url, window.location.origin);
-            return parsed.origin === window.location.origin;
-        } catch {
-            return false;
-        }
-    }
-
     let isSubmitting = false;
 
     function clearSensitiveInput() {
@@ -146,7 +132,12 @@ function initLogin() {
                     "Content-Type": "application/json",
                     "X-CSRF-Token": csrfToken(),
                 },
-                body: JSON.stringify({ username, password }),
+                body: JSON.stringify({
+                    username,
+                    password,
+                    honeypot: honeypotIn ? honeypotIn.value : "",
+                    captcha_token: captchaTokenIn ? captchaTokenIn.value : "",
+                }),
                 signal: controller.signal,
             });
 
@@ -181,6 +172,14 @@ function initLogin() {
                 return;
             }
 
+            if (response.status === 400) {
+                setMessage(
+                    data.detail || "We couldn't verify your submission. Please reload the page and try again.",
+                    "error",
+                );
+                return;
+            }
+
             if (!response.ok) {
                 setMessage("Login service unavailable. Please try again later.", "error");
                 return;
@@ -195,7 +194,7 @@ function initLogin() {
 
             success = true;
             clearSensitiveInput();
-            const redirect = isSafeLocalRedirect(data.redirect) ? data.redirect : "/";
+            const redirect = isSafeSameOriginRedirect(data.redirect) ? data.redirect : "/";
             window.location.assign(redirect);
         } catch (err) {
             reportError(err, {

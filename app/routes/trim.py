@@ -25,6 +25,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from ..common.rate_limit import limiter
 from ..db import DOWNLOADABLE_STATUSES, get_job
 from ..governor import governor
+from ..lalal_policy import LALAL_MAX_DURATION_MINUTES, LALAL_MAX_DURATION_SECONDS
 from ..utils.fs import AUDIO_SOURCE_EXTENSIONS, TRIM_ID_RE, path_is_file
 from ..worker import sanitize_filename
 from .auth import require_user_json
@@ -156,8 +157,11 @@ async def trim_audio(request: Request, job_id: uuid.UUID, body: TrimRequest, _us
     if duration < 1:
         return JSONResponse(status_code=400, content={"error": "Selection too short (minimum 1 second)"})
     
-    if duration > 600:  # 10 minutes max
-        return JSONResponse(status_code=400, content={"error": "Selection too long (maximum 10 minutes)"})
+    if duration > LALAL_MAX_DURATION_SECONDS:
+        return JSONResponse(
+            status_code=400,
+            content={"error": f"Selection too long (maximum {LALAL_MAX_DURATION_MINUTES} minutes)"},
+        )
     
     # Get job
     job_id_str = str(job_id)

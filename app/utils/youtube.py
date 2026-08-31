@@ -10,7 +10,6 @@ import asyncio
 import json
 import logging
 import math
-import os
 import re
 import subprocess
 from functools import lru_cache
@@ -19,17 +18,10 @@ from time import monotonic
 from typing import Any, TypedDict
 from urllib.parse import parse_qs, urlparse, urlsplit, urlunsplit
 
-from .fs import get_data_dir
+from .cookies import find_cookie_file
 
 logger = logging.getLogger(__name__)
 
-_COOKIES_DIR: Path = Path(__file__).parent.parent.parent
-_COOKIES_DATA_DIR: Path = get_data_dir()
-_PLATFORM_COOKIE_FILENAMES: dict[str, str] = {
-    "youtube": "youtube_cookies.txt",
-    "instagram": "instagram_cookies.txt",
-    "tiktok": "tiktok_cookies.txt",
-}
 _YOUTUBE_HOSTS = frozenset(
     {
         "youtube.com",
@@ -91,25 +83,19 @@ def _is_youtube_host(host: str) -> bool:
 
 def _resolve_cookie_path(url: str) -> Path | None:
     """Return the platform-specific cookie file for a URL, if it exists."""
-    from .platform import detect_platform
+    # Imported lazily: platform.py imports this module at import time, so a
+    # module-level import here would close the cycle.
+    from .platform import PLATFORM_COOKIE_FILENAMES, detect_platform
 
     platform = detect_platform(url)
     if not platform:
         return None
 
-    filename = _PLATFORM_COOKIE_FILENAMES.get(platform)
+    filename = PLATFORM_COOKIE_FILENAMES.get(platform)
     if not filename:
         return None
 
-    custom_dir = Path(custom_dir_raw) if (custom_dir_raw := os.environ.get("TUBEYOU_COOKIES_DIR", "").strip()) else None
-    search_dirs = [custom_dir, _COOKIES_DIR, _COOKIES_DATA_DIR]
-    for directory in search_dirs:
-        if directory is None:
-            continue
-        path = directory / filename
-        if path.is_file():
-            return path
-    return None
+    return find_cookie_file(filename)
 
 
 def _url_for_log(url: str) -> str:

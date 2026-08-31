@@ -9,13 +9,14 @@
 #
 
 import logging
-import math
 from statistics import fmean, median
 import subprocess
 import tempfile
 import threading
 from pathlib import Path
 from typing import Final, NamedTuple
+
+from .bpm_normalization import normalize_bpm
 
 logger = logging.getLogger(__name__)
 
@@ -30,10 +31,6 @@ _MONO_16BIT_44K_BYTES_PER_SECOND: Final[int] = 44_100 * 2
 _MIN_SEGMENT_BYTES: Final[int] = _MONO_16BIT_44K_BYTES_PER_SECOND + _WAV_HEADER_BYTES
 _FFMPEG_ERROR_TAIL_BYTES: Final[int] = 500
 _FFMPEG_TIMEOUT_SECONDS: Final[int] = 120
-
-# BPM normalization range (most music falls within 70-180 BPM)
-_BPM_MIN: Final[float] = 70.0
-_BPM_MAX: Final[float] = 180.0
 
 # Minimum confidence threshold for valid BPM
 _MIN_CONFIDENCE: Final[float] = 0.2
@@ -128,32 +125,6 @@ def _run_ffmpeg(
             ) from exc
 
 
-def _normalize_bpm(bpm: float) -> float:
-    """Normalize BPM into the 70-180 range via powers-of-two scaling.
-
-    BPM detectors commonly return binary multiples of the perceived tempo
-    (for example x0.5, x2, or x4). This helper doubles or halves by powers of
-    two until the value fits the expected musical range. A final halve corrects
-    the rare case where rounding up the scaling factor overshoots the upper
-    bound.
-
-    Returns:
-        Normalized BPM in [70, 180], or 0.0 when the input is non-finite or <= 0.
-    """
-    if not math.isfinite(bpm) or bpm <= 0:
-        return 0.0
-
-    if bpm < _BPM_MIN:
-        bpm *= 2 ** math.ceil(math.log2(_BPM_MIN / bpm))
-    elif bpm > _BPM_MAX:
-        bpm /= 2 ** math.ceil(math.log2(bpm / _BPM_MAX))
-
-    if bpm > _BPM_MAX:
-        bpm /= 2
-
-    return bpm
-
-
 def _extract_bpm_essentia(audio_path: Path) -> BPMResult:
     """
     Extract BPM using Essentia's RhythmExtractor2013.
@@ -173,7 +144,7 @@ def _extract_bpm_essentia(audio_path: Path) -> BPMResult:
 
     bpm, _, confidence, _, _ = _get_rhythm_extractor()(audio)
 
-    bpm = float(_normalize_bpm(bpm))
+    bpm = float(normalize_bpm(bpm))
     confidence = float(confidence)
 
     return BPMResult(bpm=bpm, confidence=confidence)

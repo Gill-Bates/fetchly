@@ -22,7 +22,7 @@ _DEFAULT_TRUSTED_PROXY_IPS: Final = ",".join((
     "127.0.0.1",
     "::1",
 ))
-_RAW_CLIENT_SCOPE_KEY: Final = "tubeyou.original_client"
+_RAW_CLIENT_SCOPE_KEY: Final = "fetchly.original_client"
 
 
 def get_trusted_proxy_hosts() -> str:

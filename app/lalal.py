@@ -27,10 +27,10 @@ LALAL_API_BASE = "https://www.lalal.ai"
 LALAL_API_PREFIX = "/api/v1"
 _TRANSFER_CHUNK_SIZE = 65536
 _MAX_RESULT_DOWNLOAD_BYTES = int(
-    os.environ.get("TUBEYOU_LALAL_MAX_DOWNLOAD_BYTES", str(4 * 1024 * 1024 * 1024))
+    os.environ.get("FETCHLY_LALAL_MAX_DOWNLOAD_BYTES", str(4 * 1024 * 1024 * 1024))
 )
 if _MAX_RESULT_DOWNLOAD_BYTES <= 0:
-    raise RuntimeError("TUBEYOU_LALAL_MAX_DOWNLOAD_BYTES must be positive")
+    raise RuntimeError("FETCHLY_LALAL_MAX_DOWNLOAD_BYTES must be positive")
 
 type ProgressCallback = Callable[[int], None]
 type StageProgressCallback = Callable[[str, int], None]
@@ -63,16 +63,15 @@ class SplitType(StrEnum):
     """Split configuration types."""
 
     AUTO = "auto"
-    # Phoenix neural network (highest quality)
-    PHOENIX = "phoenix"
-    # Orion neural network (fast, good quality)
-    ORION = "orion"
-    # Perseus neural network
-    PERSEUS = "perseus"
-    # Cassiopeia neural network
-    CASSIOPEIA = "cassiopeia"
-    # Additional splitters
+    # Andromeda (v6) - current generation, the default used by the Lalal.ai web
+    # UI. This is what the app sends unless a caller overrides it; separation
+    # quality noticeably regresses on the older networks below.
     ANDROMEDA = "andromeda"
+    # Previous generations, kept so existing callers/settings keep working.
+    PHOENIX = "phoenix"
+    ORION = "orion"
+    PERSEUS = "perseus"
+    CASSIOPEIA = "cassiopeia"
     LYNX = "lynx"
     LYRA = "lyra"
 
@@ -475,7 +474,7 @@ class LalalClient(_BaseLalalClient):
         file_id: str,
         *,
         stem: StemType = StemType.VOCALS,
-        split_type: SplitType = SplitType.PHOENIX,
+        split_type: SplitType = SplitType.ANDROMEDA,
         enhanced_processing: bool = True,
         split_mode: SplitMode = SplitMode.STEM_SEPARATOR,
         noise_cancelling_level: int | None = None,
@@ -599,7 +598,7 @@ class LalalClient(_BaseLalalClient):
         output_dir: Path | str,
         *,
         stem: StemType = StemType.VOCALS,
-        split_type: SplitType = SplitType.PHOENIX,
+        split_type: SplitType = SplitType.ANDROMEDA,
         split_mode: SplitMode = SplitMode.STEM_SEPARATOR,
         noise_cancelling_level: int | None = None,
         dereverb_enabled: bool | None = None,
@@ -671,10 +670,14 @@ class LalalClient(_BaseLalalClient):
         # 4. Download results
         results: dict[str, Path] = {}
         base_name = input_path.stem
+        # Lalal.ai returns each stem in the format that was uploaded. Hardcoding
+        # ".mp3" here wrote Opus payloads into files named .mp3, which players
+        # and the download route then had to guess at.
+        result_suffix = input_path.suffix.lower() or ".mp3"
 
         if download_stem and split_result["stem_track"]:
             emit_progress("download_stem", 0)
-            stem_path = output_dir / f"{base_name}_{stem.value}.mp3"
+            stem_path = output_dir / f"{base_name}_{stem.value}{result_suffix}"
             await self.download_result(split_result["stem_track"], stem_path)
             results["stem"] = stem_path
             emit_progress("download_stem", 100)
@@ -682,7 +685,7 @@ class LalalClient(_BaseLalalClient):
         if download_backing and split_result["back_track"]:
             emit_progress("download_backing", 0)
             backing_name = "instrumental" if stem == StemType.VOCALS else "backing"
-            backing_path = output_dir / f"{base_name}_{backing_name}.mp3"
+            backing_path = output_dir / f"{base_name}_{backing_name}{result_suffix}"
             await self.download_result(split_result["back_track"], backing_path)
             results["backing"] = backing_path
             emit_progress("download_backing", 100)
@@ -840,7 +843,7 @@ class LalalWebSessionClient(_BaseLalalClient):
         file_id: str,
         *,
         stem: StemType = StemType.VOCALS,
-        split_type: SplitType = SplitType.PHOENIX,
+        split_type: SplitType = SplitType.ANDROMEDA,
         enhanced_processing: bool = True,
         split_mode: SplitMode = SplitMode.STEM_SEPARATOR,
         noise_cancelling_level: int | None = None,

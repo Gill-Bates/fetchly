@@ -1,23 +1,27 @@
-yt.cirrio.de {
+# Generic Caddy reverse-proxy template.
+# Replace `example.com` with the public hostname for your deployment.
+example.com {
+	# Compression (modern + fallback)
+	encode zstd gzip
 
-    # Compression (modern + fallback)
-    encode zstd gzip
+	# Reverse proxy
+	# Replace 127.0.0.1:8000 with the address of the upstream application.
+	# If Caddy runs in Docker, use the shared service name/network instead,
+	# for example: reverse_proxy fetchly:8000
+	reverse_proxy 127.0.0.1:8000 {
+		transport http {
+			keepalive 30s
+		}
+	}
 
-    # Reverse proxy
-    reverse_proxy 10.30.0.153:8000 {
-        transport http {
-            keepalive 30s
-        }
-    }
+	# Security headers
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+		X-Content-Type-Options nosniff
+		X-Frame-Options SAMEORIGIN
+		Referrer-Policy strict-origin-when-cross-origin
 
-    # Security headers
-    header {
-        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
-        X-Content-Type-Options nosniff
-        X-Frame-Options SAMEORIGIN
-        Referrer-Policy strict-origin-when-cross-origin
-
-        Content-Security-Policy "
+		Content-Security-Policy "
             default-src 'self';
             script-src 'self';
             style-src 'self' 'unsafe-inline';
@@ -32,19 +36,19 @@ yt.cirrio.de {
             frame-ancestors 'self'
         "
 
-        Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), usb=(), interest-cohort=()"
+		Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), usb=(), interest-cohort=()"
 
-        -Server
-        -X-Powered-By
-    }
+		-Server
+		-X-Powered-By
+	}
 
-    # Allow larger uploads if needed
-    request_body {
-        max_size 100MB
-    }
+	# Allow larger uploads if needed
+	request_body {
+		max_size 100MB
+	}
 
-    # Logging (no rotation, handled externally)
-    log {
-        output file /var/log/caddy/access.log
-    }
+	# Optional access logging. Configure rotation according to your setup.
+	# log {
+	#     output file /var/log/caddy/access.log
+	# }
 }

@@ -6,11 +6,11 @@
 import { CONFIG } from "./config.js";
 import { fetchJob, fetchJobs } from "./api.js";
 import { reportError, reportWarning } from "./errors.js";
-import { applyJobUpdate, upsertJobSnapshot } from "./jobs.js?v=20260823d";
+import { applyJobUpdate, upsertJobSnapshot } from "./jobs.js?v=20260831a";
 
 export const EVENT_NAMES = Object.freeze({
-    JOB_UPDATE: "tubeyou:job-update",
-    LALAL_PROGRESS: "tubeyou:lalal-progress",
+    JOB_UPDATE: "fetchly:job-update",
+    LALAL_PROGRESS: "fetchly:lalal-progress",
 });
 
 const queuedJobUpdates = new Map();

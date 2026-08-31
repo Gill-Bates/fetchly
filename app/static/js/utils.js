@@ -10,7 +10,7 @@
  *
  * Most exports are side-effect-free and DOM-independent.
  * Exceptions:
- * - {@link getCookie}, which reads `document.cookie`
+ * - {@link getCsrfToken}, which reads the rendered document
  * - {@link isSafeRedirect}, which reads `window.location`
  * - {@link subscribeToLalalProgress}, which subscribes to DOM events
  *
@@ -168,7 +168,7 @@ const LALAL_STAGE_SYMBOLS = Object.freeze({
     download_backing: "↓",
 });
 
-const LALAL_PROGRESS_EVENT_NAME = "tubeyou:lalal-progress";
+const LALAL_PROGRESS_EVENT_NAME = "fetchly:lalal-progress";
 
 /**
  * Format a byte count as a human-readable string.
@@ -216,34 +216,48 @@ export function formatDuration(sec) {
 }
 
 /**
- * Read a cookie value by name.
- * Parses `document.cookie` using simple `name=value` splitting.
- * Returns an empty string when the cookie is missing or the name contains
- * illegal characters (`=`, `;`, `,`, or whitespace).
- * Values are percent-decoded; malformed encoding is returned raw.
- * This is not a full RFC 6265 parser: quoted values and duplicate names are
- * not handled specially.
- * @param {string} name
+ * Read the server-rendered CSRF token without coupling browser code to the
+ * middleware's cookie name. Forms take precedence to preserve login behavior.
  * @returns {string}
  */
-export function getCookie(name) {
-    // simple name=value parser (not full RFC 6265 compliant)
+export function getCsrfToken() {
+    const cookieName = document.documentElement?.dataset.csrfCookieName || "";
+    const cookieToken = readCookie(cookieName);
+    return cookieToken
+        || document.querySelector('input[name="csrf_token"]')?.value
+        || document.querySelector('meta[name="csrf-token"]')?.content
+        || "";
+}
+
+function readCookie(name) {
     if (!name || /[=;,\s]/.test(name)) return "";
 
     const prefix = `${name}=`;
     for (const part of document.cookie.split(";")) {
         const trimmed = part.trimStart();
-        if (trimmed.startsWith(prefix)) {
-            const raw = trimmed.slice(prefix.length);
-            try {
-                return decodeURIComponent(raw);
-            } catch {
-                // Malformed encoding: return raw value
-                return raw;
-            }
+        if (!trimmed.startsWith(prefix)) continue;
+        const raw = trimmed.slice(prefix.length);
+        try {
+            return decodeURIComponent(raw);
+        } catch {
+            return raw;
         }
     }
     return "";
+}
+
+/**
+ * Return whether a navigation target resolves to the current origin.
+ * @param {unknown} url
+ * @returns {boolean}
+ */
+export function isSafeSameOriginRedirect(url) {
+    if (typeof url !== "string" || !url) return false;
+    try {
+        return new URL(url, window.location.origin).origin === window.location.origin;
+    } catch {
+        return false;
+    }
 }
 
 // Shared regex (avoid reallocation)
@@ -312,13 +326,17 @@ export const PLATFORM = Object.freeze({
     YOUTUBE: "youtube",
     TIKTOK: "tiktok",
     INSTAGRAM: "instagram",
+    FACEBOOK: "facebook",
 });
 
 const PLATFORM_PILL_LABELS = Object.freeze({
     [PLATFORM.YOUTUBE]: "YT",
     [PLATFORM.TIKTOK]: "TikTok",
     [PLATFORM.INSTAGRAM]: "Insta",
+    [PLATFORM.FACEBOOK]: "FB",
 });
+
+const FACEBOOK_EXACT_HOSTS = Object.freeze(["fb.watch", "www.fb.watch", "fb.gg", "www.fb.gg"]);
 
 /**
  * Detect the platform of a URL purely from its host. No UI toggles.
@@ -348,11 +366,14 @@ export function detectPlatform(url) {
     if (host === "instagram.com" || host.endsWith(".instagram.com") || host === "instagr.am" || host === "www.instagr.am") {
         return PLATFORM.INSTAGRAM;
     }
+    if (host === "facebook.com" || host.endsWith(".facebook.com") || FACEBOOK_EXACT_HOSTS.includes(host)) {
+        return PLATFORM.FACEBOOK;
+    }
     return null;
 }
 
 /**
- * Short pill label (YT / TikTok / Insta) for a platform id, or "" if unknown.
+ * Short pill label (YT / TikTok / Insta / FB) for a platform id, or "" if unknown.
  * @param {unknown} platform
  * @returns {string}
  */
@@ -361,9 +382,11 @@ export function platformPillLabel(platform) {
 }
 
 /**
- * Validate whether a URL targets a supported platform (YouTube/TikTok/Instagram).
- * YouTube keeps strict video-ID validation; TikTok/Instagram require a host
- * match plus a non-trivial path (yt-dlp performs the final resolution).
+ * Validate whether a URL targets a supported platform
+ * (YouTube/TikTok/Instagram/Facebook).
+ * YouTube keeps strict video-ID validation; the others require a host match
+ * plus a non-trivial path (yt-dlp performs the final resolution).
+ * Mirrors validate_media_url() in app/utils/platform.py.
  * @param {unknown} url
  * @returns {boolean}
  */
@@ -372,7 +395,7 @@ export function isValidMediaUrl(url) {
     if (platform === PLATFORM.YOUTUBE) {
         return isValidYouTubeUrl(url);
     }
-    if (platform === PLATFORM.TIKTOK || platform === PLATFORM.INSTAGRAM) {
+    if (platform === PLATFORM.TIKTOK || platform === PLATFORM.INSTAGRAM || platform === PLATFORM.FACEBOOK) {
         let parsed;
         try {
             parsed = new URL(String(url).trim());
@@ -385,6 +408,32 @@ export function isValidMediaUrl(url) {
         }
 
         const segments = parsed.pathname.split("/").filter(Boolean);
+        if (platform === PLATFORM.FACEBOOK) {
+            const fbHost = parsed.hostname.toLowerCase();
+            const fbCode = /^[A-Za-z0-9_-]+$/;
+            // Short share hosts: fb.watch/<code>, fb.gg/<code>
+            if (FACEBOOK_EXACT_HOSTS.includes(fbHost)) {
+                return segments.length >= 1 && fbCode.test(segments[0]);
+            }
+            if (segments.length === 0) return false;
+            // /watch/?v=<id>, /watch?v=<id>, /video.php?v=<id>
+            if (segments[0] === "watch" || segments[0] === "video.php") {
+                return /^[0-9]{6,}$/.test(parsed.searchParams.get("v") || "");
+            }
+            // /reel/<id>
+            if (segments[0] === "reel") {
+                return segments.length >= 2 && fbCode.test(segments[1]);
+            }
+            // /share/v/<code>, /share/r/<code>
+            if (segments[0] === "share") {
+                return segments.length >= 3 && ["v", "r"].includes(segments[1]) && fbCode.test(segments[2]);
+            }
+            // Page permalinks: /<page>/videos/<id> and /<page>/videos/<slug>/<id>
+            return segments.length >= 3
+                && segments[1] === "videos"
+                && /^[A-Za-z0-9._-]{1,64}$/.test(segments[0])
+                && fbCode.test(segments[segments.length - 1]);
+        }
         if (platform === PLATFORM.INSTAGRAM) {
             return segments.length === 2
                 && ["p", "reel", "tv"].includes(segments[0])

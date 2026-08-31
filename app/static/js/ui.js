@@ -3,7 +3,7 @@
 // Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 //
 
-import { CANCELLABLE_STATUSES, DOWNLOADABLE_STATUSES, LALAL_MAX_DURATION_SECONDS } from "./config.js";
+import { CANCELLABLE_STATUSES, DOWNLOADABLE_STATUSES, LALAL_MAX_DURATION_MINUTES, LALAL_MAX_DURATION_SECONDS } from "./config.js";
 import { EMPTY_VALUE, humanSize } from "./utils.js";
 
 export const ACTION_CATEGORY = Object.freeze({
@@ -220,7 +220,7 @@ function appendAudioDownloadActions(menu, job) {
         } else if (durationBlocked) {
             title = getKnownDurationSeconds(job) === null
                 ? "Track duration unknown — blocked by Duration Guard"
-                : "Track exceeds 10 min — blocked by Duration Guard";
+                : `Track exceeds ${LALAL_MAX_DURATION_MINUTES} min — blocked by Duration Guard`;
         }
         menu.appendChild(createDropdownButton(
             iconName,
@@ -235,35 +235,69 @@ function appendAudioDownloadActions(menu, job) {
     }
 }
 
-function createDesktopDownloadAction(job) {
+function createDownloadOptionsToggle(className) {
+    const toggle = document.createElement("button");
+    toggle.type = "button";
+    toggle.className = className;
+    toggle.dataset.bsToggle = "dropdown";
+    toggle.setAttribute("aria-haspopup", "menu");
+    toggle.setAttribute("aria-expanded", "false");
+    toggle.setAttribute("aria-label", "More download options");
+    toggle.title = "More download options";
+
+    const srText = document.createElement("span");
+    srText.className = "visually-hidden";
+    srText.textContent = "More download options";
+    toggle.appendChild(srText);
+    return toggle;
+}
+
+function createDownloadOptionsMenu(job, downloadHref) {
     const jobId = getJobId(job);
     const jobType = job?.type || "";
+    const menu = document.createElement("ul");
+    menu.className = "dropdown-menu dropdown-menu-end";
+    menu.appendChild(createDropdownLink("download", "Download", downloadHref, { download: true }));
+    menu.appendChild(createDropdownButton(
+        "share",
+        jobType === "audio" ? "Share Audio" : "Share Video",
+        { action: "share-job", jobId },
+    ));
+
+    if (jobType === "audio") {
+        appendAudioDownloadActions(menu, job);
+    }
+    return menu;
+}
+
+function createDesktopDownloadAction(job) {
+    const jobId = getJobId(job);
 
     const btnGroup = document.createElement("div");
     btnGroup.className = "btn-group";
 
     const downloadBtn = createDownloadLink("btn btn-primary btn-sm btn-icon", jobId);
+    const toggle = createDownloadOptionsToggle(
+        "btn btn-primary btn-sm dropdown-toggle dropdown-toggle-split",
+    );
+    const menu = createDownloadOptionsMenu(job, downloadBtn.href);
 
-    const toggle = document.createElement("button");
-    toggle.type = "button";
-    toggle.className = "btn btn-primary btn-sm dropdown-toggle dropdown-toggle-split";
-    toggle.dataset.bsToggle = "dropdown";
-    toggle.setAttribute("aria-haspopup", "menu");
-    toggle.setAttribute("aria-expanded", "false");
+    btnGroup.append(downloadBtn, toggle, menu);
+    return btnGroup;
+}
 
-    const srText = document.createElement("span");
-    srText.className = "visually-hidden";
-    srText.textContent = "More options";
-    toggle.appendChild(srText);
+function createMobileDownloadAction(job) {
+    const downloadBtn = createDownloadLink(
+        "btn jobs-mobile-action jobs-mobile-action--download",
+        getJobId(job),
+    );
+    const toggle = createDownloadOptionsToggle(
+        "btn jobs-mobile-action jobs-mobile-action--menu dropdown-toggle",
+    );
+    const menu = createDownloadOptionsMenu(job, downloadBtn.href);
 
-    const menu = document.createElement("ul");
-    menu.className = "dropdown-menu dropdown-menu-end";
-    menu.appendChild(createDropdownLink("download", "Download", downloadBtn.href, { download: true }));
-
-    if (jobType === "audio") {
-        appendAudioDownloadActions(menu, job);
-    }
-
+    const btnGroup = document.createElement("div");
+    btnGroup.className = "btn-group jobs-mobile-action-group";
     btnGroup.append(downloadBtn, toggle, menu);
     return btnGroup;
 }
@@ -401,9 +435,9 @@ function renderDesktopAction(action) {
 }
 
 /**
- * Build the single primary action used by the dense mobile jobs list.
- * Downloadable jobs get a direct download action, running jobs get cancel,
- * and all remaining states expose details only.
+ * Build the primary action used by the dense mobile jobs list. Downloadable
+ * jobs use a compact split action so Download stays one tap away while Share
+ * and the remaining media actions are available from the adjacent menu.
  * @param {object} job
  * @returns {HTMLAnchorElement | HTMLButtonElement | HTMLDivElement}
  */
@@ -413,7 +447,7 @@ export function createPrimaryActionButton(job) {
 
 function renderPrimaryAction(action) {
     if (action.category === ACTION_CATEGORY.DOWNLOAD) {
-        return createDownloadLink("btn jobs-mobile-action", action.jobId);
+        return createMobileDownloadAction(action.job);
     }
 
     if (action.category === ACTION_CATEGORY.CANCEL) {

@@ -4,7 +4,7 @@
 # Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 #
 
-"""CSRF middleware and helpers for tubeyou login/session routes."""
+"""CSRF middleware and helpers for fetchly login/session routes."""
 
 from __future__ import annotations
 
@@ -40,7 +40,7 @@ class CSRFMiddleware:
         self,
         app: ASGIApp,
         *,
-        csrf_cookie_name: str = "tubeyou_csrf",  # authoritative source: app/main.py:_CSRF_COOKIE
+        csrf_cookie_name: str,
         protected_paths: tuple[str, ...] = ("/login", "/logout", "/api/submit"),
     ) -> None:
         self.app = app

@@ -4,7 +4,7 @@
 # Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 #
 
-"""Utility modules for tubeyou."""
+"""Utility modules for fetchly."""
 
 from __future__ import annotations
 

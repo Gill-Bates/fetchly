@@ -9,7 +9,6 @@
 import asyncio
 import hashlib
 import logging
-import os
 import re
 import subprocess
 import tempfile
@@ -43,13 +42,15 @@ from ..db import (
     utc_timestamp,
 )
 from ..utils.fs import get_data_dir, get_json_body
+from ..utils.cookies import default_cookie_file, find_cookie_file
 from ..session import delete_session_cookie, refresh_session_settings_cache
 from ..utils.template_filters import is_lalala_configured, public_settings
-from ..utils.platform import detect_platform, validate_media_url
+from ..utils.platform import PLATFORM_COOKIE_FILENAMES, detect_platform, validate_media_url
 from ..utils.updates import get_update_status
 from ..utils.version import (
     get_ffmpeg_version,
     get_js_runtime_version,
+    get_version,
     get_wavesurfer_version,
     get_ytdlp_ejs_version,
     get_ytdlp_version,
@@ -281,16 +282,17 @@ async def settings_page(request: Request):
 @router.get("/api/updates")
 @limiter.limit("30/minute")
 async def api_updates(request: Request, _user: str = Depends(require_user)):
-    """Report whether newer upstream releases exist for the installed tools.
+    """Report whether newer upstream releases exist for fetchly and its tools.
 
-    Purely informational: nothing here updates anything, since these tools are
-    baked into the image and only a rebuild can change them. The upstream
-    lookup is cached for 24 hours, so reloading the settings page does not
-    trigger another request.
+    Purely informational: nothing here updates anything, since fetchly and
+    these tools are baked into the image and only a rebuild (or `git pull`)
+    can change them. The upstream lookup is cached for 24 hours, so reloading
+    the settings page does not trigger another request.
     """
     _ = request
 
     current = {
+        "fetchly": get_version(),
         "ytdlp": await asyncio.to_thread(get_ytdlp_version),
         "ytdlp_ejs": get_ytdlp_ejs_version(),
         "js_runtime": await asyncio.to_thread(get_js_runtime_version),
@@ -478,15 +480,6 @@ _THUMB_CACHE_DIR = get_data_dir() / "thumb-cache"
 _THUMB_CACHE_KEY_RE = re.compile(r"^[a-f0-9]{64}$")
 _THUMB_EXTRACTION_TIMEOUT_SECONDS = 30
 _THUMB_ALLOWED_EXTENSIONS: frozenset[str] = frozenset({".jpg", ".jpeg", ".png", ".webp"})
-_COOKIES_DIR = Path(__file__).parent.parent.parent
-_COOKIES_DATA_DIR = get_data_dir()
-_PLATFORM_COOKIE_FILENAMES: dict[str, str] = {
-    "youtube": "youtube_cookies.txt",
-    "instagram": "instagram_cookies.txt",
-    "tiktok": "tiktok_cookies.txt",
-}
-
-
 def _thumbnail_signature_matches(data: bytes, content_type: str) -> bool:
     """Reject payloads whose bytes do not match their declared raster type."""
     if content_type == "image/jpeg":
@@ -525,24 +518,16 @@ def _cookies_args_for_url(url: str) -> list[str]:
 
 
 def _resolve_cookie_file(platform: str) -> Path | None:
-    filename = _PLATFORM_COOKIE_FILENAMES.get(platform)
+    filename = PLATFORM_COOKIE_FILENAMES.get(platform)
     if not filename:
         return None
 
-    custom_dir_raw = os.environ.get("TUBEYOU_COOKIES_DIR", "").strip()
-    custom_dir = Path(custom_dir_raw) if custom_dir_raw else None
-    for directory in (custom_dir, _COOKIES_DIR, _COOKIES_DATA_DIR):
-        if directory is None:
-            continue
-        candidate = directory / filename
-        if candidate.is_file():
-            return candidate
-    return _COOKIES_DIR / filename
+    return find_cookie_file(filename) or default_cookie_file(filename)
 
 
 def _cookie_hint_for_url(url: str) -> str | None:
     platform = detect_platform(url)
-    if platform not in {"instagram", "tiktok", "youtube"}:
+    if platform not in PLATFORM_COOKIE_FILENAMES:
         return None
     cookie_path = _resolve_cookie_file(platform)
     if cookie_path and not cookie_path.is_file():
@@ -594,7 +579,7 @@ async def _fetch_thumbnail_payload(url: str) -> tuple[bytes, str]:
 
     try:
         async with httpx.AsyncClient(timeout=8.0, follow_redirects=False) as client:
-            async with client.stream("GET", url, headers={"User-Agent": "tubeyou"}) as resp:
+            async with client.stream("GET", url, headers={"User-Agent": "fetchly"}) as resp:
                 if 300 <= resp.status_code < 400:
                     raise HTTPException(status_code=502, detail="Thumbnail redirects are not accepted")
                 if resp.status_code != 200:
@@ -842,9 +827,18 @@ async def api_set_settings(request: Request, _user: str = Depends(require_sessio
             payload["download_concurrent_fragments"], 1, 16, "download_concurrent_fragments"
         )
 
+    if "share_link_max_uses" in payload:
+        settings_to_update["share_link_max_uses"] = _clamp_int(
+            payload["share_link_max_uses"], 0, 10000, "share_link_max_uses"
+        )
+
     if "download_mp4_preset" in payload:
         enabled = _parse_bool(payload["download_mp4_preset"], "download_mp4_preset")
         settings_to_update["download_mp4_preset"] = "true" if enabled else "false"
+
+    if "enable_authentication" in payload:
+        enabled = _parse_bool(payload["enable_authentication"], "enable_authentication")
+        settings_to_update["enable_authentication"] = "true" if enabled else "false"
 
     if "lalalaai_duration_guard" in payload:
         enabled = _parse_bool(payload["lalalaai_duration_guard"], "lalalaai_duration_guard")

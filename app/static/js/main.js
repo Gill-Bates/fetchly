@@ -3,12 +3,12 @@
 // Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 //
 
-import { AUDIO_TYPE, CONFIG, CSRF_COOKIE_NAME, DOWNLOADABLE_STATUSES, TERMINAL_STATUSES, VIDEO_QUALITY_OPTIONS } from "./config.js";
+import { AUDIO_TYPE, CONFIG, DOWNLOADABLE_STATUSES, TERMINAL_STATUSES } from "./config.js";
 import { fetchJobs, fetchResolvedThumbnail, fetchStats, submitJob, fetchVideoInfo, toErrorMessage } from "./api.js";
 import { reportWarning } from "./errors.js";
-import { createTimeoutSignal, getCookie, humanSize, isValidMediaUrl, detectPlatform, platformPillLabel, PLATFORM, extractYouTubeVideoId, formatDuration, isSafeRedirect, subscribeToLalalProgress, triggerDownload } from "./utils.js";
-import { prependJob, loadMore, applyJobUpdate, getJobById, applyStoredJobTitleFilter, formatCreatedText } from "./jobs.js?v=20260823d";
-import { EVENT_NAMES, dispatchJobUpdate, setEventStreamEnabled } from "./events.js?v=20260823e";
+import { createTimeoutSignal, getCsrfToken, humanSize, isValidMediaUrl, detectPlatform, platformPillLabel, PLATFORM, extractYouTubeVideoId, formatDuration, isSafeRedirect, subscribeToLalalProgress, triggerDownload } from "./utils.js";
+import { prependJob, loadMore, applyJobUpdate, getJobById, applyStoredJobTitleFilter, formatCreatedText } from "./jobs.js?v=20260831a";
+import { EVENT_NAMES, dispatchJobUpdate, setEventStreamEnabled } from "./events.js?v=20260831a";
 import { showToast } from "./toast.js";
 import { initTrim } from "./trim.js";
 
@@ -40,7 +40,7 @@ const duplicateJobModalEl = document.getElementById("duplicateJobModal");
 const duplicateJobMessage = document.getElementById("duplicateJobMessage");
 const duplicateJobConfirmBtn = document.getElementById("duplicateJobConfirmBtn");
 const DROPDOWN_TOGGLE_SELECTOR = "[data-bs-toggle='dropdown']";
-const MOBILE_JOB_HISTORY_STORAGE_KEY = "tubeyou.showJobHistory";
+const MOBILE_JOB_HISTORY_STORAGE_KEY = "fetchly.showJobHistory";
 const MOBILE_JOB_HISTORY_CLASS = "mobile-job-history-enabled";
 
 const detailModal = detailModalEl ? bootstrap.Modal.getOrCreateInstance(detailModalEl) : null;
@@ -135,10 +135,6 @@ function initMobileJobHistoryToggle() {
     });
 }
 
-
-function getCsrfToken() {
-    return getCookie(CSRF_COOKIE_NAME);
-}
 
 function isNativeNavigation(event) {
     return event.ctrlKey || event.metaKey || event.shiftKey || event.button !== 0;
@@ -395,8 +391,9 @@ function getOrCreateFilterEmptyState() {
         state.className = "jobs-mobile-empty empty-state empty-state--mobile d-none";
 
         const iconDiv = document.createElement("div");
-        iconDiv.className = "icon";
-        iconDiv.textContent = "🔎";
+        iconDiv.className = "material-symbols-outlined icon";
+        iconDiv.setAttribute("aria-hidden", "true");
+        iconDiv.textContent = "search";
 
         const p = document.createElement("p");
         p.textContent = "No jobs match this title or URL search.";
@@ -422,8 +419,9 @@ function getOrCreateFilterEmptyState() {
     wrapper.className = "empty-state";
 
     const iconDiv = document.createElement("div");
-    iconDiv.className = "icon";
-    iconDiv.textContent = "🔎";
+    iconDiv.className = "material-symbols-outlined icon";
+    iconDiv.setAttribute("aria-hidden", "true");
+    iconDiv.textContent = "search";
 
     const p = document.createElement("p");
     p.textContent = "No jobs match this title or URL search.";
@@ -650,10 +648,10 @@ function updateQualityOptions(formats) {
     }
 
     const fragment = document.createDocumentFragment();
-    for (const q of VIDEO_QUALITY_OPTIONS) {
+    for (const q of defaultQualityOptions) {
         const option = document.createElement("option");
         option.value = q.value;
-        option.textContent = q.label;
+        option.textContent = q.text;
         fragment.appendChild(option);
     }
     qualitySelect.appendChild(fragment);
@@ -845,7 +843,7 @@ async function updateVideoPreview() {
         // Clear stale metadata from the previous video before showing the error.
         resetVideoMeta();
         setText(metaTitle, "Metadata unavailable");
-        setText(metaSummary, "Enter a valid public YouTube, TikTok, or Instagram URL to load preview metadata.");
+        setText(metaSummary, "Enter a valid public YouTube, TikTok, Instagram, or Facebook URL to load preview metadata.");
         setText(metaFormats, "–");
     } finally {
         if (previewAbortController === controller) {
@@ -1100,7 +1098,14 @@ function renderDetailTitle(job, text) {
     if (label) {
         const pill = document.createElement("span");
         pill.className = `platform-pill platform-pill--${platform}`;
-        pill.textContent = label;
+        pill.title = label;
+        pill.setAttribute("role", "img");
+        pill.setAttribute("aria-label", label);
+
+        const icon = document.createElement("span");
+        icon.className = `platform-pill__icon platform-pill__icon--${platform}`;
+        icon.setAttribute("aria-hidden", "true");
+        pill.appendChild(icon);
         titleEl.appendChild(pill);
     }
 
@@ -1284,29 +1289,74 @@ async function handleCancelJob(btn) {
     }
 }
 
+/**
+ * Write text to the clipboard, falling back to a hidden textarea where the
+ * async Clipboard API is unavailable (non-secure contexts, older browsers).
+ * @param {string} value
+ * @returns {Promise<void>} rejects when the copy could not be performed
+ */
+async function writeToClipboard(value) {
+    if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(value);
+        return;
+    }
+
+    const input = document.createElement("textarea");
+    input.value = value;
+    input.setAttribute("readonly", "");
+    input.style.position = "fixed";
+    input.style.opacity = "0";
+    document.body.appendChild(input);
+    input.select();
+    const copied = document.execCommand("copy");
+    input.remove();
+    if (!copied) throw new Error("Clipboard unavailable");
+}
+
 async function copyDetailValue(btn) {
     const value = String(btn?.dataset.copyValue || "");
     if (!value) return;
 
     try {
-        if (navigator.clipboard?.writeText) {
-            await navigator.clipboard.writeText(value);
-        } else {
-            const input = document.createElement("textarea");
-            input.value = value;
-            input.setAttribute("readonly", "");
-            input.style.position = "fixed";
-            input.style.opacity = "0";
-            document.body.appendChild(input);
-            input.select();
-            const copied = document.execCommand("copy");
-            input.remove();
-            if (!copied) throw new Error("Clipboard unavailable");
-        }
-
+        await writeToClipboard(value);
         showToast("Copied to clipboard", "success", 1800);
     } catch (error) {
         showToast("Could not copy to clipboard", "warning", 2200);
+    }
+}
+
+async function handleShareJob(btn) {
+    const jobId = String(btn?.dataset.jobId || "");
+    if (!jobId) return;
+
+    let payload;
+    try {
+        payload = await handleActionPost(btn, `/api/share/${encodeURIComponent(jobId)}`);
+    } catch (err) {
+        if (err?.name !== "AbortError") {
+            showToast(`Share failed: ${err.message}`, "danger");
+        }
+        return;
+    }
+
+    const url = String(payload?.url || "");
+    if (!url) {
+        showToast("No share link returned", "warning");
+        return;
+    }
+
+    const maxUses = Number(payload?.max_uses ?? 0);
+    const limitNote = maxUses > 0
+        ? ` (valid for ${maxUses} download${maxUses === 1 ? "" : "s"})`
+        : "";
+
+    try {
+        await writeToClipboard(url);
+        showToast(`Share link copied${limitNote}`, "success", 2600);
+    } catch (error) {
+        // The link exists either way - show it so it is not lost to a
+        // clipboard permission the browser refused.
+        showToast(`Share link: ${url}`, "info", 8000);
     }
 }
 
@@ -1326,6 +1376,10 @@ const ACTION_HANDLERS = Object.freeze({
     "copy-detail": (btn, event) => {
         event.preventDefault();
         void copyDetailValue(btn);
+    },
+    "share-job": (btn, event) => {
+        event.preventDefault();
+        void handleShareJob(btn);
     },
 });
 
@@ -1457,7 +1511,7 @@ submitForm?.addEventListener("submit", async (event) => {
     try {
         const urlValue = urlInput?.value.trim() || "";
         if (!isValidMediaUrl(urlValue)) {
-            setError("Unsupported URL. Please enter a valid YouTube, TikTok, or Instagram link.");
+            setError("Unsupported URL. Please enter a valid YouTube, TikTok, Instagram, or Facebook link.");
             return;
         }
 

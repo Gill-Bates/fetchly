@@ -389,13 +389,14 @@ async def job_page(request: Request, job_id: uuid.UUID):
     )
 
 
-@router.get("/download/{job_id}")
-@limiter.limit("30/minute")
-async def download(request: Request, job_id: uuid.UUID):
-    """Download a job's output file."""
-    if not current_user(request):
-        return RedirectResponse(url="/login", status_code=303)
+async def build_job_file_response(job_id: uuid.UUID) -> Response:
+    """Resolve a job's output file and return it as a download response.
 
+    Shared by the authenticated /download route and the public share-link
+    route so both deliver byte-identical results (including the on-the-fly
+    MP3 transcode for internal audio sources). Raises no exceptions: a missing
+    or not-yet-ready job comes back as the matching JSON error response.
+    """
     try:
         job, file_path = await _get_ready_job_file(job_id)
     except HTTPException as exc:
@@ -421,6 +422,16 @@ async def download(request: Request, job_id: uuid.UUID):
         media_type=_guess_media_type(file_path),
         headers=_NOSNIFF_HEADER,
     )
+
+
+@router.get("/download/{job_id}")
+@limiter.limit("30/minute")
+async def download(request: Request, job_id: uuid.UUID):
+    """Download a job's output file."""
+    if not current_user(request):
+        return RedirectResponse(url="/login", status_code=303)
+
+    return await build_job_file_response(job_id)
 
 
 @router.get("/audio-source/{job_id}")

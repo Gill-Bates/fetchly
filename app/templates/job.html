@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}tubeyou - next-gen Video Downloader{% endblock %}
+{% block title %}fetchly - next-gen Video Downloader{% endblock %}
 
 {% block navbar %}
 {% from "macros/navbar.html" import navbar %}
@@ -32,7 +32,11 @@
                 <dt>URL</dt>
                 <dd>
                     {% if platform_pill_label %}
-                    <span class="platform-pill platform-pill--{{ platform_pill_id | e }}">{{ platform_pill_label | e }}</span>
+                    <span class="platform-pill platform-pill--{{ platform_pill_id | e }}" title="{{ platform_pill_label | e }}"
+                        role="img" aria-label="{{ platform_pill_label | e }}">
+                        <span class="platform-pill__icon platform-pill__icon--{{ platform_pill_id | e }}"
+                            aria-hidden="true"></span>
+                    </span>
                     {% endif %}
                     {% if external_job_url %}
                     <a href="{{ external_job_url | e }}" title="{{ external_job_url | e }}" target="_blank"

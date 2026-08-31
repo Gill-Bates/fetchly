@@ -36,13 +36,13 @@
             <li><hr class="dropdown-divider"></li>
             {% set duration_value = job["duration_seconds"] %}
             {% set duration_known = duration_value is not none and duration_value >= 0 %}
-            {% set duration_blocked = lalal_duration_guard and (not duration_known or duration_value > 600) %}
+            {% set duration_blocked = lalal_duration_guard and (not duration_known or duration_value > LALAL_MAX_DURATION_SECONDS) %}
             <li>
                 <button class="dropdown-item{% if not lalal_enabled or duration_blocked %} disabled{% endif %}" type="button"
                         data-action="lalal-split"
                         data-job-id="{{ job["id"] }}"
                         data-stem="instrumental"
-                        {% if not lalal_enabled %}disabled aria-disabled="true" title="Lalal.ai is not connected"{% elif duration_blocked %}disabled aria-disabled="true" title="{{ 'Track duration unknown' if not duration_known else 'Track exceeds 10 min' }} — blocked by Duration Guard"{% endif %}>
+                        {% if not lalal_enabled %}disabled aria-disabled="true" title="Lalal.ai is not connected"{% elif duration_blocked %}disabled aria-disabled="true" title="{{ 'Track duration unknown' if not duration_known else 'Track exceeds ' ~ LALAL_MAX_DURATION_MINUTES ~ ' min' }} — blocked by Duration Guard"{% endif %}>
                     <span class="material-symbols-outlined icon-inline" aria-hidden="true">music_off</span>
                     <span>Instrumental</span>
                     <img class="dropdown-provider-logo"
@@ -57,7 +57,7 @@
                         data-action="lalal-split"
                         data-job-id="{{ job["id"] }}"
                         data-stem="vocals"
-                        {% if not lalal_enabled %}disabled aria-disabled="true" title="Lalal.ai is not connected"{% elif duration_blocked %}disabled aria-disabled="true" title="{{ 'Track duration unknown' if not duration_known else 'Track exceeds 10 min' }} — blocked by Duration Guard"{% endif %}>
+                        {% if not lalal_enabled %}disabled aria-disabled="true" title="Lalal.ai is not connected"{% elif duration_blocked %}disabled aria-disabled="true" title="{{ 'Track duration unknown' if not duration_known else 'Track exceeds ' ~ LALAL_MAX_DURATION_MINUTES ~ ' min' }} — blocked by Duration Guard"{% endif %}>
                     <span class="material-symbols-outlined icon-inline" aria-hidden="true">mic</span>
                     <span>A Cappella</span>
                     <img class="dropdown-provider-logo"

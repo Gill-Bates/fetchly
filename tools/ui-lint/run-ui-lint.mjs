@@ -22,24 +22,33 @@ const BASE_ORIGIN = new URL(BASE_URL).origin;
 const USERNAME = process.env.UI_LINT_USERNAME;
 const PASSWORD = process.env.UI_LINT_PASSWORD;
 const SESSION_ID = Date.now();
-const OUTPUT_DIR = process.env.UI_LINT_OUTPUT_DIR || `/tmp/tubeyou-ui-lint-${SESSION_ID}`;
+const OUTPUT_DIR = process.env.UI_LINT_OUTPUT_DIR || `/tmp/fetchly-ui-lint-${SESSION_ID}`;
 const SCREENSHOT_DIR = path.join(OUTPUT_DIR, 'screenshots');
 const RESULTS_PATH = path.join(OUTPUT_DIR, 'results.json');
 const MAIN_JS_PATH = new URL('../../app/static/js/main.js', import.meta.url);
 const JOBS_JS_PATH = new URL('../../app/static/js/jobs.js', import.meta.url);
+const UI_JS_PATH = new URL('../../app/static/js/ui.js', import.meta.url);
+const SETTINGS_JS_PATH = new URL('../../app/static/js/settings.js', import.meta.url);
+const SETTINGS_TEMPLATE_PATH = new URL('../../app/templates/settings.html', import.meta.url);
 
-let jobsScrollContractMetricsPromise;
+let jobsSourceContractMetricsPromise;
+let settingsSourceContractMetricsPromise;
 
 function viewAuditsJobsList(view) {
     return Array.isArray(view?.requiredSelectors) && view.requiredSelectors.includes('#jobsRenderRoot');
 }
 
-async function getJobsScrollContractMetrics() {
-    if (!jobsScrollContractMetricsPromise) {
-        jobsScrollContractMetricsPromise = (async () => {
-            const [mainJsSource, jobsJsSource] = await Promise.all([
+function viewAuditsSettings(view) {
+    return Array.isArray(view?.requiredSelectors) && view.requiredSelectors.includes('#settingsForm');
+}
+
+async function getJobsSourceContractMetrics() {
+    if (!jobsSourceContractMetricsPromise) {
+        jobsSourceContractMetricsPromise = (async () => {
+            const [mainJsSource, jobsJsSource, uiJsSource] = await Promise.all([
                 readFile(MAIN_JS_PATH, 'utf8'),
                 readFile(JOBS_JS_PATH, 'utf8'),
+                readFile(UI_JS_PATH, 'utf8'),
             ]);
 
             const observerBoundToScroller = /new IntersectionObserver\([\s\S]*?root:\s*jobsScrollContainer[\s\S]*?observer\.observe\(jobsSentinel\)/.test(mainJsSource);
@@ -58,14 +67,61 @@ async function getJobsScrollContractMetrics() {
             const usesRenderedCountAsFetchOffset = /fetchFn\(\s*(?:getRenderedJobCount\(|tbody\s*\.\s*querySelectorAll\(|document\s*\.\s*querySelectorAll\()[\s\S]*?\)/.test(jobsJsSource);
             const hasUnexpectedStoreLengthResync = storeLengthAssignments > (initSeedsFromStoreLength ? 1 : 0);
 
+            const desktopMediaSecondarySource = jobsJsSource.match(
+                /function formatDesktopMediaSecondary\(job\)\s*\{([\s\S]*?)\n\}/,
+            )?.[1] || '';
+            const desktopMediaDetailUsesSharedText = (
+                /humanSize\(job\?\.filesize_bytes\)/.test(desktopMediaSecondarySource)
+                && /mediaDetail\.className\s*=\s*["']meta-sub job-media-detail["'];[\s\S]{0,200}?mediaDetail\.textContent\s*=\s*formatDesktopMediaSecondary\(job\)/.test(jobsJsSource)
+            );
+            const desktopStatusWithoutSizeCalls = [
+                ...jobsJsSource.matchAll(/renderJobStatus\(job,\s*\{\s*showSize:\s*false\s*\}\)/g),
+            ].length;
+            const mobileDownloadActionSource = uiJsSource.match(
+                /function createMobileDownloadAction\(job\)\s*\{([\s\S]*?)\n\}/,
+            )?.[1] || '';
+            const mobileSharesDesktopDownloadMenu = (
+                /createDownloadOptionsMenu\(job,\s*downloadBtn\.href\)/.test(mobileDownloadActionSource)
+                && /function createDownloadOptionsMenu\(job,\s*downloadHref\)[\s\S]*?["']share["'][\s\S]*?action:\s*["']share-job["']/.test(uiJsSource)
+                && /return createMobileDownloadAction\(action\.job\)/.test(uiJsSource)
+            );
+
             return {
                 jobsInfiniteScrollNotObserverBased: !(observerBoundToScroller && localScrollFallback) || windowScrollLoadsMore,
                 jobsPagingOffsetContractBroken: !tracksMonotonicOffset || usesRenderedCountAsFetchOffset || usesLegacyDomSyncHelper || hasUnexpectedStoreLengthResync,
+                jobsDesktopFileSizePlacementBroken: !desktopMediaDetailUsesSharedText
+                    || desktopStatusWithoutSizeCalls < 2,
+                jobsMobileShareActionMissing: !mobileSharesDesktopDownloadMenu,
             };
         })();
     }
 
-    return jobsScrollContractMetricsPromise;
+    return jobsSourceContractMetricsPromise;
+}
+
+async function getSettingsSourceContractMetrics() {
+    if (!settingsSourceContractMetricsPromise) {
+        settingsSourceContractMetricsPromise = (async () => {
+            const [settingsJsSource, settingsTemplateSource] = await Promise.all([
+                readFile(SETTINGS_JS_PATH, 'utf8'),
+                readFile(SETTINGS_TEMPLATE_PATH, 'utf8'),
+            ]);
+
+            const successUsesToast = /showToast\(\s*payload\.message\s*\|\|\s*["']Settings updated["']\s*,\s*["']success["']\s*\)/.test(settingsJsSource);
+            const validationUsesToast = /showToast\(\s*validation\.error\s*,\s*["']danger["']\s*\)/.test(settingsJsSource);
+            const jsUsesInlineSaveStatus = /\b(?:AUTO_SAVE_STATE|setAutoSaveState|autoSaveIndicator|settingsSaveBtn|settingsAlert)\b/.test(settingsJsSource);
+            const templateHasInlineSaveStatus = /(?:id=["'](?:autoSaveIndicator|settingsSaveBtn|settingsAlert)["']|class=["'][^"']*settings-status-bar)/.test(settingsTemplateSource);
+
+            return {
+                settingsSaveToastContractBroken: !successUsesToast
+                    || !validationUsesToast
+                    || jsUsesInlineSaveStatus
+                    || templateHasInlineSaveStatus,
+            };
+        })();
+    }
+
+    return settingsSourceContractMetricsPromise;
 }
 
 function envFloat(name, defaultValue) {
@@ -99,6 +155,10 @@ const MOBILE_LAYOUT_STABLE_FRAMES = envInt('UI_LINT_MOBILE_LAYOUT_STABLE_FRAMES'
 const DESKTOP_LAYOUT_STABLE_FRAMES = envInt('UI_LINT_DESKTOP_LAYOUT_STABLE_FRAMES', 2);
 const MOBILE_LAYOUT_MAX_FRAMES = envInt('UI_LINT_MOBILE_LAYOUT_MAX_FRAMES', 36);
 const DESKTOP_LAYOUT_MAX_FRAMES = envInt('UI_LINT_DESKTOP_LAYOUT_MAX_FRAMES', 16);
+const PLATFORM_BADGE_WIDTH_PX = 28;
+const PLATFORM_BADGE_HEIGHT_PX = 24;
+const PLATFORM_BADGE_ICON_SIZE_PX = 16;
+const PLATFORM_BADGE_GEOMETRY_EPSILON_PX = 0.1;
 const MOTION_RESET_CSS = `
   *, *::before, *::after {
     animation: none !important;
@@ -144,7 +204,7 @@ const VIEW_DEFS = [
         readySelector: '#settingsForm',
         auth: true,
         device: 'desktop',
-        requiredSelectors: ['#settingsForm', '#settingsSaveBtn', '#lalalAuthBtn'],
+        requiredSelectors: ['#settingsForm', '#lalalAuthBtn'],
     },
     {
         name: 'mobile-dashboard',
@@ -160,7 +220,7 @@ const VIEW_DEFS = [
         readySelector: '#settingsForm',
         auth: true,
         device: 'mobile',
-        requiredSelectors: ['#settingsForm', '#settingsSaveBtn'],
+        requiredSelectors: ['#settingsForm'],
     },
 ];
 
@@ -272,6 +332,7 @@ function formatResultSummary(result) {
     if (metrics.mixedLayoutIssues) parts.push(`mixedLayout=${metrics.mixedLayoutIssues}`);
     if (metrics.statCardCenteringIssues) parts.push(`statCardCentering=${metrics.statCardCenteringIssues}`);
     if (metrics.containerWidthIssue) parts.push('containerWidth=bad');
+    if (metrics.statTileMobileLayoutIssues) parts.push(`statTileMobileLayout=${metrics.statTileMobileLayoutIssues}`);
     if (metrics.focusIndicatorMissing) parts.push(`focusIndicatorMissing=${metrics.focusIndicatorMissing}`);
     if (metrics.ghostScrollContainers) parts.push(`ghostScroll=${metrics.ghostScrollContainers}`);
     if (metrics.nestedScrollContainers) parts.push(`nestedScroll=${metrics.nestedScrollContainers}`);
@@ -285,6 +346,9 @@ function formatResultSummary(result) {
     if (metrics.viewportLockingIssues > 0)
         parts.push(`viewportLock=${metrics.viewportLockingIssues}`);
     if (metrics.badgeInconsistencies) parts.push(`badgeInconsistencies=${metrics.badgeInconsistencies}`);
+    if (metrics.platformBadgeGeometryIssues) {
+        parts.push(`platformBadgeGeometry=${metrics.platformBadgeGeometryIssues}`);
+    }
     if (metrics.iconPointerEventsIssues) parts.push(`iconPointerEvents=${metrics.iconPointerEventsIssues}`);
     if (metrics.gridViolations) parts.push(`gridViolations=${metrics.gridViolations}`);
     if (metrics.overlapIssues) parts.push(`overlapIssues=${metrics.overlapIssues}`);
@@ -306,9 +370,13 @@ function formatResultSummary(result) {
     if (metrics.jobsSentinelOutsideScrollContainer) parts.push('jobsSentinelOutsideScroller=true');
     if (metrics.jobsInfiniteScrollNotObserverBased) parts.push('jobsInfiniteScrollNotObserverBased=true');
     if (metrics.jobsPagingOffsetContractBroken) parts.push('jobsPagingOffsetContractBroken=true');
+    if (metrics.jobsDesktopFileSizePlacementBroken) parts.push('jobsDesktopFileSizePlacementBroken=true');
+    if (metrics.jobsMobileShareActionMissing) parts.push('jobsMobileShareActionMissing=true');
     if (metrics.trimWaveformMissingStyle) parts.push('trimWaveformMissingStyle=true');
     if (metrics.videoPreviewContractBroken) parts.push('videoPreviewContractBroken=true');
     if (metrics.settingsFieldStackContractBroken) parts.push('settingsFieldStackContractBroken=true');
+    if (metrics.settingsSaveToastContractBroken) parts.push('settingsSaveToastContractBroken=true');
+    if (metrics.lalalMobileActionLayoutBroken) parts.push('lalalMobileActionLayoutBroken=true');
     if (metrics.trimDefaultRegionPresent) parts.push('trimDefaultRegion=true');
     if (metrics.uiCardChildExpands) parts.push(`uiCardChildExpands=${metrics.uiCardChildExpands}`);
     // CSS hardening (2026-04-29)
@@ -318,7 +386,9 @@ function formatResultSummary(result) {
     if (metrics.zIndexAbuse > 0) parts.push(`zIndexAbuse=${metrics.zIndexAbuse}`);
     if (metrics.nestedOverflowHidden > 0) parts.push(`nestedOverflowHidden=${metrics.nestedOverflowHidden}`);
     if (metrics.mobileTitleCellFlexRegression) parts.push('mobileTitleCellFlexRegression=true');
+    if (metrics.mobileActionSurfaceContractBroken) parts.push('mobileActionSurfaceContractBroken=true');
     if (metrics.mobileJobsPageScrollTrap) parts.push('mobileJobsPageScrollTrap=true');
+    if (metrics.emptyStateHoverHighlight) parts.push('emptyStateHoverHighlight=true');
     if (metrics.flexMinHeightOverflowHidden?.length > 0) {
         parts.push(`flexMinHeightOverflowHidden=${metrics.flexMinHeightOverflowHidden.length}`);
     }
@@ -389,6 +459,7 @@ const BASE_METRICS = Object.freeze({
     mobileJobsFeedIssues: 0,
     mixedLayoutIssues: 0,
     containerWidthIssue: 0,
+    statTileMobileLayoutIssues: 0,
     statCardCenteringIssues: 0,
     focusIndicatorMissing: 0,
     ghostScrollContainers: 0,
@@ -400,6 +471,7 @@ const BASE_METRICS = Object.freeze({
     hasSelectorLayoutUsage: 0,
     viewportLockingIssues: 0,
     badgeInconsistencies: 0,
+    platformBadgeGeometryIssues: 0,
     iconPointerEventsIssues: 0,
     gridViolations: 0,
     overlapIssues: 0,
@@ -422,9 +494,13 @@ const BASE_METRICS = Object.freeze({
     jobsSentinelOutsideScrollContainer: false,
     jobsInfiniteScrollNotObserverBased: false,
     jobsPagingOffsetContractBroken: false,
+    jobsDesktopFileSizePlacementBroken: false,
+    jobsMobileShareActionMissing: false,
     trimWaveformMissingStyle: false,
     videoPreviewContractBroken: false,
     settingsFieldStackContractBroken: false,
+    settingsSaveToastContractBroken: false,
+    lalalMobileActionLayoutBroken: false,
     trimDefaultRegionPresent: false,
     uiCardChildExpands: 0,
     // CSS hardening checks (2026-04-29)
@@ -434,8 +510,10 @@ const BASE_METRICS = Object.freeze({
     zIndexAbuse: 0,
     nestedOverflowHidden: 0,
     mobileTitleCellFlexRegression: false,
+    mobileActionSurfaceContractBroken: false,
     mobileJobsPageScrollTrap: false,
     flexMinHeightOverflowHidden: 0,
+    emptyStateHoverHighlight: false,
 });
 
 /**
@@ -535,6 +613,12 @@ function applyMetricRules(metrics, failures, warnings) {
     if (metrics.nestedOverflowHidden) warnings.push(`nested overflow:hidden containers: ${metrics.nestedOverflowHidden}`);
     if (metrics.mobileTitleCellFlexRegression) {
         failures.push('mobile title cell flex contract is broken');
+    }
+    if (metrics.mobileActionSurfaceContractBroken) {
+        failures.push('mobile job controls or completion status are missing their raised surface contract');
+    }
+    if (metrics.platformBadgeGeometryIssues?.length) {
+        failures.push(`platform badge geometry is not pixel-stable: ${metrics.platformBadgeGeometryIssues.length}`);
     }
 }
 
@@ -671,7 +755,17 @@ async function waitForMedia(page) {
  */
 async function collectMetrics(page, view) {
     let timeoutId;
-    const evaluatePromise = page.evaluate(async ({ requiredSelectors, mobileTouchTargetMin, desktopTouchTargetMin, isMobile }) => {
+    const evaluatePromise = page.evaluate(async ({
+        requiredSelectors,
+        mobileTouchTargetMin,
+        desktopTouchTargetMin,
+        isMobile,
+        auditPlatformBadges,
+        platformBadgeWidth,
+        platformBadgeHeight,
+        platformBadgeIconSize,
+        platformBadgeGeometryEpsilon,
+    }) => {
         const interactiveSelector = [
             'a[href]',
             'button',
@@ -1381,6 +1475,122 @@ async function collectMetrics(page, view) {
             }
         }
 
+        // Platform badge geometry contract: the badge and its icon use fixed
+        // integer CSS-pixel boxes, never shrink in title layouts, have no
+        // padding, and share an exact geometric centre. Synthetic fixtures
+        // keep the rule active even when the current database has no jobs;
+        // visible badges additionally verify the real desktop/mobile layout.
+        const platformBadgeGeometryIssues = [];
+        if (auditPlatformBadges) {
+            const inspectPlatformBadge = (pill, source) => {
+                const icon = pill.querySelector('.platform-pill__icon');
+                const pillStyle = window.getComputedStyle(pill);
+                const pillRect = pill.getBoundingClientRect();
+                const addIssue = (type, values = {}) => {
+                    platformBadgeGeometryIssues.push({ source, type, ...values });
+                };
+                const differs = (actual, expected) => (
+                    Math.abs(actual - expected) > platformBadgeGeometryEpsilon
+                );
+
+                if (differs(pillRect.width, platformBadgeWidth)) {
+                    addIssue('badge-width', { actual: pillRect.width, expected: platformBadgeWidth });
+                }
+                if (differs(pillRect.height, platformBadgeHeight)) {
+                    addIssue('badge-height', { actual: pillRect.height, expected: platformBadgeHeight });
+                }
+                if (pillStyle.boxSizing !== 'border-box') {
+                    addIssue('badge-box-sizing', { actual: pillStyle.boxSizing });
+                }
+                if (pillStyle.alignItems !== 'center' || pillStyle.justifyContent !== 'center') {
+                    addIssue('badge-flex-alignment', {
+                        alignItems: pillStyle.alignItems,
+                        justifyContent: pillStyle.justifyContent,
+                    });
+                }
+                if (pillStyle.flexShrink !== '0') {
+                    addIssue('badge-can-shrink', { actual: pillStyle.flexShrink });
+                }
+
+                const padding = [
+                    pillStyle.paddingTop,
+                    pillStyle.paddingRight,
+                    pillStyle.paddingBottom,
+                    pillStyle.paddingLeft,
+                ].map((value) => Number.parseFloat(value) || 0);
+                if (padding.some((value) => value > platformBadgeGeometryEpsilon)) {
+                    addIssue('badge-padding', { actual: padding });
+                }
+
+                if (!icon) {
+                    addIssue('missing-icon');
+                    return;
+                }
+
+                const iconStyle = window.getComputedStyle(icon);
+                const iconRect = icon.getBoundingClientRect();
+                if (differs(iconRect.width, platformBadgeIconSize)
+                    || differs(iconRect.height, platformBadgeIconSize)) {
+                    addIssue('icon-size', {
+                        width: iconRect.width,
+                        height: iconRect.height,
+                        expected: platformBadgeIconSize,
+                    });
+                }
+                if (iconStyle.flexShrink !== '0') {
+                    addIssue('icon-can-shrink', { actual: iconStyle.flexShrink });
+                }
+
+                const badgeCenterX = pillRect.left + (pillRect.width / 2);
+                const badgeCenterY = pillRect.top + (pillRect.height / 2);
+                const iconCenterX = iconRect.left + (iconRect.width / 2);
+                const iconCenterY = iconRect.top + (iconRect.height / 2);
+                const deltaX = Math.abs(badgeCenterX - iconCenterX);
+                const deltaY = Math.abs(badgeCenterY - iconCenterY);
+                if (deltaX > platformBadgeGeometryEpsilon || deltaY > platformBadgeGeometryEpsilon) {
+                    addIssue('icon-not-centered', { deltaX, deltaY });
+                }
+            };
+
+            Array.from(document.querySelectorAll('.platform-pill'))
+                .filter((pill) => isLayoutVisible(pill))
+                .forEach((pill, index) => inspectPlatformBadge(pill, `rendered-${index}`));
+
+            const fixtureHost = document.createElement('div');
+            fixtureHost.dataset.uiLintInjected = 'true';
+            fixtureHost.style.cssText = [
+                'position:fixed',
+                'left:-200px',
+                'top:-200px',
+                'display:flex',
+                'width:20px',
+                'visibility:hidden',
+                'pointer-events:none',
+            ].join(';');
+            document.body.appendChild(fixtureHost);
+
+            for (const platform of ['youtube', 'tiktok', 'instagram', 'facebook']) {
+                const pill = document.createElement('span');
+                pill.className = `platform-pill platform-pill--${platform}`;
+                const icon = document.createElement('span');
+                icon.className = `platform-pill__icon platform-pill__icon--${platform}`;
+                pill.appendChild(icon);
+
+                if (isMobile) {
+                    const mobileContext = document.createElement('article');
+                    mobileContext.className = 'job-item';
+                    mobileContext.style.cssText = 'display:flex;width:20px';
+                    mobileContext.appendChild(pill);
+                    fixtureHost.replaceChildren(mobileContext);
+                } else {
+                    fixtureHost.replaceChildren(pill);
+                }
+
+                inspectPlatformBadge(pill, `fixture-${isMobile ? 'mobile-' : ''}${platform}`);
+            }
+            fixtureHost.remove();
+        }
+
         const gridViolations = Array.from(document.querySelectorAll('.row'))
             .filter((row) => isLayoutVisible(row))
             .filter((row) => !Array.from(row.children).some((child) => {
@@ -1455,6 +1665,24 @@ async function collectMetrics(page, view) {
                 const historyToggle = document.querySelector('#showJobHistoryToggle');
                 if (!mobileList) {
                     return [{ type: 'missing-mobile-list' }];
+                }
+
+                const jobsHeader = jobsCard?.querySelector('.jobs-card-header');
+                const jobsShell = jobsCard?.querySelector('.jobs-list-shell');
+                if (jobsHeader instanceof HTMLElement && jobsShell instanceof HTMLElement) {
+                    const headerStyle = window.getComputedStyle(jobsHeader);
+                    const shellStyle = window.getComputedStyle(jobsShell);
+                    const listStyle = window.getComputedStyle(mobileList);
+                    const headerInset = Number.parseFloat(headerStyle.paddingLeft) || 0;
+                    const feedInset = (Number.parseFloat(shellStyle.paddingLeft) || 0)
+                        + (Number.parseFloat(listStyle.paddingLeft) || 0);
+                    if (Math.abs(headerInset - feedInset) > 0.1) {
+                        issues.push({
+                            type: 'feed-edge-inset-mismatch',
+                            headerInset,
+                            feedInset,
+                        });
+                    }
                 }
 
                 if (!(historyToggle instanceof HTMLInputElement) || !isLayoutVisible(historyToggle)) {
@@ -1587,6 +1815,68 @@ async function collectMetrics(page, view) {
                 return rect.width < window.innerWidth - 12 || rect.left > 4 || (window.innerWidth - rect.right) > 4;
             })()
             : false;
+
+        // The dashboard's four stat tiles (.stats-row) must render as one
+        // row of four on mobile (not a 2x2 wrap), and within each tile the
+        // icon must center over the *whole* "number + unit" block
+        // (.stat-num-line) -- not just the bare number -- so a tile with a
+        // unit (e.g. "20.1 MiB") does not visually shift its icon off to
+        // one side. The row also keeps the same visual gap to the navbar and
+        // the submit card so it does not float low in the mobile viewport.
+        const statTileMobileLayoutIssues = isMobile
+            ? (() => {
+                const issues = [];
+                const cards = Array.from(document.querySelectorAll('.stats-row .stat-card'))
+                    .filter((card) => isLayoutVisible(card));
+
+                if (cards.length > 1) {
+                    const tops = new Set(cards.map((card) => Math.round(card.getBoundingClientRect().top)));
+                    if (tops.size > 1) {
+                        issues.push({ type: 'stat-tiles-not-single-row', rows: tops.size });
+                    }
+                }
+
+                const navbar = document.querySelector('.top-navbar');
+                const submitCard = document.querySelector('#submitCard');
+                if (cards.length > 0
+                    && navbar instanceof HTMLElement
+                    && submitCard instanceof HTMLElement
+                    && isLayoutVisible(navbar)
+                    && isLayoutVisible(submitCard)) {
+                    const navbarRect = navbar.getBoundingClientRect();
+                    const submitRect = submitCard.getBoundingClientRect();
+                    const cardRects = cards.map((card) => card.getBoundingClientRect());
+                    const topGap = Math.min(...cardRects.map((rect) => rect.top)) - navbarRect.bottom;
+                    const bottomGap = submitRect.top - Math.max(...cardRects.map((rect) => rect.bottom));
+                    if (Math.abs(topGap - bottomGap) > 1) {
+                        issues.push({
+                            type: 'stat-row-vertical-gap-mismatch',
+                            topGap: Math.round(topGap * 10) / 10,
+                            bottomGap: Math.round(bottomGap * 10) / 10,
+                        });
+                    }
+                }
+
+                for (const card of cards) {
+                    const icon = card.querySelector('.stat-icon');
+                    const numLine = card.querySelector('.stat-num-line');
+                    if (!icon || !numLine) continue;
+                    const iconRect = icon.getBoundingClientRect();
+                    const numLineRect = numLine.getBoundingClientRect();
+                    const iconCenter = iconRect.left + iconRect.width / 2;
+                    const numLineCenter = numLineRect.left + numLineRect.width / 2;
+                    if (Math.abs(iconCenter - numLineCenter) > 2) {
+                        issues.push({
+                            type: 'stat-icon-not-centered-over-metric',
+                            key: card.dataset.statKey || null,
+                            deltaPx: Math.round(iconCenter - numLineCenter),
+                        });
+                    }
+                }
+
+                return issues;
+            })()
+            : [];
 
         const hardcodedColors = [];
         const hardcodedColorPattern = /(#[0-9a-fA-F]{3,8}|rgba?\([^)]*\)|hsla?\([^)]*\)|\b(?:white|black)\b)/i;
@@ -2625,7 +2915,9 @@ async function collectMetrics(page, view) {
             return false;
         };
 
-        // 23. Video preview must include shrink-safe grid and thumbnail rules
+        // 23. Video previews must remain shrink-safe and viewport-bounded.
+        // Portrait thumbnails retain their intrinsic ratio, but may never use
+        // more than 42% of the stable viewport height (38% on mobile).
         const videoPreviewContractBroken = (() => {
             const previewGrid = document.querySelector('#videoPreviewGrid');
             const thumb = document.querySelector('.video-thumb');
@@ -2634,21 +2926,83 @@ async function collectMetrics(page, view) {
 
             const isZero = (value) => value === '0' || value === '0px';
             const isHundredPercent = (value) => value === '100%';
+            const usesPreviewHeightLimit = (value) => value === 'var(--video-preview-max-height)';
+            const computedMaxHeight = Number.parseFloat(window.getComputedStyle(thumb).maxHeight);
+            const viewportHeightRatio = computedMaxHeight / window.innerHeight;
+            const viewportHeightLimit = isMobile ? 0.38 : 0.42;
+            const hasViewportBound = Number.isFinite(viewportHeightRatio)
+                && viewportHeightRatio <= viewportHeightLimit + 0.001;
 
             return !(
                 hasDeclaration('.video-preview-grid', 'min-width', isZero)
                 && hasDeclaration('.video-preview-grid > *', 'min-width', isZero)
+                && hasDeclaration('.video-thumb', 'display', 'grid')
+                && hasDeclaration('.video-thumb', 'place-items', 'center')
+                && hasDeclaration('.video-thumb', 'align-self', 'start')
+                && hasDeclaration('.video-thumb', 'width', isHundredPercent)
                 && hasDeclaration('.video-thumb', 'min-width', isZero)
                 && hasDeclaration('.video-thumb', 'max-width', isHundredPercent)
+                && hasDeclaration('.video-thumb', 'max-height', usesPreviewHeightLimit)
                 && hasDeclaration('.video-thumb', 'overflow', 'hidden')
-                && hasDeclaration('.video-thumb img', 'width', isHundredPercent)
+                && hasDeclaration('.video-thumb img', 'width', 'auto')
                 && hasDeclaration('.video-thumb img', 'max-width', isHundredPercent)
                 && hasDeclaration('.video-thumb img', 'display', 'block')
                 && hasDeclaration('.video-thumb img', 'height', 'auto')
+                && hasDeclaration('.video-thumb img', 'max-height', usesPreviewHeightLimit)
+                && hasDeclaration('.video-thumb img', 'object-fit', 'contain')
+                && hasViewportBound
             );
         })();
 
-        // 24. Settings password stack must include shrink-safe min-width rules
+        // 24. Mobile primary actions must read as raised buttons, not bare
+        // glyphs. Keep the resting surface, keyboard focus, pointer hover and
+        // touch press states explicit even when there are no jobs to render.
+        const mobileActionSurfaceContractBroken = (() => {
+            if (!document.querySelector('#jobsRenderRoot')) return false;
+
+            const hasRaisedBackground = (value) => (
+                value.includes('linear-gradient') && value.includes('var(--surface-solid)')
+            );
+            const hasLayeredShadow = (value) => value !== 'none' && value.includes(',');
+            const transitionsShadow = (value) => value.includes('box-shadow');
+            const hasRaisedDoneBackground = (value) => (
+                value.includes('linear-gradient') && value.includes('var(--success)')
+            );
+
+            return !(
+                hasDeclaration('.jobs-mobile-action', 'border-width', '1px')
+                && hasDeclaration('.jobs-mobile-action', 'border-style', 'solid')
+                && hasDeclaration('.jobs-mobile-action', 'background', hasRaisedBackground)
+                && hasDeclaration('.jobs-mobile-action', 'box-shadow', hasLayeredShadow)
+                && hasDeclaration('.jobs-mobile-action', 'transition', transitionsShadow)
+                && hasDeclaration(
+                    '.jobs-mobile-action[href^="/download/"]',
+                    'box-shadow',
+                    hasLayeredShadow,
+                )
+                && hasDeclaration('.jobs-mobile-action:focus-visible', 'outline', (value) => value !== 'none')
+                && hasDeclaration('.jobs-mobile-action:active', 'transform', 'translateY(1px)')
+                && hasDeclaration('.jobs-mobile-action-group', 'box-shadow', hasLayeredShadow)
+                && hasDeclaration(
+                    '.job-item__primary-action .jobs-mobile-action-group .jobs-mobile-action--menu',
+                    'width',
+                    '32px',
+                )
+                && hasDeclaration('#jobsCard', 'overflow', 'visible')
+                && hasDeclaration(
+                    '.job-item.row-done .job-item__status .status-pill-success',
+                    'background',
+                    hasRaisedDoneBackground,
+                )
+                && hasDeclaration(
+                    '.job-item.row-done .job-item__status .status-pill-success',
+                    'box-shadow',
+                    hasLayeredShadow,
+                )
+            );
+        })();
+
+        // 25. Settings password stack must include shrink-safe min-width rules
         const settingsFieldStackContractBroken = (() => {
             const fieldStack = document.querySelector('.settings-field-stack');
             if (!fieldStack) return false;
@@ -2659,6 +3013,45 @@ async function collectMetrics(page, view) {
                 hasDeclaration('.settings-field-stack', 'min-width', isZero)
                 && hasDeclaration('.settings-field-stack > *', 'min-width', isZero)
                 && hasDeclaration('.settings-field-stack .d-flex', 'min-width', isZero)
+            );
+        })();
+
+        // Lalal actions share one equal two-column row on mobile. If the
+        // disconnect action is hidden, the remaining connect action expands
+        // across both tracks instead of leaving an empty half-row.
+        const lalalMobileActionLayoutBroken = (() => {
+            if (!isMobile) return false;
+
+            const row = document.querySelector('.lalal-tile-action-row');
+            const authButton = document.querySelector('#lalalAuthBtn');
+            const disconnectButton = document.querySelector('#lalalDisconnectBtn');
+            if (!(row instanceof HTMLElement)
+                || !(authButton instanceof HTMLElement)
+                || !(disconnectButton instanceof HTMLElement)) {
+                return false;
+            }
+
+            const isEqualTwoColumnGrid = (value) => (
+                /^repeat\(2, minmax\(0(?:px)?, 1fr\)\)$/.test(value.replace(/\s+/g, ' '))
+            );
+            const isFullWidth = (value) => value === '100%';
+            const isZero = (value) => value === '0' || value === '0px';
+
+            return !(
+                hasDeclaration('.lalal-tile-action-row', 'display', 'grid')
+                && hasDeclaration(
+                    '.lalal-tile-action-row',
+                    'grid-template-columns',
+                    isEqualTwoColumnGrid,
+                )
+                && hasDeclaration('.lalal-tile-action-row', 'width', isFullWidth)
+                && hasDeclaration('.lalal-tile-action-row > .btn', 'width', isFullWidth)
+                && hasDeclaration('.lalal-tile-action-row > .btn', 'min-width', isZero)
+                && hasDeclaration(
+                    '.lalal-tile-action-row:has(#lalalDisconnectBtn.d-none) #lalalAuthBtn',
+                    'grid-column',
+                    '1 / -1',
+                )
             );
         })();
 
@@ -2830,6 +3223,7 @@ async function collectMetrics(page, view) {
             hasSelectorLayoutUsage,
             viewportLockingIssues,
             badgeInconsistencies,
+            platformBadgeGeometryIssues,
             iconPointerEventsIssues,
             gridViolations,
             overlapIssues,
@@ -2837,6 +3231,7 @@ async function collectMetrics(page, view) {
             mobileJobsFeedIssues,
             mixedLayoutIssues,
             containerWidthIssue,
+            statTileMobileLayoutIssues,
             fontLoadingStatus,
             statCardCenteringIssues,
             externalFontRequests,
@@ -2864,6 +3259,7 @@ async function collectMetrics(page, view) {
             trimWaveformMissingStyle,
             videoPreviewContractBroken,
             settingsFieldStackContractBroken,
+            lalalMobileActionLayoutBroken,
             trimDefaultRegionPresent,
             uiCardChildExpands,
             trimInvalidRanges,
@@ -2882,6 +3278,7 @@ async function collectMetrics(page, view) {
             zIndexAbuse: cssAdvancedLint.zIndexAbuse,
             nestedOverflowHidden: cssAdvancedLint.nestedOverflowHidden,
             mobileTitleCellFlexRegression,
+            mobileActionSurfaceContractBroken,
             mobileJobsPageScrollTrap,
         };
     }, {
@@ -2889,6 +3286,11 @@ async function collectMetrics(page, view) {
         mobileTouchTargetMin: MOBILE_TOUCH_TARGET_MIN,
         desktopTouchTargetMin: DESKTOP_TOUCH_TARGET_MIN,
         isMobile: view.device === 'mobile',
+        auditPlatformBadges: ['dashboard', 'mobile-dashboard', 'job-detail'].includes(view.name),
+        platformBadgeWidth: PLATFORM_BADGE_WIDTH_PX,
+        platformBadgeHeight: PLATFORM_BADGE_HEIGHT_PX,
+        platformBadgeIconSize: PLATFORM_BADGE_ICON_SIZE_PX,
+        platformBadgeGeometryEpsilon: PLATFORM_BADGE_GEOMETRY_EPSILON_PX,
     });
 
     // Playwright cannot cancel an in-flight page.evaluate; the timeout only bounds the caller.
@@ -3027,6 +3429,42 @@ async function auditFooterHistoryToggle(page, view) {
         footerHistoryTransitionBroken: broken,
         footerHistoryTransitionStates: states,
     };
+}
+
+/**
+ * A non-interactive placeholder row (e.g. the "No downloads yet" empty
+ * state) must not visually react to mouse hover the way a real, clickable
+ * job row does - that reads as a broken/ghost interactive element. Uses a
+ * real Playwright hover so the browser actually enters the :hover state,
+ * since that cannot be simulated from inside page.evaluate.
+ * @param {import('playwright').Page} page
+ * @param {object} view
+ * @returns {Promise<{emptyStateHoverHighlight: boolean}>}
+ */
+async function auditEmptyStateHover(page, view) {
+    if (view.name !== 'dashboard') {
+        return { emptyStateHoverHighlight: false };
+    }
+
+    const emptyRow = page.locator('#jobsTable tbody tr#emptyRow');
+    if (await emptyRow.count() === 0) {
+        // The dashboard had jobs seeded for this run; the empty state never
+        // rendered, so there is nothing to audit.
+        return { emptyStateHoverHighlight: false };
+    }
+
+    const readBackground = () => page.evaluate(() => {
+        const row = document.querySelector('#jobsTable tbody tr#emptyRow');
+        return row ? window.getComputedStyle(row).backgroundColor : null;
+    });
+
+    const before = await readBackground();
+    await emptyRow.hover();
+    await page.waitForTimeout(50);
+    const after = await readBackground();
+    await page.mouse.move(0, 0);
+
+    return { emptyStateHoverHighlight: Boolean(before) && before !== after };
 }
 
 /**
@@ -3346,17 +3784,25 @@ async function runView(browser, storageState, view, replacements = {}) {
         const runtimeMetrics = await collectMetrics(page, view);
         const footerHistoryAudit = await auditFooterHistoryToggle(page, view);
         const trimAudit = await auditTrimModal(page, view);
-        const jobsScrollContracts = viewAuditsJobsList(view)
-            ? await getJobsScrollContractMetrics()
+        const emptyStateHoverAudit = await auditEmptyStateHover(page, view);
+        const jobsSourceContracts = viewAuditsJobsList(view)
+            ? await getJobsSourceContractMetrics()
             : {
                 jobsInfiniteScrollNotObserverBased: false,
                 jobsPagingOffsetContractBroken: false,
+                jobsDesktopFileSizePlacementBroken: false,
+                jobsMobileShareActionMissing: false,
             };
+        const settingsSourceContracts = viewAuditsSettings(view)
+            ? await getSettingsSourceContractMetrics()
+            : { settingsSaveToastContractBroken: false };
         const metrics = {
             ...runtimeMetrics,
             ...footerHistoryAudit,
             ...trimAudit.metrics,
-            ...jobsScrollContracts,
+            ...emptyStateHoverAudit,
+            ...jobsSourceContracts,
+            ...settingsSourceContracts,
         };
         const shots = await captureStablePair(page, view);
         const visual = diffScreenshots({
@@ -3479,6 +3925,9 @@ async function runView(browser, storageState, view, replacements = {}) {
         if (metrics.containerWidthIssue) {
             failures.push('app shell container does not fill the mobile viewport');
         }
+        if (metrics.statTileMobileLayoutIssues?.length) {
+            failures.push(`stat tile mobile layout broken (row, centering, or vertical spacing): ${metrics.statTileMobileLayoutIssues.length}`);
+        }
         if (metrics.externalFontRequests.length > 0) {
             failures.push(`external font CDN requests (must be self-hosted): ${metrics.externalFontRequests.length}`);
         }
@@ -3554,20 +4003,35 @@ async function runView(browser, storageState, view, replacements = {}) {
         if (metrics.jobsPagingOffsetContractBroken) {
             failures.push('jobs pagination offset is not monotonic across row trimming');
         }
+        if (metrics.jobsDesktopFileSizePlacementBroken) {
+            failures.push('desktop job file size must share the Media metadata line and stay out of Status');
+        }
+        if (metrics.jobsMobileShareActionMissing) {
+            failures.push('mobile downloadable jobs must expose the shared Download and Share menu');
+        }
         if (metrics.trimWaveformMissingStyle) {
             failures.push('trim waveform container styling is incomplete');
         }
         if (metrics.videoPreviewContractBroken) {
-            failures.push('video preview grid is missing shrink-safe thumbnail layout rules');
+            failures.push('video preview is missing shrink-safe, viewport-bounded thumbnail rules');
         }
         if (metrics.settingsFieldStackContractBroken) {
             failures.push('settings field stack is missing shrink-safe flex min-width rules');
+        }
+        if (metrics.settingsSaveToastContractBroken) {
+            failures.push('settings changes must use toasts and must not render an inline save-status row');
+        }
+        if (metrics.lalalMobileActionLayoutBroken) {
+            failures.push('Lalal mobile actions must use one equal two-column row');
         }
         if (metrics.trimDefaultRegionPresent) {
             failures.push('trim modal opens with a preselected region');
         }
         if (metrics.uiCardChildExpands) {
             failures.push(`ui-card children expanding unexpectedly: ${metrics.uiCardChildExpands}`);
+        }
+        if (metrics.emptyStateHoverHighlight) {
+            failures.push('empty jobs table row highlights on hover like an interactive row');
         }
         applyMetricRules(metrics, failures, warnings);
 
@@ -3640,6 +4104,7 @@ async function runView(browser, storageState, view, replacements = {}) {
                 statCardCenteringIssues: metrics.statCardCenteringIssues?.length || 0,
                 mixedLayoutIssues: metrics.mixedLayoutIssues?.length || 0,
                 containerWidthIssue: metrics.containerWidthIssue ? 1 : 0,
+                statTileMobileLayoutIssues: metrics.statTileMobileLayoutIssues?.length || 0,
                 focusIndicatorMissing: metrics.focusIndicatorMissing?.length || 0,
                 ghostScrollContainers: metrics.ghostScrollContainers?.length || 0,
                 nestedScrollContainers: metrics.nestedScrollContainers?.length || 0,
@@ -3647,6 +4112,7 @@ async function runView(browser, storageState, view, replacements = {}) {
                 doubleScrollRisk: metrics.doubleScrollRisk ? 1 : 0,
                 viewportScrollLeak: metrics.viewportScrollLeak ? 1 : 0,
                 badgeInconsistencies: metrics.badgeInconsistencies || 0,
+                platformBadgeGeometryIssues: metrics.platformBadgeGeometryIssues?.length || 0,
                 iconPointerEventsIssues: metrics.iconPointerEventsIssues?.length || 0,
                 gridViolations: metrics.gridViolations?.length || 0,
                 overlapIssues: metrics.overlapIssues?.length || 0,
@@ -3678,9 +4144,13 @@ async function runView(browser, storageState, view, replacements = {}) {
                 jobsSentinelOutsideScrollContainer: metrics.jobsSentinelOutsideScrollContainer || false,
                 jobsInfiniteScrollNotObserverBased: metrics.jobsInfiniteScrollNotObserverBased || false,
                 jobsPagingOffsetContractBroken: metrics.jobsPagingOffsetContractBroken || false,
+                jobsDesktopFileSizePlacementBroken: metrics.jobsDesktopFileSizePlacementBroken || false,
+                jobsMobileShareActionMissing: metrics.jobsMobileShareActionMissing || false,
                 trimWaveformMissingStyle: metrics.trimWaveformMissingStyle || false,
                 videoPreviewContractBroken: metrics.videoPreviewContractBroken || false,
                 settingsFieldStackContractBroken: metrics.settingsFieldStackContractBroken || false,
+                settingsSaveToastContractBroken: metrics.settingsSaveToastContractBroken || false,
+                lalalMobileActionLayoutBroken: metrics.lalalMobileActionLayoutBroken || false,
                 trimDefaultRegionPresent: metrics.trimDefaultRegionPresent || false,
                 uiCardChildExpands: metrics.uiCardChildExpands || 0,
                 trimInvalidRanges: metrics.trimInvalidRanges || false,
@@ -3698,6 +4168,8 @@ async function runView(browser, storageState, view, replacements = {}) {
                 zIndexAbuse: metrics.zIndexAbuse || 0,
                 nestedOverflowHidden: metrics.nestedOverflowHidden || 0,
                 mobileTitleCellFlexRegression: metrics.mobileTitleCellFlexRegression || false,
+                mobileActionSurfaceContractBroken: metrics.mobileActionSurfaceContractBroken || false,
+                emptyStateHoverHighlight: metrics.emptyStateHoverHighlight || false,
             },
             // Keep actionable element-level details in the JSON report while
             // retaining the compact counters above for console output.
@@ -3713,6 +4185,8 @@ async function runView(browser, storageState, view, replacements = {}) {
                 importantViolations: metrics.importantAbuse?.violations,
                 unguardedAnimations: metrics.unguardedAnimations,
                 mobileJobsFeedIssues: metrics.mobileJobsFeedIssues,
+                statTileMobileLayoutIssues: metrics.statTileMobileLayoutIssues,
+                platformBadgeGeometryIssues: metrics.platformBadgeGeometryIssues,
             },
             screenshots: {
                 first: shots.shotA,

@@ -4,23 +4,10 @@
 //
 
 import { showToast } from "./toast.js";
-import { getCookie } from "./utils.js";
-import { CSRF_COOKIE_NAME } from "./config.js";
+import { getCsrfToken, isSafeSameOriginRedirect } from "./utils.js";
 
 const AUTO_SAVE_DELAY_MS = 800;
 const REQUEST_TIMEOUT_MS = 10_000;
-
-const AUTO_SAVE_STATE = Object.freeze({
-    HIDDEN: "hidden",
-    SAVING: "saving",
-    SUCCESS: "success",
-    ERROR: "error",
-});
-
-const TIME_FORMATTER = new Intl.DateTimeFormat(undefined, {
-    hour: "2-digit",
-    minute: "2-digit",
-});
 
 function getBootstrapData() {
     const node = document.getElementById("settingsBootstrapData");
@@ -49,20 +36,11 @@ function getBootstrapData() {
 }
 
 function requireCsrfToken() {
-    const token = getCookie(CSRF_COOKIE_NAME);
+    const token = getCsrfToken();
     if (!token) {
         throw new Error("CSRF token missing — please reload the page");
     }
     return token;
-}
-
-function isSafeLocalRedirect(url) {
-    if (typeof url !== "string" || !url) return false;
-    try {
-        return new URL(url, window.location.origin).origin === window.location.origin;
-    } catch {
-        return false;
-    }
 }
 
 function setAlert(el, type, message) {
@@ -105,11 +83,6 @@ async function fetchWithTimeout(url, options = {}) {
 const bootstrapData = getBootstrapData();
 
 const formEl = document.getElementById("settingsForm");
-const alertEl = document.getElementById("settingsAlert");
-const settingsSaveBtn = document.getElementById("settingsSaveBtn");
-const autoSaveIndicator = document.getElementById("autoSaveIndicator");
-const autoSaveIndicatorText = document.getElementById("autoSaveIndicatorText");
-const autoSaveSpinner = document.getElementById("autoSaveSpinner");
 const resetStatsBtn = document.getElementById("resetStatsBtn");
 const passwordSaveBtn = document.getElementById("passwordSaveBtn");
 const adminPasswordEl = document.getElementById("adminPassword");
@@ -129,6 +102,7 @@ const lalalAuthUseKeySpinner = document.getElementById("lalalAuthUseKeySpinner")
 const lalalActivationKey = document.getElementById("lalalActivationKey");
 const lalalDurationGuard = document.getElementById("lalalDurationGuard");
 const mp4PresetEl = document.getElementById("mp4Preset");
+const enableAuthenticationEl = document.getElementById("enableAuthentication");
 
 let saveTimeoutId = null;
 let isSaving = false;
@@ -136,38 +110,6 @@ let pendingSave = false;
 let settingsDirty = false;
 let isAuthUseKeyBusy = false;
 let isResettingStats = false;
-
-function setAutoSaveState(state, message = "") {
-    if (!autoSaveIndicator || !autoSaveIndicatorText || !autoSaveSpinner) {
-        return;
-    }
-
-    autoSaveIndicator.classList.remove(
-        "auto-save-indicator--visible",
-        "auto-save-indicator--success",
-        "auto-save-indicator--danger",
-    );
-    autoSaveSpinner.classList.add("d-none");
-
-    switch (state) {
-        case AUTO_SAVE_STATE.SAVING:
-            autoSaveIndicator.classList.add("auto-save-indicator--visible");
-            autoSaveSpinner.classList.remove("d-none");
-            autoSaveIndicatorText.textContent = message || "Saving...";
-            break;
-        case AUTO_SAVE_STATE.SUCCESS:
-            autoSaveIndicator.classList.add("auto-save-indicator--visible", "auto-save-indicator--success");
-            autoSaveIndicatorText.textContent = message || `Saved ${TIME_FORMATTER.format(new Date())}`;
-            break;
-        case AUTO_SAVE_STATE.ERROR:
-            autoSaveIndicator.classList.add("auto-save-indicator--visible", "auto-save-indicator--danger");
-            autoSaveIndicatorText.textContent = message || "Could not save";
-            break;
-        default:
-            autoSaveIndicatorText.textContent = "";
-            break;
-    }
-}
 
 function renderAuthUseKeyButton() {
     if (!lalalAuthUseKeyBtn || !lalalAuthUseKeySpinner) return;
@@ -306,13 +248,20 @@ function validateSettings() {
         return { valid: false, error: "Parallel fragments must be between 1 and 16" };
     }
 
+    const shareMaxUses = parseInt(String(form.get("share_link_max_uses") || "0"), 10);
+    if (!Number.isFinite(shareMaxUses) || shareMaxUses < 0 || shareMaxUses > 10000) {
+        return { valid: false, error: "Max. uses per share link must be between 0 and 10000" };
+    }
+
     return {
         valid: true,
         data: {
             retention_days: retention,
             download_concurrent_fragments: fragments,
+            share_link_max_uses: shareMaxUses,
             download_mp4_preset: mp4PresetEl ? mp4PresetEl.checked : true,
             lalalaai_duration_guard: lalalDurationGuard ? lalalDurationGuard.checked : true,
+            enable_authentication: enableAuthenticationEl ? enableAuthenticationEl.checked : true,
         },
     };
 }
@@ -404,14 +353,12 @@ async function saveSettings() {
 
     const validation = validateSettings();
     if (!validation.valid) {
-        setAutoSaveState(AUTO_SAVE_STATE.ERROR, validation.error);
+        showToast(validation.error, "danger");
         return;
     }
 
     isSaving = true;
     pendingSave = false;
-    setAutoSaveState(AUTO_SAVE_STATE.SAVING);
-    clearAlert(alertEl);
 
     try {
         const res = await fetchWithTimeout("/api/settings", {
@@ -428,15 +375,14 @@ async function saveSettings() {
             throw new Error(payload.detail || `HTTP ${res.status}`);
         }
 
-        setAutoSaveState(AUTO_SAVE_STATE.SUCCESS, `Saved ${TIME_FORMATTER.format(new Date())}`);
         if (!pendingSave) {
             settingsDirty = false;
+            showToast(payload.message || "Settings updated", "success");
         }
     } catch (err) {
         const message = err?.name === "AbortError"
             ? "Request timed out"
             : (err?.message || "Could not save");
-        setAutoSaveState(AUTO_SAVE_STATE.ERROR, message);
         showToast(`Error: ${message}`, "danger");
     } finally {
         isSaving = false;
@@ -479,7 +425,7 @@ async function changePassword() {
         if (adminPasswordConfirmEl) adminPasswordConfirmEl.value = "";
         setPasswordError("");
 
-        if (payload.redirect && isSafeLocalRedirect(payload.redirect)) {
+        if (payload.redirect && isSafeSameOriginRedirect(payload.redirect)) {
             window.location.replace(payload.redirect);
             return;
         }
@@ -576,7 +522,7 @@ function persistPendingSettingsOnPageHide() {
     }
 
     const validation = validateSettings();
-    const csrfToken = getCookie(CSRF_COOKIE_NAME);
+    const csrfToken = getCsrfToken();
     if (!validation.valid || !csrfToken) {
         return;
     }
@@ -733,6 +679,97 @@ function bindLalalEvents() {
     });
 }
 
+const APP_UPDATE_STATES = {
+    loading: { icon: "progress_activity", spin: true, text: "Checking for updates…" },
+    current: { icon: "check_circle", text: "You're running the latest version" },
+    available: { icon: "new_releases", text: "Update available" },
+    prerelease: { icon: "science", text: "You're on a pre-release build" },
+    unknown: { icon: "cloud_off", text: "Update check unavailable" },
+};
+
+function parseVersionParts(value) {
+    const match = String(value || "").trim().replace(/^[vn]/i, "").match(/^\d+(?:\.\d+)*/);
+    if (!match) return null;
+    return match[0].split(".").map((part) => Number.parseInt(part, 10) || 0);
+}
+
+function formatVersion(value) {
+    const raw = String(value || "").trim();
+    return raw ? raw.replace(/^v?/i, "v") : "";
+}
+
+function compareVersions(a, b) {
+    const pa = parseVersionParts(a);
+    const pb = parseVersionParts(b);
+    if (!pa || !pb) return 0;
+    const len = Math.max(pa.length, pb.length);
+    for (let i = 0; i < len; i += 1) {
+        const diff = (pa[i] || 0) - (pb[i] || 0);
+        if (diff !== 0) return diff > 0 ? 1 : -1;
+    }
+    return 0;
+}
+
+function setAppUpdateState(box, state, { text, url } = {}) {
+    if (!box) return;
+
+    const preset = APP_UPDATE_STATES[state] || APP_UPDATE_STATES.unknown;
+    const iconEl = box.querySelector("[data-app-update-icon]");
+    const textEl = box.querySelector("[data-app-update-text]");
+    const linkEl = box.querySelector("[data-app-update-link]");
+
+    box.dataset.appUpdateState = state;
+
+    if (iconEl) {
+        iconEl.textContent = preset.icon;
+        iconEl.classList.toggle("settings-app-update-spin", Boolean(preset.spin));
+    }
+    if (textEl) {
+        textEl.textContent = text || preset.text;
+    }
+    if (linkEl) {
+        if (state === "available" && url) {
+            linkEl.href = url;
+            linkEl.hidden = false;
+        } else {
+            linkEl.hidden = true;
+            linkEl.removeAttribute("href");
+        }
+    }
+}
+
+function applyAppUpdate(box, info) {
+    if (!box) return;
+
+    const current = box.dataset.currentVersion || "";
+    const latest = info?.latest || "";
+    const latestLabel = formatVersion(latest);
+
+    if (!info || !latest) {
+        setAppUpdateState(box, "unknown");
+        return;
+    }
+
+    if (info.update_available) {
+        setAppUpdateState(box, "available", {
+            text: `Update available — ${latestLabel} is out`,
+            url: info.url,
+        });
+        return;
+    }
+
+    if (current && compareVersions(current, latest) > 0) {
+        setAppUpdateState(box, "prerelease", {
+            text: `Ahead of the latest release (${latestLabel})`,
+        });
+        return;
+    }
+
+    setAppUpdateState(box, "current", {
+        text: `You're running the latest version (${latestLabel})`,
+    });
+}
+
 function applyUpdateBadge(cell, info) {
     const badge = cell.querySelector("[data-update-badge]");
     if (!badge) return;
@@ -752,27 +789,32 @@ function applyUpdateBadge(cell, info) {
 
 async function loadUpdateStatus() {
     const cells = document.querySelectorAll("[data-update-component]");
-    if (!cells.length) {
+    const appBox = document.querySelector("[data-app-update]");
+    if (!cells.length && !appBox) {
         return;
     }
 
     try {
         const res = await fetchWithTimeout("/api/updates", { credentials: "same-origin" });
         if (!res.ok) {
+            setAppUpdateState(appBox, "unknown");
             return;
         }
 
         const payload = await parseResponsePayload(res);
         const components = payload?.components;
         if (!components || typeof components !== "object") {
+            setAppUpdateState(appBox, "unknown");
             return;
         }
 
         cells.forEach((cell) => {
             applyUpdateBadge(cell, components[cell.dataset.updateComponent]);
         });
+        applyAppUpdate(appBox, components.fetchly);
     } catch {
         // Update checks are best-effort — a failed check simply shows no badge.
+        setAppUpdateState(appBox, "unknown");
     }
 }
 
@@ -782,7 +824,6 @@ function init() {
     }
 
     applyInitialLalalState();
-    setAutoSaveState(AUTO_SAVE_STATE.HIDDEN);
     renderAuthUseKeyButton();
     updateLalalAuthButtonLabel(lalalStatusBadge?.textContent || bootstrapData.lalal_status);
     void loadLalalStatus();
@@ -800,14 +841,6 @@ function init() {
     bindSettingsInputs();
     bindLalalEvents();
     bindPasswordVisibilityToggles();
-
-    settingsSaveBtn?.addEventListener("click", () => {
-        if (saveTimeoutId) {
-            clearTimeout(saveTimeoutId);
-            saveTimeoutId = null;
-        }
-        void saveSettings();
-    });
 
     formEl.addEventListener("submit", (event) => {
         event.preventDefault();

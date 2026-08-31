@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+
+{% block title %}Lost in space - fetchly{% endblock %}
+
+{% block body_class %} app-root--share-lost{% endblock %}
+
+{# This template is only rendered by the public share route, so the navbar is
+   dropped unconditionally - visitors here are never authenticated. The footer
+   goes with it: this page is a full-bleed standalone scene, and a chrome strip
+   across the bottom of it belongs to the app shell, not here. Dropping it also
+   keeps the build version out of a page anonymous visitors can reach. #}
+{% block navbar %}{% endblock %}
+{% block footer %}{% endblock %}
+
+{% block main_shell %}
+<main class="lost-shell" role="main">
+    <div class="lost-sky" aria-hidden="true">
+        <div class="lost-stars lost-stars--far" data-parallax="6"></div>
+        <div class="lost-stars lost-stars--mid" data-parallax="14"></div>
+        <div class="lost-stars lost-stars--near" data-parallax="26"></div>
+        <div class="lost-glow"></div>
+    </div>
+
+    <div class="lost-astronaut" data-parallax="40" aria-hidden="true">
+        <svg viewBox="0 0 220 260" focusable="false">
+            <!-- tether -->
+            <path class="lost-tether" d="M40 250 C 80 205, 60 170, 96 152" fill="none" />
+            <g class="lost-astronaut__body">
+                <!-- backpack -->
+                <rect x="66" y="74" width="88" height="86" rx="20" class="lost-pack" />
+                <!-- left arm -->
+                <path d="M64 104 C 40 112, 30 132, 34 152" class="lost-limb" fill="none" />
+                <!-- right arm -->
+                <path d="M156 104 C 182 110, 196 92, 192 70" class="lost-limb" fill="none" />
+                <!-- legs -->
+                <path d="M92 158 C 86 190, 78 206, 62 220" class="lost-limb" fill="none" />
+                <path d="M130 158 C 140 188, 146 206, 164 216" class="lost-limb" fill="none" />
+                <!-- torso -->
+                <rect x="74" y="70" width="72" height="92" rx="26" class="lost-suit" />
+                <!-- chest panel -->
+                <rect x="96" y="104" width="28" height="20" rx="6" class="lost-panel" />
+                <!-- helmet -->
+                <circle cx="110" cy="62" r="46" class="lost-helmet" />
+                <circle cx="110" cy="62" r="34" class="lost-visor" />
+                <!-- visor highlight -->
+                <path d="M88 44 C 96 36, 112 32, 124 36" class="lost-visor-glint" fill="none" />
+            </g>
+        </svg>
+    </div>
+
+    <section class="lost-card">
+        <p class="lost-kicker">Shared media</p>
+        <h1 class="lost-title">This link drifted off</h1>
+        <p class="lost-lead">Whatever was shared here can&rsquo;t be reached any more.</p>
+
+        <ul class="lost-reasons">
+            <li>
+                <span class="material-symbols-outlined" aria-hidden="true">counter_1</span>
+                <span>It reached its download limit</span>
+            </li>
+            <li>
+                <span class="material-symbols-outlined" aria-hidden="true">delete_sweep</span>
+                <span>The file was cleaned up after its retention period</span>
+            </li>
+            <li>
+                <span class="material-symbols-outlined" aria-hidden="true">help</span>
+                <span>The link was mistyped or never existed</span>
+            </li>
+        </ul>
+
+        <p class="lost-hint">Ask whoever sent it to share a fresh link.</p>
+    </section>
+</main>
+{% endblock %}
+
+{% block page_scripts %}
+<script type="module" src="/static/js/share-error.js?v=20260824a"></script>
+{% endblock %}

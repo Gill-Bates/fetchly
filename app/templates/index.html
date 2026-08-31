@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}tubeyou - next-gen Video Downloader{% endblock %}
+{% block title %}fetchly - next-gen Video Downloader{% endblock %}
 
 {% block body_class %} app-root--dashboard{% endblock %}
 
@@ -20,11 +20,13 @@
     <div class="ui-card ui-card--stat stat-card" role="group" data-stat-key="{{ stat_key }}">
         <div class="stat-value">
             <span class="material-symbols-outlined stat-icon" aria-hidden="true">{{ icon }}</span>
+            <span class="stat-num-line">
             {%- if value.value is defined and value.unit is defined -%}
             <span data-stat-value>{{ value.value }}</span><span class="stat-unit" data-stat-unit>{{ value.unit }}</span>
             {%- else -%}
             <span data-stat-value>{{ value }}</span><span class="stat-unit" data-stat-unit hidden></span>
-            {%- endif %}
+            {%- endif -%}
+            </span>
         </div>
         <div class="stat-label">{{ label }}</div>
     </div>
@@ -45,7 +47,7 @@
                 <input type="hidden" name="csrf_token" value="{{ csrf_token | e }}">
                 <div class="row g-3 align-items-end">
                     <div class="col-12">
-                        <label class="form-label fw-medium" for="urlInput">Paste a YouTube, TikTok, or Instagram link</label>
+                        <label class="form-label fw-medium" for="urlInput">Paste a YouTube, TikTok, Instagram, or Facebook link</label>
                         <input class="form-control form-control-lg ui-input" id="urlInput" name="url"
                             placeholder="https://www.youtube.com/watch?v=..." required aria-describedby="formError">
 
@@ -104,7 +106,6 @@
         <div class="ui-card-header d-flex align-items-center jobs-card-header">
             <div class="jobs-card-heading">
                 <span class="jobs-card-kicker">Recent downloads</span>
-                <span class="fw-semibold jobs-card-title">Processing Queue</span>
             </div>
             <div class="jobs-card-controls">
                 <div class="jobs-quick-filter" id="jobsQuickFilter" data-active-filter="all" role="group"
@@ -336,5 +337,5 @@
 {% endblock %}
 
 {% block page_scripts %}
-<script type="module" src="/static/js/main.js?v=20260823j"></script>
+<script type="module" src="/static/js/main.js?v=20260831a"></script>
 {% endblock %}

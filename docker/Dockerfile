@@ -100,6 +100,113 @@ RUN set -euo pipefail; \
     /opt/ffmpeg/bin/ffprobe -version | head -n 1
 
 
+# --------------------------------------------------------------------------- #
+# Stage: essentia - source build, arm64 only
+# --------------------------------------------------------------------------- #
+# essentia carries the primary BPM path (app/bpm.py imports RhythmExtractor2013
+# and MonoLoader), so requirements.txt lists it unconditionally - but upstream
+# publishes manylinux wheels for x86_64 only. There has never been a
+# linux/aarch64 wheel for any release, and the PyPI sdists stop at
+# 2.1b6.dev234 (2020), long before Python 3.13; neither conda-forge nor Debian
+# package it either. Building from source is therefore the only way essentia
+# reaches arm64 at all.
+#
+# On amd64 this stage does nothing and leaves /wheels empty - the builder stage
+# below then installs the upstream wheel from PyPI as before, so the amd64
+# build pays nothing for any of this.
+#
+# The build follows upstream's own wheel recipe rather than reinventing one:
+# pyproject.toml declares numpy for the isolated build env, setup.py first runs
+# packaging/build_3rdparty_static_debian.sh (eigen, fftw3, lame, ffmpeg,
+# libsamplerate, zlib, taglib, yaml, chromaprint - all static) and then
+# configures waf with --build-static --static-dependencies. gaia and tensorflow
+# are deliberately not requested: gaia alone would pull in a full Qt 4.8 build,
+# and nothing fetchly calls needs either.
+#
+# Everything lands inside _essentia.so, so the runtime image needs no extra
+# shared libraries and docker/apt-no-distro-media.pref stays intact - the
+# static ffmpeg 7.1.1 essentia links for decoding is entirely separate from the
+# BtbN ffmpeg/ffprobe binaries the application shells out to.
+#
+# ESSENTIA_REF follows master, in keeping with the rest of this file: the
+# toolchain rolls, and a release picks up the current upstream. Note that
+# tracking master is not a looser choice than tracking releases here - it is
+# the same thing. essentia's git tags stopped at v2.1_beta5 in 2019, and every
+# 2.1b6.dev* on PyPI is itself a snapshot of a master commit, so master IS the
+# release channel for this project.
+#
+# Pin it to a commit (--build-arg ESSENTIA_REF=<sha>) only to reproduce or roll
+# back a specific build.
+#
+# The ADD below exists for the same reason as the yt-dlp and deno cache keys
+# further down: Docker compares only the instruction text when deciding whether
+# a RUN is cached, so with a floating ref a plain RUN would keep serving the
+# essentia that happened to be current on the first build, forever. The commit
+# feed for ESSENTIA_REF is refetched every build and its content changes
+# exactly when that ref moves, so the compile below reruns then and only then.
+#
+# One consequence worth knowing: the two architectures will not generally carry
+# the same essentia build. arm64 compiles whatever ESSENTIA_REF points at,
+# while amd64 takes the newest PyPI wheel built for cp313 - and upstream builds
+# a wheel per interpreter, so that lags master (at the time of writing, amd64
+# resolves 2.1b6.dev1389 while master is past dev1450). Both are "the newest
+# each platform can get", which is the intent; they are just not the same
+# commit. --build-arg ESSENTIA_REF=<sha> is how to force them together if a
+# BPM discrepancy between architectures ever needs ruling out.
+#
+# Two details of the RUN below are easy to get wrong: the clone is blobless
+# rather than shallow, because setup.py derives the version from
+# `git describe --always --tags` and a --depth 1 clone carries no tags at all -
+# its documented fallback would silently label the wheel 2.1b6.dev0. And
+# MAKEFLAGS is set because the upstream 3rdparty scripts call plain `make`,
+# which is the only way to parallelize them short of patching each script.
+# nasm is in the apt list for the same reason the rest of the toolchain is:
+# essentia's bundled ffmpeg refuses to configure without an assembler on x86.
+# arm64 does not consume it - gcc assembles the NEON paths - but leaving it out
+# would make this stage silently unbuildable the moment the arch guard is
+# lifted, e.g. to reproduce an arm64 failure locally on an x86 machine.
+FROM ${PYTHON_BASE} AS essentia
+
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+ARG TARGETARCH
+ARG ESSENTIA_REPO=https://github.com/MTG/essentia.git
+ARG ESSENTIA_REF=master
+
+COPY docker/apt-no-distro-media.pref /etc/apt/preferences.d/no-distro-media
+
+# The layer cache key for the compile below - see the note above. The Atom feed
+# is used rather than the GitHub API because it carries no rate limit, which a
+# shared CI egress address would otherwise run into.
+ADD https://github.com/MTG/essentia/commits/${ESSENTIA_REF}.atom /tmp/essentia-ref.atom
+
+RUN set -euo pipefail; \
+    : "${TARGETARCH:?must be provided by BuildKit - build with DOCKER_BUILDKIT=1 or docker buildx}"; \
+    mkdir -p /wheels; \
+    if [[ "${TARGETARCH}" != "arm64" ]]; then \
+        echo "TARGETARCH=${TARGETARCH}: essentia ships an upstream wheel, nothing to build here"; \
+        exit 0; \
+    fi; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        cmake \
+        curl \
+        git \
+        nasm \
+        pkg-config; \
+    rm -rf /var/lib/apt/lists/*; \
+    git clone --filter=blob:none "${ESSENTIA_REPO}" /src/essentia; \
+    cd /src/essentia; \
+    git checkout --detach "${ESSENTIA_REF}"; \
+    echo "essentia source: $(git describe --always --tags)"; \
+    export MAKEFLAGS="-j$(nproc)"; \
+    pip wheel --no-cache-dir --no-deps -w /wheels .; \
+    rm -f /tmp/essentia-ref.atom; \
+    ls -l /wheels
+
+
 FROM ${PYTHON_BASE} AS builder
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
@@ -125,13 +232,31 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /build
 
 ENV VIRTUAL_ENV=/venv \
-    PATH="/venv/bin:$PATH"
+    PATH="/venv/bin:$PATH" \
+    PYTHONDONTWRITEBYTECODE=1
 
 # Create venv and install Python dependencies.
 COPY requirements.txt ./requirements.txt
-RUN python -m venv "$VIRTUAL_ENV" && \
-    pip install --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+
+# Empty on amd64, one essentia wheel on arm64 (see the essentia stage above).
+COPY --from=essentia /wheels /tmp/essentia-wheels
+
+# The locally built wheel has to go in before requirements.txt, not after:
+# `essentia` is unpinned there, so an already-installed distribution satisfies
+# it and pip never goes looking for the linux/aarch64 wheel upstream does not
+# publish. On amd64 the glob matches nothing and pip resolves essentia from
+# PyPI exactly as before.
+RUN set -euo pipefail; \
+    python -m venv "$VIRTUAL_ENV"; \
+    pip install --upgrade pip; \
+    shopt -s nullglob; \
+    essentia_wheels=(/tmp/essentia-wheels/essentia-*.whl); \
+    if (( ${#essentia_wheels[@]} > 0 )); then \
+        echo "Installing locally built essentia: ${essentia_wheels[*]}"; \
+        pip install --no-cache-dir "${essentia_wheels[@]}"; \
+    fi; \
+    pip install --no-cache-dir -r requirements.txt; \
+    rm -rf /tmp/essentia-wheels
 
 # yt-dlp from PyPI, never the distro package: the app both shells out to the
 # `yt-dlp` binary and imports yt_dlp as a library, so it has to live in the
@@ -164,6 +289,25 @@ RUN pip install --no-cache-dir --upgrade \
         "yt-dlp-ejs${YTDLP_EJS_VERSION}" && \
     rm -f /tmp/yt-dlp-pypi.json /tmp/yt-dlp-ejs-pypi.json && \
     yt-dlp --version
+
+# Keep only runtime material in the venv copied into the final image. pip
+# precompiles every installed module and several scientific packages ship
+# sizeable test suites, C/C++ headers and test executables. None of those are
+# used by Fetchly at runtime. In particular, torch/testing is deliberately
+# retained: torch imports parts of it during normal operation.
+#
+# This cleanup has to happen in the builder stage before /venv is copied.
+# Deleting the same files in the runtime stage would only add whiteouts and
+# leave their bytes in the preceding image layer.
+RUN set -euo pipefail; \
+    site_packages="$(python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"; \
+    python -m pip check; \
+    find "$VIRTUAL_ENV" -type d -name __pycache__ -prune -exec rm -rf '{}' +; \
+    find "$site_packages" -depth -type d \( -name test -o -name tests \) -exec rm -rf '{}' +; \
+    rm -rf "$site_packages/torch/include"; \
+    find "$site_packages/torch/bin" -maxdepth 1 -type f \
+        \( -name 'test*' -o -name '*Test' -o -name 'protoc*' \) -delete; \
+    test -x "$site_packages/torch/bin/torch_shm_manager"
 
 # deno - the JavaScript runtime that executes yt-dlp-ejs. yt-dlp enables only
 # "deno" by default and picks it up from PATH, so no yt-dlp flag is involved;
@@ -260,7 +404,9 @@ COPY --from=builder /venv /venv
 COPY --from=builder /usr/local/bin/deno /usr/local/bin/deno
 
 ENV VIRTUAL_ENV=/venv \
-    PATH="/venv/bin:$PATH"
+    PATH="/venv/bin:$PATH" \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
 
 # yt-dlp ships inside the venv copied above (installed in the builder stage).
 # Verify the whole external toolchain resolves from PATH and record the exact
@@ -331,10 +477,6 @@ COPY --chmod=755 docker/entrypoint.sh /entrypoint.sh
 # start; catch it here instead, at build time.
 RUN bash -n /entrypoint.sh && \
     ! grep -q $'\r' /entrypoint.sh
-
-# Python runtime hygiene
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
 
 # Prepare the image-baked default data directory. If a volume or bind mount
 # is attached at /app/data instead, its ownership is handled separately by

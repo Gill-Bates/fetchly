@@ -4,7 +4,7 @@
 # Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 #
 
-"""TubeYou FastAPI Application - Main entry point."""
+"""Fetchly FastAPI Application - Main entry point."""
 
 import asyncio
 import logging
@@ -38,6 +38,7 @@ from .analysis_worker import (
 from .db import (
     cancel_interrupted_jobs,
     close_db,
+    delete_share_links_for_jobs,
     get_settings,
     init_db,
     job_exists,
@@ -46,11 +47,13 @@ from .db import (
     list_jobs_requiring_audio_analysis,
 )
 from .governor import governor
-from .routes import auth_router, api_router, events_router, lalal_router, media_router, trim_router
+from .lalal_policy import LALAL_MAX_DURATION_MINUTES, LALAL_MAX_DURATION_SECONDS
+from .routes import auth_router, api_router, events_router, lalal_router, media_router, share_router, trim_router
 from .routes.auth import init_auth
 from .routes.api import init_api
 from .routes.lalal import init_lalal
 from .routes.media import init_media, resolve_job_path
+from .routes.share import init_share
 from .routes.trim import init_trim
 from .routes.events import (
     init_sse_shutdown_event,
@@ -77,16 +80,16 @@ type EventQueue = asyncio.Queue[EventPayload]
 BASE_DIR = Path(__file__).parent.resolve()
 DATA_DIR = get_data_dir()
 
-_SECRET_KEY = os.environ.get("TUBEYOU_SECRET_KEY")
+_SECRET_KEY = os.environ.get("FETCHLY_SECRET_KEY")
 if not _SECRET_KEY:
-    raise RuntimeError("TUBEYOU_SECRET_KEY environment variable is required")
+    raise RuntimeError("FETCHLY_SECRET_KEY environment variable is required")
 
-_DEFAULT_USER = os.environ.get("TUBEYOU_ADMIN_USER", "admin")
-_DEFAULT_PASS = os.environ.get("TUBEYOU_ADMIN_PASSWORD")
+_DEFAULT_USER = os.environ.get("FETCHLY_ADMIN_USER", "admin")
+_DEFAULT_PASS = os.environ.get("FETCHLY_ADMIN_PASSWORD")
 if not _DEFAULT_PASS:
-    raise RuntimeError("TUBEYOU_ADMIN_PASSWORD environment variable is required")
+    raise RuntimeError("FETCHLY_ADMIN_PASSWORD environment variable is required")
 
-_CSRF_COOKIE = "tubeyou_csrf"
+_CSRF_COOKIE = "fetchly_csrf"
 _HOUSEKEEPING_INTERVAL = 3600  # Every hour
 _ANALYSIS_BACKLOG_POLL_INTERVAL = 5.0
 _EVENT_QUEUE_MAXSIZE = 10_000
@@ -114,6 +117,9 @@ register_filters(templates)
 templates.env.globals["now"] = lambda: datetime.now(UTC)
 templates.env.globals["VERSION"] = VERSION
 templates.env.globals["BUILD_INFO"] = BUILD_INFO
+templates.env.globals["CSRF_COOKIE_NAME"] = _CSRF_COOKIE
+templates.env.globals["LALAL_MAX_DURATION_SECONDS"] = LALAL_MAX_DURATION_SECONDS
+templates.env.globals["LALAL_MAX_DURATION_MINUTES"] = LALAL_MAX_DURATION_MINUTES
 
 # Auth routes only depend on templates and env-backed credentials, so initialize
 # them eagerly as well as during lifespan. This keeps TestClient(app) usable for
@@ -185,7 +191,13 @@ def _run_housekeeping_once() -> None:
     """Load retention settings and clean expired job files in one worker-thread call."""
     settings = get_settings()
     keep_days = settings.get("retention_days", 7)
-    cleanup_expired_jobs(keep_days, DATA_DIR, list_expired_job_ids)
+    expired_ids = list_expired_job_ids(keep_days)
+    cleanup_expired_jobs(keep_days, DATA_DIR, lambda _days: expired_ids)
+    # Artifacts for these jobs are gone, so their share links can only 404 from
+    # here on. Dropping them keeps the table from growing without bound.
+    removed_links = delete_share_links_for_jobs(expired_ids)
+    if removed_links:
+        logger.info("Housekeeping: removed %d share link(s) for expired jobs", removed_links)
     cleanup_thumbnail_cache(DATA_DIR / "thumb-cache")
     # Retained DB rows protect their directories from this orphan sweep. Only
     # directories with no corresponding job record are removed here.
@@ -194,7 +206,7 @@ def _run_housekeeping_once() -> None:
 
 async def _housekeeping_daemon() -> None:
     """Periodically clean up expired jobs and associated files using retention settings."""
-    log = logging.getLogger("tubeyou.housekeeping")
+    log = logging.getLogger("fetchly.housekeeping")
     try:
         while True:
             await asyncio.sleep(_HOUSEKEEPING_INTERVAL)
@@ -364,6 +376,7 @@ async def lifespan(app: FastAPI):
     # Initialize route modules
     init_api(templates, _DEFAULT_USER)
     init_media(DATA_DIR, BASE_DIR, templates)
+    init_share(templates)
     init_lalal(DATA_DIR, enqueue_event)
     init_trim(DATA_DIR, resolve_job_path)
 
@@ -437,12 +450,29 @@ class SessionRenewalMiddleware:
             if renewed_token and message.get("type") == "http.response.start":
                 status = int(message.get("status", 200))
                 if status < 400:
-                    headers = MutableHeaders(scope=message)
-                    response = Response()
-                    set_session_cookie(response, renewed_token, request)
-                    for key, value in response.raw_headers:
-                        if key == b"set-cookie":
-                            headers.append("set-cookie", value.decode("latin-1"))
+                    try:
+                        response = Response()
+                        set_session_cookie(response, renewed_token, request)
+                    except ValueError:
+                        # renewed_token was computed from a session that was
+                        # live at request start, but the handler itself can
+                        # invalidate every outstanding session (e.g. a
+                        # password change bumping session_version - see
+                        # api_set_settings in app/routes/api.py) before this
+                        # response is sent. set_session_cookie correctly
+                        # refuses to reissue a now-invalid token; skip the
+                        # renewal instead of turning that into a 500, and
+                        # leave the handler's own cookie handling (if any) as
+                        # the source of truth.
+                        logger.debug(
+                            "Skipping session renewal: token invalidated during request handling",
+                            exc_info=True,
+                        )
+                    else:
+                        headers = MutableHeaders(scope=message)
+                        for key, value in response.raw_headers:
+                            if key == b"set-cookie":
+                                headers.append("set-cookie", value.decode("latin-1"))
             await send(message)
 
         await self.app(scope, receive, send_wrapper)
@@ -501,7 +531,7 @@ class OriginalClientMiddleware:
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope.get("type") in {"http", "websocket"}:
-            scope["tubeyou.original_client"] = scope.get("client")
+            scope["fetchly.original_client"] = scope.get("client")
         await self.app(scope, receive, send)
 
 
@@ -535,5 +565,6 @@ app.include_router(auth_router)
 app.include_router(api_router)
 app.include_router(lalal_router)
 app.include_router(media_router)
+app.include_router(share_router)
 app.include_router(trim_router)
 app.include_router(events_router)

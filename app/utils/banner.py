@@ -4,7 +4,7 @@
 # Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 #
 
-"""Startup banner for tubeyou."""
+"""Startup banner for fetchly."""
 
 from __future__ import annotations
 
@@ -20,28 +20,29 @@ from .version import BUILD_INFO, VERSION
 
 logger = logging.getLogger(__name__)
 
-_BANNER_LOCK_FILE = os.path.join(tempfile.gettempdir(), "tubeyou_banner.lock")
+_BANNER_LOCK_FILE = os.path.join(tempfile.gettempdir(), "fetchly_banner.lock")
 
 def _block_width(text: str) -> int:
     return max((len(line) for line in text.splitlines()), default=0)
 
 
 def print_banner() -> None:
-    """Print the tubeyou startup banner."""
+    """Print the fetchly startup banner."""
     build_short = BUILD_INFO[:7] if BUILD_INFO else "dev"
 
     ascii_art = r"""
- _         _                            
-| |_ _   _| |__   ___ _   _  ___  _   _ 
-| __| | | | '_ \ / _ \ | | |/ _ \| | | |
-| |_| |_| | |_) |  __/ |_| | (_) | |_| |
- \__|\__,_|_.__/ \___|\__, |\___/ \__,_|
-                      |___/             
+    ___        _          __       __           
+  .' ..]      / |_       [  |     [  |          
+ _| |_  .---.`| |-'.---.  | |--.   | |   _   __ 
+'-| |-'/ /__\\| | / /'`\] | .-. |  | |  [ \ [  ]
+  | |  | \__.,| |,| \__.  | | | |  | |   \ '/ / 
+ [___]  '.__.'\__/'.___.'[___]|__][___][\_:  /  
+                                        \__.'   
 """.strip("\n")
 
     text_lines = [
-        f"Use Youtube with ease! v{VERSION} ({build_short})",
-        "(C) 2026 by Gill-Bates (https://github.com/Gill-Bates/tubeyou)",
+        f"Multi-platform video downloader v{VERSION} ({build_short})",
+        "(C) 2026 by Gill-Bates (https://github.com/Gill-Bates/fetchly)",
     ]
 
     ascii_lines = ascii_art.splitlines()

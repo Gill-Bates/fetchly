@@ -28,6 +28,12 @@ from ..session import (
     set_session_cookie,
     delete_session_cookie,
 )
+from ..utils.hidden_captcha import (
+    HONEYPOT_FIELD_NAME,
+    CaptchaOutcome,
+    issue_captcha_token,
+    verify_captcha_token,
+)
 
 if TYPE_CHECKING:
     from fastapi.templating import Jinja2Templates
@@ -35,6 +41,14 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# Client-facing message for a failed Hidden_Captcha check. Deliberately
+# generic and identical for every failing signal (honeypot filled, missing/
+# invalid/expired token, too-fast submit) so a caller can never learn which
+# invisible check tripped.
+_CAPTCHA_REJECTED_MESSAGE = (
+    "We couldn't verify your submission. Please reload the page and try again."
+)
 
 # Module-level state (set during init)
 _templates: "Jinja2Templates | None" = None
@@ -105,7 +119,27 @@ def verify_login(username: str, password: str) -> bool:
 
 def current_user(request: Request) -> str | None:
     """Get current authenticated user from request cookies."""
+    if not is_authentication_enabled():
+        # The application has one configured admin identity and no per-user
+        # data ownership. Treat the configured identity as the effective user
+        # while authentication is disabled so all existing authorization
+        # dependencies continue to work consistently.
+        return _DEFAULT_USER
     return validate_session(request.cookies.get(SESSION_COOKIE))
+
+
+def is_authentication_enabled() -> bool:
+    """Return whether the settings page requires application authentication.
+
+    Fail closed when the setting cannot be read: authentication remains
+    required if a database/storage problem prevents loading the setting.
+    """
+    try:
+        settings = get_settings()
+    except Exception:
+        logger.exception("Unable to load authentication mode")
+        return True
+    return bool(settings.get("enable_authentication", True))
 
 
 def require_user(request: Request) -> str:
@@ -118,7 +152,7 @@ def require_user(request: Request) -> str:
 
 def require_session(request: Request) -> str:
     """Dependency: require a valid authenticated session."""
-    user = validate_session(request.cookies.get(SESSION_COOKIE))
+    user = current_user(request)
     if not user:
         raise HTTPException(status_code=401, detail="Authentication required")
     return user
@@ -167,7 +201,11 @@ async def login_page(request: Request):
     return templates.TemplateResponse(
         request=request,
         name="login.html",
-        context=_login_template_context(request),
+        context=_login_template_context(
+            request,
+            captcha_token=issue_captcha_token(_SECRET_KEY),
+            honeypot_field=HONEYPOT_FIELD_NAME,
+        ),
     )
 
 
@@ -177,12 +215,31 @@ class LoginRequest(BaseModel):
 
     username: str = Field(min_length=1, max_length=128)
     password: str = Field(min_length=1, max_length=1024)
+    honeypot: str = Field(default="", max_length=1024)
+    captcha_token: str = Field(default="", max_length=1024)
 
 
 @router.post("/login")
 @limiter.limit("5/minute")
 async def login(request: Request, body: LoginRequest):
     """Process login (JSON API)."""
+    if not is_authentication_enabled():
+        # Authentication-disabled mode has no login gate. Keep CAPTCHA and
+        # credential verification inactive as well and let the caller proceed
+        # as the configured application user via current_user().
+        return JSONResponse(content={"ok": True, "redirect": "/"})
+
+    captcha_outcome = verify_captcha_token(
+        token=body.captcha_token,
+        honeypot=body.honeypot,
+        secret_key=_SECRET_KEY,
+    )
+    if captcha_outcome is not CaptchaOutcome.OK:
+        return JSONResponse(
+            status_code=400,
+            content={"ok": False, "detail": _CAPTCHA_REJECTED_MESSAGE},
+        )
+
     if not await asyncio.to_thread(verify_login, body.username, body.password):
         return JSONResponse(
             status_code=401,

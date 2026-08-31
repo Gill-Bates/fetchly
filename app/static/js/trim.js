@@ -12,11 +12,11 @@
 
 import { showToast } from "./toast.js";
 import { reportError } from "./errors.js";
-import { CSRF_COOKIE_NAME, LALAL_MAX_DURATION_SECONDS } from "./config.js";
+import { LALAL_MAX_DURATION_MINUTES, LALAL_MAX_DURATION_SECONDS } from "./config.js";
 import {
     buildTrimId,
     clamp,
-    getCookie,
+    getCsrfToken as readCsrfToken,
     isSafeRedirect,
     normalizeTimeRange,
     subscribeToLalalProgress,
@@ -111,9 +111,9 @@ function setPlaybackControlsEnabled(enabled) {
 
 
 function getCsrfToken() {
-    const token = getCookie(CSRF_COOKIE_NAME);
+    const token = readCsrfToken();
     if (!token) {
-        reportError(new Error(`CSRF token missing from ${CSRF_COOKIE_NAME} cookie`), {
+        reportError(new Error("CSRF token missing from rendered page"), {
             module: "trim",
             action: "getCsrfToken",
         });
@@ -1039,7 +1039,7 @@ async function handleApplyTrim() {
     }
 
     if (duration > LALAL_MAX_DURATION_SECONDS) {
-        showToast("Selection too long (maximum 10 minutes)", "warning");
+        showToast(`Selection too long (maximum ${LALAL_MAX_DURATION_MINUTES} minutes)`, "warning");
         return;
     }
 
@@ -1133,7 +1133,7 @@ async function runLalal(stem) {
         showToast(
             trimDurationSeconds === null
                 ? "Trim duration is unavailable — blocked by Duration Guard"
-                : "Trim duration exceeds 10 min — blocked by Duration Guard",
+                : `Trim duration exceeds ${LALAL_MAX_DURATION_MINUTES} min — blocked by Duration Guard`,
             "warning",
         );
         return;

@@ -16,7 +16,7 @@ import re
 import stat as stat_module
 import uuid
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from time import time
 from typing import Any, Callable
@@ -30,7 +30,7 @@ from ..db import DOWNLOADABLE_STATUSES, get_job, get_settings, set_settings, upd
 from ..utils.fs import TRIM_ID_RE, get_json_body, path_is_file
 from ..utils.template_filters import is_lalala_configured
 from .auth import require_user, require_user_json
-from .media import resolve_job_path
+from .media import resolve_job_path, transcode_to_mp3
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +41,71 @@ _LALAL_AUTH_VALIDATION_CACHE_SECONDS = 300
 _MAX_EMAIL_LENGTH = 320
 _MAX_ACTIVATION_KEY_LENGTH = 1024
 _EMAIL_RE = re.compile(r"^[^@]+@[^@]+\.[^@]+$")
+# Formats handed to Lalal.ai unchanged. Anything else - the .source.opus /
+# .webm / .m4a a finished audio job normally holds - is decoded to WAV first.
+# Lalal.ai returns every stem in the format it received, so uploading Opus came
+# back as Opus; re-encoding to MP3 *before* the upload would instead stack a
+# second lossy generation ahead of the separation, which is exactly where
+# quality must not be lost. WAV keeps the source audio bit-identical and the
+# stems are encoded to MP3 afterwards.
+_UPLOAD_READY_SUFFIXES: frozenset[str] = frozenset({".wav", ".flac"})
+_FFMPEG_TIMEOUT_SECONDS = 900
+
+
+async def _run_ffmpeg(cmd: list[str], *, description: str) -> None:
+    """Run an ffmpeg command, raising RuntimeError on timeout or failure."""
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        _, stderr = await asyncio.wait_for(
+            proc.communicate(), timeout=_FFMPEG_TIMEOUT_SECONDS
+        )
+    except TimeoutError:
+        proc.kill()
+        with suppress(ProcessLookupError):
+            await proc.wait()
+        raise RuntimeError(f"{description} timed out") from None
+    if proc.returncode != 0:
+        detail = (stderr or b"").decode("utf-8", "replace").strip()[-400:]
+        raise RuntimeError(f"{description} failed: {detail}")
+
+
+async def _decode_for_upload(
+    source_path: Path, output_dir: Path, base_name: str
+) -> tuple[Path, Path | None]:
+    """Return (file_to_upload, temp_file_to_clean_up_or_None)."""
+    if source_path.suffix.lower() in _UPLOAD_READY_SUFFIXES:
+        return source_path, None
+
+    temp_path = output_dir / f"{base_name}.lalalsrc.{uuid.uuid4().hex[:8]}.wav"
+    await _run_ffmpeg(
+        [
+            "ffmpeg", "-y",
+            "-i", str(source_path),
+            "-vn",
+            "-codec:a", "pcm_s16le",
+            "-f", "wav",
+            str(temp_path),
+        ],
+        description="Decoding source audio for Lalal.ai",
+    )
+    return temp_path, temp_path
+
+
+async def _finalize_stem(source: Path, target: Path) -> None:
+    """Move or transcode a returned stem to its final MP3 path."""
+    if source == target:
+        return
+    if source.suffix.lower() == ".mp3":
+        await asyncio.to_thread(source.replace, target)
+        return
+    await transcode_to_mp3(source, target)
+    await asyncio.to_thread(source.unlink, True)
+
+
 _STEM_VOCALS = "vocals"
 _STEM_INSTRUMENTAL = "instrumental"
 _VALID_STEMS = frozenset({_STEM_VOCALS, _STEM_INSTRUMENTAL})
@@ -511,14 +576,30 @@ async def lalal_split(
 
             async with client:
                 async with asyncio.timeout(_LALAL_PROCESS_TIMEOUT_SECONDS):
-                    results = await client.process_file(
-                        file_path,
-                        output_dir,
-                        stem=stem_type,
-                        download_stem=download_stem,
-                        download_backing=download_backing,
-                        progress_callback=sync_progress_callback,
+                    upload_path, temp_upload = await _decode_for_upload(
+                        file_path, output_dir, base_name
                     )
+                    try:
+                        results = await client.process_file(
+                            upload_path,
+                            output_dir,
+                            stem=stem_type,
+                            download_stem=download_stem,
+                            download_backing=download_backing,
+                            progress_callback=sync_progress_callback,
+                        )
+                    finally:
+                        if temp_upload is not None:
+                            await asyncio.to_thread(temp_upload.unlink, True)
+
+                    # Stems come back in the uploaded (WAV) format; convert them
+                    # to the MP3 paths the cache lookup and downloads expect.
+                    if "stem" in results:
+                        await _finalize_stem(results["stem"], vocals_path)
+                        results["stem"] = vocals_path
+                    if "backing" in results:
+                        await _finalize_stem(results["backing"], instrumental_path)
+                        results["backing"] = instrumental_path
 
         if stem == _STEM_VOCALS and "stem" in results:
             result_path = results["stem"]

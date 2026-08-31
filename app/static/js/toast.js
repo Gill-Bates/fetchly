@@ -6,7 +6,7 @@
 /**
  * @module toast
  *
- * Central toast notification system for tubeyou.
+ * Central toast notification system for fetchly.
  * Provides accessible, dismissible notifications with a single
  * container attached to document.body.
  */

@@ -23,7 +23,7 @@ from typing import Any
 from .audio_analysis import AudioAnalysisResult, extract_analysis
 from .audio_cache import get_cached, store_cache
 from .audio_hash import compute_audio_hash
-from .db import update_job_if_status
+from .db import update_job_if_status, utc_timestamp
 from .governor import governor
 
 logger = logging.getLogger(__name__)
@@ -57,8 +57,8 @@ _SHUTDOWN_SENTINEL: object = object()
 # Maximum number of pending analysis jobs kept in memory.
 _QUEUE_MAXSIZE = 50
 # Tracks longer than 15 minutes are skipped to bound worst-case analysis time.
-_MAX_ANALYSIS_DURATION_SECONDS = max(0, int(os.environ.get("TUBEYOU_MAX_ANALYSIS_SECONDS", "900")))
-_ANALYSIS_TIMEOUT_SECONDS = max(1, int(os.environ.get("TUBEYOU_AUDIO_ANALYSIS_TIMEOUT_SECONDS", "300")))
+_MAX_ANALYSIS_DURATION_SECONDS = max(0, int(os.environ.get("FETCHLY_MAX_ANALYSIS_SECONDS", "900")))
+_ANALYSIS_TIMEOUT_SECONDS = max(1, int(os.environ.get("FETCHLY_AUDIO_ANALYSIS_TIMEOUT_SECONDS", "300")))
 _analysis_queue: queue.Queue[AnalysisJob] | None = None
 _queue_lock = threading.Lock()
 _queued_job_ids: set[str] = set()
@@ -79,6 +79,7 @@ class AnalysisJob:
 
 
 def _now_iso() -> str:
+    """Timestamp for status-event payloads (informational; not persisted)."""
     return datetime.now(UTC).isoformat()
 
 
@@ -114,7 +115,9 @@ def set_status_callback(callback: Callable[[dict[str, Any]], None] | None) -> No
 def _finalize_job(job_id: str, status: JobStatus, message: str, **extra: Any) -> bool:
     """Finalize an analysis job only while it still owns the analysis state."""
     if status in {JobStatus.DONE, JobStatus.ERROR, JobStatus.ANALYSIS_DONE}:
-        extra.setdefault("finished_at", _now_iso())
+        # Canonical "YYYY-MM-DD HH:MM:SS" so finished_at stays sortable as text
+        # for the retention/stats range scans (see app/db.py).
+        extra.setdefault("finished_at", utc_timestamp())
     updated = update_job_if_status(
         job_id,
         (JobStatus.ANALYSIS,),

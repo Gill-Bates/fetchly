@@ -8,7 +8,7 @@
 // Must stay render-blocking (no defer/async) for that reason.
 (() => {
     try {
-        if (window.localStorage.getItem("tubeyou.showJobHistory") === "true") {
+        if (window.localStorage.getItem("fetchly.showJobHistory") === "true") {
             document.documentElement.classList.add("mobile-job-history-enabled");
         }
     } catch (_) {

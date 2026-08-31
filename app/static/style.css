@@ -1,5 +1,5 @@
 /* ============================================================================
-   tubeyou - Dark UI
+   fetchly - Dark UI
    ============================================================================ */
 
 /* Roboto Flex Font */
@@ -22,13 +22,18 @@
     font-display: block;
 }
 
-/* ─── Logo colour ───────────────────────────────────────────────────────────
-     App UI is dark-only, so the logo should always render for dark surfaces. */
+/* ─── Logo ──────────────────────────────────────────────────────────────────
+     App UI is dark-only; fetchly_logo.svg already ships white. */
 .logo {
-    filter: invert(1);
     width: 180px;
     height: auto;
     display: block;
+}
+
+/* Navbar brand: constrain by height so the icon+wordmark fits the 64px bar. */
+.top-navbar .logo {
+    width: auto;
+    height: 34px;
 }
 
 /* ─────────────────────────────────────────────
@@ -219,6 +224,21 @@ textarea:focus-visible {
 }
 
 .app-root--dashboard .app-shell {
+    height: auto;
+    min-height: 100dvh;
+    padding-top: var(--nav-offset);
+    box-sizing: border-box;
+    overflow: visible;
+}
+
+.app-root--settings {
+    min-height: 100dvh;
+    height: auto;
+    overflow-y: auto;
+    padding-top: 0;
+}
+
+.app-root--settings .app-shell {
     height: auto;
     min-height: 100dvh;
     padding-top: var(--nav-offset);
@@ -514,6 +534,15 @@ body {
     top: -1px;
 }
 
+/* Groups the number + unit so they can be centered together as one block
+   under the icon on mobile (see the .stats-row override) without changing
+   their desktop appearance -- same baseline row, same 6px gap as before. */
+.stat-num-line {
+    display: inline-flex;
+    align-items: baseline;
+    gap: 6px;
+}
+
 .stat-label {
     font-size: 0.8rem;
     color: var(--text-muted);
@@ -673,8 +702,8 @@ button .material-symbols-outlined,
 
 .jobs-card-heading {
     display: flex;
-    flex-direction: column;
-    gap: 0.18rem;
+    align-items: center;
+    min-height: 40px;
 }
 
 .jobs-card-kicker {
@@ -682,12 +711,6 @@ button .material-symbols-outlined,
     font-size: 0.75rem;
     letter-spacing: 0.14em;
     text-transform: uppercase;
-}
-
-.jobs-card-title {
-    color: #ffffff;
-    letter-spacing: 0.01em;
-    flex: 0 0 auto;
 }
 
 .status-column {
@@ -1280,6 +1303,74 @@ html body .text-muted {
     white-space: nowrap;
 }
 
+/* ── fetchly self-update tile (Settings → System) ─────────────────────── */
+.settings-app-update {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+}
+
+.settings-app-update-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+}
+
+.settings-app-update-logo {
+    height: 26px;
+    width: auto;
+    flex-shrink: 0;
+}
+
+.settings-app-update-status {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    margin: 0;
+    font-size: 0.9rem;
+    font-weight: 500;
+    color: var(--text-muted);
+}
+
+.settings-app-update-status .icon-inline {
+    font-size: 18px;
+    line-height: 1;
+    flex-shrink: 0;
+}
+
+.settings-app-update[data-app-update-state="current"] .settings-app-update-status {
+    color: var(--success);
+}
+
+.settings-app-update[data-app-update-state="available"] .settings-app-update-status {
+    color: var(--warning);
+}
+
+.settings-app-update[data-app-update-state="prerelease"] .settings-app-update-status {
+    color: var(--primary);
+}
+
+.settings-app-update-link[hidden] {
+    display: none;
+}
+
+.settings-app-update-spin {
+    animation: settings-app-update-spin 0.9s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .settings-app-update-spin {
+        animation: none;
+    }
+}
+
+@keyframes settings-app-update-spin {
+    to {
+        transform: rotate(360deg);
+    }
+}
+
 .settings-group .row {
     margin-top: 0.25rem;
 }
@@ -1298,6 +1389,30 @@ html body .text-muted {
 
 .settings-grid-item {
     display: flex;
+}
+
+.settings-security-grid .settings-grid-item {
+    flex-direction: column;
+}
+
+/* Titled grid item: the heading travels inside the item instead of sitting
+   above its own single-item grid, so two settings groups share one grid row
+   on desktop. The 768px override below collapses them back to one column. */
+/* Hard cap at two tiles per row. The base grid is auto-fit, so a third tile
+   would otherwise squeeze three across on wide screens instead of wrapping.
+   minmax(0, 1fr) (not 1fr) lets the columns shrink below their content width,
+   so the pair never overflows just above the mobile breakpoint. */
+.settings-grid--cols-2 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.settings-grid-item--titled {
+    flex-direction: column;
+    min-width: 0;
+}
+
+.settings-grid-item--titled>.ui-card {
+    flex: 1 1 auto;
 }
 
 .settings-grid-stack {
@@ -1494,12 +1609,6 @@ html body .text-muted {
     font-size: 0.82em;
 }
 
-/* Status bar at bottom */
-.settings-status-bar {
-    padding: var(--space-4) 0;
-    margin-top: var(--space-5);
-}
-
 /* ── Video Preview Grid ──────────────────────────────────────────────────── */
 
 .video-preview-grid {
@@ -1637,19 +1746,35 @@ html body .text-muted {
 }
 
 .video-thumb {
+    --video-preview-max-height: min(24rem, 42vh);
+
+    display: grid;
+    place-items: center;
+    align-self: start;
+    width: 100%;
     min-width: 0;
     max-width: 100%;
+    max-height: var(--video-preview-max-height);
     overflow: hidden;
     border-radius: var(--radius-md);
+    background: var(--surface-solid);
 }
 
 .video-thumb img {
-    width: 100%;
+    width: auto;
     max-width: 100%;
     display: block;
     height: auto;
+    max-height: var(--video-preview-max-height);
+    object-fit: contain;
     border-radius: var(--radius-md);
     border: 1px solid var(--border);
+}
+
+@supports (height: 1svh) {
+    .video-thumb {
+        --video-preview-max-height: min(24rem, 42svh);
+    }
 }
 
 .video-meta {
@@ -1757,9 +1882,13 @@ html body .text-muted {
 .platform-pill {
     display: inline-flex;
     align-items: center;
-    flex: 0 0 auto;
-    margin-right: 0.45rem;
-    padding: 0.12rem 0.45rem;
+    justify-content: center;
+    width: 28px;
+    height: 24px;
+    flex: 0 0 28px;
+    box-sizing: border-box;
+    margin-right: 0.5rem;
+    padding: 0;
     border-radius: var(--radius-pill, 999px);
     font-size: 0.75rem;
     font-weight: 700;
@@ -1771,6 +1900,40 @@ html body .text-muted {
     color: #ffffff;
     background: rgba(255, 255, 255, 0.14);
     border: 1px solid rgba(255, 255, 255, 0.18);
+}
+
+.platform-pill__icon {
+    display: block;
+    width: 16px;
+    height: 16px;
+    flex: 0 0 auto;
+    background-color: currentColor;
+    -webkit-mask-position: center;
+    mask-position: center;
+    -webkit-mask-repeat: no-repeat;
+    mask-repeat: no-repeat;
+    -webkit-mask-size: contain;
+    mask-size: contain;
+}
+
+.platform-pill__icon--youtube {
+    -webkit-mask-image: url("/static/img/social/youtube.svg");
+    mask-image: url("/static/img/social/youtube.svg");
+}
+
+.platform-pill__icon--tiktok {
+    -webkit-mask-image: url("/static/img/social/tiktok.svg");
+    mask-image: url("/static/img/social/tiktok.svg");
+}
+
+.platform-pill__icon--instagram {
+    -webkit-mask-image: url("/static/img/social/instagram.svg");
+    mask-image: url("/static/img/social/instagram.svg");
+}
+
+.platform-pill__icon--facebook {
+    -webkit-mask-image: url("/static/img/social/facebook.svg");
+    mask-image: url("/static/img/social/facebook.svg");
 }
 
 .platform-pill--youtube {
@@ -1788,6 +1951,12 @@ html body .text-muted {
 .platform-pill--instagram {
     background: linear-gradient(45deg, #f09433 0%, #e6683c 25%, #dc2743 50%, #cc2366 75%, #bc1888 100%);
     border-color: transparent;
+}
+
+.platform-pill--facebook {
+    /* Facebook brand blue; dark enough for white pill text to meet AA. */
+    background: #0866ff;
+    border-color: #0866ff;
 }
 
 .video-meta.is-loading .video-meta__title,
@@ -1911,7 +2080,7 @@ html body .text-muted {
     border-bottom: 1px solid var(--border);
 }
 
-.table tbody tr:hover {
+.table tbody tr:not(.row-empty):hover {
     background: var(--surface-hover);
 }
 
@@ -1943,11 +2112,16 @@ td[data-label="Title"] {
 
 .job-title-cell {
     position: relative;
+    cursor: default;
+    max-width: 220px;
+    min-width: 0;
+}
+
+.job-title-cell__content {
     display: flex;
     align-items: center;
     gap: 0.5rem;
-    cursor: default;
-    max-width: 220px;
+    width: 100%;
     min-width: 0;
 }
 
@@ -2222,7 +2396,7 @@ td[data-label="Title"] {
 
 .jobs-mobile-list {
     display: none;
-    padding: 0 var(--space-3) var(--space-3);
+    padding: 0;
     position: relative;
 }
 
@@ -2244,18 +2418,94 @@ td[data-label="Title"] {
     padding: 0;
     display: inline-grid;
     place-items: center;
-    border: none;
+    border: 1px solid rgba(229, 231, 235, 0.16);
+    border-color: color-mix(in srgb, var(--text) 16%, transparent);
     border-radius: 10px;
-    background: transparent;
-    color: var(--text-muted);
-    box-shadow: none;
+    background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.09), rgba(255, 255, 255, 0.015)),
+        var(--surface-solid);
+    color: var(--text);
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.1),
+        inset 0 -1px 0 rgba(2, 6, 23, 0.32),
+        0 2px 4px rgba(2, 6, 23, 0.35),
+        0 9px 18px rgba(2, 6, 23, 0.28);
+    transition:
+        background-color 0.18s ease,
+        border-color 0.18s ease,
+        box-shadow 0.18s ease,
+        color 0.18s ease,
+        filter 0.18s ease,
+        transform 0.18s ease;
+    -webkit-tap-highlight-color: transparent;
 }
 
-.jobs-mobile-action:hover,
+.jobs-mobile-action[href^="/download/"] {
+    border-color: rgba(129, 140, 248, 0.48);
+    border-color: color-mix(in srgb, var(--primary) 48%, transparent);
+    background:
+        linear-gradient(180deg, rgba(129, 140, 248, 0.24), rgba(99, 102, 241, 0.09)),
+        var(--surface-solid);
+    color: #e0e7ff;
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.13),
+        inset 0 -1px 0 rgba(49, 46, 129, 0.38),
+        0 2px 4px rgba(2, 6, 23, 0.38),
+        0 9px 20px rgba(49, 46, 129, 0.38);
+}
+
+.jobs-mobile-action-group {
+    border-radius: 10px;
+    box-shadow:
+        0 2px 4px rgba(2, 6, 23, 0.38),
+        0 9px 20px rgba(49, 46, 129, 0.38);
+}
+
+.jobs-mobile-action-group .jobs-mobile-action {
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.13),
+        inset 0 -1px 0 rgba(49, 46, 129, 0.38);
+}
+
+.jobs-mobile-action-group .jobs-mobile-action--download {
+    border-right-width: 0;
+    border-radius: 10px 0 0 10px;
+}
+
+.jobs-mobile-action-group .jobs-mobile-action--menu {
+    border-radius: 0 10px 10px 0;
+}
+
 .jobs-mobile-action:focus-visible {
-    background: rgba(229, 231, 235, 0.1);
-    background: color-mix(in srgb, var(--text) 10%, transparent);
-    color: var(--text);
+    outline: 2px solid var(--primary);
+    outline-offset: 3px;
+    filter: brightness(1.1);
+    transform: translateY(-1px);
+}
+
+@media (hover: hover) and (pointer: fine) {
+    .jobs-mobile-action:hover {
+        filter: brightness(1.1);
+        transform: translateY(-1px);
+    }
+}
+
+.jobs-mobile-action:active {
+    filter: brightness(0.96);
+    transform: translateY(1px);
+    box-shadow:
+        inset 0 2px 5px rgba(2, 6, 23, 0.42),
+        0 1px 2px rgba(2, 6, 23, 0.3);
+}
+
+.jobs-mobile-action:disabled,
+.jobs-mobile-action[aria-disabled="true"] {
+    opacity: 0.55;
+    filter: none;
+    transform: none;
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.06),
+        0 2px 4px rgba(2, 6, 23, 0.22);
 }
 
 .jobs-mobile-action .material-symbols-outlined {
@@ -2327,6 +2577,10 @@ td[data-label="Title"] {
     min-width: 0;
 }
 
+.jobs-mobile-feed-item .job-item__title-row {
+    grid-template-columns: minmax(0, 1fr);
+}
+
 .job-item__title-row .job-item__title-wrap {
     display: flex;
     align-items: flex-start;
@@ -2376,6 +2630,33 @@ td[data-label="Title"] {
     line-height: 1.2;
 }
 
+.job-item__time-row {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    min-width: 0;
+}
+
+.job-item__time-row .job-item__time {
+    flex: 0 1 auto;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.job-item__time-row .job-item__status {
+    flex: 0 0 auto;
+    align-items: center;
+    justify-content: flex-start;
+}
+
+.job-item__time-row .status-inline {
+    flex-direction: row;
+    align-items: center;
+    gap: 0.35rem;
+}
+
 .job-item__primary-action {
     display: flex;
     align-items: center;
@@ -2395,6 +2676,13 @@ td[data-label="Title"] {
     min-width: 44px;
     min-height: 44px;
     padding: 0;
+}
+
+.job-item__primary-action .jobs-mobile-action-group .jobs-mobile-action--menu {
+    flex: 0 0 32px;
+    width: 32px;
+    min-width: 32px;
+    max-width: 32px;
 }
 
 .job-item__details {
@@ -3266,7 +3554,7 @@ td:last-child {
 
 @media (max-width: 768px) {
     .app-main {
-        padding-top: calc(var(--space-6) + var(--space-2));
+        padding-top: var(--space-4);
     }
 
     .app-shell-container {
@@ -3277,8 +3565,8 @@ td:last-child {
 
     .stats-row {
         display: grid;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-        gap: 0.75rem;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 0.5rem;
         margin: 0;
         --bs-gutter-x: 0;
         --bs-gutter-y: 0;
@@ -3294,30 +3582,65 @@ td:last-child {
         margin: 0 !important;
     }
 
-    .stat-card {
+    /* Qualified with .stats-row so this wins over the wider (max-width:
+       1024px) stat-card/stat-value rules further down regardless of
+       source order -- one column narrower per row needs the smaller size. */
+    .stats-row .stat-card {
+        position: relative;
         height: 100%;
-        min-height: 80px;
-        padding: 0.65rem;
+        min-height: 70px;
+        padding: 0.5rem 0.35rem;
         background: var(--surface-60);
         border: 1px solid var(--border);
         box-shadow: none;
     }
 
-    .stat-value {
-        font-size: 1.6rem;
+    /* Two rows: icon on row 1, "number + unit" (.stat-num-line, one block)
+       on row 2. A column flexbox with align-items:center centers every
+       child on the same axis using the widest child's own width as the
+       reference -- so when the unit makes row 2 wider than the icon, the
+       icon centers under the *whole* "20.1 MiB" block, not just the
+       number; when there is no unit, row 2 is narrower than the icon and
+       centers under it instead. Either way both rows share one center. */
+    .stats-row .stat-value {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 2px;
+        font-size: 1.15rem;
         font-weight: 700;
         line-height: 1.1;
     }
 
-    .stat-icon {
-        font-size: 18px;
+    .stats-row .stat-num-line {
+        gap: 3px;
+    }
+
+    .stats-row .stat-icon {
+        font-size: 16px;
         opacity: 0.7;
     }
 
     /* Keep stat-unit smaller on mobile */
-    .stat-unit {
-        font-size: 0.85rem;
+    .stats-row .stat-unit {
+        font-size: 0.7rem;
         font-weight: 500;
+    }
+
+    /* Save vertical/horizontal space: four tiles per row leaves no room
+       for the label text underneath. Visually hidden rather than
+       display:none so the label stays in the accessibility tree --
+       role="group" derives its accessible name from this text. */
+    .stats-row .stat-label {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        margin: -1px;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
     }
 
     .hero-main {
@@ -3387,6 +3710,16 @@ td:last-child {
         grid-template-columns: 1fr;
     }
 
+    .video-thumb {
+        --video-preview-max-height: min(20rem, 38vh);
+    }
+
+    @supports (height: 1svh) {
+        .video-thumb {
+            --video-preview-max-height: min(20rem, 38svh);
+        }
+    }
+
     #submitForm>.row {
         --bs-gutter-x: 0;
         margin-left: 0;
@@ -3417,10 +3750,6 @@ td:last-child {
     .jobs-search-wrap {
         flex: 1 1 100%;
         min-width: 0;
-    }
-
-    .jobs-card-title {
-        flex: 0 1 auto;
     }
 
     #jobsCard .jobs-list-shell {
@@ -3463,6 +3792,27 @@ td:last-child {
         max-width: 100%;
         min-width: 0;
         min-height: 44px;
+    }
+
+    .lalal-tile-actions {
+        align-items: stretch;
+    }
+
+    .lalal-tile-action-row {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        width: 100%;
+        gap: var(--space-2);
+    }
+
+    .lalal-tile-action-row > .btn {
+        width: 100%;
+        min-width: 0;
+        padding-inline: var(--space-2);
+    }
+
+    .lalal-tile-action-row:has(#lalalDisconnectBtn.d-none) #lalalAuthBtn {
+        grid-column: 1 / -1;
     }
 
     .settings-grid .form-control,
@@ -3626,36 +3976,6 @@ td:last-child {
 
 .toast--info .toast-icon {
     color: var(--primary);
-}
-
-/* Auto-save indicator */
-.auto-save-indicator {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.375rem;
-    min-height: 1rem;
-    font-size: 0.75rem;
-    color: var(--text-muted);
-    opacity: 0;
-    transition: opacity 0.2s;
-}
-
-.auto-save-indicator--visible {
-    opacity: 1;
-}
-
-.auto-save-indicator--success {
-    color: var(--success);
-}
-
-.auto-save-indicator--danger {
-    color: var(--danger);
-}
-
-.auto-save-indicator .spinner-border {
-    width: 0.875rem;
-    height: 0.875rem;
-    border-width: 0.125rem;
 }
 
 @media (max-width: 576px) {
@@ -3879,6 +4199,10 @@ td:last-child {
         margin-left: 1rem !important;
     }
 
+    #jobsCard {
+        overflow: visible;
+    }
+
     #jobsCard .ui-card-body,
     #jobsCard .jobs-list-shell {
         overflow: visible;
@@ -3887,6 +4211,7 @@ td:last-child {
     #jobsCard .jobs-list-shell {
         flex: 0 0 auto;
         min-height: auto;
+        padding: 0 var(--space-4) var(--space-2);
     }
 
     .jobs-card-header {
@@ -3952,6 +4277,12 @@ td:last-child {
         border-color: rgba(220, 39, 67, 0.35);
     }
 
+    .job-item .platform-pill--facebook {
+        color: #bfd8ff;
+        background: rgba(8, 102, 255, 0.18);
+        border-color: rgba(8, 102, 255, 0.38);
+    }
+
     .job-item__status .status-pill {
         border-color: currentColor;
         border: 1px solid color-mix(in srgb, currentColor 32%, transparent);
@@ -3970,8 +4301,35 @@ td:last-child {
     }
 
     .job-item.row-done .job-item__status .status-pill-success {
-        box-shadow: 0 0 0 2px rgba(34, 197, 94, 0.12);
-        box-shadow: 0 0 0 2px color-mix(in srgb, var(--success) 12%, transparent);
+        background:
+            linear-gradient(180deg, rgba(255, 255, 255, 0.1), transparent 58%),
+            color-mix(in srgb, var(--success) 18%, var(--surface-solid));
+        box-shadow:
+            inset 0 1px 0 rgba(255, 255, 255, 0.14),
+            0 2px 4px rgba(2, 6, 23, 0.3),
+            0 5px 12px color-mix(in srgb, var(--success) 14%, transparent);
+    }
+
+    .job-item__time-row .job-item__status .status-pill {
+        padding: 0.14rem 0.4rem;
+        font-size: 0.65rem;
+        line-height: 1;
+        letter-spacing: 0.03em;
+    }
+}
+
+@media (max-width: 360px) {
+    .job-item {
+        flex-wrap: wrap;
+    }
+
+    .job-item__body {
+        flex-basis: 100%;
+    }
+
+    .job-item__primary-action {
+        width: 100%;
+        align-self: auto;
     }
 }
 
@@ -4014,12 +4372,27 @@ td:last-child {
         /* backdrop-filter is GPU-expensive on iOS and can cause layout shifts */
         .ui-card,
         .top-navbar,
+        .modal-backdrop.show,
         .modal-content,
         .wb-footer,
         .table thead,
-        .video-meta {
+        .video-meta,
+        .lost-card {
             backdrop-filter: none;
             -webkit-backdrop-filter: none;
+        }
+
+        /* Use opaque modal surfaces so Safari does not blur the dialog layer. */
+        .modal-content {
+            background: var(--surface-solid);
+        }
+
+        #lalalAuthModal .modal-body {
+            background: var(--surface-strong);
+        }
+
+        .lost-card {
+            background: var(--surface-elevated);
         }
 
         /* flex + height:100% is buggy in iOS grid columns */
@@ -4122,3 +4495,266 @@ td:last-child {
             scroll-behavior: auto !important;
         }
     }
+
+/* ── Share "Lost in Space" page ─────────────────────────────────────────── */
+/* Public 404 for an unusable share link. Standalone chrome (no navbar), so it
+   carries its own full-bleed backdrop instead of the app shell's. */
+
+/* The navbar block is empty on this page, so drop the fixed-navbar offset
+   .app-root reserves - it would otherwise show as a lighter band above the
+   starfield. The backdrop lives here rather than on .lost-shell so the sky
+   covers the whole viewport, including the area an overscroll bounce exposes,
+   instead of letting the app gradient show past the shell. */
+.app-root--share-lost {
+    overflow-x: hidden;
+    padding-top: 0;
+    background:
+        radial-gradient(circle at 78% 12%, rgba(91, 95, 220, 0.22) 0%, transparent 45%),
+        radial-gradient(circle at 12% 82%, rgba(34, 197, 94, 0.10) 0%, transparent 42%),
+        linear-gradient(180deg, #0b1222 0%, var(--base) 55%, #070c17 100%);
+}
+
+/* Grow into the space .app-shell leaves rather than claiming a viewport of its
+   own. With the navbar and footer blocks both empty, that is the full shell -
+   but a hard 100dvh would stack on top of whatever else the shell holds and
+   push it below the fold, so the sizing stays flex-driven. */
+.lost-shell {
+    position: relative;
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-5);
+    min-height: 0;
+    padding: var(--space-6) var(--space-4);
+    overflow: hidden;
+}
+
+/* --- starfield ------------------------------------------------------------ */
+
+.lost-sky {
+    position: absolute;
+    /* Oversized so parallax translation never exposes an unpainted edge. */
+    inset: -12%;
+    pointer-events: none;
+}
+
+.lost-stars {
+    position: absolute;
+    inset: 0;
+    background-repeat: repeat;
+    will-change: transform;
+}
+
+.lost-stars--far {
+    background-image:
+        radial-gradient(1px 1px at 20% 30%, rgba(255, 255, 255, 0.55) 50%, transparent 50%),
+        radial-gradient(1px 1px at 68% 12%, rgba(255, 255, 255, 0.40) 50%, transparent 50%),
+        radial-gradient(1px 1px at 42% 78%, rgba(255, 255, 255, 0.45) 50%, transparent 50%),
+        radial-gradient(1px 1px at 88% 62%, rgba(255, 255, 255, 0.35) 50%, transparent 50%);
+    background-size: 260px 260px;
+    animation: lost-drift 190s linear infinite;
+}
+
+.lost-stars--mid {
+    background-image:
+        radial-gradient(1.6px 1.6px at 15% 55%, rgba(255, 255, 255, 0.75) 50%, transparent 50%),
+        radial-gradient(1.6px 1.6px at 72% 34%, rgba(198, 210, 255, 0.70) 50%, transparent 50%),
+        radial-gradient(1.6px 1.6px at 51% 88%, rgba(255, 255, 255, 0.60) 50%, transparent 50%);
+    background-size: 420px 420px;
+    animation: lost-drift 120s linear infinite reverse;
+}
+
+.lost-stars--near {
+    background-image:
+        radial-gradient(2.4px 2.4px at 30% 22%, rgba(255, 255, 255, 0.95) 50%, transparent 50%),
+        radial-gradient(2.2px 2.2px at 82% 74%, rgba(190, 205, 255, 0.90) 50%, transparent 50%);
+    background-size: 640px 640px;
+    animation: lost-twinkle 5.5s ease-in-out infinite;
+}
+
+.lost-glow {
+    position: absolute;
+    top: 8%;
+    right: 6%;
+    width: min(420px, 55vw);
+    aspect-ratio: 1;
+    border-radius: 50%;
+    background: radial-gradient(circle, rgba(91, 95, 220, 0.28) 0%, transparent 68%);
+    filter: blur(18px);
+}
+
+@keyframes lost-drift {
+    from { background-position: 0 0; }
+    to   { background-position: 1000px -600px; }
+}
+
+@keyframes lost-twinkle {
+    0%, 100% { opacity: 0.55; }
+    50%      { opacity: 1; }
+}
+
+/* --- astronaut ------------------------------------------------------------ */
+
+.lost-astronaut {
+    position: relative;
+    width: min(230px, 46vw);
+    filter: drop-shadow(0 26px 44px rgba(0, 0, 0, 0.55));
+    will-change: transform;
+}
+
+.lost-astronaut svg {
+    display: block;
+    width: 100%;
+    height: auto;
+    overflow: visible;
+}
+
+/* Float lives on an inner element so the pointer parallax on the wrapper and
+   the idle animation never fight over the same transform. */
+.lost-astronaut__body {
+    transform-origin: 110px 116px;
+    animation: lost-float 8s ease-in-out infinite;
+}
+
+.lost-suit,
+.lost-pack {
+    fill: #e8edf7;
+    stroke: rgba(15, 23, 42, 0.55);
+    stroke-width: 2;
+}
+
+.lost-pack {
+    fill: #b9c4d8;
+}
+
+.lost-helmet {
+    fill: #f8fafc;
+    stroke: rgba(15, 23, 42, 0.45);
+    stroke-width: 2;
+}
+
+.lost-visor {
+    fill: #16233d;
+    stroke: rgba(91, 95, 220, 0.75);
+    stroke-width: 2.5;
+}
+
+.lost-visor-glint {
+    stroke: rgba(255, 255, 255, 0.55);
+    stroke-width: 5;
+    stroke-linecap: round;
+}
+
+.lost-panel {
+    fill: var(--primary);
+    opacity: 0.9;
+}
+
+.lost-limb {
+    stroke: #e8edf7;
+    stroke-width: 17;
+    stroke-linecap: round;
+}
+
+.lost-tether {
+    stroke: rgba(232, 237, 247, 0.35);
+    stroke-width: 3;
+    stroke-linecap: round;
+    stroke-dasharray: 7 9;
+}
+
+@keyframes lost-float {
+    0%, 100% { transform: translateY(0) rotate(-3deg); }
+    50%      { transform: translateY(-20px) rotate(3deg); }
+}
+
+/* --- message card --------------------------------------------------------- */
+
+.lost-card {
+    position: relative;
+    width: min(560px, 100%);
+    padding: var(--space-5);
+    text-align: center;
+    background: color-mix(in srgb, var(--surface-elevated) 82%, transparent);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-xl);
+    box-shadow: 0 22px 60px rgba(0, 0, 0, 0.55);
+    backdrop-filter: var(--blur-md);
+}
+
+.lost-kicker {
+    margin: 0 0 var(--space-2);
+    color: var(--text-weak);
+    font-size: 0.78rem;
+    font-weight: 600;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+}
+
+.lost-title {
+    margin: 0 0 var(--space-3);
+    color: var(--text-strong);
+    font-size: clamp(1.5rem, 4vw, 2rem);
+    font-weight: 700;
+}
+
+.lost-lead {
+    margin: 0 0 var(--space-5);
+    color: var(--text-muted);
+}
+
+.lost-reasons {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+    margin: 0 0 var(--space-5);
+    padding: 0;
+    text-align: left;
+    list-style: none;
+}
+
+.lost-reasons li {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    padding: var(--space-3);
+    color: var(--text-muted);
+    font-size: 0.92rem;
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+}
+
+.lost-reasons .material-symbols-outlined {
+    flex: 0 0 auto;
+    color: var(--primary);
+    font-size: 20px;
+}
+
+.lost-hint {
+    margin: 0;
+    color: var(--text-weak);
+    font-size: 0.88rem;
+}
+
+@media (max-width: 576px) {
+    .lost-shell {
+        gap: var(--space-4);
+        padding: var(--space-5) var(--space-3);
+    }
+
+    .lost-card {
+        padding: var(--space-4);
+    }
+}
+
+/* Motion is decorative here: hold every layer still when the visitor asks for
+   reduced motion. The parallax script checks the same query. */
+@media (prefers-reduced-motion: reduce) {
+    .lost-stars,
+    .lost-astronaut__body {
+        animation: none !important;
+    }
+}

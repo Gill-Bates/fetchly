@@ -17,12 +17,13 @@ Dynamic Bayesian Network to smooth beat predictions.
 """
 
 import logging
-import math
 import threading
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, NamedTuple
 
 import numpy as np
+
+from .bpm_normalization import normalize_bpm
 
 if TYPE_CHECKING:
     from beat_this.inference import File2Beats
@@ -34,10 +35,6 @@ _model_lock = threading.RLock()
 _model_instance: "File2Beats | None" = None
 _DBN_DEFAULT_ENABLED: Final[bool] = True
 
-# BPM normalization range (most music falls within 70-180 BPM)
-_BPM_MIN: Final[float] = 70.0
-_BPM_MAX: Final[float] = 180.0
-
 # Minimum number of beats required for reliable BPM calculation
 _MIN_BEATS_FOR_BPM: Final[int] = 4
 
@@ -48,28 +45,6 @@ class BeatThisResult(NamedTuple):
     bpm: float
     confidence: float
     num_beats: int
-
-
-def _normalize_bpm(bpm: float) -> float:
-    """Normalize BPM into the 70-180 range via powers-of-two scaling.
-
-    BPM detectors commonly return binary multiples of the perceived tempo
-    (for example x0.5, x2, or x4). This helper doubles or halves by powers of
-    two until the value fits the expected musical range.
-
-    Returns:
-        Normalized BPM in [70, 180], or 0.0 when the input is non-finite or <= 0.
-    """
-    if not math.isfinite(bpm) or bpm <= 0:
-        return 0.0
-
-    while bpm < _BPM_MIN:
-        bpm *= 2.0
-
-    while bpm > _BPM_MAX:
-        bpm /= 2.0
-
-    return bpm
 
 
 def _dbn_enabled() -> bool:
@@ -203,7 +178,7 @@ def extract_bpm_beat_this(audio_path: Path) -> BeatThisResult:
     raw_bpm, confidence = _bpm_from_beats(beats)
 
     # Normalize to standard range
-    bpm = _normalize_bpm(raw_bpm)
+    bpm = normalize_bpm(raw_bpm)
 
     logger.debug(
         "beat_this: %.1f BPM (raw=%.1f, confidence=%.2f, beats=%d) for %s",

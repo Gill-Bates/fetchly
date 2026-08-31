@@ -7,6 +7,7 @@ data/
 .pytest_cache/
 .ruff_cache/
 __pycache__/
+**/__pycache__/
 
 # Editor
 .idea/
@@ -17,9 +18,10 @@ __pycache__/
 .env.*
 !.env.example
 
-# Git metadata
+# Git / repo metadata (CI workflows, README assets — not needed at runtime)
 .git/
 .gitignore
+.github/
 
 # Local tooling and setup
 .claude/settings.local.json
@@ -30,6 +32,7 @@ tools/
 
 # Python
 *.py[cod]
+**/*.py[cod]
 .venv/
 
 # Runtime and development artifacts

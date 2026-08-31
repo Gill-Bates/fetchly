@@ -8,10 +8,10 @@
 <link rel="preload" href="/static/fonts/roboto-flex.woff2" as="font" type="font/woff2" crossorigin>
 {% endblock %}
 
-{% block title %}tubeyou - next-gen Video Downloader{% endblock %}
+{% block title %}fetchly - next-gen Video Downloader{% endblock %}
 
 {% block app_styles %}
-<link href="/static/login.css?v=20260823c" rel="stylesheet">
+<link href="/static/login.css?v=20260831a" rel="stylesheet">
 {% endblock %}
 
 {% block navbar %}{% endblock %}
@@ -20,8 +20,8 @@
 <main class="login-shell" role="main">
     <section class="login-card">
         <div class="login-header text-center">
-            <img src="/static/img/tubeyou.svg" alt="tubeyou" class="logo mb-3">
-            <p class="login-kicker">next-gen media toolkit</p>
+            <img src="/static/img/fetchly_logo.svg" alt="fetchly" class="logo mb-3">
+            <p class="login-kicker">Multi-Platform Video Downloader</p>
         </div>
 
         <div id="login-message" class="login-message text-center" role="status" aria-live="polite" aria-atomic="true">
@@ -40,6 +40,16 @@
                 <input class="form-control form-control-lg" id="password" name="password" type="password"
                     autocomplete="current-password" aria-describedby="login-message" required>
             </div>
+
+            <!-- Hidden Captcha: honeypot (invisible to humans, tempting to bots) -->
+            <div class="hp-field" aria-hidden="true" tabindex="-1">
+                <label for="hp-field">Website (leave this empty)</label>
+                <input type="text" id="hp-field" name="{{ honeypot_field }}" autocomplete="off" tabindex="-1">
+            </div>
+
+            <!-- Hidden Captcha: signed time-trap token -->
+            <input type="hidden" name="captcha_token" id="captcha-token" value="{{ captcha_token }}">
+
             <button id="submit-btn" type="submit"
                 class="btn btn-primary btn-lg w-100 mt-2 d-inline-flex align-items-center justify-content-center gap-2">
                 <span id="submit-spinner" class="spinner-border spinner-border-sm d-none" aria-hidden="true"></span>
@@ -53,5 +63,5 @@
 {% block footer %}{% endblock %}
 
 {% block page_scripts %}
-<script type="module" src="/static/js/login.js?v=20260823b"></script>
+<script type="module" src="/static/js/login.js?v=20260824b"></script>
 {% endblock %}

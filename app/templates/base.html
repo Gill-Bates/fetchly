@@ -1,17 +1,18 @@
 <!DOCTYPE html>
-<html lang="en" data-bs-theme="dark" data-lalal-enabled="{{ lalal_enabled | default(false) | tojson | forceescape }}" data-lalal-duration-guard="{{ lalal_duration_guard | default(true) | tojson | forceescape }}">
+<html lang="en" data-bs-theme="dark" data-csrf-cookie-name="{{ CSRF_COOKIE_NAME | e }}" data-lalal-enabled="{{ lalal_enabled | default(false) | tojson | forceescape }}" data-lalal-duration-guard="{{ lalal_duration_guard | default(true) | tojson | forceescape }}" data-lalal-max-duration-seconds="{{ LALAL_MAX_DURATION_SECONDS }}">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="color-scheme" content="dark">
     <meta name="theme-color" content="#0f172a">
-    <link rel="icon" href="/static/img/favicon.ico?v=20260823b" type="image/x-icon">
+    <link rel="icon" href="/static/img/favicon.svg?v=20260831a" type="image/svg+xml">
+    <link rel="icon" href="/static/img/favicon.ico?v=20260831a" sizes="any" type="image/x-icon">
     {% block head_meta %}{% endblock %}
-    <title>{% block title %}tubeyou - next-gen Video Downloader{% endblock %}</title>
+    <title>{% block title %}fetchly - next-gen Video Downloader{% endblock %}</title>
     {% block head_preconnect %}{% endblock %}
     <link href="/static/vendor/bootstrap.min.css?v=20260428b" rel="stylesheet">
     {% block app_styles %}
-    <link href="/static/style.css?v=20260823l" rel="stylesheet">
+    <link href="/static/style.css?v=20260831d" rel="stylesheet">
     {% endblock %}
     {% block head_extra %}{% endblock %}
 </head>
@@ -33,11 +34,11 @@
     {% block footer %}
     <footer class="wb-footer">
         <div class="wb-footer-content">
-            <span>tubeyou v{{ VERSION | e }} (<span class="font-monospace">{{ (BUILD_INFO or '')[:7] | e }}</span>)</span>
+            <span>fetchly v{{ VERSION | e }} (<span class="font-monospace">{{ (BUILD_INFO or '')[:7] | e }}</span>)</span>
             <span>&middot;</span>
             <span>&copy; {{ now().year }} Gill-Bates</span>
             <span>&middot;</span>
-            <a href="https://github.com/Gill-Bates/tubeyou"
+            <a href="https://github.com/Gill-Bates/fetchly"
                target="_blank"
                rel="noopener noreferrer"
                class="wb-footer-link">

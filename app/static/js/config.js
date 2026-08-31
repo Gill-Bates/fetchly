@@ -12,17 +12,14 @@ export const CONFIG = Object.freeze({
 
 export const AUDIO_TYPE = "audio";
 
-export const VIDEO_QUALITY_OPTIONS = Object.freeze([
-    Object.freeze({ label: "Max", value: "max" }),
-    Object.freeze({ label: "720p", value: "medium" }),
-    Object.freeze({ label: "480p", value: "small" }),
-]);
-
-// Maximum track duration Lalal.ai can process (also used as max trim selection length).
-export const LALAL_MAX_DURATION_SECONDS = 600;
-
-// CSRF double-submit cookie name — must match app/main.py:_CSRF_COOKIE and middleware/csrf.py.
-export const CSRF_COOKIE_NAME = "tubeyou_csrf";
+// Server-owned Lalal.ai processing limit, rendered by base.html.
+export const LALAL_MAX_DURATION_SECONDS = Number(
+    document.documentElement?.dataset.lalalMaxDurationSeconds,
+);
+if (!Number.isFinite(LALAL_MAX_DURATION_SECONDS) || LALAL_MAX_DURATION_SECONDS <= 0) {
+    throw new Error("Invalid Lalal.ai duration limit in page bootstrap data");
+}
+export const LALAL_MAX_DURATION_MINUTES = LALAL_MAX_DURATION_SECONDS / 60;
 
 export const DOWNLOADABLE_STATUSES = new Set(["done", "analysis", "analysis_done"]);
 

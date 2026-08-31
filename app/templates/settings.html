@@ -1,6 +1,6 @@
 {% extends "base.html" %}
 
-{% block title %}tubeyou - next-gen Video Downloader{% endblock %}
+{% block title %}fetchly - next-gen Video Downloader{% endblock %}
 
 {% block body_class %} app-root--settings{% endblock %}
 
@@ -35,17 +35,15 @@
     </ul>
 
     <form id="settingsForm" class="settings-form-layout">
-        <div id="settingsAlert" class="alert d-none" role="alert"></div>
-
         <div class="tab-content" id="settingsTabContent">
         <section class="settings-group tab-pane fade show active" id="settingsGeneralPanel" role="tabpanel"
             aria-labelledby="settingsGeneralTab" tabindex="0">
-            <h2 class="settings-panel-title fw-semibold mb-3 d-flex align-items-center gap-1">
-                <span class="material-symbols-outlined icon-inline" aria-hidden="true">database</span>
-                Retention
-            </h2>
-            <div class="settings-grid">
-                <div class="settings-grid-item">
+            <div class="settings-grid settings-grid--cols-2">
+                <div class="settings-grid-item settings-grid-item--titled">
+                    <h2 class="settings-panel-title fw-semibold mb-3 d-flex align-items-center gap-1">
+                        <span class="material-symbols-outlined icon-inline" aria-hidden="true">database</span>
+                        Retention
+                    </h2>
                     <div class="ui-card h-100">
                         <div>
                             <div class="settings-section">
@@ -68,14 +66,11 @@
                         </div>
                     </div>
                 </div>
-            </div>
-
-            <h2 class="settings-panel-title fw-semibold mb-3 mt-4 d-flex align-items-center gap-1">
-                <span class="material-symbols-outlined icon-inline" aria-hidden="true">download</span>
-                Downloads
-            </h2>
-            <div class="settings-grid">
-                <div class="settings-grid-item">
+                <div class="settings-grid-item settings-grid-item--titled">
+                    <h2 class="settings-panel-title fw-semibold mb-3 d-flex align-items-center gap-1">
+                        <span class="material-symbols-outlined icon-inline" aria-hidden="true">download</span>
+                        Downloads
+                    </h2>
                     <div class="ui-card h-100">
                         <div>
                             <div class="settings-section">
@@ -100,6 +95,29 @@
                                         </label>
                                     </div>
                                     <small class="setting-hint">Maximises device compatibility by skipping VP9/AV1 renditions</small>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="settings-grid-item settings-grid-item--titled">
+                    <h2 class="settings-panel-title fw-semibold mb-3 d-flex align-items-center gap-1">
+                        <span class="material-symbols-outlined icon-inline" aria-hidden="true">share</span>
+                        Sharing
+                    </h2>
+                    <div class="ui-card h-100">
+                        <div>
+                            <div class="settings-section">
+                                <div class="mb-3">
+                                    <label for="shareLinkMaxUses" class="form-label">Max. uses per share link</label>
+                                    <input type="number" class="form-control ui-input" id="shareLinkMaxUses"
+                                        name="share_link_max_uses" min="0" max="10000"
+                                        value="{{ settings.share_link_max_uses | default(0) }}">
+                                    <small class="setting-hint setting-hint--with-icon">
+                                        <span class="material-symbols-outlined setting-hint-icon"
+                                            aria-hidden="true">info</span>
+                                        <span>0 means unlimited; the limit is fixed onto each link when it is created, so changing this never alters links already shared</span>
+                                    </small>
                                 </div>
                             </div>
                         </div>
@@ -154,7 +172,7 @@
                                             Limit long tracks
                                         </label>
                                     </div>
-                                    <small class="setting-hint">Block tracks longer than 10 minutes</small>
+                                    <small class="setting-hint">Block tracks longer than {{ LALAL_MAX_DURATION_MINUTES }} minutes</small>
                                 </div>
                             </div>
                         </div>
@@ -165,12 +183,32 @@
 
         <section class="settings-group tab-pane fade" id="settingsSecurityPanel" role="tabpanel"
             aria-labelledby="settingsSecurityTab" tabindex="0">
-            <h2 class="settings-panel-title fw-semibold mb-3 d-flex align-items-center gap-1">
-                <span class="material-symbols-outlined icon-inline" aria-hidden="true">password</span>
-                Change password
-            </h2>
-            <div class="settings-grid">
+            <div class="settings-grid settings-security-grid">
                 <div class="settings-grid-item">
+                    <h2 class="settings-panel-title fw-semibold mb-3 d-flex align-items-center gap-1">
+                        <span class="material-symbols-outlined icon-inline" aria-hidden="true">lock_open</span>
+                        Authentication
+                    </h2>
+                    <div class="ui-card h-100">
+                        <div>
+                            <div class="settings-section">
+                                <div class="form-check form-switch">
+                                    <input class="form-check-input" type="checkbox" role="switch"
+                                        id="enableAuthentication" name="enable_authentication"
+                                        {{ 'checked' if settings.enable_authentication | default(true) else '' }}>
+                                    <label class="form-check-label" for="enableAuthentication">
+                                        Enable Authentication
+                                    </label>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="settings-grid-item">
+                    <h2 class="settings-panel-title fw-semibold mb-3 d-flex align-items-center gap-1">
+                        <span class="material-symbols-outlined icon-inline" aria-hidden="true">password</span>
+                        Change password
+                    </h2>
                     <div class="ui-card h-100">
                         <div>
                             <div class="settings-section">
@@ -285,25 +323,37 @@
                                         </dd>
                                     </div>
                                 </dl>
-                                <small class="setting-hint setting-hint--with-icon">
-                                    <span class="material-symbols-outlined setting-hint-icon"
-                                        aria-hidden="true">info</span>
-                                    <span>Installed tool and library versions on this instance</span>
-                                </small>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="settings-grid-item">
+                    <div class="ui-card h-100">
+                        <div>
+                            <div class="settings-section settings-app-update" data-app-update
+                                data-current-version="{{ VERSION | e }}" data-app-update-state="loading">
+                                <div class="settings-app-update-head">
+                                    <img src="/static/img/fetchly_logo.svg" alt="fetchly"
+                                        class="settings-app-update-logo">
+                                    <span class="settings-version-badge font-monospace">v{{ VERSION | e }}</span>
+                                </div>
+                                <p class="settings-app-update-status">
+                                    <span class="material-symbols-outlined icon-inline settings-app-update-spin"
+                                        aria-hidden="true" data-app-update-icon>progress_activity</span>
+                                    <span data-app-update-text>Checking for updates…</span>
+                                </p>
+                                <a class="btn btn-sm btn-primary w-100 settings-app-update-link"
+                                    data-app-update-link href="#" target="_blank" rel="noopener noreferrer" hidden>
+                                    <span class="material-symbols-outlined icon-inline"
+                                        aria-hidden="true">open_in_new</span>
+                                    View release on GitHub
+                                </a>
                             </div>
                         </div>
                     </div>
                 </div>
             </div>
         </section>
-        </div>
-
-        <div class="settings-status-bar d-flex justify-content-between align-items-center">
-            <button id="settingsSaveBtn" class="btn btn-primary d-none" type="button">Save</button>
-            <span id="autoSaveIndicator" class="auto-save-indicator" role="status" aria-live="polite" aria-atomic="true">
-                <span id="autoSaveSpinner" class="spinner-border spinner-border-sm d-none" aria-hidden="true"></span>
-                <span id="autoSaveIndicatorText"></span>
-            </span>
         </div>
     </form>
 </div>
@@ -384,5 +434,5 @@
     "lalal_status": (lalal_status or "Not configured"),
     "lalal_email": (lalal_email or "")
 } | tojson }}</script>
-<script type="module" src="/static/js/settings.js?v=20260823c"></script>
+<script type="module" src="/static/js/settings.js?v=20260831a"></script>
 {% endblock %}

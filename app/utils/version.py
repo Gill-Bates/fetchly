@@ -4,7 +4,7 @@
 # Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 #
 
-"""Version and build information for tubeyou."""
+"""Version and build information for fetchly."""
 
 from __future__ import annotations
 

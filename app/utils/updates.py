@@ -37,7 +37,8 @@ logger = logging.getLogger(__name__)
 CACHE_FILENAME = "update_check.json"
 # Bumped when the cache layout changes; files written by another layout are
 # discarded rather than migrated - it is a cache, refetching costs one request.
-CACHE_SCHEMA = 2
+# 3: added the "fetchly" self-check component.
+CACHE_SCHEMA = 3
 # Successful check: do not ask GitHub again for 24 hours.
 CACHE_TTL_SECONDS = 24 * 60 * 60
 # Failed check: retry sooner, but never on every page load.
@@ -46,7 +47,7 @@ RETRY_TTL_SECONDS = 60 * 60
 # not the request as a whole - with redirects (max_redirects=3) each hop gets
 # its own budget, so one slow upstream could otherwise stretch well past
 # _REQUEST_TIMEOUT. This is the hard ceiling on the whole fetch-all round
-# (all 5 components, run concurrently), which every /api/updates request can
+# (all components, run concurrently), which every /api/updates request can
 # end up waiting on via _lock while a refresh is in flight.
 _TOTAL_FETCH_TIMEOUT = 20.0
 
@@ -54,7 +55,7 @@ _REQUEST_TIMEOUT = 6.0
 _HEADERS = {
     "Accept": "application/vnd.github+json",
     "X-GitHub-Api-Version": "2022-11-28",
-    "User-Agent": "tubeyou-update-check",
+    "User-Agent": "fetchly-update-check",
 }
 
 # Rolling release the ffmpeg build stage pulls from (see docker/Dockerfile).
@@ -83,6 +84,7 @@ class _Component:
 
 
 COMPONENTS: dict[str, _Component] = {
+    "fetchly": _Component(label="fetchly", repo="Gill-Bates/fetchly", source="releases"),
     "ytdlp": _Component(label="yt-dlp", repo="yt-dlp/yt-dlp", source="releases"),
     "ytdlp_ejs": _Component(label="yt-dlp-ejs", repo="yt-dlp/ejs", source="releases"),
     "js_runtime": _Component(label="deno", repo="denoland/deno", source="releases"),
@@ -139,7 +141,7 @@ def _is_newer(latest: str | None, current: str | None) -> bool:
 # Hard cap on pages walked per component so one release-happy repo cannot
 # blow out the total request budget in _get_latest_versions (see the
 # asyncio.timeout there). 3 pages * 50 = 150 releases, comfortably more than
-# any of the five configured repos has ever published.
+# any of the configured repos has ever published.
 _MAX_RELEASE_PAGES = 3
 
 
@@ -217,17 +219,40 @@ async def _fetch_latest_ffmpeg_build(client: httpx.AsyncClient) -> str | None:
     return f"n{best_series}" if best_series else None
 
 
-async def _fetch_component(client: httpx.AsyncClient, key: str, component: _Component) -> tuple[str, str | None]:
-    """Fetch the newest upstream version of one component; None on any failure."""
+async def _fetch_component(
+    client: httpx.AsyncClient, key: str, component: _Component
+) -> tuple[str, str | None, bool]:
+    """Fetch the newest upstream version of one component.
+
+    Returns ``(key, tag, retry)``. ``tag`` is None when no upstream version
+    could be determined. ``retry`` is True only for failures worth retrying
+    soon - a network blip, a timeout, a rate-limit response - and False when
+    the source simply had nothing to offer, most notably a 404 for a repo that
+    is still private. That distinction keeps one unresolvable component (such
+    as fetchly's own repo before it is published) from dragging the whole
+    batch onto the short RETRY_TTL_SECONDS cadence.
+    """
     try:
         if component.source == "ffmpeg-builds":
             tag = await _fetch_latest_ffmpeg_build(client)
         else:
             tag = await _fetch_latest_release(client, component.repo)
+    except httpx.HTTPStatusError as exc:
+        # 404 -> the repo/asset is not reachable (private, renamed, removed);
+        # retrying in an hour will not change that. Anything else (403 rate
+        # limit, 5xx) is transient and does warrant a sooner retry.
+        retry = exc.response.status_code != 404
+        logger.log(
+            logging.WARNING if retry else logging.INFO,
+            "Update check for %s failed: %s",
+            component.repo,
+            exc,
+        )
+        return key, None, retry
     except (httpx.HTTPError, ValueError) as exc:
         logger.warning("Update check for %s failed: %s", component.repo, exc)
-        return key, None
-    return key, tag
+        return key, None, True
+    return key, tag, False
 
 
 async def _fetch_all(
@@ -235,9 +260,12 @@ async def _fetch_all(
 ) -> tuple[dict[str, dict[str, Any]], bool]:
     """Query every upstream source once. Returns (versions, all_succeeded).
 
-    A component that fails keeps its previously known version - with its own
-    older ``checked_at``, so the result stays honest about what was actually
-    confirmed just now. Entries for components that no longer exist are
+    A component that hits a transient failure keeps its previously known
+    version - with its own older ``checked_at``, so the result stays honest
+    about what was actually confirmed just now - and marks the round
+    incomplete so it is retried sooner. A component whose source resolved with
+    nothing to compare against (a 404) has any stale entry dropped and does
+    not hold back the round. Entries for components that no longer exist are
     dropped instead of lingering in the cache file forever.
     """
     async with httpx.AsyncClient(
@@ -252,13 +280,17 @@ async def _fetch_all(
 
     versions = {key: entry for key, entry in previous.items() if key in COMPONENTS}
     complete = True
-    for key, tag in results:
+    for key, tag, retry in results:
         if tag:
             # Stamped with the attempt's own timestamp, so a component that
             # answered is not accidentally older than the attempt itself.
             versions[key] = {"version": tag, "checked_at": attempted_at}
-        else:
+        elif retry:
             complete = False
+        else:
+            # Source resolved with nothing to offer (e.g. a still-private
+            # repo). Drop any stale entry and let the normal 24h TTL apply.
+            versions.pop(key, None)
     return versions, complete
 
 

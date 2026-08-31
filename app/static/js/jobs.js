@@ -19,7 +19,7 @@ import {
     createActionButton,
     createPrimaryActionButton,
     resolveJobAction,
-} from "./ui.js?v=20260823c";
+} from "./ui.js?v=20260825a";
 import { detectPlatform, humanSize, platformPillLabel } from "./utils.js";
 
 const MOBILE_BREAKPOINT = "(max-width: 1024px)";
@@ -354,8 +354,14 @@ function createPlatformPill(job) {
 
     const pill = document.createElement("span");
     pill.className = `platform-pill platform-pill--${platform}`;
-    pill.textContent = label;
     pill.title = label;
+    pill.setAttribute("role", "img");
+    pill.setAttribute("aria-label", label);
+
+    const icon = document.createElement("span");
+    icon.className = `platform-pill__icon platform-pill__icon--${platform}`;
+    icon.setAttribute("aria-hidden", "true");
+    pill.appendChild(icon);
     return pill;
 }
 
@@ -378,7 +384,11 @@ function renderDesktopTitle(job) {
     td.dataset.label = "Title";
     td.className = "job-title-cell job-title-cell--wide col-title job-title-popover-target";
     td.dataset.popoverText = job?.video_meta_hover || job?.url || "";
-    td.append(renderJobTitle(job));
+
+    const content = document.createElement("div");
+    content.className = "job-title-cell__content";
+    content.append(renderJobTitle(job));
+    td.append(content);
     return td;
 }
 
@@ -388,7 +398,12 @@ function formatDesktopMediaPrimary(job) {
 }
 
 function formatDesktopMediaSecondary(job) {
-    const parts = [job?.codec || "", formatBpmCompact(job?.bpm), formatBitrateText(job?.bitrate_kbps)]
+    const parts = [
+        job?.codec || "",
+        formatBpmCompact(job?.bpm),
+        formatBitrateText(job?.bitrate_kbps),
+        humanSize(job?.filesize_bytes),
+    ]
         .filter((part) => part && part !== EMPTY_VALUE);
     return parts.join(" · ") || "Live job metadata updates here";
 }
@@ -539,6 +554,7 @@ function buildCreatedCell(isoOrFormatted) {
 function buildDesktopEmptyState(message, id = "emptyRow") {
     const row = document.createElement("tr");
     row.id = id;
+    row.className = "row-empty";
 
     const td = document.createElement("td");
     td.colSpan = getJobsTableColumnCount();
@@ -584,7 +600,7 @@ function buildDesktopJob(job) {
     tr.append(
         renderDesktopTitle(job),
         ...renderDesktopMeta(job),
-        renderJobStatus(job),
+        renderJobStatus(job, { showSize: false }),
         buildCreatedCell(job?.created_at),
         renderJobActions(job),
     );
@@ -608,14 +624,21 @@ function buildMobileJob(job) {
 
     const titleRow = document.createElement("div");
     titleRow.className = "job-item__title-row";
-    titleRow.append(titleWrap, renderJobStatus(job, { mobile: true, showSize: false }));
+    titleRow.append(titleWrap);
+
+    const timeRow = document.createElement("div");
+    timeRow.className = "job-item__time-row";
+    timeRow.append(
+        renderMobileTime(job),
+        renderJobStatus(job, { mobile: true, showSize: false }),
+    );
 
     body.dataset.action = "open-detail";
     body.dataset.jobId = getJobId(job);
     body.setAttribute("role", "button");
     body.setAttribute("tabindex", "0");
     body.setAttribute("aria-label", `View details for ${getTitleText(job) || "this job"}`);
-    body.append(titleRow, renderMobileMeta(job), renderMobileTime(job), renderMobileDetails(job));
+    body.append(titleRow, renderMobileMeta(job), timeRow, renderMobileDetails(job));
 
     const actionWrap = document.createElement("div");
     actionWrap.className = "job-item__primary-action";
@@ -654,7 +677,7 @@ function patchDesktopJobNode(row, job) {
 
     const statusCell = row.querySelector('[data-role="job-status"]');
     if (statusCell instanceof HTMLTableCellElement) {
-        statusCell.replaceWith(renderJobStatus(job));
+        statusCell.replaceWith(renderJobStatus(job, { showSize: false }));
     }
 
     const createdCell = row.querySelector('[data-role="job-created"]');

@@ -21,9 +21,10 @@ from typing import Any, Final
 from urllib.parse import parse_qs, urlparse
 
 from .analysis_worker import SubmitResult, submit_analysis
-from .db import get_settings, update_job, update_job_if_status
+from .db import get_settings, update_job, update_job_if_status, utc_timestamp
 from .governor import governor
-from .utils.platform import detect_platform
+from .utils.cookies import default_cookie_file, find_cookie_file
+from .utils.platform import PLATFORM_COOKIE_FILENAMES, detect_platform
 from .utils.fs import AUDIO_SOURCE_EXTENSIONS, get_data_dir
 from .utils.youtube import normalize_info_url
 
@@ -33,13 +34,6 @@ type Job = tuple[str, str, str, str]
 type StatusPayload = dict[str, Any]
 type StatusCallback = Callable[[StatusPayload], None]
 
-_COOKIES_DIR: Final = Path(__file__).parent.parent
-_COOKIES_DATA_DIR: Final = get_data_dir()
-_PLATFORM_COOKIE_FILENAMES: Final[dict[str, str]] = {
-    "youtube": "youtube_cookies.txt",
-    "instagram": "instagram_cookies.txt",
-    "tiktok": "tiktok_cookies.txt",
-}
 _BASE_DIR: Path | None = None
 _base_dir_lock = threading.Lock()
 
@@ -54,32 +48,21 @@ def _get_base_dir() -> Path:
         return _BASE_DIR
 
 
-def _cookie_search_dirs() -> list[Path]:
-    dirs: list[Path] = []
-    custom_dir = os.environ.get("TUBEYOU_COOKIES_DIR", "").strip()
-    if custom_dir:
-        dirs.append(Path(custom_dir))
-    dirs.append(_COOKIES_DIR)
-    dirs.append(_COOKIES_DATA_DIR)
-    return dirs
-
-
 def _resolve_cookie_file(platform: str) -> Path:
-    filename = _PLATFORM_COOKIE_FILENAMES.get(platform, "")
+    filename = PLATFORM_COOKIE_FILENAMES.get(platform, "")
     if not filename:
         return Path("")
 
-    for directory in _cookie_search_dirs():
-        candidate = directory / filename
-        if candidate.is_file():
-            try:
-                if candidate.stat().st_mode & 0o077:
-                    logger.warning("Cookie file %s is group/world accessible", candidate)
-            except OSError:
-                logger.warning("Could not inspect permissions for cookie file %s", candidate)
-            return candidate
+    cookie_path = find_cookie_file(filename)
+    if cookie_path is None:
+        return default_cookie_file(filename)
 
-    return _COOKIES_DIR / filename
+    try:
+        if cookie_path.stat().st_mode & 0o077:
+            logger.warning("Cookie file %s is group/world accessible", cookie_path)
+    except OSError:
+        logger.warning("Could not inspect permissions for cookie file %s", cookie_path)
+    return cookie_path
 
 
 def _cookies_args_for_url(url: str) -> list[str]:
@@ -192,13 +175,13 @@ def _user_facing_error(url: str, exc: Exception) -> str:
 
     if any(p in raw_lower for p in _LOGIN_REQUIRED_PATTERNS):
         platform = detect_platform(url)
-        cookie_file = _PLATFORM_COOKIE_FILENAMES.get(platform or "", "")
+        cookie_file = PLATFORM_COOKIE_FILENAMES.get(platform or "", "")
         cookie_path = _resolve_cookie_file(platform or "") if platform else Path("")
         if platform and cookie_file and not cookie_path.is_file():
             return (
                 f"{platform.capitalize()} requires authentication. "
                 f"Place a Netscape-format cookie file at "
-                f"data/{cookie_file} or set TUBEYOU_COOKIES_DIR."
+                f"data/{cookie_file} or set FETCHLY_COOKIES_DIR."
             )
         return f"Platform requires authentication: {raw[:200]}"
 
@@ -206,6 +189,7 @@ def _user_facing_error(url: str, exc: Exception) -> str:
 
 
 def _now_iso() -> str:
+    """Timestamp for status-event payloads (informational; not persisted)."""
     return datetime.now(UTC).isoformat()
 
 
@@ -1065,7 +1049,7 @@ def process_job(job: Job) -> None:
             status,
             message,
             filename=str(out_path),
-            finished_at=_now_iso(),
+            finished_at=utc_timestamp(),
             filesize_bytes=filesize_bytes,
             codec=codec,
             bitrate_kbps=bitrate_kbps,
@@ -1075,7 +1059,7 @@ def process_job(job: Job) -> None:
 
     except JobCancelledError:
         logger.info("Job %s was cancelled", job_id)
-        _transition(job_id, "cancelled", "Job was cancelled by user", finished_at=_now_iso())
+        _transition(job_id, "cancelled", "Job was cancelled by user", finished_at=utc_timestamp())
     except ShutdownError:
         # Graceful shutdown - keep the job queued for the next startup.
         logger.info("Job %s interrupted by shutdown", job_id)
@@ -1084,7 +1068,7 @@ def process_job(job: Job) -> None:
     except Exception as exc:
         err_msg = _user_facing_error(url, exc)
         logger.exception("Job %s failed", job_id)
-        _transition_if_processing(job_id, "error", err_msg, finished_at=_now_iso())
+        _transition_if_processing(job_id, "error", err_msg, finished_at=utc_timestamp())
     finally:
         with _cancel_lock:
             _cancelled_jobs.discard(job_id)
@@ -1110,7 +1094,7 @@ def worker() -> None:
                 return
 
             if is_job_cancelled(job_id):
-                _transition(job_id, "cancelled", "Job was cancelled by user", finished_at=_now_iso())
+                _transition(job_id, "cancelled", "Job was cancelled by user", finished_at=utc_timestamp())
                 continue
             if not update_job_if_status(job_id, ("queued",), status="processing"):
                 logger.info("Skipping job %s because its state changed before worker pickup", job_id)
@@ -1123,7 +1107,7 @@ def worker() -> None:
         except Exception:
             logger.exception("Unhandled worker error for job %s", job_id)
             try:
-                _transition(job_id, "error", "Internal worker error", finished_at=_now_iso())
+                _transition(job_id, "error", "Internal worker error", finished_at=utc_timestamp())
             except Exception:
                 logger.exception("Failed to persist internal error state for job %s", job_id)
         finally:
@@ -1161,7 +1145,7 @@ def start_workers(n: int | None = None) -> None:
         logger.info("Started %d worker threads (effective CPUs: %.2f)", n, governor.effective_cpus)
 
         # Log cookie file availability at startup for operational visibility.
-        for platform, filename in _PLATFORM_COOKIE_FILENAMES.items():
+        for platform, filename in PLATFORM_COOKIE_FILENAMES.items():
             resolved = _resolve_cookie_file(platform)
             if resolved.is_file():
                 logger.info("Cookie file for %s: %s", platform, resolved)

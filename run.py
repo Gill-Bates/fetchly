@@ -9,12 +9,14 @@ import os
 import re
 import sys
 from copy import copy
+from pathlib import Path
 from typing import TextIO
 
 import uvicorn
 
 from app.utils.banner import print_banner_once
 from app.common.rate_limit import validate_trusted_proxy_hosts
+from app.utils.fs import get_data_dir
 
 _VALID_LOG_LEVELS = frozenset(logging.getLevelNamesMapping())
 
@@ -25,7 +27,7 @@ class RedactingFormatter(logging.Formatter):
     SENSITIVE_PATTERNS = (
         (
             re.compile(
-                r"(?P<key>\b(?:auth_token|tubeyou_csrf|tubeyou_session|session|token)\b=)(?P<value>[^&;\s]+)",
+                r"(?P<key>\b(?:auth_token|fetchly_csrf|fetchly_session|session|token)\b=)(?P<value>[^&;\s]+)",
                 re.IGNORECASE,
             ),
             r"\g<key>***REDACTED***",
@@ -50,6 +52,15 @@ def _env_str(name: str, default: str) -> str:
     raw = os.environ.get(name, default)
     values = [part.strip() for part in raw.split(",") if part.strip()]
     return ",".join(values) if values else default
+
+
+def _env_paths(name: str, default: list[str]) -> list[str]:
+    """Read a comma-separated list of filesystem paths from the environment."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    values = [part.strip() for part in raw.split(",") if part.strip()]
+    return values if values else default
 
 
 def _env_int(name: str, default: int) -> int:
@@ -177,6 +188,25 @@ def main() -> None:
 
     log_level = _env_log_level("LOG_LEVEL", "INFO")
     reload_enabled = _env_truthy(os.environ.get("UVICORN_RELOAD"))
+    reload_excludes = None
+    reload_dirs = None
+    if reload_enabled:
+        reload_excludes = _env_paths(
+            "UVICORN_RELOAD_EXCLUDES",
+            [str(get_data_dir()), str(Path(__file__).resolve().parent / ".git")],
+        )
+        # uvicorn/watchfiles watches Path.cwd() when reload_dirs is unset, and
+        # reload_excludes can only drop a watched dir that equals or contains
+        # an excluded path - it cannot carve a subdirectory (like data/) back
+        # out of a single top-level watch. Watching only the source dirs keeps
+        # data/ and .git/ off the raw watcher instead of merely off the
+        # post-filter, which is what actually stops the DEBUG log noise from
+        # every job DB write.
+        app_root = Path(__file__).resolve().parent
+        reload_dirs = _env_paths(
+            "UVICORN_RELOAD_DIRS",
+            [str(app_root / "app"), str(app_root / "middleware")],
+        )
     use_colors = _should_use_colors(sys.stdout)
     host = os.environ.get("HOST", "0.0.0.0")
     port = _env_int("PORT", 8000)
@@ -192,6 +222,8 @@ def main() -> None:
         host=host,
         port=port,
         reload=reload_enabled,
+        reload_dirs=reload_dirs,
+        reload_excludes=reload_excludes,
         # The application installs the single validated proxy-header middleware
         # itself. Keeping Uvicorn's duplicate middleware disabled preserves the
         # actual socket peer for the rate-limit trust decision.

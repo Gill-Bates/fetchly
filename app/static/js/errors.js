@@ -11,7 +11,7 @@ export function reportError(error, context = {}) {
         timestamp: new Date().toISOString(),
     };
 
-    console.error("[tubeyou]", payload);
+    console.error("[fetchly]", payload);
 }
 
 export function reportWarning(message, context = {}) {
@@ -21,5 +21,5 @@ export function reportWarning(message, context = {}) {
         timestamp: new Date().toISOString(),
     };
 
-    console.warn("[tubeyou]", payload);
+    console.warn("[fetchly]", payload);
 }

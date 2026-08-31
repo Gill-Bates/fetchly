@@ -32,6 +32,12 @@ readonly PORT="${PORT:-${UVICORN_PORT:-8000}}"
 # and is unaffected.
 readonly WORKERS="${WORKERS:-${UVICORN_WORKERS:-1}}"
 readonly TIMEOUT="${TIMEOUT:-60}"
+# Upper bound on graceful shutdown: how long Gunicorn waits for the worker to
+# finish its FastAPI lifespan shutdown (stop workers, WAL checkpoint / close the
+# SQLite DB - see app/main.py, app/db.py) before it SIGKILLs. Must stay below
+# the orchestrator's kill grace period (docker-compose stop_grace_period: 20s)
+# so the checkpoint actually completes on `docker restart` / `docker stop`.
+readonly GRACEFUL_TIMEOUT="${GRACEFUL_TIMEOUT:-15}"
 readonly LOG_LEVEL="$(printf '%s' "${LOG_LEVEL:-info}" | tr '[:upper:]' '[:lower:]')"
 # Loopback only, matching Gunicorn's own default. A wider default would let any
 # workload that can reach this container forge X-Forwarded-For and thereby
@@ -102,6 +108,7 @@ validate_config() {
     (( PORT <= 65535 )) || fail "PORT must be between 1 and 65535, got: ${PORT}"
 
     validate_positive_int "TIMEOUT" "${TIMEOUT}"
+    validate_positive_int "GRACEFUL_TIMEOUT" "${GRACEFUL_TIMEOUT}"
     validate_positive_int "WORKERS" "${WORKERS}"
 
     # See the WORKERS comment above: any other value is an incorrect operating
@@ -227,6 +234,7 @@ exec gunicorn app.main:app \
     --worker-class uvicorn_worker.UvicornWorker \
     --log-level "${LOG_LEVEL}" \
     --timeout "${TIMEOUT}" \
+    --graceful-timeout "${GRACEFUL_TIMEOUT}" \
     --access-logfile - \
     --access-logformat "${ACCESS_LOG_FORMAT}" \
     --error-logfile -

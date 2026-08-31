@@ -1,0 +1,12 @@
+# .trivyignore
+#
+# CVEs accepted for the published fetchly image, consumed by the Trivy scan in
+# .github/workflows/docker-build.yml. The scan already passes --ignore-unfixed,
+# so anything listed here is a finding that HAS a fix available and is being
+# accepted anyway - record why, and revisit it on the next release.
+#
+# Format: one vulnerability id per line, with the reason in a comment above it.
+#
+#   # torch pulls this transitively; not reachable from any code path fetchly
+#   # executes, upstream fix expected in <version>.
+#   CVE-0000-00000

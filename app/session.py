@@ -26,7 +26,7 @@ from .db import get_settings
 # --------------------------------------------------------------------------- #
 # Configuration
 # --------------------------------------------------------------------------- #
-SESSION_COOKIE: Final = "tubeyou_session"
+SESSION_COOKIE: Final = "fetchly_session"
 
 # Hard session limit: 24 hours from login (non-configurable)
 SESSION_HARD_LIMIT_SECONDS: Final = 24 * 60 * 60
@@ -34,11 +34,11 @@ SESSION_HARD_LIMIT_SECONDS: Final = 24 * 60 * 60
 # Fixed sliding idle timeout (non-configurable)
 _DEFAULT_IDLE_MINUTES: Final = 60
 
-_SECRET_KEY = os.environ.get("TUBEYOU_SECRET_KEY", "")
+_SECRET_KEY = os.environ.get("FETCHLY_SECRET_KEY", "")
 if not _SECRET_KEY:
-    raise RuntimeError("TUBEYOU_SECRET_KEY is not set. Cannot start with an empty session signing key.")
+    raise RuntimeError("FETCHLY_SECRET_KEY is not set. Cannot start with an empty session signing key.")
 _SECRET_KEY_BYTES = _SECRET_KEY.encode("utf-8")
-_COOKIE_SECURE_ENV: Final = "TUBEYOU_BEHIND_HTTPS"
+_COOKIE_SECURE_ENV: Final = "FETCHLY_BEHIND_HTTPS"
 _SESSION_SETTINGS_DEFAULTS: Final[dict[str, Any]] = {
     "session_version": 0,
     "session_idle_minutes": _DEFAULT_IDLE_MINUTES,

@@ -4,7 +4,7 @@
 # Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 #
 
-"""Jinja2 template filters and template-safe helpers for TubeYou."""
+"""Jinja2 template filters and template-safe helpers for Fetchly."""
 
 from __future__ import annotations
 
@@ -86,9 +86,11 @@ _FILESIZE_UNITS: tuple[tuple[str, int], ...] = (
 _PUBLIC_SETTING_KEYS: frozenset[str] = frozenset({
     "retention_days",
     "login_required",
+    "enable_authentication",
     "session_idle_minutes",
     "download_concurrent_fragments",
     "download_mp4_preset",
+    "share_link_max_uses",
     "lalalaai_email",
     "lalalaai_auth_checked_at",
     "lalalaai_auth_is_valid",
