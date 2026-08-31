@@ -994,7 +994,9 @@ def _probe_media(
         if duration_raw is not None:
             # Rounded, not truncated: a 213.4 s track stored as 213 made the
             # trim guard reject a legitimate full-length selection.
-            duration_seconds = max(1.0, round_seconds(float(duration_raw)) or 1.0)
+            rounded = round_seconds(float(duration_raw))
+            if rounded is not None:
+                duration_seconds = max(1.0, rounded)
     except (TypeError, ValueError):
         duration_seconds = None
 
