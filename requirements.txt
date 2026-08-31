@@ -7,10 +7,6 @@ fastapi==0.141.1
 gunicorn==26.2.0
 httpx==0.28.1
 jinja2==3.1.6
-# Transitive via librosa (msgpack>=1.0.5, no upper bound), which resolved to
-# 1.1.2 and failed the release scan on GHSA-6v7p-g79w-8964. Floor it here
-# rather than waiting for librosa to raise its own.
-msgpack>=1.2.1
 python-multipart==0.0.32
 slowapi==0.1.10
 torch==2.13.0

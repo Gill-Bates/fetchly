@@ -189,6 +189,20 @@ RUN set -euo pipefail; \
 # upstream reorder or reword of that block cannot silently un-fix this; the
 # shell simply takes the last assignment. Revisit if build_config.sh ever
 # bumps FFTW past 3.3.5, where --enable-neon does cover aarch64.
+#
+# CONFIG_SITE covers the second aarch64 blocker in that same chain. Several of
+# the pinned 3rdparty tarballs are old enough to ship a config.guess that
+# predates aarch64 - libsamplerate 0.1.9 carries one stamped 2009-04-27 - so
+# their configure aborts with "cannot guess build type; you must specify one"
+# on a machine whose uname -m is aarch64. Presetting the ac_cv_build and
+# ac_cv_host cache variables makes AC_CANONICAL_BUILD skip config.guess and
+# config.sub entirely, which fixes every autotools package in the chain at
+# once rather than one --build flag per build_*.sh.
+#
+# Only autoconf reads CONFIG_SITE, which is exactly the wanted blast radius:
+# ffmpeg's hand-written configure and the cmake-based builds (eigen, taglib,
+# chromaprint) ignore the file, so the two that already configure correctly
+# here are not touched.
 FROM ${PYTHON_BASE} AS essentia
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
@@ -226,6 +240,9 @@ RUN set -euo pipefail; \
     git checkout --detach "${ESSENTIA_REF}"; \
     echo "essentia source: $(git describe --always --tags)"; \
     printf '\n%s\n' 'FFTW_FLAGS="--enable-float"' >> packaging/build_config.sh; \
+    printf 'ac_cv_build=aarch64-unknown-linux-gnu\nac_cv_host=aarch64-unknown-linux-gnu\n' \
+        > /tmp/config.site; \
+    export CONFIG_SITE=/tmp/config.site; \
     export MAKEFLAGS="-j$(nproc)"; \
     pip wheel --no-cache-dir --no-deps -w /wheels .; \
     rm -f /tmp/essentia-ref.atom; \
@@ -271,16 +288,9 @@ COPY --from=essentia /wheels /tmp/essentia-wheels
 # it and pip never goes looking for the linux/aarch64 wheel upstream does not
 # publish. On amd64 the glob matches nothing and pip resolves essentia from
 # PyPI exactly as before.
-#
-# setuptools is upgraded explicitly, before and after the requirements install.
-# `pip install --upgrade pip` covers pip alone, and setuptools reaches the venv
-# only as somebody else's transitive dependency - which resolved to 70.3.0 and
-# tripped the release scan on CVE-2025-47273. The second call is not redundant:
-# a requirement is free to pull an older setuptools back in, and only the final
-# state of the venv is what gets copied into the runtime image and scanned.
 RUN set -euo pipefail; \
     python -m venv "$VIRTUAL_ENV"; \
-    pip install --upgrade pip 'setuptools>=78.1.1'; \
+    pip install --upgrade pip; \
     shopt -s nullglob; \
     essentia_wheels=(/tmp/essentia-wheels/essentia-*.whl); \
     if (( ${#essentia_wheels[@]} > 0 )); then \
@@ -288,7 +298,6 @@ RUN set -euo pipefail; \
         pip install --no-cache-dir "${essentia_wheels[@]}"; \
     fi; \
     pip install --no-cache-dir -r requirements.txt; \
-    pip install --no-cache-dir --upgrade 'setuptools>=78.1.1'; \
     rm -rf /tmp/essentia-wheels
 
 # yt-dlp from PyPI, never the distro package: the app both shells out to the
