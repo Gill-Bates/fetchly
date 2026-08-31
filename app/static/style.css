@@ -3444,41 +3444,99 @@ td:last-child {
     cursor: default;
 }
 
-#trimWave.has-selection::part(regions-container) {
+#trimWave ::part(regions-container) {
     background: transparent;
 }
 
-#trimWave::part(region) {
-    background: rgba(99, 102, 241, 0.55) !important;
+#trimWave ::part(region) {
+    background: transparent !important;
+    box-shadow: none;
+    pointer-events: none !important;
+}
+
+.trim-selection {
+    position: absolute;
+    z-index: 11;
+    top: 0;
+    bottom: 0;
+    display: none;
+    min-width: 2px;
+    border-top: 1px solid rgba(199, 210, 254, 0.9);
+    border-bottom: 1px solid rgba(199, 210, 254, 0.9);
+    background:
+        linear-gradient(180deg, rgba(129, 140, 248, 0.38), rgba(79, 70, 229, 0.24));
     box-shadow:
-        inset 2px 0 0 #c7d2fe,
-        inset -2px 0 0 #c7d2fe,
-        0 0 0 1px rgba(99, 102, 241, 0.25);
+        inset 0 1px 0 rgba(255, 255, 255, 0.2),
+        inset 0 -1px 0 rgba(255, 255, 255, 0.08),
+        0 0 18px rgba(99, 102, 241, 0.18);
+    cursor: grab;
+    pointer-events: auto;
+    touch-action: none;
 }
 
-#trimWave::part(region):hover {
-    background: rgba(99, 102, 241, 0.6) !important;
+.trim-selection.is-visible {
+    display: block;
 }
 
-#trimWave::part(region-handle-left),
-#trimWave::part(region-handle-right) {
-    width: 8px !important;
-    min-width: 8px !important;
-    background: rgba(255, 255, 255, 0.9) !important;
+.trim-selection.is-dragging {
+    cursor: grabbing;
 }
 
-#trimWave::part(region-handle-left) {
-    border-left-color: #c7d2fe !important;
+.trim-selection-handle {
+    position: absolute;
+    z-index: 12;
+    top: -1px;
+    bottom: -1px;
+    width: 32px;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background:
+        linear-gradient(#eef2ff, #eef2ff) center / 3px 100% no-repeat,
+        linear-gradient(180deg, #818cf8, #4f46e5) center / 14px 34px no-repeat;
+    color: #eef2ff;
+    cursor: ew-resize;
+    filter: drop-shadow(0 0 5px rgba(99, 102, 241, 0.85));
+    pointer-events: auto;
+    touch-action: none;
+    -webkit-tap-highlight-color: transparent;
 }
 
-#trimWave::part(region-handle-right) {
-    border-right-color: #c7d2fe !important;
+.trim-selection-handle--start {
+    left: 0;
+    transform: translateX(-50%);
 }
 
-#trimWave::part(cursor) {
+.trim-selection-handle--end {
+    right: 0;
+    transform: translateX(50%);
+}
+
+.trim-selection-handle:hover,
+.trim-selection-handle:focus-visible,
+.trim-selection.is-dragging .trim-selection-handle {
+    background:
+        linear-gradient(#ffffff, #ffffff) center / 3px 100% no-repeat,
+        linear-gradient(180deg, #a5b4fc, #6366f1) center / 14px 38px no-repeat;
+    filter: drop-shadow(0 0 7px rgba(129, 140, 248, 1));
+}
+
+.trim-selection-handle:focus-visible {
+    outline: 2px solid #ffffff;
+    outline-offset: -3px;
+}
+
+#trimWave ::part(cursor) {
     background: #f59e0b !important;
     width: 2px !important;
     opacity: 0.9;
+}
+
+@media (pointer: coarse) {
+    .trim-selection-handle {
+        width: 44px;
+    }
 }
 
 .beat-grid {
@@ -3505,7 +3563,7 @@ td:last-child {
     position: absolute;
     top: 0;
     bottom: 0;
-    background: rgba(0, 0, 0, 0.45);
+    background: rgba(2, 6, 23, 0.62);
     pointer-events: none;
     z-index: 10;
     opacity: 0;

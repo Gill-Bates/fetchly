@@ -10,7 +10,7 @@ import { createTimeoutSignal, getCsrfToken, humanSize, isValidMediaUrl, detectPl
 import { prependJob, loadMore, applyJobUpdate, getJobById, applyStoredJobTitleFilter, formatCreatedText } from "./jobs.js?v=20260831a";
 import { EVENT_NAMES, dispatchJobUpdate, setEventStreamEnabled } from "./events.js?v=20260831a";
 import { showToast } from "./toast.js";
-import { initTrim } from "./trim.js";
+import { initTrim } from "./trim.js?v=20260831a";
 
 const submitForm = document.getElementById("submitForm");
 const urlInput = document.getElementById("urlInput");
@@ -202,9 +202,12 @@ function renderStatParts(statKey, value) {
                 : { value: rendered, unit: "" };
         }
         case "total_jobs":
-        case "total_minutes":
-        case "total_lalal_minutes":
             return { value: String(Math.max(0, Math.trunc(Number(value) || 0))), unit: "" };
+        case "total_minutes":
+        case "total_lalal_minutes": {
+            const rounded = Math.round(Math.max(0, Number(value) || 0) * 10) / 10;
+            return { value: String(rounded), unit: "" };
+        }
         default:
             return { value: String(value ?? 0), unit: "" };
     }

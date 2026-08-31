@@ -22,12 +22,12 @@
 ---
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/Gill-Bates/fetchly/main/.github/img/screen_2.jpeg" alt="fetchly dashboard: link input, video preview, format picker, and recent downloads" width="800"><br>
+  <img src="https://raw.githubusercontent.com/Gill-Bates/fetchly/main/.github/img/screen_1.jpeg" alt="fetchly dashboard: link input, video preview, format picker, and recent downloads" width="800"><br>
   <em>Dashboard — paste a link, preview the media, pick a format, and track every job live.</em>
 </p>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/Gill-Bates/fetchly/main/.github/img/screen_1.jpeg" alt="fetchly login screen" width="800"><br>
+  <img src="https://raw.githubusercontent.com/Gill-Bates/fetchly/main/.github/img/screen_2.jpeg" alt="fetchly login screen" width="800"><br>
   <em>Authenticated login with invisible, server-verified anti-bot protection.</em>
 </p>
 

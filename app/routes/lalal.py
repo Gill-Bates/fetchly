@@ -53,6 +53,17 @@ _EMAIL_RE = re.compile(r"^[^@]+@[^@]+\.[^@]+$")
 # stems are encoded to MP3 afterwards.
 _UPLOAD_READY_SUFFIXES: frozenset[str] = frozenset({".wav", ".flac"})
 _FFMPEG_TIMEOUT_SECONDS = 900
+_FFMPEG_STDERR_TAIL_BYTES = 4096
+_LALAL_MAX_CONCURRENT_PROCESSES = 2
+_LALAL_CAPACITY_WAIT_SECONDS = 1.0
+
+
+async def _read_stderr_tail(stream: asyncio.StreamReader, tail: bytearray) -> None:
+    """Consume stderr without retaining unbounded ffmpeg output in memory."""
+    while chunk := await stream.read(8192):
+        tail.extend(chunk)
+        if len(tail) > _FFMPEG_STDERR_TAIL_BYTES:
+            del tail[:-_FFMPEG_STDERR_TAIL_BYTES]
 
 
 async def _run_ffmpeg(cmd: list[str], *, description: str) -> None:
@@ -62,22 +73,29 @@ async def _run_ffmpeg(cmd: list[str], *, description: str) -> None:
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.PIPE,
     )
+    assert proc.stderr is not None
+    stderr_tail = bytearray()
+    stderr_reader = asyncio.create_task(_read_stderr_tail(proc.stderr, stderr_tail))
     try:
-        _, stderr = await asyncio.wait_for(
-            proc.communicate(), timeout=_FFMPEG_TIMEOUT_SECONDS
-        )
+        await asyncio.wait_for(proc.wait(), timeout=_FFMPEG_TIMEOUT_SECONDS)
+        await stderr_reader
     except TimeoutError:
         await stop_ffmpeg_process(proc)
+        with suppress(Exception):
+            await stderr_reader
         raise RuntimeError(f"{description} timed out") from None
     except BaseException:
         # BaseException, not Exception: the caller wraps this in an
         # asyncio.timeout well below _FFMPEG_TIMEOUT_SECONDS, so the realistic
         # exit is a CancelledError - which would otherwise leave ffmpeg running
         # past the request that started it.
-        await stop_ffmpeg_process(proc)
+        await asyncio.shield(stop_ffmpeg_process(proc))
+        stderr_reader.cancel()
+        with suppress(asyncio.CancelledError):
+            await stderr_reader
         raise
     if proc.returncode != 0:
-        detail = (stderr or b"").decode("utf-8", "replace").strip()[-400:]
+        detail = stderr_tail.decode("utf-8", "replace").strip()[-400:]
         raise RuntimeError(f"{description} failed: {detail}")
 
 
@@ -116,12 +134,16 @@ async def _decode_for_upload(
 
 
 async def _finalize_stem(source: Path, target: Path) -> None:
-    """Move or transcode a returned stem to its final MP3 path."""
+    """Atomically publish a returned stem at its final MP3 path."""
     if source == target:
         return
     if source.suffix.lower() == ".mp3":
+        # Lalal writes source files into output_dir, so this is a same-filesystem
+        # rename. The ready-file check can therefore never observe a partial MP3.
         await asyncio.to_thread(source.replace, target)
         return
+    # transcode_to_mp3() writes a unique temporary file and atomically replaces
+    # target only after ffmpeg exits successfully.
     await transcode_to_mp3(source, target)
     await asyncio.to_thread(source.unlink, True)
 
@@ -134,6 +156,7 @@ _LALAL_PROCESS_TIMEOUT_SECONDS = 600
 # Module-level state
 _DATA_DIR: Path | None = None
 _queue_event: Callable[[dict[str, Any]], None] | None = None
+_processing_capacity: asyncio.Semaphore | None = None
 
 
 def init_lalal(
@@ -141,9 +164,10 @@ def init_lalal(
     queue_event_func: Callable[[dict[str, Any]], None],
 ) -> None:
     """Initialize the LALAL module with required dependencies."""
-    global _DATA_DIR, _queue_event
+    global _DATA_DIR, _queue_event, _processing_capacity
     _DATA_DIR = data_dir
     _queue_event = queue_event_func
+    _processing_capacity = asyncio.Semaphore(_LALAL_MAX_CONCURRENT_PROCESSES)
 
 
 
@@ -253,6 +277,28 @@ async def _processing_attempt(lock_file: Path, *outputs: Path) -> AsyncIterator[
         except BaseException:
             await _remove_split_outputs(*outputs)
             raise
+
+
+@asynccontextmanager
+async def _processing_capacity_slot() -> AsyncIterator[None]:
+    """Reserve bounded per-process capacity for an expensive Lalal split."""
+    if _processing_capacity is None:
+        raise RuntimeError("Lalal routes are not initialized")
+
+    try:
+        async with asyncio.timeout(_LALAL_CAPACITY_WAIT_SECONDS):
+            await _processing_capacity.acquire()
+    except TimeoutError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Lalal.ai processing capacity exhausted",
+            headers={"Retry-After": "5"},
+        ) from exc
+
+    try:
+        yield
+    finally:
+        _processing_capacity.release()
 
 
 async def _get_cached_split_response(
@@ -693,42 +739,43 @@ async def lalal_split(
             if cached_response is not None:
                 return cached_response
 
-            async with client:
-                async with asyncio.timeout(_LALAL_PROCESS_TIMEOUT_SECONDS):
-                    upload_path, temp_upload = await _decode_for_upload(
-                        file_path, output_dir, base_name
-                    )
-                    try:
-                        results = await client.process_file(
-                            upload_path,
-                            output_dir,
-                            stem=stem_type,
-                            download_stem=download_stem,
-                            download_backing=download_backing,
-                            progress_callback=sync_progress_callback,
+            async with _processing_capacity_slot():
+                async with client:
+                    async with asyncio.timeout(_LALAL_PROCESS_TIMEOUT_SECONDS):
+                        upload_path, temp_upload = await _decode_for_upload(
+                            file_path, output_dir, base_name
                         )
-                    finally:
-                        if temp_upload is not None:
-                            await asyncio.to_thread(temp_upload.unlink, True)
+                        try:
+                            results = await client.process_file(
+                                upload_path,
+                                output_dir,
+                                stem=stem_type,
+                                download_stem=download_stem,
+                                download_backing=download_backing,
+                                progress_callback=sync_progress_callback,
+                            )
+                        finally:
+                            if temp_upload is not None:
+                                await asyncio.to_thread(temp_upload.unlink, True)
 
-                    # Stems come back in the uploaded (WAV) format; convert them
-                    # to the MP3 paths the cache lookup and downloads expect.
-                    if "stem" in results:
-                        await _finalize_stem(results["stem"], vocals_path)
-                        results["stem"] = vocals_path
-                    if "backing" in results:
-                        await _finalize_stem(results["backing"], instrumental_path)
-                        results["backing"] = instrumental_path
+                        # Stems come back in the uploaded (WAV) format; convert them
+                        # to the MP3 paths the cache lookup and downloads expect.
+                        if "stem" in results:
+                            await _finalize_stem(results["stem"], vocals_path)
+                            results["stem"] = vocals_path
+                        if "backing" in results:
+                            await _finalize_stem(results["backing"], instrumental_path)
+                            results["backing"] = instrumental_path
 
-                    # Both stems are always requested, and both the cache
-                    # lookup and lalal_split_done need both. Raise inside the
-                    # lock so a half-finished pair is cleaned up rather than
-                    # reported as a success nothing can reuse.
-                    if "stem" not in results or "backing" not in results:
-                        raise HTTPException(
-                            status_code=500,
-                            detail="Processing completed but no output file",
-                        )
+                        # Both stems are always requested, and both the cache
+                        # lookup and lalal_split_done need both. Raise inside the
+                        # lock so a half-finished pair is cleaned up rather than
+                        # reported as a success nothing can reuse.
+                        if "stem" not in results or "backing" not in results:
+                            raise HTTPException(
+                                status_code=500,
+                                detail="Processing completed but no output file",
+                            )
 
         await _mark_lalal_split_done_if_ready(
             job_id_str,

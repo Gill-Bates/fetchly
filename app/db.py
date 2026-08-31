@@ -340,7 +340,7 @@ def init_db() -> None:
                 filename TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 finished_at TEXT,
-                duration_seconds INTEGER CHECK (duration_seconds IS NULL OR duration_seconds >= 0),
+                duration_seconds REAL CHECK (duration_seconds IS NULL OR duration_seconds >= 0),
                 filesize_bytes INTEGER CHECK (filesize_bytes IS NULL OR filesize_bytes >= 0),
                 message TEXT,
                 codec TEXT,
@@ -773,7 +773,7 @@ def paginate_jobs(limit: int = 50, offset: int = 0) -> list[sqlite3.Row]:
         ).fetchall()
 
 
-def get_stats() -> dict[str, int]:
+def get_stats() -> dict[str, int | float]:
     """Aggregated KPIs for jobs that reached a completed state."""
     placeholders = _in_placeholders(COMPLETED_STATUSES)
     with get_db() as con:
@@ -808,9 +808,9 @@ def get_stats() -> dict[str, int]:
 
     return {
         "total_jobs": row["total_jobs"] or 0,
-        "total_minutes": row["total_minutes"] or 0,
+        "total_minutes": round(float(row["total_minutes"] or 0), 1),
         "total_bytes": row["total_bytes"] or 0,
-        "total_lalal_minutes": row["total_lalal_minutes"] or 0,
+        "total_lalal_minutes": round(float(row["total_lalal_minutes"] or 0), 1),
     }
 
 

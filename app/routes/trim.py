@@ -28,6 +28,7 @@ from ..db import DOWNLOADABLE_STATUSES, get_job
 from ..governor import governor
 from ..lalal_policy import LALAL_MAX_DURATION_MINUTES, LALAL_MAX_DURATION_SECONDS
 from ..utils.fs import AUDIO_SOURCE_EXTENSIONS, TRIM_ID_RE, path_is_file
+from ..utils.duration import format_seconds, round_seconds
 from ..worker import sanitize_filename
 from .auth import require_user_json
 
@@ -107,6 +108,23 @@ async def _delete_trim_files(output_dir: Path, trim_id: str | None) -> int:
     return await asyncio.to_thread(_delete)
 
 
+def _duration_validation_error(end: float, raw_duration: object) -> JSONResponse | None:
+    """Return a boundary error when *end* exceeds the known track duration."""
+    duration = round_seconds(raw_duration)
+    if duration is None or end <= duration:
+        return None
+
+    return JSONResponse(
+        status_code=400,
+        content={
+            "error": (
+                f"End time ({format_seconds(end)}s) exceeds track duration "
+                f"({format_seconds(duration)}s)"
+            )
+        },
+    )
+
+
 @asynccontextmanager
 async def _acquire_trim_lock(lock_file: Path) -> AsyncIterator[None]:
     """Acquire an advisory trim lock without blocking the event loop."""
@@ -176,11 +194,9 @@ async def trim_audio(request: Request, job_id: uuid.UUID, body: TrimRequest, _us
     if job["status"] not in DOWNLOADABLE_STATUSES:
         return JSONResponse(status_code=400, content={"error": "Job not ready"})
     
-    # Validate end against known duration (if available)
-    # sqlite3.Row doesn't have .get(), use bracket access with fallback
-    job_duration = job["duration_seconds"] if "duration_seconds" in job else None
-    if job_duration is not None and end > float(job_duration):
-        return JSONResponse(status_code=400, content={"error": f"End time ({end:.1f}s) exceeds track duration ({job_duration:.1f}s)"})
+    # get_job() selects every current jobs column, including duration_seconds.
+    if duration_error := _duration_validation_error(end, job["duration_seconds"]):
+        return duration_error
     
     # Resolve source file
     raw_filename = job["filename"]

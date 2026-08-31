@@ -627,6 +627,8 @@ function createSelectionHandle(side) {
     handle.type = "button";
     handle.className = `trim-selection-handle trim-selection-handle--${side}`;
     handle.dataset.selectionHandle = side;
+    handle.setAttribute("role", "slider");
+    handle.setAttribute("aria-orientation", "horizontal");
     handle.setAttribute("aria-label", `Adjust selection ${side}`);
     handle.setAttribute("title", `Drag to adjust selection ${side}`);
     handle.addEventListener("keydown", handleSelectionHandleKeydown);
@@ -713,12 +715,14 @@ function updateSelectionOverlays(start, end) {
         trimSelectionStartHandle.setAttribute("aria-valuemin", "0");
         trimSelectionStartHandle.setAttribute("aria-valuemax", String(end));
         trimSelectionStartHandle.setAttribute("aria-valuenow", String(start));
+        trimSelectionStartHandle.setAttribute("aria-valuetext", formatTime(start));
     }
     if (trimSelectionEndHandle instanceof HTMLElement) {
         trimSelectionEndHandle.hidden = endPx < 0 || endPx > viewportWidth;
         trimSelectionEndHandle.setAttribute("aria-valuemin", String(start));
         trimSelectionEndHandle.setAttribute("aria-valuemax", String(duration));
         trimSelectionEndHandle.setAttribute("aria-valuenow", String(end));
+        trimSelectionEndHandle.setAttribute("aria-valuetext", formatTime(end));
     }
 }
 

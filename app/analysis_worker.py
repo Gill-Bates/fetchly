@@ -75,7 +75,7 @@ _status_callback_lock = threading.Lock()
 class AnalysisJob:
     job_id: str
     file_path: Path
-    duration_seconds: int | None = None
+    duration_seconds: float | None = None
 
 
 def _now_iso() -> str:
@@ -180,7 +180,7 @@ def submit_analysis(
     job_id: str,
     file_path: Path,
     *,
-    duration_seconds: int | None = None,
+    duration_seconds: float | None = None,
     block: bool = False,
     timeout: float = 2.0,
 ) -> SubmitResult:

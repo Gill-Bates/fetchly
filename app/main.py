@@ -62,6 +62,7 @@ from .routes.events import (
 )
 from .session import SESSION_COOKIE, refresh_session_settings_cache, renew_session, set_session_cookie
 from .utils.housekeeping import cleanup_expired_jobs, cleanup_orphaned_directories, cleanup_thumbnail_cache
+from .utils.duration import round_seconds
 from .utils.fs import get_data_dir
 from .utils.template_filters import register_filters
 from .utils.version import BUILD_INFO, VERSION
@@ -259,7 +260,7 @@ async def _fill_analysis_queue() -> None:
         result = submit_analysis(
             str(row["id"]),
             Path(raw_filename),
-            duration_seconds=int(row["duration_seconds"] or 0) or None,
+            duration_seconds=round_seconds(row["duration_seconds"]),
             block=False,
         )
         if result is SubmitResult.QUEUE_FULL:
