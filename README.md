@@ -40,13 +40,15 @@
 
 ## Features
 
-- **Multi-platform downloads** — video and audio from YouTube, TikTok, Instagram, and Facebook.
-- **Live job dashboard** — monitor queued, active, completed, and failed jobs with live updates.
-- **Media processing** — choose output quality, transcode with ffmpeg, and manage downloaded files from the browser.
-- **Waveform-based audio trimming** — select and trim audio precisely before further processing.
-- **Lalal.ai integration** — optionally separate vocals and instrumentals through the Lalal.ai API.
-- **Self-hosted and secure** — SQLite persistence, authenticated access, CSRF protection, signed anti-bot checks, and login rate limiting.
-- **Docker-ready** — the complete app with all system and Python dependencies in one image.
+| Feature | What you get |
+| --- | --- |
+| **Download everywhere** | Save video or audio from YouTube, TikTok, Instagram, and Facebook in one place. |
+| **Stay in control** | Follow every queued, active, completed, or failed job from a live dashboard. |
+| **Choose your quality** | Pick the format and quality you want, then let fetchly handle the conversion. |
+| **Trim with precision** | Cut audio visually with an interactive waveform before you download or process it further. |
+| **Create clean stems** | Connect Lalal.ai to separate vocals and instrumentals when you need production-ready tracks. |
+| **Keep it private** | Run everything yourself with persistent storage, authentication, CSRF protection, anti-bot checks, and login rate limiting. |
+| **Ready to run** | Get the complete application and its required dependencies in one Docker image. |
 
 ## Supported platforms
 

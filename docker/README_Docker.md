@@ -1,7 +1,7 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Gill-Bates/fetchly/feature/v1.5/.github/img/fetchly_white.svg">
-    <img src="https://raw.githubusercontent.com/Gill-Bates/fetchly/feature/v1.5/.github/img/fetchly_black.svg" alt="fetchly" width="400">
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Gill-Bates/fetchly/main/.github/img/fetchly_white.svg">
+    <img src="https://raw.githubusercontent.com/Gill-Bates/fetchly/main/.github/img/fetchly_black.svg" alt="fetchly" width="400">
   </picture>
 </p>
 
@@ -22,12 +22,12 @@
 ---
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/Gill-Bates/fetchly/feature/v1.5/.github/img/screen_2.jpeg" alt="fetchly dashboard: link input, video preview, format picker, and recent downloads" width="800"><br>
+  <img src="https://raw.githubusercontent.com/Gill-Bates/fetchly/main/.github/img/screen_2.jpeg" alt="fetchly dashboard: link input, video preview, format picker, and recent downloads" width="800"><br>
   <em>Dashboard — paste a link, preview the media, pick a format, and track every job live.</em>
 </p>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/Gill-Bates/fetchly/feature/v1.5/.github/img/screen_1.jpeg" alt="fetchly login screen" width="800"><br>
+  <img src="https://raw.githubusercontent.com/Gill-Bates/fetchly/main/.github/img/screen_1.jpeg" alt="fetchly login screen" width="800"><br>
   <em>Authenticated login with invisible, server-verified anti-bot protection.</em>
 </p>
 
@@ -40,13 +40,15 @@
 
 ## Features
 
-- **Multi-platform downloads** — video and audio from YouTube, TikTok, Instagram, and Facebook.
-- **Live job dashboard** — monitor queued, active, completed, and failed jobs with live updates.
-- **Media processing** — choose output quality, transcode with ffmpeg, and manage downloaded files from the browser.
-- **Waveform-based audio trimming** — select and trim audio precisely before further processing.
-- **Lalal.ai integration** — optionally separate vocals and instrumentals through the Lalal.ai API.
-- **Self-hosted and secure** — SQLite persistence, authenticated access, CSRF protection, signed anti-bot checks, and login rate limiting.
-- **Docker-ready** — the complete app with all system and Python dependencies in one image.
+| Feature | What you get |
+| --- | --- |
+| **Download everywhere** | Save video or audio from YouTube, TikTok, Instagram, and Facebook in one place. |
+| **Stay in control** | Follow every queued, active, completed, or failed job from a live dashboard. |
+| **Choose your quality** | Pick the format and quality you want, then let fetchly handle the conversion. |
+| **Trim with precision** | Cut audio visually with an interactive waveform before you download or process it further. |
+| **Create clean stems** | Connect Lalal.ai to separate vocals and instrumentals when you need production-ready tracks. |
+| **Keep it private** | Run everything yourself with persistent storage, authentication, CSRF protection, anti-bot checks, and login rate limiting. |
+| **Ready to run** | Get the complete application and its required dependencies in one Docker image. |
 
 ## Supported platforms
 
@@ -143,7 +145,7 @@ The image ships upstream static ffmpeg/ffprobe builds and stable yt-dlp PyPI rel
 
 <p align="center">
   <a href="https://www.lalal.ai/">
-    <img src="https://raw.githubusercontent.com/Gill-Bates/fetchly/feature/v1.5/.github/img/lalal_ai.svg" alt="Lalal.ai" width="130">
+    <img src="https://raw.githubusercontent.com/Gill-Bates/fetchly/main/.github/img/lalal_ai.svg" alt="Lalal.ai" width="130">
   </a>
 </p>
 
