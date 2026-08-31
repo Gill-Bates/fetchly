@@ -656,7 +656,7 @@ def _quality_label(quality: str) -> str:
     return _QUALITY_LABELS.get((quality or "").lower(), f"{quality}Quality" if quality else "defaultQuality")
 
 
-def _build_output_stem(job_id: str, url: str, quality: str) -> str:
+def _build_output_stem(job_id: str, url: str, quality: str, media_type: str) -> str:
     try:
         title_raw = _run_cmd(
             ["yt-dlp", "--no-playlist", *_cookies_args_for_url(url), "--get-title", "--", url],
@@ -670,6 +670,10 @@ def _build_output_stem(job_id: str, url: str, quality: str) -> str:
         logger.warning("Could not fetch video title, using fallback filename: %s", exc)
         title_raw = "video"
     title = sanitize_filename(title_raw)
+    if media_type == "audio":
+        # Audio is always pulled losslessly, so the quality label would say the
+        # same thing on every file. Only video has renditions worth naming.
+        return title
     return f"{title} ({_quality_label(quality)})"
 
 
@@ -799,7 +803,7 @@ def _download_media(job_id: str, url: str, *, quality: str, media_type: str) -> 
 
     # Normalize URL to strip playlist params that cause issues
     clean_url = normalize_info_url(url)
-    stem = _build_output_stem(job_id, clean_url, quality)
+    stem = _build_output_stem(job_id, clean_url, quality, media_type)
     if media_type == "audio":
         # Download lossless audio (no transcode) - we'll convert to MP3 on download
         _transition_worker_status(job_id, "downloading", "Downloading audio (lossless)")

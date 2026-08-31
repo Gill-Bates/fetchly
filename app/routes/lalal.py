@@ -27,6 +27,7 @@ from fastapi.responses import FileResponse
 
 from ..common.rate_limit import limiter
 from ..db import DOWNLOADABLE_STATUSES, get_job, get_settings, set_settings, update_job
+from ..lalal_policy import stem_download_name
 from ..utils.fs import TRIM_ID_RE, get_json_body, path_is_file
 from ..utils.template_filters import is_lalala_configured
 from .auth import require_user, require_user_json
@@ -206,6 +207,8 @@ async def _get_cached_split_response(
     vocals_path: Path,
     instrumental_path: Path,
     *,
+    base_name: str,
+    bpm: Any,
     trimmed: bool,
     trim_id: str | None,
 ) -> dict[str, Any] | None:
@@ -216,7 +219,6 @@ async def _get_cached_split_response(
     if not (vocals_exists and instrumental_exists):
         return None
 
-    cached_path = vocals_path if stem == _STEM_VOCALS else instrumental_path
     if trimmed:
         logger.debug("Returning cached Lalal result for %s (stem=%s, trim_id=%s)", job_id_str, stem, trim_id)
     await _mark_lalal_split_done_if_ready(
@@ -229,7 +231,7 @@ async def _get_cached_split_response(
         job_id_str,
         stem,
         trimmed=trimmed,
-        filename=cached_path.name,
+        filename=stem_download_name(base_name, stem, bpm),
         cached=True,
         trim_id=trim_id,
     )
@@ -522,6 +524,8 @@ async def lalal_split(
         stem,
         vocals_path,
         instrumental_path,
+        base_name=base_name,
+        bpm=job["bpm"],
         trimmed=trimmed,
         trim_id=trim_id,
     )
@@ -568,6 +572,8 @@ async def lalal_split(
                 stem,
                 vocals_path,
                 instrumental_path,
+                base_name=base_name,
+                bpm=job["bpm"],
                 trimmed=trimmed,
                 trim_id=trim_id,
             )
@@ -601,11 +607,8 @@ async def lalal_split(
                         await _finalize_stem(results["backing"], instrumental_path)
                         results["backing"] = instrumental_path
 
-        if stem == _STEM_VOCALS and "stem" in results:
-            result_path = results["stem"]
-        elif stem == _STEM_INSTRUMENTAL and "backing" in results:
-            result_path = results["backing"]
-        else:
+        stem_key = "stem" if stem == _STEM_VOCALS else "backing"
+        if stem_key not in results:
             raise HTTPException(status_code=500, detail="Processing completed but no output file")
 
         await _mark_lalal_split_done_if_ready(
@@ -619,7 +622,7 @@ async def lalal_split(
             job_id_str,
             stem,
             trimmed=trimmed,
-            filename=result_path.name,
+            filename=stem_download_name(base_name, stem, job["bpm"]),
             cached=False,
             trim_id=trim_id,
         )
@@ -672,14 +675,19 @@ async def lalal_download(
     output_dir = data_dir / job_id_str
 
     if trimmed:
-        stem_path, _base_name = await _latest_trim_result(output_dir, stem, trim_id)
+        stem_path, base_name = await _latest_trim_result(output_dir, stem, trim_id)
     else:
         raw_filename = job["filename"]
         source_path = resolve_job_path(raw_filename)
         if not await path_is_file(source_path):
             raise HTTPException(status_code=404, detail="Source file not found")
-        stem_path = output_dir / f"{source_path.stem}_{stem}.mp3"
+        base_name = source_path.stem
+        stem_path = output_dir / f"{base_name}_{stem}.mp3"
         if not await path_is_file(stem_path):
             raise HTTPException(status_code=404, detail=f"{stem.capitalize()} file not found. Please process with Lalal.ai first.")
 
-    return FileResponse(path=stem_path, filename=stem_path.name, media_type="audio/mpeg")
+    return FileResponse(
+        path=stem_path,
+        filename=stem_download_name(base_name, stem, job["bpm"]),
+        media_type="audio/mpeg",
+    )

@@ -437,6 +437,86 @@ jobs:
           print("✓ Toolchain and build metadata OK")
           PY
 
+      # The only step that proves essentia computes rather than merely imports.
+      # That matters most on arm64: upstream publishes no aarch64 wheel, so the
+      # essentia stage in docker/Dockerfile compiles it from source against a
+      # scalar FFTW, which makes this image's rhythm path a different build
+      # from the PyPI wheel amd64 installs. The runtime stage's
+      # `import essentia.standard` only shows that _essentia.so loads and
+      # resolves its symbols - an image whose RhythmExtractor2013 returned
+      # nonsense would pass every other check here and surface on a user's
+      # first analysis job instead.
+      - name: Verify BPM analysis (${{ matrix.arch }})
+        run: |
+          set -euo pipefail
+          docker exec -i "${{ matrix.container_name }}" python - <<'PY'
+          import math
+          import sys
+          import wave
+
+          import numpy as np
+
+          SAMPLE_RATE = 44100
+          EXPECTED_BPM = 120.0
+          TOLERANCE_BPM = 2.0
+          DURATION_S = 20.0
+          CLICK_PATH = "/tmp/bpm-smoke.wav"
+
+          # A click track is deliberately the simplest signal
+          # RhythmExtractor2013 can be asked about: one 1 kHz burst per beat,
+          # decaying over ~25 ms, at exactly EXPECTED_BPM. Anything reading
+          # that as a different tempo is broken, not merely imprecise. Built
+          # with numpy + wave rather than an ffmpeg filter so the fixture
+          # cannot itself become the flaky part.
+          period = 60.0 / EXPECTED_BPM
+          t = np.arange(int(SAMPLE_RATE * DURATION_S)) / SAMPLE_RATE
+          envelope = np.exp(-40.0 * np.mod(t, period))
+          samples = np.sin(2.0 * math.pi * 1000.0 * t) * envelope * 0.8
+
+          with wave.open(CLICK_PATH, "wb") as handle:
+              handle.setnchannels(1)
+              handle.setsampwidth(2)
+              handle.setframerate(SAMPLE_RATE)
+              handle.writeframes((samples * 32767).astype("<i2").tobytes())
+
+          # Mirrors app/bpm.py: MonoLoader on defaults, then
+          # RhythmExtractor2013(method="multifeature"). MonoLoader decodes
+          # through the static ffmpeg essentia links against, so the compiled
+          # audio I/O path is covered too, not just the rhythm algorithm.
+          from essentia.standard import MonoLoader, RhythmExtractor2013
+
+          audio = MonoLoader(filename=CLICK_PATH)()
+          bpm, beats, confidence, _, _ = RhythmExtractor2013(method="multifeature")(audio)
+
+          bpm = float(bpm)
+          confidence = float(confidence)
+          print(f"samples loaded : {len(audio)}")
+          print(f"detected BPM   : {bpm:.3f}  (expected {EXPECTED_BPM} +/- {TOLERANCE_BPM})")
+          print(f"beats detected : {len(beats)}")
+          print(f"confidence     : {confidence:.3f}")
+
+          failures = []
+          if len(audio) == 0:
+              failures.append("MonoLoader returned no samples")
+          if not math.isfinite(bpm):
+              failures.append(f"BPM is not a finite number: {bpm!r}")
+          elif abs(bpm - EXPECTED_BPM) > TOLERANCE_BPM:
+              failures.append(
+                  f"BPM {bpm:.3f} is off by more than {TOLERANCE_BPM} from {EXPECTED_BPM}"
+              )
+          if len(beats) < int(DURATION_S / period) - 4:
+              failures.append(
+                  f"only {len(beats)} beats found in {DURATION_S:.0f}s at {EXPECTED_BPM} BPM"
+              )
+
+          if failures:
+              for failure in failures:
+                  print(f"✗ {failure}", file=sys.stderr)
+              sys.exit(1)
+
+          print("✓ essentia BPM analysis OK")
+          PY
+
       - name: Remove smoke-test container
         if: always()
         run: docker rm -f "${{ matrix.container_name }}" 2>/dev/null || true

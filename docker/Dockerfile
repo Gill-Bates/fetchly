@@ -178,17 +178,18 @@ RUN set -euo pipefail; \
 # the remaining 3rdparty libraries or essentia itself is reached. The other two
 # flags are x86 stack/alloc tuning and equally meaningless here.
 #
-# There is no SIMD flag to swap in: build_config.sh pins FFTW 3.3.2 (2012),
-# which predates aarch64 NEON support, so --enable-neon would only move the
-# failure. Dropping the SIMD flags builds a scalar FFTW instead. That costs
-# some FFT throughput on arm64, which is the right trade against not shipping
-# an arm64 image at all - and it only affects essentia's bundled copy, not the
-# BtbN ffmpeg the application shells out to.
+# FFTW_VERSION is raised in the same breath because the pinned 3.3.2 (2012)
+# predates aarch64 NEON support - on that version there would be no SIMD flag
+# to swap in and the only option would be a scalar build. 3.3.10 covers
+# aarch64 under --enable-neon, is API-compatible for the single-precision
+# fftw3f that essentia and chromaprint link against, and is served from the
+# same http://www.fftw.org/$FFTW_VERSION.tar.gz layout build_fftw3.sh already
+# uses. --enable-neon requires --enable-float, which upstream sets anyway.
 #
 # Appending re-assigns rather than patching individual lines out, so an
 # upstream reorder or reword of that block cannot silently un-fix this; the
-# shell simply takes the last assignment. Revisit if build_config.sh ever
-# bumps FFTW past 3.3.5, where --enable-neon does cover aarch64.
+# shell simply takes the last assignment. Drop both overrides once upstream
+# ships a build_config.sh that is arch-aware on its own.
 #
 # CONFIG_SITE covers the second aarch64 blocker in that same chain. Several of
 # the pinned 3rdparty tarballs are old enough to ship a config.guess that
@@ -239,7 +240,9 @@ RUN set -euo pipefail; \
     cd /src/essentia; \
     git checkout --detach "${ESSENTIA_REF}"; \
     echo "essentia source: $(git describe --always --tags)"; \
-    printf '\n%s\n' 'FFTW_FLAGS="--enable-float"' >> packaging/build_config.sh; \
+    printf '\n%s\n%s\n' \
+        'FFTW_VERSION=fftw-3.3.10' \
+        'FFTW_FLAGS="--enable-float --enable-neon"' >> packaging/build_config.sh; \
     printf 'ac_cv_build=aarch64-unknown-linux-gnu\nac_cv_host=aarch64-unknown-linux-gnu\n' \
         > /tmp/config.site; \
     export CONFIG_SITE=/tmp/config.site; \
