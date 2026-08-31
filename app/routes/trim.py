@@ -22,6 +22,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
+from ..bpm_naming import apply_bpm_tag
 from ..common.rate_limit import limiter
 from ..db import DOWNLOADABLE_STATUSES, get_job
 from ..governor import governor
@@ -357,14 +358,18 @@ async def download_trim(request: Request, job_id: uuid.UUID, trim_id: str, _user
     if not await path_is_file(trim_path):
         return JSONResponse(status_code=404, content={"error": "Trimmed file not found. Please trim again."})
     
-    # Get job info for filename
+    # Get job info for filename. A sqlite3.Row has no key-membership test -
+    # `"video_title" in job` iterates the row's *values*, so it answered False
+    # for every job and the title never reached the filename. get_job() selects
+    # every column, so read them off the row directly.
     job = await asyncio.to_thread(get_job, job_id_str)
-    video_title = job["video_title"] if job and "video_title" in job else None
+    video_title = job["video_title"] if job else None
+    bpm = job["bpm"] if job else None
     if video_title:
-        safe_title = sanitize_filename(video_title, max_len=100)
-        filename = f"{safe_title}_trimmed.wav"
+        base_name = f"{apply_bpm_tag(sanitize_filename(video_title, max_len=100), bpm)}_trimmed"
     else:
-        filename = f"trimmed_{trim_id}.wav"
+        base_name = apply_bpm_tag(f"trimmed_{trim_id}", bpm)
+    filename = f"{base_name}.wav"
     
     return FileResponse(
         path=trim_path,

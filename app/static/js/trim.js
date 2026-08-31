@@ -54,6 +54,10 @@ let panScrollLeft = 0;
 let movedDuringPan = false;
 let trimOverlayLeft = null;
 let trimOverlayRight = null;
+let trimSelectionEl = null;
+let trimSelectionStartHandle = null;
+let trimSelectionEndHandle = null;
+let selectionDragState = null;
 let lastFocusedBeforeTrimModal = null;
 let bpm = null;
 let beatOffset = 0;
@@ -71,7 +75,7 @@ const MIN_SELECTION_SECONDS = 1;
 const DEFAULT_ZOOM_LEVEL = 50;
 const MAX_ZOOM_LEVEL = 2000;
 const PAN_THRESHOLD_PX = 4;
-const SELECTION_REGION_COLOR = "rgba(99, 102, 241, 0.55)";
+const SELECTION_REGION_COLOR = "transparent";
 const TRIM_REQUEST_TIMEOUT_MS = 120_000;
 const LALAL_REQUEST_TIMEOUT_MS = 15 * 60_000;
 const MIN_BPM = 20;
@@ -186,12 +190,16 @@ async function parseApiResponse(res, fallbackMessage) {
 
 
 function destroyWaveSurfer() {
+    selectionDragState = null;
     if (!trimWs) return;
     trimWs.destroy();
     trimWs = null;
     trimWaveEl?.replaceChildren();
     trimOverlayLeft = null;
     trimOverlayRight = null;
+    trimSelectionEl = null;
+    trimSelectionStartHandle = null;
+    trimSelectionEndHandle = null;
     beatGridEl = null;
 }
 
@@ -478,10 +486,151 @@ function getWaveClickTime(clientX) {
 
 function setSelectionVisualState(hasSelection) {
     trimWaveEl?.classList.toggle("has-selection", hasSelection);
+    trimSelectionEl?.classList.toggle("is-visible", hasSelection);
     if (!hasSelection) {
+        selectionDragState = null;
         trimOverlayLeft?.classList.remove("is-visible");
         trimOverlayRight?.classList.remove("is-visible");
+        trimSelectionEl?.classList.remove("is-visible", "is-dragging");
     }
+}
+
+
+function applySelectionRange(start, end) {
+    if (!trimRegion || !trimWs) return;
+
+    const duration = trimWs.getDuration();
+    if (!(duration > 0)) return;
+
+    const nextStart = clamp(start, 0, duration);
+    const nextEnd = clamp(end, 0, duration);
+    if (nextEnd - nextStart < MIN_SELECTION_SECONDS) return;
+
+    trimRegion.setOptions({ start: nextStart, end: nextEnd });
+    updateSelectionOverlays(nextStart, nextEnd);
+    updateInfo();
+}
+
+
+function handleSelectionPointerDown(event) {
+    if (!trimRegion || !trimWs || !trimSelectionEl || event.button !== 0) return;
+
+    const pointerTime = getWaveClickTime(event.clientX);
+    if (pointerTime === null) return;
+
+    const handle = event.target instanceof Element
+        ? event.target.closest(".trim-selection-handle")
+        : null;
+    const mode = handle?.dataset.selectionHandle || "move";
+
+    selectionDragState = {
+        pointerId: event.pointerId,
+        pointerTime,
+        mode,
+        start: trimRegion.start,
+        end: trimRegion.end,
+    };
+
+    event.preventDefault();
+    event.stopPropagation();
+    trimSelectionEl.classList.add("is-dragging");
+    trimSelectionEl.setPointerCapture(event.pointerId);
+}
+
+
+function handleSelectionPointerMove(event) {
+    if (!selectionDragState || !trimRegion || !trimWs) return;
+    if (event.pointerId !== selectionDragState.pointerId) return;
+
+    const pointerTime = getWaveClickTime(event.clientX);
+    if (pointerTime === null) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+
+    if (selectionDragState.mode === "start") {
+        const nextStart = clamp(
+            pointerTime,
+            0,
+            trimRegion.end - MIN_SELECTION_SECONDS,
+        );
+        applySelectionRange(nextStart, trimRegion.end);
+        return;
+    }
+
+    if (selectionDragState.mode === "end") {
+        const nextEnd = clamp(
+            pointerTime,
+            trimRegion.start + MIN_SELECTION_SECONDS,
+            trimWs.getDuration(),
+        );
+        applySelectionRange(trimRegion.start, nextEnd);
+        return;
+    }
+
+    const selectionDuration = selectionDragState.end - selectionDragState.start;
+    const delta = pointerTime - selectionDragState.pointerTime;
+    const nextStart = clamp(
+        selectionDragState.start + delta,
+        0,
+        trimWs.getDuration() - selectionDuration,
+    );
+    applySelectionRange(nextStart, nextStart + selectionDuration);
+}
+
+
+function handleSelectionPointerEnd(event) {
+    if (!selectionDragState || event.pointerId !== selectionDragState.pointerId) return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    selectionDragState = null;
+    trimSelectionEl?.classList.remove("is-dragging");
+    if (trimSelectionEl?.hasPointerCapture(event.pointerId)) {
+        trimSelectionEl.releasePointerCapture(event.pointerId);
+    }
+}
+
+
+function handleSelectionHandleKeydown(event) {
+    if (!trimRegion || !trimWs || !["ArrowLeft", "ArrowRight"].includes(event.key)) return;
+
+    const side = event.currentTarget?.dataset?.selectionHandle;
+    if (side !== "start" && side !== "end") return;
+
+    event.preventDefault();
+    event.stopPropagation();
+    const direction = event.key === "ArrowLeft" ? -1 : 1;
+    const step = SNAP_INTERVAL_SECONDS * (event.shiftKey ? 10 : 1);
+
+    if (side === "start") {
+        const nextStart = clamp(
+            trimRegion.start + (direction * step),
+            0,
+            trimRegion.end - MIN_SELECTION_SECONDS,
+        );
+        applySelectionRange(nextStart, trimRegion.end);
+        return;
+    }
+
+    const nextEnd = clamp(
+        trimRegion.end + (direction * step),
+        trimRegion.start + MIN_SELECTION_SECONDS,
+        trimWs.getDuration(),
+    );
+    applySelectionRange(trimRegion.start, nextEnd);
+}
+
+
+function createSelectionHandle(side) {
+    const handle = document.createElement("button");
+    handle.type = "button";
+    handle.className = `trim-selection-handle trim-selection-handle--${side}`;
+    handle.dataset.selectionHandle = side;
+    handle.setAttribute("aria-label", `Adjust selection ${side}`);
+    handle.setAttribute("title", `Drag to adjust selection ${side}`);
+    handle.addEventListener("keydown", handleSelectionHandleKeydown);
+    return handle;
 }
 
 
@@ -499,6 +648,23 @@ function ensureOverlays() {
         trimOverlayRight.className = "trim-overlay trim-overlay-right";
         trimWaveEl.appendChild(trimOverlayRight);
     }
+
+    if (!(trimSelectionEl instanceof HTMLElement)) {
+        trimSelectionEl = document.createElement("div");
+        trimSelectionEl.className = "trim-selection";
+        trimSelectionEl.setAttribute("aria-label", "Selected audio range");
+
+        trimSelectionStartHandle = createSelectionHandle("start");
+        trimSelectionEndHandle = createSelectionHandle("end");
+        trimSelectionEl.append(trimSelectionStartHandle, trimSelectionEndHandle);
+
+        trimSelectionEl.addEventListener("pointerdown", handleSelectionPointerDown);
+        trimSelectionEl.addEventListener("pointermove", handleSelectionPointerMove);
+        trimSelectionEl.addEventListener("pointerup", handleSelectionPointerEnd);
+        trimSelectionEl.addEventListener("pointercancel", handleSelectionPointerEnd);
+        trimSelectionEl.addEventListener("click", (event) => event.stopPropagation());
+        trimWaveEl.appendChild(trimSelectionEl);
+    }
 }
 
 
@@ -511,7 +677,11 @@ function updateSelectionOverlays(start, end) {
     if (!(scrollContainer instanceof HTMLElement) || !(wrapper instanceof HTMLElement) || !(duration > 0)) return;
 
     ensureOverlays();
-    if (!(trimOverlayLeft instanceof HTMLElement) || !(trimOverlayRight instanceof HTMLElement)) return;
+    if (
+        !(trimOverlayLeft instanceof HTMLElement)
+        || !(trimOverlayRight instanceof HTMLElement)
+        || !(trimSelectionEl instanceof HTMLElement)
+    ) return;
 
     const totalWidth = wrapper.scrollWidth;
     const viewportWidth = scrollContainer.clientWidth || trimWaveEl.clientWidth;
@@ -530,8 +700,26 @@ function updateSelectionOverlays(start, end) {
     trimOverlayRight.style.left = `${rightLeft}px`;
     trimOverlayRight.style.width = `${rightWidth}px`;
 
+    const selectionWidth = Math.max(0, visibleEnd - visibleStart);
+    trimSelectionEl.style.left = `${visibleStart}px`;
+    trimSelectionEl.style.width = `${selectionWidth}px`;
+
     trimOverlayLeft.classList.toggle("is-visible", leftWidth > 0);
     trimOverlayRight.classList.toggle("is-visible", rightWidth > 0);
+    trimSelectionEl.classList.toggle("is-visible", selectionWidth > 0);
+
+    if (trimSelectionStartHandle instanceof HTMLElement) {
+        trimSelectionStartHandle.hidden = startPx < 0 || startPx > viewportWidth;
+        trimSelectionStartHandle.setAttribute("aria-valuemin", "0");
+        trimSelectionStartHandle.setAttribute("aria-valuemax", String(end));
+        trimSelectionStartHandle.setAttribute("aria-valuenow", String(start));
+    }
+    if (trimSelectionEndHandle instanceof HTMLElement) {
+        trimSelectionEndHandle.hidden = endPx < 0 || endPx > viewportWidth;
+        trimSelectionEndHandle.setAttribute("aria-valuemin", String(start));
+        trimSelectionEndHandle.setAttribute("aria-valuemax", String(duration));
+        trimSelectionEndHandle.setAttribute("aria-valuenow", String(end));
+    }
 }
 
 
@@ -718,8 +906,8 @@ function handleWaveClick(e) {
         start: selectedStart,
         end: selectedEnd,
         color: SELECTION_REGION_COLOR,
-        drag: true,
-        resize: true,
+        drag: false,
+        resize: false,
     });
 
     fitSelectionIntoView(selectedStart, selectedEnd);

@@ -19,19 +19,21 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from time import time
-from typing import Any, Callable
+from typing import Annotated, Any, Callable, Literal
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
+from pydantic import BaseModel, ConfigDict, StringConstraints
 
 from ..common.rate_limit import limiter
 from ..db import DOWNLOADABLE_STATUSES, get_job, get_settings, set_settings, update_job
+from ..governor import governor
 from ..lalal_policy import stem_download_name
-from ..utils.fs import TRIM_ID_RE, get_json_body, path_is_file
+from ..utils.fs import TRIM_ID_RE, path_is_file
 from ..utils.template_filters import is_lalala_configured
 from .auth import require_user, require_user_json
-from .media import resolve_job_path, transcode_to_mp3
+from .media import resolve_job_path, stop_ffmpeg_process, transcode_to_mp3
 
 logger = logging.getLogger(__name__)
 
@@ -65,10 +67,15 @@ async def _run_ffmpeg(cmd: list[str], *, description: str) -> None:
             proc.communicate(), timeout=_FFMPEG_TIMEOUT_SECONDS
         )
     except TimeoutError:
-        proc.kill()
-        with suppress(ProcessLookupError):
-            await proc.wait()
+        await stop_ffmpeg_process(proc)
         raise RuntimeError(f"{description} timed out") from None
+    except BaseException:
+        # BaseException, not Exception: the caller wraps this in an
+        # asyncio.timeout well below _FFMPEG_TIMEOUT_SECONDS, so the realistic
+        # exit is a CancelledError - which would otherwise leave ffmpeg running
+        # past the request that started it.
+        await stop_ffmpeg_process(proc)
+        raise
     if proc.returncode != 0:
         detail = (stderr or b"").decode("utf-8", "replace").strip()[-400:]
         raise RuntimeError(f"{description} failed: {detail}")
@@ -82,17 +89,29 @@ async def _decode_for_upload(
         return source_path, None
 
     temp_path = output_dir / f"{base_name}.lalalsrc.{uuid.uuid4().hex[:8]}.wav"
-    await _run_ffmpeg(
-        [
-            "ffmpeg", "-y",
-            "-i", str(source_path),
-            "-vn",
-            "-codec:a", "pcm_s16le",
-            "-f", "wav",
-            str(temp_path),
-        ],
-        description="Decoding source audio for Lalal.ai",
-    )
+    try:
+        # Same governor budget the MP3 transcodes use: an unbounded number of
+        # concurrent decodes is the one part of a split that can saturate a
+        # small VPS on its own.
+        async with governor.transcode_semaphore:
+            await _run_ffmpeg(
+                [
+                    "ffmpeg", "-y",
+                    "-i", str(source_path),
+                    "-vn",
+                    "-codec:a", "pcm_s16le",
+                    "-f", "wav",
+                    str(temp_path),
+                ],
+                description="Decoding source audio for Lalal.ai",
+            )
+    except BaseException:
+        # The caller only learns the path on success, so cleanup belongs here:
+        # a failed or cancelled decode would otherwise leave an uncompressed
+        # WAV behind that nothing ever removes.
+        with suppress(OSError):
+            await asyncio.shield(asyncio.to_thread(temp_path.unlink, True))
+        raise
     return temp_path, temp_path
 
 
@@ -155,6 +174,25 @@ def _validate_trim_id(trim_id: str) -> str:
 
 
 
+def _newest_first(output_dir: Path, pattern: str) -> list[Path]:
+    """Match ``pattern`` newest-first, skipping entries that vanish mid-scan.
+
+    glob() and stat() are two trips to the filesystem; a trim deleted between
+    them would otherwise surface as an uncaught FileNotFoundError.
+    """
+    candidates: list[tuple[float, Path]] = []
+    for path in output_dir.glob(pattern):
+        try:
+            stat_result = path.stat()
+        except OSError:
+            continue
+        if stat_module.S_ISREG(stat_result.st_mode):
+            candidates.append((stat_result.st_mtime, path))
+
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return [path for _, path in candidates]
+
+
 async def _path_is_ready_file(path: Path) -> bool:
     def _check() -> bool:
         try:
@@ -201,6 +239,22 @@ async def _remove_split_outputs(*paths: Path) -> None:
     await asyncio.gather(*(_remove(path) for path in paths))
 
 
+@asynccontextmanager
+async def _processing_attempt(lock_file: Path, *outputs: Path) -> AsyncIterator[None]:
+    """Hold the processing lock and clean up outputs before releasing it.
+
+    Cleaning up outside the lock would let a request that never owned it - a
+    caller bounced with 409, for instance - delete the outputs of the request
+    that is still working on them.
+    """
+    async with _acquire_processing_lock(lock_file):
+        try:
+            yield
+        except BaseException:
+            await _remove_split_outputs(*outputs)
+            raise
+
+
 async def _get_cached_split_response(
     job_id_str: str,
     stem: str,
@@ -245,20 +299,15 @@ async def _latest_trim_input(output_dir: Path, trim_id: str | None) -> tuple[Pat
             raise HTTPException(status_code=404, detail=f"Trim file not found: trim_{trim_id}.wav")
         return file_path, trim_id
 
-    def _find_latest() -> list[Path]:
-        return sorted(
-            output_dir.glob("trim_*.wav"),
-            key=lambda path: path.stat().st_mtime,
-            reverse=True,
-        )
-
-    trim_files = await asyncio.to_thread(_find_latest)
+    trim_files = await asyncio.to_thread(_newest_first, output_dir, "trim_*.wav")
     if not trim_files:
         raise HTTPException(status_code=400, detail="No trimmed file found. Please trim the audio first.")
     if len(trim_files) > 1:
         raise HTTPException(status_code=400, detail="trim_id required when multiple trims exist")
 
     file_path = trim_files[0]
+    if not await path_is_file(file_path):
+        raise HTTPException(status_code=404, detail="Trim file no longer exists")
     return file_path, file_path.stem.removeprefix("trim_")
 
 
@@ -271,20 +320,15 @@ async def _latest_trim_result(output_dir: Path, stem: str, trim_id: str | None) 
             raise HTTPException(status_code=404, detail=f"{stem.capitalize()} file not found. Please process with Lalal.ai first.")
         return stem_path, base_name
 
-    def _find_latest() -> list[Path]:
-        return sorted(
-            output_dir.glob(f"trim_*_{stem}.mp3"),
-            key=lambda path: path.stat().st_mtime,
-            reverse=True,
-        )
-
-    stem_files = await asyncio.to_thread(_find_latest)
+    stem_files = await asyncio.to_thread(_newest_first, output_dir, f"trim_*_{stem}.mp3")
     if not stem_files:
         raise HTTPException(status_code=404, detail=f"{stem.capitalize()} file not found. Please process with Lalal.ai first.")
     if len(stem_files) > 1:
         raise HTTPException(status_code=400, detail="trim_id required when multiple trims exist")
 
     stem_path = stem_files[0]
+    if not await path_is_file(stem_path):
+        raise HTTPException(status_code=404, detail=f"{stem.capitalize()} file no longer exists")
     base_name = stem_path.stem[: -len(f"_{stem}")]
     return stem_path, base_name
 
@@ -335,29 +379,84 @@ async def _mark_lalal_split_done_if_ready(
         await asyncio.to_thread(update_job, job_id_str, lalal_split_done=1)
 
 
+class ActivationKeyRequest(BaseModel):
+    """JSON body for the manual Lalal.ai activation-key endpoint."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    email: Annotated[str, StringConstraints(min_length=3, max_length=_MAX_EMAIL_LENGTH)]
+    activation_key: Annotated[
+        str, StringConstraints(min_length=1, max_length=_MAX_ACTIVATION_KEY_LENGTH)
+    ]
+
+
+class AuthStatusResponse(BaseModel):
+    """Saved Lalal.ai credentials plus their last validation result."""
+
+    ok: Literal[True] = True
+    configured: bool
+    email: str
+    token_valid: bool
+    validation_error: str
+    validated_at: int
+
+
+class OperationResponse(BaseModel):
+    """Acknowledgement for the auth mutation endpoints."""
+
+    ok: Literal[True] = True
+    message: str
+
+
+# Storing auth settings is a read, a network round trip, then a write. WORKERS
+# is pinned to 1 (docker/entrypoint.sh), so a process-local guard is enough:
+# every credential change bumps the generation, and a validation that started
+# against an older generation drops its result instead of overwriting newer
+# credentials - or resurrecting ones that were just logged out.
+_auth_state_lock = asyncio.Lock()
+_auth_generation = 0
+
+
+async def _commit_auth_settings(
+    values: dict[str, Any], *, expected_generation: int | None, bump: bool
+) -> bool:
+    """Persist auth settings unless the credentials changed meanwhile."""
+    global _auth_generation
+
+    async with _auth_state_lock:
+        if expected_generation is not None and _auth_generation != expected_generation:
+            return False
+        await asyncio.to_thread(set_settings, values)
+        if bump:
+            _auth_generation += 1
+        return True
+
+
 # ============================================================================
 # Routes
 # ============================================================================
 
 
-@router.get("/status")
+@router.get("/status", response_model=AuthStatusResponse)
 @limiter.limit("30/minute")
-async def api_lalal_status(request: Request, force_refresh: bool = False, _user: str = Depends(require_user)):
+async def api_lalal_status(
+    request: Request, force_refresh: bool = False, _user: str = Depends(require_user)
+) -> AuthStatusResponse:
     """Return saved Lalal.ai auth status and validation state."""
     _ = request
+    generation = _auth_generation
     settings = await asyncio.to_thread(get_settings, include_secrets=True)
     email = str(settings.get("lalalaai_email", "")).strip()
     auth_key = str(settings.get("lalalaai_auth_key", "")).strip()
 
     if not is_lalala_configured(settings):
-        return {
-            "ok": True,
-            "configured": False,
-            "email": "",
-            "token_valid": False,
-            "validation_error": "",
-            "validated_at": 0,
-        }
+        return AuthStatusResponse(
+            configured=False,
+            email="",
+            token_valid=False,
+            validation_error="",
+            validated_at=0,
+        )
 
     now_ts = int(time())
     checked_at = int(settings.get("lalalaai_auth_checked_at", 0) or 0)
@@ -386,38 +485,43 @@ async def api_lalal_status(request: Request, force_refresh: bool = False, _user:
             validation_error = "Authentication validation failed"
 
         checked_at = now_ts
-        await asyncio.to_thread(
-            set_settings,
+        # A key saved or cleared while this validation ran makes the result
+        # describe credentials that are no longer stored - report it, but do
+        # not stamp it onto the newer ones.
+        await _commit_auth_settings(
             {
                 "lalalaai_auth_checked_at": checked_at,
                 "lalalaai_auth_is_valid": token_valid,
                 "lalalaai_auth_last_error": validation_error,
             },
+            expected_generation=generation,
+            bump=False,
         )
 
-    return {
-        "ok": True,
-        "configured": True,
-        "email": email,
-        "token_valid": token_valid,
-        "validation_error": validation_error,
-        "validated_at": checked_at,
-    }
+    return AuthStatusResponse(
+        configured=True,
+        email=email,
+        token_valid=token_valid,
+        validation_error=validation_error,
+        validated_at=checked_at,
+    )
 
 
-@router.post("/auth/activation-key")
+@router.post("/auth/activation-key", response_model=OperationResponse)
 @limiter.limit("5/minute")
-async def api_lalal_auth_activation_key(request: Request, _user: str = Depends(require_user)):
+async def api_lalal_auth_activation_key(
+    request: Request,
+    body: ActivationKeyRequest,
+    _user: str = Depends(require_user),
+) -> OperationResponse:
     """Validate and store a manually provided Lalal activation key."""
+    _ = request
 
-    payload = await get_json_body(request)
-
-    email = str(payload.get("email", "")).strip().lower()
-    activation_key = str(payload.get("activation_key", "")).strip()
+    generation = _auth_generation
+    email = body.email.lower()
+    activation_key = body.activation_key
 
     _validate_email(email)
-    if not 1 <= len(activation_key) <= _MAX_ACTIVATION_KEY_LENGTH:
-        raise HTTPException(status_code=400, detail="Activation key has an invalid length")
 
     from ..lalal import LalalClient, LalalError
 
@@ -438,8 +542,7 @@ async def api_lalal_auth_activation_key(request: Request, _user: str = Depends(r
         logger.exception("Unexpected Lalal activation-key validation failure")
         raise HTTPException(status_code=503, detail="Lalal.ai is temporarily unavailable") from exc
 
-    await asyncio.to_thread(
-        set_settings,
+    saved = await _commit_auth_settings(
         {
             "lalalaai_email": email,
             "lalalaai_auth_key": activation_key,
@@ -447,18 +550,26 @@ async def api_lalal_auth_activation_key(request: Request, _user: str = Depends(r
             "lalalaai_auth_is_valid": True,
             "lalalaai_auth_last_error": "",
         },
+        expected_generation=generation,
+        bump=True,
     )
+    if not saved:
+        raise HTTPException(
+            status_code=409,
+            detail="Lalal.ai authentication changed during validation",
+        )
 
-    return {"ok": True, "message": "Activation key saved"}
+    return OperationResponse(message="Activation key saved")
 
 
-@router.post("/auth/logout")
+@router.post("/auth/logout", response_model=OperationResponse)
 @limiter.limit("10/minute")
-async def api_lalal_auth_logout(request: Request, _user: str = Depends(require_user)):
+async def api_lalal_auth_logout(
+    request: Request, _user: str = Depends(require_user)
+) -> OperationResponse:
     """Clear Lalal.ai auth credentials."""
     _ = request
-    await asyncio.to_thread(
-        set_settings,
+    await _commit_auth_settings(
         {
             "lalalaai_email": "",
             "lalalaai_auth_key": "",
@@ -466,9 +577,11 @@ async def api_lalal_auth_logout(request: Request, _user: str = Depends(require_u
             "lalalaai_auth_is_valid": False,
             "lalalaai_auth_last_error": "",
         },
+        expected_generation=None,
+        bump=True,
     )
 
-    return {"ok": True, "message": "Logged out"}
+    return OperationResponse(message="Logged out")
 
 
 @router.post("/{job_id}")
@@ -566,7 +679,7 @@ async def lalal_split(
         download_stem = True
         download_backing = True
 
-        async with _acquire_processing_lock(lock_file):
+        async with _processing_attempt(lock_file, vocals_path, instrumental_path):
             cached_response = await _get_cached_split_response(
                 job_id_str,
                 stem,
@@ -607,9 +720,15 @@ async def lalal_split(
                         await _finalize_stem(results["backing"], instrumental_path)
                         results["backing"] = instrumental_path
 
-        stem_key = "stem" if stem == _STEM_VOCALS else "backing"
-        if stem_key not in results:
-            raise HTTPException(status_code=500, detail="Processing completed but no output file")
+                    # Both stems are always requested, and both the cache
+                    # lookup and lalal_split_done need both. Raise inside the
+                    # lock so a half-finished pair is cleaned up rather than
+                    # reported as a success nothing can reuse.
+                    if "stem" not in results or "backing" not in results:
+                        raise HTTPException(
+                            status_code=500,
+                            detail="Processing completed but no output file",
+                        )
 
         await _mark_lalal_split_done_if_ready(
             job_id_str,
@@ -627,21 +746,18 @@ async def lalal_split(
             trim_id=trim_id,
         )
 
-    except TimeoutError:
-        await _remove_split_outputs(vocals_path, instrumental_path)
+    # Output cleanup happens inside _processing_attempt, under the lock.
+    except TimeoutError as exc:
         logger.error("Lalal.ai processing timed out for job %s", job_id)
-        raise HTTPException(status_code=504, detail="Lalal.ai processing timed out")
-    except LalalError:
-        await _remove_split_outputs(vocals_path, instrumental_path)
+        raise HTTPException(status_code=504, detail="Lalal.ai processing timed out") from exc
+    except LalalError as exc:
         logger.exception("Lalal.ai error for job %s", job_id)
-        raise HTTPException(status_code=502, detail="Lalal.ai processing failed")
+        raise HTTPException(status_code=502, detail="Lalal.ai processing failed") from exc
     except HTTPException:
-        await _remove_split_outputs(vocals_path, instrumental_path)
         raise
-    except Exception:
-        await _remove_split_outputs(vocals_path, instrumental_path)
+    except Exception as exc:
         logger.exception("Unexpected error in Lalal.ai processing for job %s", job_id)
-        raise HTTPException(status_code=500, detail="Processing failed")
+        raise HTTPException(status_code=500, detail="Processing failed") from exc
 
 
 @router.get("/download/{job_id}")

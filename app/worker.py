@@ -21,6 +21,7 @@ from typing import Any, Final
 from urllib.parse import parse_qs, urlparse
 
 from .analysis_worker import SubmitResult, submit_analysis
+from .utils.duration import round_seconds
 from .db import get_settings, update_job, update_job_if_status, utc_timestamp
 from .governor import governor
 from .utils.cookies import default_cookie_file, find_cookie_file
@@ -496,7 +497,7 @@ def _emit_ffmpeg_progress(
     *,
     message: str,
     out_seconds: float,
-    duration_seconds: int | None,
+    duration_seconds: float | None,
     started_at: float,
     last_progress: int,
 ) -> int:
@@ -523,7 +524,7 @@ def _run_ffmpeg_transcode(
     timeout: int,
     job_id: str,
     message: str,
-    duration_seconds: int | None,
+    duration_seconds: float | None,
 ) -> None:
     logger.debug("Executing ffmpeg with progress: %s", " ".join(cmd))
     _check_cancellation(job_id)
@@ -947,7 +948,7 @@ def _probe_media(
     media_type: str,
     *,
     job_id: str | None = None,
-) -> tuple[str | None, int | None, int | None]:
+) -> tuple[str | None, int | None, float | None]:
     cmd = [
         "ffprobe",
         "-v",
@@ -987,11 +988,13 @@ def _probe_media(
     except (TypeError, ValueError):
         bitrate_kbps = None
 
-    duration_seconds: int | None = None
+    duration_seconds: float | None = None
     try:
         duration_raw = (data.get("format") or {}).get("duration")
         if duration_raw is not None:
-            duration_seconds = max(1, int(float(duration_raw)))
+            # Rounded, not truncated: a 213.4 s track stored as 213 made the
+            # trim guard reject a legitimate full-length selection.
+            duration_seconds = max(1.0, round_seconds(float(duration_raw)) or 1.0)
     except (TypeError, ValueError):
         duration_seconds = None
 

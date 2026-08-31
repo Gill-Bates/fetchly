@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
 
+from ..bpm_naming import tagged_download_name
 from ..common.rate_limit import limiter
 from ..db import DOWNLOADABLE_STATUSES, get_job
 from ..utils.fs import AUDIO_SOURCE_EXTENSIONS, path_is_file
@@ -243,7 +244,7 @@ def needs_browser_audio_fallback(file_path: Path) -> bool:
     return file_path.suffix.lower() not in _BROWSER_SAFE_AUDIO_EXTENSIONS
 
 
-async def _stop_transcode_process(proc: asyncio.subprocess.Process) -> None:
+async def stop_ffmpeg_process(proc: asyncio.subprocess.Process) -> None:
     """Stop and reap a still-running ffmpeg process."""
     if proc.returncode is None:
         with suppress(ProcessLookupError):
@@ -317,7 +318,7 @@ async def transcode_to_mp3(source_path: Path, output_path: Path) -> Path:
                         # BaseException, not Exception: CancelledError (client
                         # disconnect, server shutdown) is the case that would
                         # otherwise leave ffmpeg running past its request.
-                        await _stop_transcode_process(proc)
+                        await stop_ffmpeg_process(proc)
                         raise
 
                     if proc.returncode != 0:
@@ -411,14 +412,14 @@ async def build_job_file_response(job_id: uuid.UUID) -> Response:
 
         return FileResponse(
             path=mp3_path,
-            filename=mp3_path.name,
+            filename=tagged_download_name(mp3_path, job["bpm"]),
             media_type="audio/mpeg",
             headers=_NOSNIFF_HEADER,
         )
 
     return FileResponse(
         path=file_path,
-        filename=file_path.name,
+        filename=tagged_download_name(file_path, job["bpm"]),
         media_type=_guess_media_type(file_path),
         headers=_NOSNIFF_HEADER,
     )
