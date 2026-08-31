@@ -165,6 +165,30 @@ RUN set -euo pipefail; \
 # arm64 does not consume it - gcc assembles the NEON paths - but leaving it out
 # would make this stage silently unbuildable the moment the arch guard is
 # lifted, e.g. to reproduce an arm64 failure locally on an x86 machine.
+#
+# The FFTW_FLAGS line appended to packaging/build_config.sh below is what makes
+# this stage build at all on aarch64. Upstream hardcodes an x86-only set there:
+#
+#     FFTW_FLAGS="--enable-float --enable-sse2
+#                 --with-incoming-stack-boundary=2 --with-our-malloc16"
+#
+# and packaging/debian_3rdparty/build_fftw3.sh passes it straight to FFTW's
+# configure. On aarch64 --enable-sse2 makes that configure probe for -msse and
+# abort - "configure: error: Need a version of gcc with -msse" - before any of
+# the remaining 3rdparty libraries or essentia itself is reached. The other two
+# flags are x86 stack/alloc tuning and equally meaningless here.
+#
+# There is no SIMD flag to swap in: build_config.sh pins FFTW 3.3.2 (2012),
+# which predates aarch64 NEON support, so --enable-neon would only move the
+# failure. Dropping the SIMD flags builds a scalar FFTW instead. That costs
+# some FFT throughput on arm64, which is the right trade against not shipping
+# an arm64 image at all - and it only affects essentia's bundled copy, not the
+# BtbN ffmpeg the application shells out to.
+#
+# Appending re-assigns rather than patching individual lines out, so an
+# upstream reorder or reword of that block cannot silently un-fix this; the
+# shell simply takes the last assignment. Revisit if build_config.sh ever
+# bumps FFTW past 3.3.5, where --enable-neon does cover aarch64.
 FROM ${PYTHON_BASE} AS essentia
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
@@ -201,6 +225,7 @@ RUN set -euo pipefail; \
     cd /src/essentia; \
     git checkout --detach "${ESSENTIA_REF}"; \
     echo "essentia source: $(git describe --always --tags)"; \
+    printf '\n%s\n' 'FFTW_FLAGS="--enable-float"' >> packaging/build_config.sh; \
     export MAKEFLAGS="-j$(nproc)"; \
     pip wheel --no-cache-dir --no-deps -w /wheels .; \
     rm -f /tmp/essentia-ref.atom; \
@@ -246,9 +271,16 @@ COPY --from=essentia /wheels /tmp/essentia-wheels
 # it and pip never goes looking for the linux/aarch64 wheel upstream does not
 # publish. On amd64 the glob matches nothing and pip resolves essentia from
 # PyPI exactly as before.
+#
+# setuptools is upgraded explicitly, before and after the requirements install.
+# `pip install --upgrade pip` covers pip alone, and setuptools reaches the venv
+# only as somebody else's transitive dependency - which resolved to 70.3.0 and
+# tripped the release scan on CVE-2025-47273. The second call is not redundant:
+# a requirement is free to pull an older setuptools back in, and only the final
+# state of the venv is what gets copied into the runtime image and scanned.
 RUN set -euo pipefail; \
     python -m venv "$VIRTUAL_ENV"; \
-    pip install --upgrade pip; \
+    pip install --upgrade pip 'setuptools>=78.1.1'; \
     shopt -s nullglob; \
     essentia_wheels=(/tmp/essentia-wheels/essentia-*.whl); \
     if (( ${#essentia_wheels[@]} > 0 )); then \
@@ -256,6 +288,7 @@ RUN set -euo pipefail; \
         pip install --no-cache-dir "${essentia_wheels[@]}"; \
     fi; \
     pip install --no-cache-dir -r requirements.txt; \
+    pip install --no-cache-dir --upgrade 'setuptools>=78.1.1'; \
     rm -rf /tmp/essentia-wheels
 
 # yt-dlp from PyPI, never the distro package: the app both shells out to the
@@ -384,7 +417,20 @@ COPY docker/apt-no-distro-media.pref /etc/apt/preferences.d/no-distro-media
 # bash is already present in python:3.13-slim; curl is not needed since the
 # healthcheck below uses the Python already present in the image. ffmpeg is
 # NOT here - it comes from the static upstream build in the ffmpeg stage.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+#
+# `apt-get upgrade` is the point of this layer as much as the two installs are.
+# `apt-get update` only refreshes the package index; every package inherited
+# from python:3.13-slim that is never named in an install line stays at
+# whatever version that base image was last rebuilt with. Docker Official
+# Images lag Debian security uploads by days, which is how the release scan
+# came to fail on openssl/libssl3t64 (CVE-2026-14456) even though the build
+# pulls the newest python:3.13-slim tag. Upgrading here closes that window on
+# every rebuild, matching the "security updates arrive with a rebuild" note at
+# the top of this file. `upgrade` rather than `dist-upgrade`: it only upgrades
+# packages in place and never installs or removes any. The ffmpeg/libav pins
+# in apt-no-distro-media.pref are honoured by this too, so the distro media
+# stack still cannot come back in through an upgrade.
+RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
     gosu \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
