@@ -377,7 +377,7 @@ function formatResultSummary(result) {
     if (metrics.settingsFieldStackContractBroken) parts.push('settingsFieldStackContractBroken=true');
     if (metrics.settingsSaveToastContractBroken) parts.push('settingsSaveToastContractBroken=true');
     if (metrics.lalalMobileActionLayoutBroken) parts.push('lalalMobileActionLayoutBroken=true');
-    if (metrics.trimDefaultRegionPresent) parts.push('trimDefaultRegion=true');
+    if (metrics.trimDefaultSelectionInvalid) parts.push('trimDefaultSelection=invalid');
     if (metrics.uiCardChildExpands) parts.push(`uiCardChildExpands=${metrics.uiCardChildExpands}`);
     // CSS hardening (2026-04-29)
     if (metrics.webkitOnlyRules > 10) parts.push(`webkitOnlyRules=${metrics.webkitOnlyRules}`);
@@ -501,7 +501,7 @@ const BASE_METRICS = Object.freeze({
     settingsFieldStackContractBroken: false,
     settingsSaveToastContractBroken: false,
     lalalMobileActionLayoutBroken: false,
-    trimDefaultRegionPresent: false,
+    trimDefaultSelectionInvalid: false,
     uiCardChildExpands: 0,
     // CSS hardening checks (2026-04-29)
     webkitOnlyRules: 0,
@@ -3055,24 +3055,14 @@ async function collectMetrics(page, view) {
             );
         })();
 
-        // 25. Trim modal should not have default region on open (user must select)
-        const trimDefaultRegionPresent = (() => {
+        // 25. Trim modal should open with a small selection at the track start.
+        const trimDefaultSelectionInvalid = (() => {
             const trimModal = document.querySelector('#trimModal');
             if (!trimModal || !trimModal.classList.contains('show')) return false;
-            // Check if a region exists immediately after modal open
             const regions = document.querySelectorAll('#trimWave [data-id], #trimWave .wavesurfer-region');
             const infoText = document.querySelector('#trimInfo');
-            // If info shows a time range (not "Click and drag" prompt), region was auto-created
-            if (infoText && infoText.textContent) {
-                const text = infoText.textContent.trim();
-                // Should show instruction, not a pre-selected range
-                const hasTimeRange = /\d+:\d+.*–.*\d+:\d+/.test(text);
-                const hasInstruction = text.toLowerCase().includes('click') || text.toLowerCase().includes('drag');
-                if (hasTimeRange && !hasInstruction && regions.length > 0) {
-                    return true;
-                }
-            }
-            return false;
+            const text = infoText?.textContent?.trim() || '';
+            return regions.length === 0 || !text.startsWith('0:00.00');
         })();
 
         // 26. UI card children should not expand unless explicitly needed
@@ -3260,7 +3250,7 @@ async function collectMetrics(page, view) {
             videoPreviewContractBroken,
             settingsFieldStackContractBroken,
             lalalMobileActionLayoutBroken,
-            trimDefaultRegionPresent,
+            trimDefaultSelectionInvalid,
             uiCardChildExpands,
             trimInvalidRanges,
             trimSnapViolations,
@@ -3555,10 +3545,11 @@ async function auditTrimModal(page, view) {
             delete window.__uiLintTrimKeyEvents;
         });
 
-        const trimDefaultRegionPresent = await page.evaluate(() => (
-            document.querySelectorAll('#trimWave [data-id], #trimWave .wavesurfer-region').length > 0
-            && !/click|drag/i.test(document.querySelector('#trimInfo')?.textContent || '')
-        ));
+        const trimDefaultSelectionInvalid = await page.evaluate(() => {
+            const infoText = document.querySelector('#trimInfo')?.textContent?.trim() || '';
+            return document.querySelectorAll('#trimWave [data-id], #trimWave .wavesurfer-region').length === 0
+                || !infoText.startsWith('0:00.00');
+        });
 
         const trimKeyboardConflicts = [];
         if (!keyState.events.some(({ key }) => key === ' ')) {
@@ -3574,7 +3565,7 @@ async function auditTrimModal(page, view) {
             failures: [],
             warnings: [],
             metrics: {
-                trimDefaultRegionPresent,
+                trimDefaultSelectionInvalid,
                 trimKeyboardMissing: trimKeyboardMissing || [],
                 trimKeyboardConflicts,
             },
@@ -4024,8 +4015,8 @@ async function runView(browser, storageState, view, replacements = {}) {
         if (metrics.lalalMobileActionLayoutBroken) {
             failures.push('Lalal mobile actions must use one equal two-column row');
         }
-        if (metrics.trimDefaultRegionPresent) {
-            failures.push('trim modal opens with a preselected region');
+        if (metrics.trimDefaultSelectionInvalid) {
+            failures.push('trim modal must open with a selection at the track start');
         }
         if (metrics.uiCardChildExpands) {
             failures.push(`ui-card children expanding unexpectedly: ${metrics.uiCardChildExpands}`);
@@ -4151,7 +4142,7 @@ async function runView(browser, storageState, view, replacements = {}) {
                 settingsFieldStackContractBroken: metrics.settingsFieldStackContractBroken || false,
                 settingsSaveToastContractBroken: metrics.settingsSaveToastContractBroken || false,
                 lalalMobileActionLayoutBroken: metrics.lalalMobileActionLayoutBroken || false,
-                trimDefaultRegionPresent: metrics.trimDefaultRegionPresent || false,
+                trimDefaultSelectionInvalid: metrics.trimDefaultSelectionInvalid || false,
                 uiCardChildExpands: metrics.uiCardChildExpands || 0,
                 trimInvalidRanges: metrics.trimInvalidRanges || false,
                 trimSnapViolations: metrics.trimSnapViolations || 0,

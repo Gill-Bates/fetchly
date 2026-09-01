@@ -517,7 +517,9 @@ function persistPendingSettingsOnPageHide() {
         saveTimeoutId = null;
     }
 
-    if (!settingsDirty) {
+    // A regular save is already writing the same payload - a second concurrent
+    // POST would only add a competing write transaction.
+    if (!settingsDirty || isSaving) {
         return;
     }
 
@@ -526,6 +528,10 @@ function persistPendingSettingsOnPageHide() {
     if (!validation.valid || !csrfToken) {
         return;
     }
+
+    // iOS fires pagehide on every tab switch. Clearing the flag up front keeps
+    // a suspended-and-resumed page from re-sending the same payload each time.
+    settingsDirty = false;
 
     // iOS/Safari may suspend the page before the debounced save runs. The
     // request is intentionally small and idempotent so keepalive can finish
@@ -541,7 +547,8 @@ function persistPendingSettingsOnPageHide() {
         body: JSON.stringify(validation.data),
     }).catch(() => {
         // Navigation is already in progress; the normal page state cannot be
-        // updated reliably here.
+        // updated reliably here. Restore the flag so a restored page retries.
+        settingsDirty = true;
     });
 }
 
@@ -549,7 +556,11 @@ window.addEventListener("pagehide", persistPendingSettingsOnPageHide);
 
 function bindSettingsInputs() {
     formEl?.querySelectorAll("input, select, textarea").forEach((input) => {
-        if (input === adminPasswordEl || input === adminPasswordConfirmEl) {
+        // The password fields and the authentication switch are never
+        // auto-saved: they have their own explicit confirmation path.
+        if (input === adminPasswordEl
+            || input === adminPasswordConfirmEl
+            || input === enableAuthenticationEl) {
             return;
         }
 
@@ -560,6 +571,20 @@ function bindSettingsInputs() {
 
         input.addEventListener("input", () => scheduleAutoSave());
         input.addEventListener("change", () => scheduleAutoSave());
+    });
+
+    enableAuthenticationEl?.addEventListener("change", () => {
+        // Turning authentication off exposes the whole instance to anyone who
+        // can reach it, so a stray click must not be enough to do it.
+        if (!enableAuthenticationEl.checked
+            && !window.confirm(
+                "Disable authentication? Everyone who can reach this server will have full access.",
+            )) {
+            enableAuthenticationEl.checked = true;
+            return;
+        }
+
+        scheduleAutoSave(0);
     });
 }
 
@@ -717,8 +742,10 @@ function setAppUpdateState(box, state, { text, url } = {}) {
     const iconEl = box.querySelector("[data-app-update-icon]");
     const textEl = box.querySelector("[data-app-update-text]");
     const linkEl = box.querySelector("[data-app-update-link]");
+    const refreshBtn = document.querySelector("[data-app-update-refresh]");
 
     box.dataset.appUpdateState = state;
+    box.setAttribute("aria-busy", String(state === "loading"));
 
     if (iconEl) {
         iconEl.textContent = preset.icon;
@@ -726,6 +753,9 @@ function setAppUpdateState(box, state, { text, url } = {}) {
     }
     if (textEl) {
         textEl.textContent = text || preset.text;
+    }
+    if (refreshBtn) {
+        refreshBtn.disabled = state === "loading";
     }
     if (linkEl) {
         if (state === "available" && url) {
@@ -738,12 +768,27 @@ function setAppUpdateState(box, state, { text, url } = {}) {
     }
 }
 
+function setAppUpdateVersions(box, current, latest) {
+    if (!box) return;
+
+    const currentEl = box.querySelector("[data-app-update-current]");
+    const latestEl = box.querySelector("[data-app-update-latest]");
+
+    if (currentEl) {
+        currentEl.textContent = formatVersion(current) || "–";
+    }
+    if (latestEl) {
+        latestEl.textContent = formatVersion(latest) || "–";
+    }
+}
+
 function applyAppUpdate(box, info) {
     if (!box) return;
 
     const current = box.dataset.currentVersion || "";
     const latest = info?.latest || "";
     const latestLabel = formatVersion(latest);
+    setAppUpdateVersions(box, current, latest);
 
     if (!info || !latest) {
         setAppUpdateState(box, "unknown");
@@ -794,6 +839,11 @@ async function loadUpdateStatus() {
         return;
     }
 
+    if (appBox) {
+        setAppUpdateVersions(appBox, appBox.dataset.currentVersion, "");
+        setAppUpdateState(appBox, "loading");
+    }
+
     try {
         const res = await fetchWithTimeout("/api/updates", { credentials: "same-origin" });
         if (!res.ok) {
@@ -828,6 +878,10 @@ function init() {
     updateLalalAuthButtonLabel(lalalStatusBadge?.textContent || bootstrapData.lalal_status);
     void loadLalalStatus();
     void loadUpdateStatus();
+
+    document.querySelector("[data-app-update-refresh]")?.addEventListener("click", () => {
+        void loadUpdateStatus();
+    });
 
     adminPasswordEl?.addEventListener("input", validatePasswordFields);
     adminPasswordConfirmEl?.addEventListener("input", validatePasswordFields);

@@ -82,11 +82,11 @@
     --base: #0f172a;
 
     /* Z-index scale (normalized) */
+    /* Local scale only. Bootstrap owns 1030 (.fixed-top), 1050/1055 (modal). */
     --z-sticky: 10;
-    --z-navbar: 100;
-    --z-overlay: 1000;
+    --z-dropdown: 1080;
     --z-popover: 1100;
-    --z-modal: 1200;
+    --z-toast: 1110;
 
     /* Spacing scale (8px grid) */
     --space-1: 4px;
@@ -107,7 +107,6 @@
     --surface-60: #0f172a;
     --surface-90: #0f172a;
     --surface-95: #0f172a;
-    --surface-strong: #0f172a;
 
     /* Blur scales */
     --blur-sm: blur(6px);
@@ -145,12 +144,20 @@
 
     /* Deterministic solid surfaces (no drift) */
     --surface-solid: #0f172a;
+    /* Always opaque: base for inputs and dialog bodies that must not
+       show page content through them. */
+    --surface-strong: #0f172a;
     --surface-elevated: #111827;
     --surface-hover: #1e293b;
     --surface-success-row: #142b24;
     --surface-danger-row: #2b1e2d;
 }
 
+/* color-mix() is required (Baseline 2023). Do NOT add a preceding static
+   declaration as a "fallback": a value containing var() parses as valid, so
+   the earlier declaration is dropped at parse time and the color-mix() one
+   only fails later at computed-value time — the property then resets to its
+   initial value instead of falling back. Guard at token level via @supports. */
 @supports (color: color-mix(in srgb, white, black)) {
     :root {
         --surface: color-mix(in srgb, var(--base) 92%, transparent);
@@ -176,7 +183,6 @@
 }
 
 .btn:focus-visible {
-    box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.4);
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 40%, transparent);
 }
 
@@ -185,7 +191,6 @@ button:focus-visible,
 input:focus-visible,
 select:focus-visible,
 textarea:focus-visible {
-    box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.35);
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 35%, transparent);
 }
 
@@ -246,7 +251,7 @@ textarea:focus-visible {
     overflow: visible;
 }
 
-@media (min-width: 769px) {
+@media (min-width: 768px) {
     .app-root--dashboard {
         height: 100dvh;
         overflow: hidden;
@@ -321,7 +326,6 @@ body {
     display: flex;
     align-items: center;
     justify-content: center;
-    background: var(--surface-solid);
     background: color-mix(in srgb, var(--surface-95) 96%, transparent);
     border-top: 1px solid var(--border);
     backdrop-filter: var(--blur-md);
@@ -398,7 +402,6 @@ body {
     height: var(--nav-height);
     padding-top: 0;
     padding-bottom: 0;
-    background: var(--surface-solid);
     background: color-mix(in srgb, var(--surface) 70%, transparent);
     backdrop-filter: var(--blur-md);
     -webkit-backdrop-filter: var(--blur-md);
@@ -431,7 +434,7 @@ body {
     padding: 0;
 }
 
-@media (max-width: 768px) {
+@media (max-width: 767.98px) {
     .top-navbar .btn {
         height: 44px;
         min-height: 44px;
@@ -455,11 +458,6 @@ body {
     color: var(--text-muted);
 }
 
-.top-navbar,
-.table thead {
-    background: var(--surface-elevated);
-}
-
 /* ── Hero ─────────────────────────────────────────────────────────────────── */
 
 .hero {
@@ -470,7 +468,6 @@ body {
 .hero-main {
     padding: 48px 32px;
     border-radius: var(--card-radius);
-    background: var(--surface-solid);
     background: linear-gradient(135deg, color-mix(in srgb, var(--primary) 15%, transparent), var(--surface-90));
     border: 1px solid var(--border);
 }
@@ -567,11 +564,6 @@ body {
 .form-control,
 .form-select {
     transition: border-color 0.18s ease, box-shadow 0.18s ease, background-color 0.18s ease;
-}
-
-.form-control,
-.form-select {
-    min-height: 40px;
 }
 
 /* ── Unified Button System ───────────────────────────────────────────────── */
@@ -833,7 +825,7 @@ button .material-symbols-outlined,
 }
 
 /* Keep the icon inset after Bootstrap's form-control-sm padding rules. */
-.input-icon > .input-icon__field {
+.input-icon>.input-icon__field {
     padding-left: 2.5rem;
 }
 
@@ -843,14 +835,14 @@ button .material-symbols-outlined,
     width: 100%;
 }
 
-.jobs-search-wrap > .jobs-search-input {
+.jobs-search-wrap>.jobs-search-input {
     width: 100%;
     padding-right: 2.25rem;
 }
 
 /* Keep the placeholder clear of the leading search glyph. The extra
    specificity wins over Bootstrap's .form-control-sm padding shorthand. */
-.jobs-search-wrap > input.jobs-search-input.form-control-sm {
+.jobs-search-wrap>input.jobs-search-input.form-control-sm {
     padding-left: 2.75rem;
     padding-right: 2.25rem;
 }
@@ -873,7 +865,6 @@ button .material-symbols-outlined,
 
 .jobs-search-clear:hover,
 .jobs-search-clear:focus-visible {
-    background: rgba(229, 231, 235, 0.12);
     background: color-mix(in srgb, var(--text) 12%, transparent);
     color: var(--text);
 }
@@ -967,17 +958,16 @@ html body .text-muted {
 /* Make Lalal auth suggestions clearly look like placeholders, not typed input. */
 #lalalAuthEmail::placeholder,
 #lalalActivationKey::placeholder {
-    color: rgba(198, 209, 228, 0.65);
-    color: color-mix(in srgb, var(--text-muted) 65%, transparent);
-    opacity: 0.45;
+    /* Single reduction only — stacking 65% alpha on 0.45 opacity dropped
+       this to ~2.2:1 against the dialog surface. */
+    color: var(--text-muted);
+    opacity: 0.68;
 }
 
 .form-control:focus,
 .form-select:focus {
     border-color: var(--primary);
-    box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.35);
     box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary) 35%, transparent);
-    background: var(--surface);
     background: color-mix(in srgb, var(--surface) 92%, transparent);
     color: var(--text);
 }
@@ -985,7 +975,6 @@ html body .text-muted {
 /* Disabled controls: keep dark-theme look and avoid bright browser defaults */
 .form-control:disabled,
 .form-select:disabled {
-    background: var(--surface-strong);
     background: color-mix(in srgb, var(--surface-strong) 86%, transparent);
     color: var(--text-muted);
     border: 1px solid var(--border);
@@ -1003,7 +992,6 @@ html body .text-muted {
 }
 
 .form-select.is-disabled {
-    background: var(--surface-strong);
     background: color-mix(in srgb, var(--surface-strong) 86%, transparent);
     color: var(--text-muted);
     border: 1px solid var(--border);
@@ -1013,7 +1001,6 @@ html body .text-muted {
 /* Optional readonly state for better UX than disabled */
 .form-control[readonly],
 .form-select[readonly] {
-    background: var(--surface-strong);
     background: color-mix(in srgb, var(--surface-strong) 92%, transparent);
     color: var(--text);
     cursor: default;
@@ -1123,7 +1110,6 @@ html body .text-muted {
 }
 
 .ui-card:hover {
-    border-color: var(--primary);
     border-color: color-mix(in srgb, var(--primary) 50%, var(--border));
 }
 
@@ -1132,11 +1118,9 @@ html body .text-muted {
 }
 
 .ui-card--primary {
-    background: var(--surface-solid);
     background: linear-gradient(135deg,
             color-mix(in srgb, var(--primary) 15%, rgba(15, 23, 42, 0.92)),
             rgba(15, 23, 42, 0.88));
-    border-color: var(--border);
     border-color: color-mix(in srgb, var(--primary) 40%, var(--border));
 }
 
@@ -1206,7 +1190,6 @@ html body .text-muted {
 .settings-tabs .nav-link:hover,
 .settings-tabs .nav-link:focus-visible {
     color: var(--text);
-    border-color: var(--primary);
     border-color: color-mix(in srgb, var(--primary) 50%, var(--border));
 }
 
@@ -1258,10 +1241,8 @@ html body .text-muted {
     align-items: center;
     gap: 0.25rem;
     padding: 0.25rem 0.55rem;
-    border: 1px solid var(--warning);
     border: 1px solid color-mix(in srgb, var(--warning) 45%, transparent);
     border-radius: var(--radius-sm);
-    background: var(--surface);
     background: color-mix(in srgb, var(--warning) 18%, var(--surface));
     color: var(--warning);
     font-size: 0.75rem;
@@ -1273,7 +1254,6 @@ html body .text-muted {
 
 .settings-update-badge:hover,
 .settings-update-badge:focus-visible {
-    background: var(--surface);
     background: color-mix(in srgb, var(--warning) 28%, var(--surface));
     color: var(--warning);
 }
@@ -1292,10 +1272,8 @@ html body .text-muted {
     align-items: center;
     max-width: 100%;
     padding: 0.25rem 0.55rem;
-    border: 1px solid var(--border);
     border: 1px solid color-mix(in srgb, var(--primary) 28%, var(--border));
     border-radius: var(--radius-sm);
-    background: var(--surface);
     background: color-mix(in srgb, var(--primary) 12%, var(--surface));
     color: var(--text);
     font-size: 0.8rem;
@@ -1303,24 +1281,26 @@ html body .text-muted {
     white-space: nowrap;
 }
 
-/* ── fetchly self-update tile (Settings → System) ─────────────────────── */
-.settings-app-update {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
+/* ── Fetchly self-update card (Settings → System) ─────────────────────── */
+.settings-update-card {
+    padding: 0;
 }
 
-.settings-app-update-head {
+.settings-update-card-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: var(--space-3);
 }
 
-.settings-app-update-logo {
-    height: 26px;
-    width: auto;
-    flex-shrink: 0;
+.settings-update-card-header .icon-inline {
+    font-size: 19px;
+}
+
+.settings-app-update {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
 }
 
 .settings-app-update-status {
@@ -1479,7 +1459,7 @@ html body .text-muted {
     font-weight: 600;
 }
 
-.settings-group > h2 {
+.settings-group>h2 {
     margin-bottom: var(--space-5) !important;
 }
 
@@ -1501,7 +1481,6 @@ html body .text-muted {
 /* Focus state for accessibility + structure */
 .ui-card:focus-within {
     border-color: var(--primary);
-    box-shadow: 0 0 0 1px rgba(99, 102, 241, 0.3);
     box-shadow: 0 0 0 1px color-mix(in srgb, var(--primary) 30%, transparent);
 }
 
@@ -1595,7 +1574,6 @@ html body .text-muted {
     display: inline-block;
     font-size: 0.85em;
     font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
-    background: var(--surface-elevated);
     background: color-mix(in srgb, var(--surface-elevated) 92%, transparent);
     color: var(--text-default);
     padding: 0.12rem 0.45rem;
@@ -1698,7 +1676,6 @@ html body .text-muted {
     padding: clamp(1rem, 2vw, 1.45rem);
     border-radius: calc(var(--radius-lg) + 2px);
     background: linear-gradient(180deg, rgba(255, 255, 255, 0.02), rgba(255, 255, 255, 0));
-    box-shadow: 0 0 0 1px rgba(229, 231, 235, 0.04) inset;
     box-shadow: 0 0 0 1px color-mix(in srgb, var(--text) 4%, transparent) inset;
 }
 
@@ -1817,7 +1794,6 @@ html body .text-muted {
     flex-direction: column;
     gap: 0.55rem;
     padding-top: 0.7rem;
-    border-top: 1px solid rgba(229, 231, 235, 0.1);
     border-top: 1px solid color-mix(in srgb, var(--text) 10%, transparent);
 }
 
@@ -1879,61 +1855,76 @@ html body .text-muted {
 }
 
 /* Platform pill — shown before the title; platform is derived from the URL. */
+/* Icon-only badge: every call site (jobs list, detail modal, job.html) renders
+   a single masked icon span and no text, so the box is a circle. `color` is
+   load-bearing - the icon paints itself with currentColor. */
 .platform-pill {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 28px;
+    width: 24px;
     height: 24px;
-    flex: 0 0 28px;
+    flex: 0 0 24px;
     box-sizing: border-box;
     margin-right: 0.5rem;
     padding: 0;
     border-radius: var(--radius-pill, 999px);
-    font-size: 0.75rem;
-    font-weight: 700;
-    line-height: 1.25;
-    letter-spacing: 0.02em;
-    text-transform: none;
-    white-space: nowrap;
     vertical-align: middle;
     color: #ffffff;
     background: rgba(255, 255, 255, 0.14);
     border: 1px solid rgba(255, 255, 255, 0.18);
 }
 
+/* All four source files share a 24x24 viewBox, but the glyphs inside cover
+   very different fractions of it (YouTube is wide and short, Facebook narrow
+   and tall). `mask-size: contain` would scale the viewBox, not the glyph, and
+   render them at visibly different weights - so each icon gets the mask-size
+   that lands its glyph at ~11px optical height. The 18px box is the common
+   canvas and must stay >= the largest mask-size, otherwise the mask clips. */
 .platform-pill__icon {
     display: block;
-    width: 16px;
-    height: 16px;
+    width: 18px;
+    height: 18px;
     flex: 0 0 auto;
     background-color: currentColor;
     -webkit-mask-position: center;
     mask-position: center;
     -webkit-mask-repeat: no-repeat;
     mask-repeat: no-repeat;
-    -webkit-mask-size: contain;
-    mask-size: contain;
+    -webkit-mask-size: 16px;
+    mask-size: 16px;
 }
 
 .platform-pill__icon--youtube {
+    /* Glyph spans 19.7 x 15.0 of the viewBox. */
     -webkit-mask-image: url("/static/img/social/youtube.svg");
     mask-image: url("/static/img/social/youtube.svg");
+    -webkit-mask-size: 17px;
+    mask-size: 17px;
 }
 
 .platform-pill__icon--tiktok {
+    /* Glyph spans 14.8 x 17.6 of the viewBox. */
     -webkit-mask-image: url("/static/img/social/tiktok.svg");
     mask-image: url("/static/img/social/tiktok.svg");
+    -webkit-mask-size: 15px;
+    mask-size: 15px;
 }
 
 .platform-pill__icon--instagram {
+    /* Glyph fills 19.0 x 19.0 of the viewBox. */
     -webkit-mask-image: url("/static/img/social/instagram.svg");
     mask-image: url("/static/img/social/instagram.svg");
+    -webkit-mask-size: 14px;
+    mask-size: 14px;
 }
 
 .platform-pill__icon--facebook {
+    /* Glyph spans 9.5 x 17.3 of the viewBox. */
     -webkit-mask-image: url("/static/img/social/facebook.svg");
     mask-image: url("/static/img/social/facebook.svg");
+    -webkit-mask-size: 15px;
+    mask-size: 15px;
 }
 
 .platform-pill--youtube {
@@ -2040,12 +2031,9 @@ html body .text-muted {
 }
 
 .table thead {
-    /* Use solid background for sticky header compatibility and better z-index stacking */
-    position: sticky;
-    top: 0;
-    z-index: var(--z-sticky);
+    /* Sticky sits on the th (see #jobsCard .table thead th); sticky on
+       thead itself is unreliable across engines. */
     background: var(--surface-solid);
-    /* will-change removed: unnecessary GPU layer for sticky elements */
 }
 
 .table thead th {
@@ -2104,7 +2092,6 @@ td[data-label="Title"] {
     white-space: nowrap;
     font-family: "Roboto Flex", system-ui, sans-serif;
     font-stretch: 100%;
-    font-variation-settings: "wdth" 100;
     letter-spacing: -0.01em;
 }
 
@@ -2133,10 +2120,8 @@ td[data-label="Title"] {
     height: 1.75rem;
     flex: 0 0 auto;
     padding: 0;
-    border: 1px solid var(--border);
     border: 1px solid color-mix(in srgb, var(--border) 92%, transparent);
     border-radius: var(--radius-sm);
-    background: var(--surface-elevated);
     background: color-mix(in srgb, var(--surface-elevated) 92%, transparent);
     color: var(--text-muted);
     transition: color 0.15s ease, border-color 0.15s ease, background 0.15s ease;
@@ -2145,14 +2130,11 @@ td[data-label="Title"] {
 .job-copy-url-btn:hover,
 .job-copy-url-btn:focus-visible {
     color: var(--text);
-    border-color: var(--primary);
     border-color: color-mix(in srgb, var(--primary) 45%, var(--border));
-    background: var(--surface-elevated);
     background: color-mix(in srgb, var(--primary) 14%, var(--surface-elevated));
 }
 
 .job-copy-url-btn:focus-visible {
-    outline: 2px solid rgba(99, 102, 241, 0.4);
     outline: 2px solid color-mix(in srgb, var(--primary) 40%, transparent);
     outline-offset: 2px;
 }
@@ -2220,7 +2202,7 @@ td[data-label="Title"] {
 
 /* Bootstrap's table-hover paints every cell on hover. Keep that state
    transparent so the row owns one continuous background without seams. */
-.jobs-table.table-hover > tbody > tr:hover > * {
+.jobs-table.table-hover>tbody>tr:hover>* {
     --bs-table-bg-state: transparent;
     background-color: transparent;
 }
@@ -2267,7 +2249,7 @@ td[data-label="Title"] {
     display: none;
 }
 
-@media (min-width: 769px) {
+@media (min-width: 768px) {
     #jobsCard .jobs-list-shell {
         flex: 1 1 auto;
         min-height: 0;
@@ -2375,14 +2357,13 @@ td[data-label="Title"] {
 }
 
 .jobs-table tbody tr {
-    border-bottom: 1px solid rgba(229, 231, 235, 0.06);
     border-bottom: 1px solid color-mix(in srgb, var(--text) 6%, transparent);
 }
 
 #jobsCard .table thead th {
     position: sticky;
     top: 0;
-    z-index: 6;
+    z-index: var(--z-sticky);
     background: var(--surface-solid);
     box-shadow: 0 2px 0 var(--border);
 }
@@ -2441,7 +2422,6 @@ td[data-label="Title"] {
 }
 
 .jobs-mobile-action[href^="/download/"] {
-    border-color: rgba(129, 140, 248, 0.48);
     border-color: color-mix(in srgb, var(--primary) 48%, transparent);
     background:
         linear-gradient(180deg, rgba(129, 140, 248, 0.24), rgba(99, 102, 241, 0.09)),
@@ -2474,6 +2454,11 @@ td[data-label="Title"] {
 
 .jobs-mobile-action-group .jobs-mobile-action--menu {
     border-radius: 0 10px 10px 0;
+}
+
+.jobs-mobile-action-group .jobs-mobile-action--retry {
+    border-right-width: 0;
+    border-radius: 10px 0 0 10px;
 }
 
 .jobs-mobile-action:focus-visible {
@@ -2523,10 +2508,8 @@ td[data-label="Title"] {
     min-height: 4.7rem;
     margin-top: 0.8rem;
     padding: 0.9rem 0.95rem;
-    border: 1px solid var(--border);
     border: 1px solid color-mix(in srgb, var(--text) 8%, transparent);
     border-radius: 18px;
-    background: var(--surface-elevated);
     background:
         linear-gradient(180deg, rgba(255, 255, 255, 0.02), rgba(255, 255, 255, 0)),
         color-mix(in srgb, var(--surface-elevated) 88%, transparent);
@@ -2534,7 +2517,6 @@ td[data-label="Title"] {
 }
 
 .job-item:last-child {
-    border-bottom: 1px solid var(--border);
     border-bottom: 1px solid color-mix(in srgb, var(--text) 8%, transparent);
 }
 
@@ -2558,6 +2540,7 @@ td[data-label="Title"] {
     font-weight: 600;
     line-height: 1.24;
     -webkit-line-clamp: 2;
+    line-clamp: 2;
     -webkit-box-orient: vertical;
 }
 
@@ -2597,7 +2580,6 @@ td[data-label="Title"] {
 }
 
 .job-item__body[data-action="open-detail"]:focus-visible {
-    outline: 2px solid rgba(99, 102, 241, 0.7);
     outline: 2px solid color-mix(in srgb, var(--primary) 70%, transparent);
     outline-offset: 4px;
 }
@@ -2704,7 +2686,6 @@ td[data-label="Title"] {
 }
 
 .job-item__detail-label {
-    color: var(--text-muted);
     color: color-mix(in srgb, var(--text-muted) 88%, white 12%);
     font-size: 0.75rem;
     font-weight: 650;
@@ -2803,9 +2784,7 @@ td[data-label="Title"] {
     aspect-ratio: 16 / 9;
     overflow: hidden;
     border-radius: 12px;
-    background: var(--surface-elevated);
     background: color-mix(in srgb, var(--surface-elevated) 92%, transparent);
-    border: 1px solid var(--border);
     border: 1px solid color-mix(in srgb, var(--text) 8%, transparent);
 }
 
@@ -2903,7 +2882,6 @@ td[data-label="Title"] {
     flex-direction: column;
     gap: 0.45rem;
     padding-top: 0.65rem;
-    border-top: 1px solid rgba(229, 231, 235, 0.08);
     border-top: 1px solid color-mix(in srgb, var(--text) 8%, transparent);
 }
 
@@ -2939,9 +2917,7 @@ td[data-label="Title"] {
     min-height: 24px;
     padding: 0 0.55rem;
     border-radius: 999px;
-    border: 1px solid var(--border);
     border: 1px solid color-mix(in srgb, var(--text) 10%, transparent);
-    background: var(--surface-elevated);
     background: color-mix(in srgb, var(--surface-elevated) 96%, transparent);
     color: var(--text);
     font-size: 0.75rem;
@@ -3008,7 +2984,7 @@ td[data-label="Title"] {
     min-width: 0;
 }
 
-.detail-disclosure > summary {
+.detail-disclosure>summary {
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -3020,18 +2996,25 @@ td[data-label="Title"] {
     list-style: none;
 }
 
-.detail-disclosure > summary::-webkit-details-marker {
+.detail-disclosure>summary::-webkit-details-marker {
     display: none;
 }
 
-.detail-disclosure > summary::after {
-    content: "expand_more";
-    font-family: "Material Symbols Outlined";
-    font-size: 1.1rem;
+.detail-disclosure>summary::after {
+    /* Masked SVG instead of a Material Symbols ligature: generated text
+       content lands in the accessibility tree and is read out verbatim. */
+    content: "";
+    flex: 0 0 auto;
+    width: 1.1rem;
+    height: 1.1rem;
+    background-color: currentColor;
+    -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 -960 960 960'%3E%3Cpath d='M480-345 240-585l56-56 184 184 184-184 56 56-240 240Z'/%3E%3C/svg%3E") center / contain no-repeat;
+    mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 -960 960 960'%3E%3Cpath d='M480-345 240-585l56-56 184 184 184-184 56 56-240 240Z'/%3E%3C/svg%3E") center / contain no-repeat;
+    transition: transform 0.15s ease;
 }
 
-.detail-disclosure[open] > summary::after {
-    content: "expand_less";
+.detail-disclosure[open]>summary::after {
+    transform: rotate(180deg);
 }
 
 .detail-source-full {
@@ -3058,7 +3041,7 @@ td[data-label="Title"] {
     opacity: 0.6;
 }
 
-/* ── Status ──────────────────────────────────────────────────────────────── */
+/* ── Action Cell ─────────────────────────────────────────────────────────── */
 
 .action-cell-wrap {
     display: flex;
@@ -3072,7 +3055,7 @@ td[data-label="Title"] {
 /* Ensure dropdown menus can escape table overflow */
 .action-cell-wrap .dropdown-menu {
     position: fixed;
-    z-index: 1080;
+    z-index: var(--z-dropdown);
     /* Fallback in case JS positioning fails */
     top: -9999px;
     left: -9999px;
@@ -3182,13 +3165,12 @@ td[data-label="Title"] {
     border-radius: var(--radius-pill);
     font-weight: 600;
     padding: 0.35em 0.7em;
-    background: var(--surface);
+    color: var(--text-strong);
     background: color-mix(in srgb, var(--surface) 85%, transparent);
     border: 1px solid var(--border);
 }
 
 .badge.bg-success {
-    background: rgba(34, 197, 94, 0.2);
     background: color-mix(in srgb, var(--success) 20%, transparent);
     color: #86efac;
 }
@@ -3323,17 +3305,15 @@ td:last-child {
 }
 
 .modal-content {
-    background: var(--surface);
+    /* No backdrop-filter here: .modal-backdrop.show already blurs the whole
+       viewport behind it, so a second stacked blur layer buys nothing. */
     background: color-mix(in srgb, var(--surface) 88%, transparent);
-    backdrop-filter: var(--blur-md);
-    -webkit-backdrop-filter: var(--blur-md);
     border: 1px solid var(--border);
     border-radius: var(--radius-xl);
     color: var(--text);
 }
 
 #lalalAuthModal .modal-body {
-    background: var(--surface-strong);
     background: linear-gradient(180deg,
             color-mix(in srgb, var(--surface-strong) 92%, transparent),
             color-mix(in srgb, var(--surface) 75%, transparent));
@@ -3354,10 +3334,8 @@ td:last-child {
 }
 
 .auth-step-badge {
-    background: rgba(99, 102, 241, 0.22);
     background: color-mix(in srgb, var(--primary) 22%, transparent);
     color: #c7d2fe;
-    border-color: var(--primary);
     border-color: color-mix(in srgb, var(--primary) 42%, var(--border));
     margin-bottom: 0.25rem;
 }
@@ -3374,22 +3352,18 @@ td:last-child {
 }
 
 .auth-method-panel:hover {
-    border-color: var(--primary);
     border-color: color-mix(in srgb, var(--primary) 40%, var(--border));
 }
 
 .auth-method-panel--alt {
-    background: var(--surface-elevated);
     background: linear-gradient(135deg,
             color-mix(in srgb, var(--primary) 12%, var(--surface-elevated)),
             color-mix(in srgb, var(--primary) 4%, var(--surface-elevated)));
-    border-color: var(--border);
     border-color: color-mix(in srgb, var(--primary) 25%, var(--border));
     box-shadow: 0 0 0 1px rgba(99, 102, 241, 0.25);
 }
 
 .auth-method-panel--alt:hover {
-    border-color: var(--primary);
     border-color: color-mix(in srgb, var(--primary) 45%, var(--border));
 }
 
@@ -3425,6 +3399,30 @@ td:last-child {
 
 /* ── Trim Modal Waveform ─────────────────────────────────────────────────── */
 
+/* The loader is an overlay, not a sibling that swaps places with the waveform:
+   WaveSurfer reads its container's width when it is created and seeds its
+   ResizeObserver from it, so a display:none #trimWave produces a zero-width
+   first render plus a delayed re-render on top of the finished waveform. */
+.trim-wave-stage {
+    position: relative;
+}
+
+.trim-loader {
+    position: absolute;
+    inset: 0;
+    z-index: 20;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    border-radius: var(--radius-md);
+    background: var(--surface-elevated);
+}
+
+.trim-loader p {
+    margin-bottom: 0;
+}
+
 #trimWave {
     width: 100%;
     height: 120px;
@@ -3444,12 +3442,24 @@ td:last-child {
     cursor: default;
 }
 
+#trimWave ::part(scroll) {
+    overflow-x: auto !important;
+    overflow-y: hidden !important;
+    scrollbar-width: none;
+}
+
+#trimWave ::part(scroll)::-webkit-scrollbar {
+    width: 0;
+    height: 0;
+}
+
 #trimWave ::part(regions-container) {
     background: transparent;
 }
 
 #trimWave ::part(region) {
     background: transparent !important;
+    border: 0 !important;
     box-shadow: none;
     pointer-events: none !important;
 }
@@ -3461,13 +3471,18 @@ td:last-child {
     bottom: 0;
     display: none;
     min-width: 2px;
-    border-top: 1px solid rgba(199, 210, 254, 0.9);
-    border-bottom: 1px solid rgba(199, 210, 254, 0.9);
+    box-sizing: border-box;
+    border: 0;
+    border-radius: 12px;
+    /* Keep the fill translucent: the waveform is painted underneath this
+       element, so a heavier tint hides it inside the selection. */
     background:
-        linear-gradient(180deg, rgba(129, 140, 248, 0.38), rgba(79, 70, 229, 0.24));
+        linear-gradient(rgba(199, 210, 254, 0.9), rgba(199, 210, 254, 0.9)) top / 100% 1px no-repeat,
+        linear-gradient(rgba(199, 210, 254, 0.9), rgba(199, 210, 254, 0.9)) bottom / 100% 1px no-repeat,
+        linear-gradient(180deg, rgba(129, 140, 248, 0.18), rgba(79, 70, 229, 0.1));
     box-shadow:
-        inset 0 1px 0 rgba(255, 255, 255, 0.2),
-        inset 0 -1px 0 rgba(255, 255, 255, 0.08),
+        inset 0 1px 0 rgba(255, 255, 255, 0.12),
+        inset 0 -1px 0 rgba(255, 255, 255, 0.06),
         0 0 18px rgba(99, 102, 241, 0.18);
     cursor: grab;
     pointer-events: auto;
@@ -3492,15 +3507,27 @@ td:last-child {
     padding: 0;
     border: 0;
     border-radius: 0;
-    background:
-        linear-gradient(#eef2ff, #eef2ff) center / 3px 100% no-repeat,
-        linear-gradient(180deg, #818cf8, #4f46e5) center / 14px 34px no-repeat;
+    background: transparent;
     color: #eef2ff;
     cursor: ew-resize;
     filter: drop-shadow(0 0 5px rgba(99, 102, 241, 0.85));
     pointer-events: auto;
     touch-action: none;
     -webkit-tap-highlight-color: transparent;
+}
+
+.trim-selection-handle::after {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 8px;
+    height: 40px;
+    border-radius: 4px;
+    background: linear-gradient(180deg, #818cf8, #4f46e5);
+    box-shadow: 0 0 5px rgba(99, 102, 241, 0.85);
+    content: "";
+    pointer-events: none;
+    transform: translate(-50%, -50%);
 }
 
 .trim-selection-handle--start {
@@ -3516,10 +3543,15 @@ td:last-child {
 .trim-selection-handle:hover,
 .trim-selection-handle:focus-visible,
 .trim-selection.is-dragging .trim-selection-handle {
-    background:
-        linear-gradient(#ffffff, #ffffff) center / 3px 100% no-repeat,
-        linear-gradient(180deg, #a5b4fc, #6366f1) center / 14px 38px no-repeat;
     filter: drop-shadow(0 0 7px rgba(129, 140, 248, 1));
+}
+
+.trim-selection-handle:hover::after,
+.trim-selection-handle:focus-visible::after,
+.trim-selection.is-dragging .trim-selection-handle::after {
+    height: 44px;
+    background: linear-gradient(180deg, #a5b4fc, #6366f1);
+    box-shadow: 0 0 7px rgba(129, 140, 248, 1);
 }
 
 .trim-selection-handle:focus-visible {
@@ -3579,11 +3611,17 @@ td:last-child {
 }
 
 .trim-overlay-right {
+    /* JS sets left/width per selection; default to collapsed. */
     left: 100%;
+    width: 0;
 }
 
 #trimInfo {
     color: var(--text-muted);
+}
+
+.trim-hint {
+    opacity: 0.75;
 }
 
 /* ── Empty State ─────────────────────────────────────────────────────────── */
@@ -3610,7 +3648,7 @@ td:last-child {
 
 /* ── Responsive ──────────────────────────────────────────────────────────── */
 
-@media (max-width: 768px) {
+@media (max-width: 767.98px) {
     .app-main {
         padding-top: var(--space-4);
     }
@@ -3720,49 +3758,8 @@ td:last-child {
         text-overflow: ellipsis;
     }
 
-    #jobsCard {
-        display: none;
-        flex: 1 0 16rem;
-        min-height: 0;
-    }
-
-    html.mobile-job-history-enabled #jobsCard {
-        display: flex;
-    }
-
-    .mobile-job-history-option {
-        display: flex;
-        align-items: center;
-        min-height: 3.25rem;
-        margin: -0.5rem 0 1rem;
-        padding: 0.75rem 1rem;
-        border: 1px solid var(--border);
-        border-radius: var(--radius-md);
-        background: var(--surface-60);
-    }
-
-    .mobile-job-history-option .form-check-input {
-        flex: 0 0 auto;
-        margin-top: 0;
-        margin-left: 1rem !important;
-    }
-
-    .mobile-job-history-option .form-check {
-        padding-left: 0;
-    }
-
-    #jobsCard .jobs-list-shell {
-        overflow-x: hidden;
-    }
-
-    .jobs-mobile-list {
-        display: flex;
-        flex-direction: column;
-    }
-
-    .jobs-desktop-view {
-        display: none;
-    }
+    /* Jobs card / mobile list swap lives in the (max-width: 1024px) block
+       below, which also covers this range. */
 
     .video-preview-grid {
         grid-template-columns: 1fr;
@@ -3863,7 +3860,7 @@ td:last-child {
         gap: var(--space-2);
     }
 
-    .lalal-tile-action-row > .btn {
+    .lalal-tile-action-row>.btn {
         width: 100%;
         min-width: 0;
         padding-inline: var(--space-2);
@@ -3929,7 +3926,7 @@ td:last-child {
     position: fixed;
     top: calc(var(--nav-offset) + var(--space-2));
     right: 1rem;
-    z-index: 1100;
+    z-index: var(--z-toast);
     display: flex;
     flex-direction: column;
     gap: 0.5rem;
@@ -3943,7 +3940,6 @@ td:last-child {
     gap: 0.625rem;
     padding: 0.75rem 1rem;
     border-radius: var(--radius-md);
-    background: var(--surface);
     background: color-mix(in srgb, var(--surface) 90%, transparent);
     border: 1px solid var(--border);
     backdrop-filter: var(--blur-md);
@@ -4054,7 +4050,7 @@ td:last-child {
         padding: 0 var(--space-3) var(--space-2);
     }
 
-.jobs-mobile-meta {
+    .jobs-mobile-meta {
         min-width: 0;
         overflow: hidden;
         text-overflow: ellipsis;
@@ -4201,16 +4197,16 @@ td:last-child {
         order: 1;
     }
 
-        .toast {
-            transform: translateY(-20px);
-        }
+    .toast {
+        transform: translateY(-20px);
+    }
 
-        .toast--visible {
-            transform: translateY(0);
-        }
+    .toast--visible {
+        transform: translateY(0);
+    }
 
-        .toast--hiding {
-            transform: translateY(-20px);
+    .toast--hiding {
+        transform: translateY(-20px);
     }
 }
 
@@ -4349,12 +4345,10 @@ td:last-child {
     }
 
     .job-item.row-error {
-        border-color: var(--danger);
         border-color: color-mix(in srgb, var(--danger) 42%, var(--border));
     }
 
     .job-item.row-error .job-item__status .status-pill-danger {
-        box-shadow: 0 0 0 2px rgba(239, 68, 68, 0.14);
         box-shadow: 0 0 0 2px color-mix(in srgb, var(--danger) 14%, transparent);
     }
 
@@ -4391,7 +4385,8 @@ td:last-child {
     }
 }
 
-@media (min-width: 769px) and (max-width: 1024px) {
+@media (min-width: 768px) and (max-width: 1024px) {
+
     .app-root--dashboard,
     .app-root--dashboard .app-shell {
         height: auto;
@@ -4407,152 +4402,169 @@ td:last-child {
     }
 }
 
-    /* ── iOS Safari overrides ─────────────────────────────────────────────────
-   Restrict to actual touch devices: -webkit-touch-callout is iOS only,
-   and (hover: none) ensures we're on a true touch device, not desktop Safari. */
-    @supports (-webkit-touch-callout: none) and (hover: none) {
+/* ── Touch device overrides (iOS Safari in particular) ───────────────────
+   These were previously gated on
+   `@supports (-webkit-touch-callout: none) and (hover: none)`, which never
+   matched anywhere: @supports evaluates declarations, so "(hover: none)" was
+   read as a property named "hover" that no engine knows, and an unknown
+   feature query is false. The whole block was dead, which is what left the
+   dialog blurred on iOS - a translucent .modal-content kept its
+   backdrop-filter and stacked it on the already blurred .modal-backdrop.
 
-        /* background-attachment: fixed is broken on iOS (repaint on scroll) */
-        .app-root {
-            background-attachment: scroll;
-        }
+   Now a plain media query, which is also what every rule below actually cares
+   about: a phone or tablet, not the specific vendor. `hover: none` plus
+   `pointer: coarse` is the standard test for that, and it excludes both
+   desktop Safari and touch-capable laptops (whose primary pointer still
+   hovers). Cheaper surfaces and non-sticky layout are the right call on
+   Android too. */
+@media (hover: none) and (pointer: coarse) {
 
-        /* Keep the footer in the flex flow on iOS too. A sticky-positioned
+    /* background-attachment: fixed is broken on iOS (repaint on scroll) */
+    .app-root {
+        background-attachment: scroll;
+    }
+
+    /* Keep the footer in the flex flow on iOS too. A sticky-positioned
            footer would overlay expanded dashboard content while scrolling. */
-        .wb-footer {
-            position: static;
-        }
+    .wb-footer {
+        position: static;
+    }
 
-        .app-main {
-            padding-bottom: 0;
-        }
+    .app-main {
+        padding-bottom: 0;
+    }
 
-        /* backdrop-filter is GPU-expensive on iOS and can cause layout shifts */
-        .ui-card,
-        .top-navbar,
-        .modal-backdrop.show,
-        .modal-content,
-        .wb-footer,
-        .table thead,
-        .video-meta,
-        .lost-card {
-            backdrop-filter: none;
-            -webkit-backdrop-filter: none;
-        }
+    /* backdrop-filter is GPU-expensive on iOS and can cause layout shifts */
+    .ui-card,
+    .top-navbar,
+    .modal-backdrop.show,
+    .wb-footer,
+    .table thead,
+    .video-meta,
+    .lost-card {
+        backdrop-filter: none;
+        -webkit-backdrop-filter: none;
+    }
 
-        /* Use opaque modal surfaces so Safari does not blur the dialog layer. */
-        .modal-content {
-            background: var(--surface-solid);
-        }
+    /* Blur is off in this block, so the fixed navbar needs an opaque
+       surface — otherwise page content shows through while scrolling. */
+    .top-navbar {
+        background: var(--surface-elevated);
+    }
 
-        #lalalAuthModal .modal-body {
-            background: var(--surface-strong);
-        }
+    /* Use opaque modal surfaces so Safari does not blur the dialog layer. */
+    .modal-content {
+        background: var(--surface-solid);
+    }
 
-        .lost-card {
-            background: var(--surface-elevated);
-        }
+    #lalalAuthModal .modal-body {
+        background: var(--surface-strong);
+    }
 
-        /* flex + height:100% is buggy in iOS grid columns */
-        .ui-card {
-            height: auto;
-        }
+    .lost-card {
+        background: var(--surface-elevated);
+    }
 
-        /* calc(100vh) in scrollable containers causes clipping on iOS
+    /* flex + height:100% is buggy in iOS grid columns */
+    .ui-card {
+        height: auto;
+    }
+
+    /* calc(100vh) in scrollable containers causes clipping on iOS
        (URL bar is included in vh but not in visible area) */
-        #jobsCard .jobs-list-shell {
-            overflow: visible;
-        }
-
-        /* toast backdrop-filter can trigger compositor bugs on older iPhones */
-        .toast {
-            backdrop-filter: none;
-            -webkit-backdrop-filter: none;
-        }
-
+    #jobsCard .jobs-list-shell {
+        overflow: visible;
     }
 
-    /* ── Mobile-specific refinements ──────────────────────────────────────────
+    /* toast backdrop-filter can trigger compositor bugs on older iPhones */
+    .toast {
+        backdrop-filter: none;
+        -webkit-backdrop-filter: none;
+    }
+
+}
+
+/* ── Mobile-specific refinements ──────────────────────────────────────────
    Base rules already allow vertical scroll; these are additional mobile tweaks. */
-    @media (max-width: 768px) {
+@media (max-width: 767.98px) {
 
-        /* .btn-sm.btn-icon is more specific than the base navbar rule. Keep
+    /* .btn-sm.btn-icon is more specific than the base navbar rule. Keep
            icon controls at the full mobile touch target size. */
-        .top-navbar .btn,
-        .top-navbar .btn-sm {
-            height: 44px;
-            min-height: 44px;
-        }
-
-        .top-navbar .btn-sm.btn-icon {
-            width: 44px;
-            min-width: 44px;
-        }
-
-        html,
-        body {
-            height: auto !important;
-            min-height: 100% !important;
-            overflow-y: auto !important;
-            -webkit-overflow-scrolling: touch;
-            overscroll-behavior-y: auto;
-        }
-
-        .app-main,
-        .settings-tabs,
-        .modal-body,
-        .detail-modal__body,
-        .jobs-list-shell {
-            -webkit-overflow-scrolling: touch;
-        }
-
-        .wb-footer-link {
-            min-height: 44px;
-        }
-
-        .app-root,
-        .app-root--dashboard,
-        .app-shell {
-            height: auto !important;
-            overflow: visible !important;
-        }
-
-        /* Keep enough flex height for the footer when job history is collapsed. */
-        .app-root--dashboard,
-        .app-root--dashboard .app-shell {
-            min-height: 100dvh !important;
-        }
-
-        #jobsCard,
-        #jobsCard .ui-card-body,
-        #jobsCard .jobs-list-shell {
-            overflow: visible !important;
-            height: auto !important;
-            max-height: none !important;
-            min-height: auto !important;
-        }
-
-        #jobsCard {
-            contain: none;
-        }
-
-        #jobsCard .jobs-list-shell {
-            flex: 0 0 auto;
-            overscroll-behavior: auto;
-            -webkit-overflow-scrolling: auto;
-        }
+    .top-navbar .btn,
+    .top-navbar .btn-sm {
+        height: 44px;
+        min-height: 44px;
     }
 
-    @media (prefers-reduced-motion: reduce) {
-
-        *,
-        *::before,
-        *::after {
-            animation: none !important;
-            transition: none !important;
-            scroll-behavior: auto !important;
-        }
+    .top-navbar .btn-sm.btn-icon {
+        width: 44px;
+        min-width: 44px;
     }
+
+    html,
+    body {
+        height: auto !important;
+        min-height: 100% !important;
+        overflow-y: auto !important;
+        -webkit-overflow-scrolling: touch;
+        overscroll-behavior-y: auto;
+    }
+
+    .app-main,
+    .settings-tabs,
+    .modal-body,
+    .detail-modal__body,
+    .jobs-list-shell {
+        -webkit-overflow-scrolling: touch;
+    }
+
+    .wb-footer-link {
+        min-height: 44px;
+    }
+
+    .app-root,
+    .app-root--dashboard,
+    .app-shell {
+        height: auto !important;
+        overflow: visible !important;
+    }
+
+    /* Keep enough flex height for the footer when job history is collapsed. */
+    .app-root--dashboard,
+    .app-root--dashboard .app-shell {
+        min-height: 100dvh !important;
+    }
+
+    #jobsCard,
+    #jobsCard .ui-card-body,
+    #jobsCard .jobs-list-shell {
+        overflow: visible !important;
+        height: auto !important;
+        max-height: none !important;
+        min-height: auto !important;
+    }
+
+    #jobsCard {
+        contain: none;
+    }
+
+    #jobsCard .jobs-list-shell {
+        flex: 0 0 auto;
+        overscroll-behavior: auto;
+        -webkit-overflow-scrolling: auto;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+
+    *,
+    *::before,
+    *::after {
+        animation: none !important;
+        transition: none !important;
+        scroll-behavior: auto !important;
+    }
+}
 
 /* ── Share "Lost in Space" page ─────────────────────────────────────────── */
 /* Public 404 for an unusable share link. Standalone chrome (no navbar), so it
@@ -4602,7 +4614,8 @@ td:last-child {
     position: absolute;
     inset: 0;
     background-repeat: repeat;
-    will-change: transform;
+    /* No will-change: the drift animates background-position (paint, not
+       composite), so a transform hint only pins useless GPU layers. */
 }
 
 .lost-stars--far {
@@ -4644,13 +4657,25 @@ td:last-child {
 }
 
 @keyframes lost-drift {
-    from { background-position: 0 0; }
-    to   { background-position: 1000px -600px; }
+    from {
+        background-position: 0 0;
+    }
+
+    to {
+        background-position: 1000px -600px;
+    }
 }
 
 @keyframes lost-twinkle {
-    0%, 100% { opacity: 0.55; }
-    50%      { opacity: 1; }
+
+    0%,
+    100% {
+        opacity: 0.55;
+    }
+
+    50% {
+        opacity: 1;
+    }
 }
 
 /* --- astronaut ------------------------------------------------------------ */
@@ -4724,8 +4749,15 @@ td:last-child {
 }
 
 @keyframes lost-float {
-    0%, 100% { transform: translateY(0) rotate(-3deg); }
-    50%      { transform: translateY(-20px) rotate(3deg); }
+
+    0%,
+    100% {
+        transform: translateY(0) rotate(-3deg);
+    }
+
+    50% {
+        transform: translateY(-20px) rotate(3deg);
+    }
 }
 
 /* --- message card --------------------------------------------------------- */
@@ -4749,6 +4781,13 @@ td:last-child {
     font-weight: 600;
     letter-spacing: 0.14em;
     text-transform: uppercase;
+}
+
+.lost-logo {
+    display: block;
+    width: 96px;
+    height: auto;
+    margin: var(--space-4) auto 0;
 }
 
 .lost-title {
@@ -4791,12 +4830,6 @@ td:last-child {
     font-size: 20px;
 }
 
-.lost-hint {
-    margin: 0;
-    color: var(--text-weak);
-    font-size: 0.88rem;
-}
-
 @media (max-width: 576px) {
     .lost-shell {
         gap: var(--space-4);
@@ -4811,6 +4844,7 @@ td:last-child {
 /* Motion is decorative here: hold every layer still when the visitor asks for
    reduced motion. The parallax script checks the same query. */
 @media (prefers-reduced-motion: reduce) {
+
     .lost-stars,
     .lost-astronaut__body {
         animation: none !important;

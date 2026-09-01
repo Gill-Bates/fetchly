@@ -12,18 +12,23 @@
  * DOM representations.
  */
 
-import { CONFIG, TERMINAL_STATUSES } from "./config.js";
+import { CONFIG, TERMINAL_STATUSES } from "./config.js?v=20260831b";
 import { reportError } from "./errors.js";
 import {
     createStatusElement,
     createActionButton,
     createPrimaryActionButton,
     resolveJobAction,
-} from "./ui.js?v=20260825a";
+} from "./ui.js?v=20260831c";
 import { detectPlatform, humanSize, platformPillLabel } from "./utils.js";
 
 const MOBILE_BREAKPOINT = "(max-width: 1024px)";
-const FALLBACK_JOBS_TABLE_COLUMN_COUNT = 8;
+const FALLBACK_JOBS_TABLE_COLUMN_COUNT = 5;
+
+// Every placeholder that can sit inside a jobs surface without being a real
+// job row: the "no downloads yet" states owned by this module and the
+// search/status filter placeholder main.js mounts.
+const EMPTY_STATE_SELECTOR = "#emptyRow, #jobsEmptyState, #jobsFilterEmptyRow, #jobsFilterEmptyState";
 const HARD_MAX_ROWS = CONFIG.MAX_ROWS * 2;
 const EMPTY_VALUE = "–";
 
@@ -226,7 +231,7 @@ function getRenderedNodesMap({ mobile = false } = {}) {
 }
 
 function clearContainerEmptyState(container) {
-    container?.querySelector("#emptyRow, #jobsEmptyState")?.remove();
+    container?.querySelectorAll(EMPTY_STATE_SELECTOR).forEach((node) => node.remove());
 }
 
 function trimRenderedNodes(container, renderedNodes) {
@@ -240,7 +245,15 @@ function trimRenderedNodes(container, renderedNodes) {
             return;
         }
 
-        renderedNodes.delete(trailingNode.dataset.jobId || "");
+        const jobId = trailingNode.dataset.jobId || "";
+        // Untracked trailing nodes (empty states, the search/status filter
+        // placeholder main.js mounts) do not shrink the map. Removing one here
+        // would keep the loop running and eat real job rows instead.
+        if (!renderedNodes.has(jobId)) {
+            return;
+        }
+
+        renderedNodes.delete(jobId);
         trailingNode.remove();
     }
 }
@@ -301,10 +314,14 @@ export function normalizeJobUpdate(payload) {
     return update;
 }
 
+// Statuses whose events carry a percentage. A status change into anything else
+// drops a stale percentage instead of showing the previous phase's number.
+const PROGRESS_BEARING_STATUSES = new Set([STATUS.DOWNLOADING, STATUS.TRANSCODING]);
+
 function mergeStoredJob(existingJob, update) {
     const mergedJob = { ...existingJob, ...update };
 
-    if (hasOwnField(update, "status") && update.status !== STATUS.TRANSCODING && !hasOwnField(update, "progress")) {
+    if (hasOwnField(update, "status") && !PROGRESS_BEARING_STATUSES.has(update.status) && !hasOwnField(update, "progress")) {
         mergedJob.progress = null;
     }
 
@@ -551,7 +568,22 @@ function buildCreatedCell(isoOrFormatted) {
     return td;
 }
 
-function buildDesktopEmptyState(message, id = "emptyRow") {
+function buildEmptyStateIcon(icon) {
+    const iconEl = document.createElement("span");
+    iconEl.className = "material-symbols-outlined icon";
+    iconEl.setAttribute("aria-hidden", "true");
+    iconEl.textContent = icon;
+    return iconEl;
+}
+
+/**
+ * Build the desktop (table row) empty state. Shared with main.js, which mounts
+ * its own instance as the search/status filter placeholder.
+ * @param {string} message
+ * @param {{ id?: string, icon?: string }} [options]
+ * @returns {HTMLTableRowElement}
+ */
+export function buildDesktopEmptyState(message, { id = "emptyRow", icon = "inbox" } = {}) {
     const row = document.createElement("tr");
     row.id = id;
     row.className = "row-empty";
@@ -562,34 +594,31 @@ function buildDesktopEmptyState(message, id = "emptyRow") {
     const wrapper = document.createElement("div");
     wrapper.className = "empty-state";
 
-    const iconDiv = document.createElement("span");
-    iconDiv.className = "material-symbols-outlined icon";
-    iconDiv.setAttribute("aria-hidden", "true");
-    iconDiv.textContent = "inbox";
-
     const p = document.createElement("p");
     p.textContent = message;
 
-    wrapper.append(iconDiv, p);
+    wrapper.append(buildEmptyStateIcon(icon), p);
     td.append(wrapper);
     row.append(td);
     return row;
 }
 
-function buildMobileEmptyState(message, id = "jobsEmptyState") {
+/**
+ * Build the mobile (feed item) empty state. Shared with main.js, which mounts
+ * its own instance as the search/status filter placeholder.
+ * @param {string} message
+ * @param {{ id?: string, icon?: string }} [options]
+ * @returns {HTMLDivElement}
+ */
+export function buildMobileEmptyState(message, { id = "jobsEmptyState", icon = "inbox" } = {}) {
     const emptyState = document.createElement("div");
     emptyState.id = id;
     emptyState.className = "jobs-mobile-empty empty-state empty-state--mobile";
 
-    const iconDiv = document.createElement("span");
-    iconDiv.className = "material-symbols-outlined icon";
-    iconDiv.setAttribute("aria-hidden", "true");
-    iconDiv.textContent = "inbox";
-
     const p = document.createElement("p");
     p.textContent = message;
 
-    emptyState.append(iconDiv, p);
+    emptyState.append(buildEmptyStateIcon(icon), p);
     return emptyState;
 }
 
@@ -1017,6 +1046,16 @@ function syncViewMode(force = false) {
 
 export function syncMobileJobsList() {
     syncViewMode();
+}
+
+/**
+ * Whether the jobs list currently renders its mobile surface.
+ * This module owns MOBILE_BREAKPOINT; consumers must read the decision here
+ * instead of running a second matchMedia against a copy of the query.
+ * @returns {boolean}
+ */
+export function isMobileJobsView() {
+    return state.mobileView;
 }
 
 function trimJobs() {

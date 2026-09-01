@@ -3,7 +3,7 @@
 // Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 //
 
-import { CONFIG } from "./config.js";
+import { CONFIG } from "./config.js?v=20260831b";
 import { combineAbortSignals, createTimeoutSignal } from "./utils.js";
 
 const TIMEOUT_DEFAULT_MS = 10_000;
@@ -94,7 +94,7 @@ function _normalizeHeaders(headers) {
     return [...normalized.entries()].sort(([a], [b]) => a.localeCompare(b));
 }
 
-function _requestKey(url, options = {}) {
+function _requestKey(url, options = {}, timeoutMs) {
     const method = String(options.method ?? "GET").toUpperCase();
     if (method !== "GET" && method !== "HEAD") {
         throw new Error(`_apiCallDeduped only supports GET/HEAD requests, got ${method}`);
@@ -103,6 +103,7 @@ function _requestKey(url, options = {}) {
     return JSON.stringify({
         method,
         url,
+        timeoutMs,
         headers: _normalizeHeaders(options.headers),
         credentials: options.credentials,
         cache: options.cache,
@@ -144,13 +145,18 @@ function _waitForAbort(signal) {
  * Extract a human-readable error message from a JSON error response object.
  *
  * Priority order:
- * 1. `detail` (FastAPI convention)
- * 2. `error` (application convention)
- * 3. Concatenation of all object values as a lossy fallback
+ * 1. `msg` (FastAPI validation error item: { loc, msg, type })
+ * 2. `detail` (FastAPI convention)
+ * 3. `error` (application convention)
+ * 4. Concatenation of all object values as a lossy fallback
  * @param {Record<string, unknown>} obj
  * @returns {string} Empty string if no readable message is present.
  */
 function _extractMessages(obj) {
+    // Pydantic/FastAPI 422 items carry loc/type noise alongside msg; the lossy
+    // fallback below would stringify all of them into an unreadable message.
+    if (typeof obj.msg === "string" && obj.msg) return obj.msg;
+
     for (const key of ["detail", "error"]) {
         const val = obj[key];
         if (typeof val === "string") return val;
@@ -404,7 +410,7 @@ async function _raceWithAbort(promise, signal) {
  */
 async function _apiCallDeduped(url, options = {}, timeoutMs = TIMEOUT_DEFAULT_MS) {
     const { signal: callerSignal, ...sharedOptions } = options;
-    const key = _requestKey(url, sharedOptions);
+    const key = _requestKey(url, sharedOptions, timeoutMs);
     const cachedPromise = _inFlightRequests.get(key);
     if (cachedPromise) {
         return _raceWithAbort(cachedPromise, callerSignal);

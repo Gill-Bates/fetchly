@@ -1,15 +1,14 @@
 {% macro status_badge(job) %}
-    {% set status = job["status"] %}
-    {% set size = job["filesize_bytes"] %}
-    {% set display_status = "done" if status == "analysis_done" else status %}
-    {# Status pill with optional file size badge #}
+{% set status = job["status"] %}
+{% set size = job["filesize_bytes"] %}
+{# Status pill with optional file size badge #}
 
-    <div class="status-inline">
-        <span class="status-pill status-pill-{{ status|status_class }}">
-            {{ display_status | upper }}
-        </span>
-        {% if size is not none %}
-        <span class="status-size" title="File size">{{ size|filesize }}</span>
-        {% endif %}
-    </div>
+<div class="status-inline">
+    <span class="status-pill status-pill-{{ status|status_class }}">
+        {{ status|status_label | upper }}
+    </span>
+    {% if size is not none %}
+    <span class="status-size" title="File size">{{ size|filesize }}</span>
+    {% endif %}
+</div>
 {% endmacro %}

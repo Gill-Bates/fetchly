@@ -25,8 +25,8 @@
         </li>
         <li class="nav-item" role="presentation">
             <button class="nav-link" id="settingsSecurityTab" data-bs-toggle="tab"
-                data-bs-target="#settingsSecurityPanel" type="button" role="tab"
-                aria-controls="settingsSecurityPanel" aria-selected="false">Security</button>
+                data-bs-target="#settingsSecurityPanel" type="button" role="tab" aria-controls="settingsSecurityPanel"
+                aria-selected="false">Security</button>
         </li>
         <li class="nav-item" role="presentation">
             <button class="nav-link" id="settingsSystemTab" data-bs-toggle="tab" data-bs-target="#settingsSystemPanel"
@@ -36,324 +36,368 @@
 
     <form id="settingsForm" class="settings-form-layout">
         <div class="tab-content" id="settingsTabContent">
-        <section class="settings-group tab-pane fade show active" id="settingsGeneralPanel" role="tabpanel"
-            aria-labelledby="settingsGeneralTab" tabindex="0">
-            <div class="settings-grid settings-grid--cols-2">
-                <div class="settings-grid-item settings-grid-item--titled">
-                    <h2 class="settings-panel-title fw-semibold mb-3 d-flex align-items-center gap-1">
-                        <span class="material-symbols-outlined icon-inline" aria-hidden="true">database</span>
-                        Retention
-                    </h2>
-                    <div class="ui-card h-100">
-                        <div>
-                            <div class="settings-section">
-                                <div class="mb-3">
-                                    <label for="retentionDays" class="form-label">Max. Job retention (days)</label>
-                                    <input type="number" class="form-control ui-input" id="retentionDays"
-                                        name="retention_days" min="1" max="365"
-                                        value="{{ settings.retention_days | default(7) }}">
-                                    <small class="setting-hint setting-hint--with-icon">
-                                        <span class="material-symbols-outlined setting-hint-icon"
-                                            aria-hidden="true">info</span>
-                                        <span>Job files will be removed after this period; dashboard history and statistics are kept</span>
-                                    </small>
-                                    <button type="button" class="btn btn-outline-danger btn-sm w-50 d-block ms-auto mt-3" id="resetStatsBtn">
-                                        <span class="material-symbols-outlined icon-inline" aria-hidden="true">restart_alt</span>
-                                        Reset Statistics
-                                    </button>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-                <div class="settings-grid-item settings-grid-item--titled">
-                    <h2 class="settings-panel-title fw-semibold mb-3 d-flex align-items-center gap-1">
-                        <span class="material-symbols-outlined icon-inline" aria-hidden="true">download</span>
-                        Downloads
-                    </h2>
-                    <div class="ui-card h-100">
-                        <div>
-                            <div class="settings-section">
-                                <div class="mb-3">
-                                    <label for="concurrentFragments" class="form-label">Parallel fragments per download</label>
-                                    <input type="number" class="form-control ui-input" id="concurrentFragments"
-                                        name="download_concurrent_fragments" min="1" max="16"
-                                        value="{{ settings.download_concurrent_fragments | default(3) }}">
-                                    <small class="setting-hint setting-hint--with-icon">
-                                        <span class="material-symbols-outlined setting-hint-icon"
-                                            aria-hidden="true">info</span>
-                                        <span>Speeds up segmented DASH/HLS sources; higher values raise bandwidth and CPU load</span>
-                                    </small>
-                                </div>
-                                <div class="mt-3 pt-3 border-top">
-                                    <div class="form-check form-switch">
-                                        <input class="form-check-input" type="checkbox" role="switch"
-                                            id="mp4Preset" name="download_mp4_preset"
-                                            {{ 'checked' if settings.download_mp4_preset | default(true) else '' }}>
-                                        <label class="form-check-label" for="mp4Preset">
-                                            Prefer H.264/AAC for max quality
-                                        </label>
-                                    </div>
-                                    <small class="setting-hint">Maximises device compatibility by skipping VP9/AV1 renditions</small>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-                <div class="settings-grid-item settings-grid-item--titled">
-                    <h2 class="settings-panel-title fw-semibold mb-3 d-flex align-items-center gap-1">
-                        <span class="material-symbols-outlined icon-inline" aria-hidden="true">share</span>
-                        Sharing
-                    </h2>
-                    <div class="ui-card h-100">
-                        <div>
-                            <div class="settings-section">
-                                <div class="mb-3">
-                                    <label for="shareLinkMaxUses" class="form-label">Max. uses per share link</label>
-                                    <input type="number" class="form-control ui-input" id="shareLinkMaxUses"
-                                        name="share_link_max_uses" min="0" max="10000"
-                                        value="{{ settings.share_link_max_uses | default(0) }}">
-                                    <small class="setting-hint setting-hint--with-icon">
-                                        <span class="material-symbols-outlined setting-hint-icon"
-                                            aria-hidden="true">info</span>
-                                        <span>0 means unlimited; the limit is fixed onto each link when it is created, so changing this never alters links already shared</span>
-                                    </small>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </section>
-
-        <section class="settings-group tab-pane fade" id="settingsIntegrationsPanel" role="tabpanel"
-            aria-labelledby="settingsIntegrationsTab" tabindex="0">
-            <h2 class="settings-panel-title fw-semibold mb-3 d-flex align-items-center gap-1">
-                <span class="material-symbols-outlined icon-inline" aria-hidden="true">extension</span>
-                Lalal.ai
-            </h2>
-            <div class="settings-grid">
-                <div class="settings-grid-item">
-                    <div class="ui-card h-100">
-                        <div>
-                            <div class="settings-section lalal-tile-section">
-                                <div class="lalal-tile-header mb-3">
-                                    <img src="/static/img/lalal_ai.svg" alt="Lalal.ai" class="lalal-tile-logo">
-                                    <span id="lalalStatusBadge"
-                                        class="badge {{ 'bg-success' if lalal_configured else 'bg-secondary' }}">{{
-                                        lalal_status or 'Not configured' }}</span>
-                                </div>
-
-                                <div class="lalal-tile-actions">
-                                    <div class="lalal-tile-action-row">
-                                        <button type="button" class="btn btn-outline-primary btn-sm" id="lalalAuthBtn"
-                                            data-bs-toggle="modal" data-bs-target="#lalalAuthModal">
-                                            <span class="material-symbols-outlined icon-inline"
-                                                aria-hidden="true">key</span>
-                                            <span id="lalalAuthBtnLabel">{{ 'Reconnect' if lalal_configured else
-                                                'Click to Connect' }}</span>
-                                        </button>
+            <section class="settings-group tab-pane fade show active" id="settingsGeneralPanel" role="tabpanel"
+                aria-labelledby="settingsGeneralTab" tabindex="0">
+                <div class="settings-grid settings-grid--cols-2">
+                    <div class="settings-grid-item settings-grid-item--titled">
+                        <h2 class="settings-panel-title fw-semibold mb-3 d-flex align-items-center gap-1">
+                            <span class="material-symbols-outlined icon-inline" aria-hidden="true">database</span>
+                            Retention
+                        </h2>
+                        <div class="ui-card h-100">
+                            <div>
+                                <div class="settings-section">
+                                    <div class="mb-3">
+                                        <label for="retentionDays" class="form-label">Max. Job retention (days)</label>
+                                        <input type="number" class="form-control ui-input" id="retentionDays"
+                                            name="retention_days" min="1" max="365"
+                                            value="{{ settings.retention_days | default(7) }}">
+                                        <small class="setting-hint setting-hint--with-icon">
+                                            <span class="material-symbols-outlined setting-hint-icon"
+                                                aria-hidden="true">info</span>
+                                            <span>Job files will be removed after this period; dashboard history and
+                                                statistics are kept</span>
+                                        </small>
                                         <button type="button"
-                                            class="btn btn-outline-danger btn-sm {{ '' if lalal_configured else 'd-none' }}"
-                                            id="lalalDisconnectBtn" {{ 'disabled' if not lalal_configured else '' }}>
+                                            class="btn btn-outline-danger btn-sm w-50 d-block ms-auto mt-3"
+                                            id="resetStatsBtn">
                                             <span class="material-symbols-outlined icon-inline"
-                                                aria-hidden="true">link_off</span>
-                                            Disconnect
+                                                aria-hidden="true">restart_alt</span>
+                                            Reset Statistics
                                         </button>
                                     </div>
                                 </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="settings-grid-item settings-grid-item--titled">
+                        <h2 class="settings-panel-title fw-semibold mb-3 d-flex align-items-center gap-1">
+                            <span class="material-symbols-outlined icon-inline" aria-hidden="true">download</span>
+                            Downloads
+                        </h2>
+                        <div class="ui-card h-100">
+                            <div>
+                                <div class="settings-section">
+                                    <div class="mb-3">
+                                        <label for="concurrentFragments" class="form-label">Parallel fragments per
+                                            download</label>
+                                        <input type="number" class="form-control ui-input" id="concurrentFragments"
+                                            name="download_concurrent_fragments" min="1" max="16"
+                                            value="{{ settings.download_concurrent_fragments | default(3) }}">
+                                        <small class="setting-hint setting-hint--with-icon">
+                                            <span class="material-symbols-outlined setting-hint-icon"
+                                                aria-hidden="true">info</span>
+                                            <span>Speeds up segmented DASH/HLS sources; higher values raise bandwidth
+                                                and CPU load</span>
+                                        </small>
+                                    </div>
+                                    <div class="mt-3 pt-3 border-top">
+                                        <div class="form-check form-switch">
+                                            <input class="form-check-input" type="checkbox" role="switch" id="mp4Preset"
+                                                name="download_mp4_preset" {{ 'checked' if settings.download_mp4_preset
+                                                | default(true) else '' }}>
+                                            <label class="form-check-label" for="mp4Preset">
+                                                Prefer H.264/AAC for max quality
+                                            </label>
+                                        </div>
+                                        <small class="setting-hint">Maximises device compatibility by skipping VP9/AV1
+                                            renditions</small>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="settings-grid-item settings-grid-item--titled">
+                        <h2 class="settings-panel-title fw-semibold mb-3 d-flex align-items-center gap-1">
+                            <span class="material-symbols-outlined icon-inline" aria-hidden="true">share</span>
+                            Sharing
+                        </h2>
+                        <div class="ui-card h-100">
+                            <div>
+                                <div class="settings-section">
+                                    <div class="mb-3">
+                                        <label for="shareLinkMaxUses" class="form-label">Max. uses per share
+                                            link</label>
+                                        <input type="number" class="form-control ui-input" id="shareLinkMaxUses"
+                                            name="share_link_max_uses" min="0" max="10000"
+                                            value="{{ settings.share_link_max_uses | default(0) }}">
+                                        <small class="setting-hint setting-hint--with-icon">
+                                            <span class="material-symbols-outlined setting-hint-icon"
+                                                aria-hidden="true">info</span>
+                                            <span>0 means unlimited; the limit is fixed onto each link when it is
+                                                created, so changing this never alters links already shared</span>
+                                        </small>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
 
-                                <div class="mt-3 pt-3 border-top">
+            <section class="settings-group tab-pane fade" id="settingsIntegrationsPanel" role="tabpanel"
+                aria-labelledby="settingsIntegrationsTab" tabindex="0">
+                <h2 class="settings-panel-title fw-semibold mb-3 d-flex align-items-center gap-1">
+                    <span class="material-symbols-outlined icon-inline" aria-hidden="true">extension</span>
+                    Lalal.ai
+                </h2>
+                <div class="settings-grid">
+                    <div class="settings-grid-item">
+                        <div class="ui-card h-100">
+                            <div>
+                                <div class="settings-section lalal-tile-section">
+                                    <div class="lalal-tile-header mb-3">
+                                        <img src="/static/img/lalal_ai.svg" alt="Lalal.ai" class="lalal-tile-logo">
+                                        <span id="lalalStatusBadge"
+                                            class="badge {{ 'bg-success' if lalal_configured else 'bg-secondary' }}">{{
+                                            lalal_status or 'Not configured' }}</span>
+                                    </div>
+
+                                    <div class="lalal-tile-actions">
+                                        <div class="lalal-tile-action-row">
+                                            <button type="button" class="btn btn-outline-primary btn-sm"
+                                                id="lalalAuthBtn" data-bs-toggle="modal"
+                                                data-bs-target="#lalalAuthModal">
+                                                <span class="material-symbols-outlined icon-inline"
+                                                    aria-hidden="true">key</span>
+                                                <span id="lalalAuthBtnLabel">{{ 'Reconnect' if lalal_configured else
+                                                    'Click to Connect' }}</span>
+                                            </button>
+                                            <button type="button"
+                                                class="btn btn-outline-danger btn-sm {{ '' if lalal_configured else 'd-none' }}"
+                                                id="lalalDisconnectBtn" {{ 'disabled' if not lalal_configured else ''
+                                                }}>
+                                                <span class="material-symbols-outlined icon-inline"
+                                                    aria-hidden="true">link_off</span>
+                                                Disconnect
+                                            </button>
+                                        </div>
+                                    </div>
+
+                                    <div class="mt-3 pt-3 border-top">
+                                        <div class="form-check form-switch">
+                                            <input class="form-check-input" type="checkbox" role="switch"
+                                                id="lalalDurationGuard" name="lalalaai_duration_guard" {{ 'checked' if
+                                                settings.lalalaai_duration_guard | default(true) else '' }}>
+                                            <label class="form-check-label" for="lalalDurationGuard">
+                                                Limit long tracks
+                                            </label>
+                                        </div>
+                                        <small class="setting-hint">Block tracks longer than {{
+                                            LALAL_MAX_DURATION_MINUTES }} minutes</small>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <section class="settings-group tab-pane fade" id="settingsSecurityPanel" role="tabpanel"
+                aria-labelledby="settingsSecurityTab" tabindex="0">
+                <div class="settings-grid settings-security-grid">
+                    <div class="settings-grid-item">
+                        <h2 class="settings-panel-title fw-semibold mb-3 d-flex align-items-center gap-1">
+                            <span class="material-symbols-outlined icon-inline" aria-hidden="true">lock_open</span>
+                            Authentication
+                        </h2>
+                        <div class="ui-card h-100">
+                            <div>
+                                <div class="settings-section">
                                     <div class="form-check form-switch">
                                         <input class="form-check-input" type="checkbox" role="switch"
-                                            id="lalalDurationGuard" name="lalalaai_duration_guard"
-                                            {{ 'checked' if settings.lalalaai_duration_guard | default(true) else '' }}>
-                                        <label class="form-check-label" for="lalalDurationGuard">
-                                            Limit long tracks
+                                            id="enableAuthentication" name="enable_authentication" {{ 'checked' if
+                                            settings.enable_authentication | default(true) else '' }}>
+                                        <label class="form-check-label" for="enableAuthentication">
+                                            Enable Authentication
                                         </label>
                                     </div>
-                                    <small class="setting-hint">Block tracks longer than {{ LALAL_MAX_DURATION_MINUTES }} minutes</small>
                                 </div>
                             </div>
                         </div>
                     </div>
-                </div>
-            </div>
-        </section>
-
-        <section class="settings-group tab-pane fade" id="settingsSecurityPanel" role="tabpanel"
-            aria-labelledby="settingsSecurityTab" tabindex="0">
-            <div class="settings-grid settings-security-grid">
-                <div class="settings-grid-item">
-                    <h2 class="settings-panel-title fw-semibold mb-3 d-flex align-items-center gap-1">
-                        <span class="material-symbols-outlined icon-inline" aria-hidden="true">lock_open</span>
-                        Authentication
-                    </h2>
-                    <div class="ui-card h-100">
-                        <div>
-                            <div class="settings-section">
-                                <div class="form-check form-switch">
-                                    <input class="form-check-input" type="checkbox" role="switch"
-                                        id="enableAuthentication" name="enable_authentication"
-                                        {{ 'checked' if settings.enable_authentication | default(true) else '' }}>
-                                    <label class="form-check-label" for="enableAuthentication">
-                                        Enable Authentication
-                                    </label>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-                <div class="settings-grid-item">
-                    <h2 class="settings-panel-title fw-semibold mb-3 d-flex align-items-center gap-1">
-                        <span class="material-symbols-outlined icon-inline" aria-hidden="true">password</span>
-                        Change password
-                    </h2>
-                    <div class="ui-card h-100">
-                        <div>
-                            <div class="settings-section">
-                                <div class="settings-field-stack">
-                                    <div>
-                                        <label class="form-label" for="adminPassword">New password</label>
-                                        <div class="input-group">
-                                            <input type="password" class="form-control ui-input" id="adminPassword"
-                                                value="" autocomplete="new-password">
-                                            <button type="button" class="btn btn-outline-secondary password-toggle-btn"
-                                                data-target="adminPassword" aria-label="Show password"
-                                                aria-pressed="false">
-                                                <span class="material-symbols-outlined icon-inline"
-                                                    aria-hidden="true">visibility</span>
-                                            </button>
+                    <div class="settings-grid-item">
+                        <h2 class="settings-panel-title fw-semibold mb-3 d-flex align-items-center gap-1">
+                            <span class="material-symbols-outlined icon-inline" aria-hidden="true">password</span>
+                            Change password
+                        </h2>
+                        <div class="ui-card h-100">
+                            <div>
+                                <div class="settings-section">
+                                    <div class="settings-field-stack">
+                                        <div>
+                                            <label class="form-label" for="adminPassword">New password</label>
+                                            <div class="input-group">
+                                                <input type="password" class="form-control ui-input" id="adminPassword"
+                                                    value="" autocomplete="new-password">
+                                                <button type="button"
+                                                    class="btn btn-outline-secondary password-toggle-btn"
+                                                    data-target="adminPassword" aria-label="Show password"
+                                                    aria-pressed="false">
+                                                    <span class="material-symbols-outlined icon-inline"
+                                                        aria-hidden="true">visibility</span>
+                                                </button>
+                                            </div>
+                                            <small class="setting-hint">At least 8 characters</small>
                                         </div>
-                                        <small class="setting-hint">At least 8 characters</small>
-                                    </div>
-                                    <div>
-                                        <label class="form-label" for="adminPasswordConfirm">Confirm new
-                                            password</label>
-                                        <div class="input-group">
-                                            <input type="password" class="form-control ui-input"
-                                                id="adminPasswordConfirm" value="" autocomplete="new-password">
-                                            <button type="button" class="btn btn-outline-secondary password-toggle-btn"
-                                                data-target="adminPasswordConfirm" aria-label="Show password"
-                                                aria-pressed="false">
-                                                <span class="material-symbols-outlined icon-inline"
-                                                    aria-hidden="true">visibility</span>
+                                        <div>
+                                            <label class="form-label" for="adminPasswordConfirm">Confirm new
+                                                password</label>
+                                            <div class="input-group">
+                                                <input type="password" class="form-control ui-input"
+                                                    id="adminPasswordConfirm" value="" autocomplete="new-password">
+                                                <button type="button"
+                                                    class="btn btn-outline-secondary password-toggle-btn"
+                                                    data-target="adminPasswordConfirm" aria-label="Show password"
+                                                    aria-pressed="false">
+                                                    <span class="material-symbols-outlined icon-inline"
+                                                        aria-hidden="true">visibility</span>
+                                                </button>
+                                            </div>
+                                        </div>
+                                        <div id="passwordError" class="invalid-feedback d-none"></div>
+                                        <div class="d-flex justify-content-end">
+                                            <button id="passwordSaveBtn" class="btn btn-primary btn-sm" type="button">
+                                                Update password
                                             </button>
                                         </div>
                                     </div>
-                                    <div id="passwordError" class="invalid-feedback d-none"></div>
-                                    <div class="d-flex justify-content-end">
-                                        <button id="passwordSaveBtn" class="btn btn-primary btn-sm" type="button">
-                                            Update password
-                                        </button>
-                                    </div>
                                 </div>
                             </div>
                         </div>
                     </div>
                 </div>
-            </div>
-        </section>
+            </section>
 
-        <section class="settings-group tab-pane fade" id="settingsSystemPanel" role="tabpanel"
-            aria-labelledby="settingsSystemTab" tabindex="0">
-            <h2 class="settings-panel-title fw-semibold mb-3 d-flex align-items-center gap-1">
-                <span class="material-symbols-outlined icon-inline" aria-hidden="true">dns</span>
-                System information
-            </h2>
-            <div class="settings-grid">
-                <div class="settings-grid-item">
-                    <div class="ui-card h-100">
-                        <div>
-                            <div class="settings-section">
-                                <dl class="settings-info-row-group">
-                                    <div class="settings-info-row">
-                                        <dt>yt-dlp</dt>
-                                        <dd class="settings-version-cell" data-update-component="ytdlp">
-                                            <a class="settings-update-badge" data-update-badge href="#" target="_blank"
-                                                rel="noopener noreferrer" hidden>
-                                                <span class="material-symbols-outlined icon-inline" aria-hidden="true">upgrade</span>
-                                                <span>Update available</span>
-                                            </a>
-                                            <span class="settings-version-badge font-monospace">{{ ytdlp_version | default('unavailable') }}</span>
-                                        </dd>
-                                    </div>
-                                    <div class="settings-info-row">
-                                        <dt>yt-dlp-ejs</dt>
-                                        <dd class="settings-version-cell" data-update-component="ytdlp_ejs">
-                                            <a class="settings-update-badge" data-update-badge href="#" target="_blank"
-                                                rel="noopener noreferrer" hidden>
-                                                <span class="material-symbols-outlined icon-inline" aria-hidden="true">upgrade</span>
-                                                <span>Update available</span>
-                                            </a>
-                                            <span class="settings-version-badge font-monospace">{{ ytdlp_ejs_version | default('unavailable') }}</span>
-                                        </dd>
-                                    </div>
-                                    <div class="settings-info-row">
-                                        <dt>deno (JS runtime)</dt>
-                                        <dd class="settings-version-cell" data-update-component="js_runtime">
-                                            <a class="settings-update-badge" data-update-badge href="#" target="_blank"
-                                                rel="noopener noreferrer" hidden>
-                                                <span class="material-symbols-outlined icon-inline" aria-hidden="true">upgrade</span>
-                                                <span>Update available</span>
-                                            </a>
-                                            <span class="settings-version-badge font-monospace">{{ js_runtime_version | default('unavailable') }}</span>
-                                        </dd>
-                                    </div>
-                                    <div class="settings-info-row">
-                                        <dt>ffmpeg</dt>
-                                        <dd class="settings-version-cell" data-update-component="ffmpeg">
-                                            <a class="settings-update-badge" data-update-badge href="#" target="_blank"
-                                                rel="noopener noreferrer" hidden>
-                                                <span class="material-symbols-outlined icon-inline" aria-hidden="true">upgrade</span>
-                                                <span>Update available</span>
-                                            </a>
-                                            <span class="settings-version-badge font-monospace">{{ ffmpeg_version | default('unavailable') }}</span>
-                                        </dd>
-                                    </div>
-                                    <div class="settings-info-row">
-                                        <dt>wavesurfer.js</dt>
-                                        <dd class="settings-version-cell" data-update-component="wavesurfer">
-                                            <a class="settings-update-badge" data-update-badge href="#" target="_blank"
-                                                rel="noopener noreferrer" hidden>
-                                                <span class="material-symbols-outlined icon-inline" aria-hidden="true">upgrade</span>
-                                                <span>Update available</span>
-                                            </a>
-                                            <span class="settings-version-badge font-monospace">{{ wavesurfer_version | default('unavailable') }}</span>
-                                        </dd>
-                                    </div>
-                                </dl>
+            <section class="settings-group tab-pane fade" id="settingsSystemPanel" role="tabpanel"
+                aria-labelledby="settingsSystemTab" tabindex="0">
+                <h2 class="settings-panel-title fw-semibold mb-3 d-flex align-items-center gap-1">
+                    <span class="material-symbols-outlined icon-inline" aria-hidden="true">dns</span>
+                    System information
+                </h2>
+                <div class="settings-grid">
+                    <div class="settings-grid-item">
+                        <div class="ui-card h-100">
+                            <div>
+                                <div class="settings-section">
+                                    <dl class="settings-info-row-group">
+                                        <div class="settings-info-row">
+                                            <dt>yt-dlp</dt>
+                                            <dd class="settings-version-cell" data-update-component="ytdlp">
+                                                <a class="settings-update-badge" data-update-badge href="#"
+                                                    target="_blank" rel="noopener noreferrer" hidden>
+                                                    <span class="material-symbols-outlined icon-inline"
+                                                        aria-hidden="true">upgrade</span>
+                                                    <span>Update available</span>
+                                                </a>
+                                                <span class="settings-version-badge font-monospace">{{ ytdlp_version |
+                                                    default('unavailable') }}</span>
+                                            </dd>
+                                        </div>
+                                        <div class="settings-info-row">
+                                            <dt>yt-dlp-ejs</dt>
+                                            <dd class="settings-version-cell" data-update-component="ytdlp_ejs">
+                                                <a class="settings-update-badge" data-update-badge href="#"
+                                                    target="_blank" rel="noopener noreferrer" hidden>
+                                                    <span class="material-symbols-outlined icon-inline"
+                                                        aria-hidden="true">upgrade</span>
+                                                    <span>Update available</span>
+                                                </a>
+                                                <span class="settings-version-badge font-monospace">{{ ytdlp_ejs_version
+                                                    | default('unavailable') }}</span>
+                                            </dd>
+                                        </div>
+                                        <div class="settings-info-row">
+                                            <dt>deno (JS runtime)</dt>
+                                            <dd class="settings-version-cell" data-update-component="js_runtime">
+                                                <a class="settings-update-badge" data-update-badge href="#"
+                                                    target="_blank" rel="noopener noreferrer" hidden>
+                                                    <span class="material-symbols-outlined icon-inline"
+                                                        aria-hidden="true">upgrade</span>
+                                                    <span>Update available</span>
+                                                </a>
+                                                <span class="settings-version-badge font-monospace">{{
+                                                    js_runtime_version | default('unavailable') }}</span>
+                                            </dd>
+                                        </div>
+                                        <div class="settings-info-row">
+                                            <dt>ffmpeg</dt>
+                                            <dd class="settings-version-cell" data-update-component="ffmpeg">
+                                                <a class="settings-update-badge" data-update-badge href="#"
+                                                    target="_blank" rel="noopener noreferrer" hidden>
+                                                    <span class="material-symbols-outlined icon-inline"
+                                                        aria-hidden="true">upgrade</span>
+                                                    <span>Update available</span>
+                                                </a>
+                                                <span class="settings-version-badge font-monospace">{{ ffmpeg_version |
+                                                    default('unavailable') }}</span>
+                                            </dd>
+                                        </div>
+                                        <div class="settings-info-row">
+                                            <dt>wavesurfer.js</dt>
+                                            <dd class="settings-version-cell" data-update-component="wavesurfer">
+                                                <a class="settings-update-badge" data-update-badge href="#"
+                                                    target="_blank" rel="noopener noreferrer" hidden>
+                                                    <span class="material-symbols-outlined icon-inline"
+                                                        aria-hidden="true">upgrade</span>
+                                                    <span>Update available</span>
+                                                </a>
+                                                <span class="settings-version-badge font-monospace">{{
+                                                    wavesurfer_version | default('unavailable') }}</span>
+                                            </dd>
+                                        </div>
+                                    </dl>
+                                </div>
                             </div>
                         </div>
                     </div>
-                </div>
-                <div class="settings-grid-item">
-                    <div class="ui-card h-100">
-                        <div>
-                            <div class="settings-section settings-app-update" data-app-update
-                                data-current-version="{{ VERSION | e }}" data-app-update-state="loading">
-                                <div class="settings-app-update-head">
-                                    <img src="/static/img/fetchly_logo.svg" alt="fetchly"
-                                        class="settings-app-update-logo">
-                                    <span class="settings-version-badge font-monospace">v{{ VERSION | e }}</span>
-                                </div>
-                                <p class="settings-app-update-status">
-                                    <span class="material-symbols-outlined icon-inline settings-app-update-spin"
-                                        aria-hidden="true" data-app-update-icon>progress_activity</span>
-                                    <span data-app-update-text>Checking for updates…</span>
-                                </p>
-                                <a class="btn btn-sm btn-primary w-100 settings-app-update-link"
-                                    data-app-update-link href="#" target="_blank" rel="noopener noreferrer" hidden>
+                    <div class="settings-grid-item">
+                        <section class="ui-card h-100 settings-update-card" aria-labelledby="update-card-title">
+                            <header class="ui-card-header settings-update-card-header">
+                                <div class="d-flex align-items-center gap-2">
                                     <span class="material-symbols-outlined icon-inline"
-                                        aria-hidden="true">open_in_new</span>
-                                    View release on GitHub
-                                </a>
+                                        aria-hidden="true">system_update</span>
+                                    <h3 class="h6 fw-semibold mb-0" id="update-card-title">Check for updates</h3>
+                                </div>
+                                <button class="btn btn-sm btn-outline-secondary text-nowrap" type="button"
+                                    data-app-update-refresh title="Check for updates">
+                                    <span class="material-symbols-outlined icon-inline"
+                                        aria-hidden="true">refresh</span>
+                                    Check now
+                                </button>
+                            </header>
+                            <div class="ui-card-body">
+                                <div class="settings-app-update" data-app-update
+                                    data-current-version="{{ VERSION | e }}" data-app-update-state="loading">
+                                    <p class="settings-app-update-status" role="status" aria-live="polite">
+                                        <span class="material-symbols-outlined icon-inline settings-app-update-spin"
+                                            aria-hidden="true" data-app-update-icon>progress_activity</span>
+                                        <span data-app-update-text>Checking for updates…</span>
+                                    </p>
+                                    <dl class="settings-info-row-group">
+                                        <div class="settings-info-row">
+                                            <dt>Current</dt>
+                                            <dd><span class="settings-version-badge font-monospace"
+                                                    data-app-update-current>v{{ VERSION | e }}</span></dd>
+                                        </div>
+                                        <div class="settings-info-row">
+                                            <dt>Latest</dt>
+                                            <dd><span class="settings-version-badge font-monospace"
+                                                    data-app-update-latest>–</span></dd>
+                                        </div>
+                                    </dl>
+                                    <a class="btn btn-sm btn-primary w-100 settings-app-update-link"
+                                        data-app-update-link href="#" target="_blank" rel="noopener noreferrer" hidden>
+                                        <span class="material-symbols-outlined icon-inline"
+                                            aria-hidden="true">open_in_new</span>
+                                        View release on GitHub
+                                    </a>
+                                </div>
                             </div>
-                        </div>
+                        </section>
                     </div>
                 </div>
-            </div>
-        </section>
+            </section>
         </div>
     </form>
 </div>
@@ -400,8 +444,8 @@
                             </div>
                             <div class="col-md-6">
                                 <label for="lalalActivationKey" class="form-label">Activation Key</label>
-                                <input type="password" class="form-control ui-input font-monospace" id="lalalActivationKey"
-                                    autocomplete="off">
+                                <input type="password" class="form-control ui-input font-monospace"
+                                    id="lalalActivationKey" autocomplete="off">
                             </div>
                         </div>
                         <button type="button" class="btn btn-primary w-100" id="lalalAuthUseKeyBtn">

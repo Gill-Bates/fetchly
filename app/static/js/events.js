@@ -3,7 +3,7 @@
 // Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 //
 
-import { CONFIG } from "./config.js";
+import { CONFIG } from "./config.js?v=20260831b";
 import { fetchJob, fetchJobs } from "./api.js";
 import { reportError, reportWarning } from "./errors.js";
 import { applyJobUpdate, upsertJobSnapshot } from "./jobs.js?v=20260831a";
@@ -246,10 +246,23 @@ async function reconcileVisibleJobs() {
             return;
         }
 
+        // The server returns its first page newest-first. Jobs already in the
+        // store are patched in place; unknown ones are prepended, and that has
+        // to happen oldest-first so the newest still ends up on top.
+        const unknownJobs = [];
         for (const job of jobs) {
-            const updatedJob = applyJobUpdate(job) || upsertJobSnapshot(job);
+            const updatedJob = applyJobUpdate(job);
             if (updatedJob) {
                 dispatchJobUpdate(updatedJob);
+                continue;
+            }
+            unknownJobs.push(job);
+        }
+
+        for (let index = unknownJobs.length - 1; index >= 0; index -= 1) {
+            const insertedJob = upsertJobSnapshot(unknownJobs[index]);
+            if (insertedJob) {
+                dispatchJobUpdate(insertedJob);
             }
         }
     } catch (error) {

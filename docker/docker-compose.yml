@@ -29,7 +29,7 @@ services:
       - "${FETCHLY_PORT:-8000}:8000"
     environment:
       LOG_LEVEL: ${LOG_LEVEL:-info}
-      TZ: ${TZ:-Europe/Berlin}
+      TZ: ${TZ:-Etc/UTC}
       TIMEOUT: 60
       # No default: compose refuses to start rather than bringing the app up
       # with a guessable session key or password.

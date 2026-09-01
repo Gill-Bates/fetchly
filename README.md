@@ -22,12 +22,12 @@
 ---
 
 <p align="center">
-  <img src=".github/img/screen_2.jpeg" alt="fetchly dashboard: link input, video preview, format picker, and recent downloads" width="800"><br>
+  <img src=".github/img/screen_1.jpeg" alt="fetchly dashboard: link input, video preview, format picker, and recent downloads" width="800"><br>
   <em>Dashboard — paste a link, preview the media, pick a format, and track every job live.</em>
 </p>
 
 <p align="center">
-  <img src=".github/img/screen_1.jpeg" alt="fetchly login screen" width="800"><br>
+  <img src=".github/img/screen_2.jpeg" alt="fetchly login screen" width="800"><br>
   <em>Authenticated login with invisible, server-verified anti-bot protection.</em>
 </p>
 
@@ -36,6 +36,7 @@
 - **A web UI, not the CLI** — no `yt-dlp` flags to remember; format and quality are picked from menus.
 - **It stays running** — a persistent dashboard for queued, active, done, and failed jobs, not a one-shot command.
 - **More than downloading** — trim audio on a waveform and split vocals from instrumentals without leaving the app.
+- **Share with friends and family** — hand out an unguessable link to a finished download; recipients need no account, and you can cap how often each link works.
 - **Self-hosted** — a single container, SQLite on a mounted volume, authenticated access, and a hardened default setup.
 
 ## Features
@@ -47,12 +48,18 @@
 | **Choose your quality** | Pick the format and quality you want, then let fetchly handle the conversion. |
 | **Trim with precision** | Cut audio visually with an interactive waveform before you download or process it further. |
 | **Create clean stems** | Connect Lalal.ai to separate vocals and instrumentals when you need production-ready tracks. |
+| **Share what you made** | Send friends and family a share link to a finished download — no account needed on their side, with an optional limit on how many times it can be used. |
 | **Keep it private** | Run everything yourself with persistent storage, authentication, CSRF protection, anti-bot checks, and login rate limiting. |
 | **Ready to run** | Get the complete application and its required dependencies in one Docker image. |
 
 ## Supported platforms
 
-Video and audio downloads from **YouTube**, **TikTok**, **Instagram**, and **Facebook**.
+| | Platform | Video | Audio |
+| --- | --- | --- | --- |
+| <picture><source media="(prefers-color-scheme: dark)" srcset=".github/img/social/youtube_white.svg"><img src=".github/img/social/youtube_black.svg" alt="YouTube" width="24"></picture> | **YouTube** | ✅ | ✅ |
+| <picture><source media="(prefers-color-scheme: dark)" srcset=".github/img/social/tiktok_white.svg"><img src=".github/img/social/tiktok_black.svg" alt="TikTok" width="24"></picture> | **TikTok** | ✅ | ✅ |
+| <picture><source media="(prefers-color-scheme: dark)" srcset=".github/img/social/instagram_white.svg"><img src=".github/img/social/instagram_black.svg" alt="Instagram" width="24"></picture> | **Instagram** | ✅ | ✅ |
+| <picture><source media="(prefers-color-scheme: dark)" srcset=".github/img/social/facebook_white.svg"><img src=".github/img/social/facebook_black.svg" alt="Facebook" width="24"></picture> | **Facebook** | ✅ | ✅ |
 
 > **Note:** Only publicly accessible URLs work — private videos will not download.
 
@@ -123,11 +130,11 @@ Everything is set through environment variables (with Compose, put them in an `.
 | `FETCHLY_ADMIN_USER` | `admin` | Admin login username. |
 | `FETCHLY_BEHIND_HTTPS` | `0` | Set to `1` when serving over HTTPS (e.g. behind a reverse proxy) so session cookies are marked `Secure`. |
 | `FETCHLY_COOKIES_DIR` | `data/` | Directory scanned for a `cookies.txt` that yt-dlp uses for age- or login-gated content. |
-| `TZ` | `Europe/Berlin` | Container timezone, used for timestamps in the UI and logs. |
+| `TZ` | `Etc/UTC` | Container timezone, used for timestamps in the UI and logs. |
 | `LOG_LEVEL` | `info` | One of `debug`, `info`, `warning`, `error`. |
 | `PORT` / `HOST` | `8000` / `0.0.0.0` | Bind address for the standalone server (`python run.py`). |
 
-**Lalal.ai** stem separation is enabled by entering an API key under **Settings** in the app — no environment variable required.
+**Lalal.ai** stem separation is enabled by entering your Lalal.ai **activation key** under **Settings** in the app — no environment variable required.
 
 ### Reverse proxy
 
@@ -140,8 +147,6 @@ fetchly speaks plain HTTP inside the container. Terminate TLS at a proxy (Caddy,
 - [wavesurfer.js](https://wavesurfer.xyz/) — browser-based waveform display and trim UI
 - [Gunicorn](https://gunicorn.org/) + [Uvicorn](https://www.uvicorn.org/) — ASGI server used in Docker
 - [Lalal.ai](https://www.lalal.ai/) — optional vocals/instrumental stem separation
-
-The image ships upstream static ffmpeg/ffprobe builds and stable yt-dlp PyPI releases; Debian's media packages are pinned out so they cannot shadow them.
 
 <p align="center">
   <a href="https://www.lalal.ai/">

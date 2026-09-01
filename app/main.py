@@ -11,10 +11,12 @@ import logging
 import os
 import queue
 import shutil
+import signal
 from collections.abc import Callable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime
 from pathlib import Path
+from types import FrameType
 from typing import Any
 
 from fastapi import FastAPI, Request
@@ -340,6 +342,51 @@ async def _cancel_background_tasks(tasks: list[asyncio.Task[None]], *, timeout: 
                 logger.warning("Background task %s did not stop within %.1fs", task.get_name(), timeout)
 
 
+type _SignalHandler = Callable[[int, FrameType | None], Any] | int | None
+
+
+def _install_shutdown_signal_hook() -> Callable[[], None]:
+    """Close SSE streams as soon as a termination signal arrives.
+
+    Uvicorn waits for open connections to finish *before* it emits the lifespan
+    shutdown event, so signalling the streams from the lifespan teardown only
+    happens after the graceful-shutdown timeout has elapsed and the long-lived
+    /events request has already been cancelled. Chaining onto the server's own
+    signal handler ends those streams while the server is still waiting.
+
+    Returns a callable that restores the previous handlers.
+    """
+    loop = asyncio.get_running_loop()
+    previous: dict[int, _SignalHandler] = {}
+
+    def _restore() -> None:
+        for sig, handler in previous.items():
+            with suppress(ValueError):
+                signal.signal(sig, handler)
+        previous.clear()
+
+    def _handle_shutdown_signal(sig: int, frame: FrameType | None) -> None:
+        with suppress(RuntimeError):
+            loop.call_soon_threadsafe(signal_sse_shutdown)
+        chained = previous.get(sig)
+        if callable(chained):
+            chained(sig, frame)
+        elif chained is signal.SIG_DFL:
+            signal.signal(sig, signal.SIG_DFL)
+            signal.raise_signal(sig)
+
+    try:
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            previous[sig] = signal.signal(sig, _handle_shutdown_signal)
+    except ValueError:
+        # Signal handlers can only be installed from the main thread (for
+        # example TestClient runs the app in a worker thread).
+        _restore()
+        return lambda: None
+
+    return _restore
+
+
 def _log_background_task_completion(task: asyncio.Task[None]) -> None:
     try:
         exc = task.exception()
@@ -363,6 +410,7 @@ async def lifespan(app: FastAPI):
     await asyncio.to_thread(DATA_DIR.mkdir, parents=True, exist_ok=True)
     await asyncio.to_thread(init_db)
     init_sse_shutdown_event()
+    restore_shutdown_signals = _install_shutdown_signal_hook()
     await asyncio.to_thread(refresh_session_settings_cache)
     recovered_jobs = await asyncio.to_thread(cancel_interrupted_jobs)
     if recovered_jobs:
@@ -402,6 +450,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
+        restore_shutdown_signals()
         logger.info("Shutting down...")
         signal_sse_shutdown()
         disable_event_dispatch()

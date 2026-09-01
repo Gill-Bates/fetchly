@@ -25,4 +25,9 @@ export const DOWNLOADABLE_STATUSES = new Set(["done", "analysis", "analysis_done
 
 export const CANCELLABLE_STATUSES = new Set(["queued", "processing", "downloading", "transcoding"]);
 
+// A job in one of these states can be re-queued from scratch via
+// POST /api/jobs/{id}/retry: it failed on its own (error) or was stopped by the
+// user (cancelled), and nothing about the source url/type/quality changed.
+export const RETRYABLE_STATUSES = new Set(["error", "cancelled"]);
+
 export const TERMINAL_STATUSES = new Set(["done", "analysis_done", "error", "cancelled"]);

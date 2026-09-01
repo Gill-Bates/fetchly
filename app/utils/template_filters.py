@@ -33,6 +33,7 @@ __all__ = [
     "register_filters",
     "status_class",
     "status_icon",
+    "status_label",
 ]
 
 
@@ -62,6 +63,21 @@ _SUCCESS_STATUSES = COMPLETED_STATUSES
 _STATUS_CLASS_MAP: dict[str, str] = {
     "cancelled": "secondary",
     "error": "danger",
+}
+# Human-readable phase names for the status pill. Raw status values leak
+# implementation wording ("processing") and the previous client-side collapse of
+# every in-flight status into "Running" hid which phase a job was actually in.
+# Keep in sync with STATUS_META in app/static/js/ui.js.
+_STATUS_LABEL_MAP: dict[str, str] = {
+    "queued": "Queued",
+    "processing": "Preparing",
+    "downloading": "Downloading",
+    "transcoding": "Transcoding",
+    "analysis": "Analyzing",
+    "analysis_done": "Done",
+    "done": "Done",
+    "error": "Error",
+    "cancelled": "Cancelled",
 }
 _STATUS_ICON_MAP: dict[str, str] = {
     "cancelled": "cancel",
@@ -152,6 +168,13 @@ def status_class(status: str | None) -> str:
     return _STATUS_CLASS_MAP.get(status, "primary")
 
 
+def status_label(status: str | None) -> str:
+    """Get the human-readable phase label for a job status."""
+    if not status:
+        return _STATUS_LABEL_MAP["queued"]
+    return _STATUS_LABEL_MAP.get(status, str(status).replace("_", " ").title())
+
+
 def status_icon(status: str | None) -> str:
     """Get Material icon name for job status."""
     if status in _SUCCESS_STATUSES:
@@ -198,6 +221,7 @@ def register_filters(templates: Jinja2Templates) -> None:
     templates.env.filters["localtime"] = localtime
     templates.env.filters["filesize"] = filesize
     templates.env.filters["status_class"] = status_class
+    templates.env.filters["status_label"] = status_label
     templates.env.filters["status_icon"] = status_icon
     templates.env.filters["platform_pill"] = platform_pill
     templates.env.filters["platform_id"] = platform_id

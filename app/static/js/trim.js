@@ -12,7 +12,7 @@
 
 import { showToast } from "./toast.js";
 import { reportError } from "./errors.js";
-import { LALAL_MAX_DURATION_MINUTES, LALAL_MAX_DURATION_SECONDS } from "./config.js";
+import { LALAL_MAX_DURATION_MINUTES, LALAL_MAX_DURATION_SECONDS } from "./config.js?v=20260831b";
 import {
     buildTrimId,
     clamp,
@@ -23,7 +23,7 @@ import {
     triggerDownload,
     SNAP_INTERVAL_SECONDS,
 } from "./utils.js";
-import { isLalalEnabled, isLalalDurationGuardEnabled } from "./ui.js?v=20260823c";
+import { isLalalEnabled, isLalalDurationGuardEnabled } from "./ui.js?v=20260831c";
 
 // WaveSurfer imports (loaded dynamically)
 let WaveSurfer = null;
@@ -35,6 +35,7 @@ let trimRegion = null;
 let trimJobId = null;
 let trimId = null;  // Current trim ID (e.g., "5000_30000")
 let trimDurationSeconds = null;
+let selectionRevision = 0;
 let trimReady = false;
 let trimModal = null;
 let regionPlugin = null;
@@ -44,6 +45,7 @@ let isLooping = false;
 let isOpening = false;
 let trimSession = 0;
 let zoomRaf = 0;
+let pendingZoomClientX = null;
 let beatGridRaf = 0;
 let trimAbortController = new AbortController();
 let listenersAttached = false;
@@ -58,20 +60,25 @@ let trimSelectionEl = null;
 let trimSelectionStartHandle = null;
 let trimSelectionEndHandle = null;
 let selectionDragState = null;
+let suppressNextWaveClick = false;
+let suppressWaveClickTimeout = 0;
 let lastFocusedBeforeTrimModal = null;
 let bpm = null;
 let beatOffset = 0;
 let beatInterval = null;
 let beatGridEl = null;
 
-const ZOOM_BASE = 1.2;
 const JOB_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const ZOOM_MIN = 20;
+const ZOOM_WHEEL_SENSITIVITY = 0.0022;
+const ZOOM_WHEEL_STEP_MAX = 1.4;
+const WHEEL_LINE_HEIGHT_PX = 16;
+const WHEEL_PAGE_HEIGHT_PX = 400;
 const SELECTION_PADDING_FACTOR = 0.15;
 const TARGET_VIEWPORT_FILL = 0.9;
 const WAVESURFER_MODULE_PATH = "/static/vendor/wavesurfer/dist/wavesurfer.esm.js";
 const WAVESURFER_REGIONS_PATH = "/static/vendor/wavesurfer/dist/plugins/regions.esm.js";
 const MIN_SELECTION_SECONDS = 1;
+const DEFAULT_SELECTION_SECONDS = 5;
 const DEFAULT_ZOOM_LEVEL = 50;
 const MAX_ZOOM_LEVEL = 2000;
 const PAN_THRESHOLD_PX = 4;
@@ -98,7 +105,6 @@ let trimWaveEl = null;
 let trimInfoEl = null;
 let btnPlay = null;
 let btnPause = null;
-let btnApply = null;
 let btnDownload = null;
 let btnVocals = null;
 let btnInstr = null;
@@ -152,10 +158,9 @@ function isValidJobId(jobId) {
 }
 
 
-function resetButtons() {
+function resetButtons({ preservePlayback = false } = {}) {
     trimDurationSeconds = null;
-    setPlaybackControlsEnabled(false);
-    setButtonState(btnApply, { disabled: true, text: "Use Selection" });
+    setPlaybackControlsEnabled(preservePlayback && trimReady);
     setButtonState(btnVocals, { disabled: true });
     setButtonState(btnInstr, { disabled: true });
 
@@ -164,8 +169,30 @@ function resetButtons() {
 
     if (btnDownload) {
         btnDownload.classList.add("d-none");
-        btnDownload.href = "#";
+        btnDownload.disabled = true;
     }
+}
+
+
+function updateSelectionActions() {
+    const hasSelection = trimRegion !== null;
+    trimDurationSeconds = hasSelection ? trimRegion.end - trimRegion.start : null;
+
+    if (btnDownload) {
+        btnDownload.classList.toggle("d-none", !hasSelection);
+        btnDownload.disabled = !hasSelection;
+    }
+
+    const canUseLalal = hasSelection && isLalalEnabled() && !isTrimDurationBlocked();
+    setButtonState(btnVocals, { disabled: !canUseLalal });
+    setButtonState(btnInstr, { disabled: !canUseLalal });
+}
+
+
+function markSelectionChanged() {
+    selectionRevision += 1;
+    trimId = null;
+    updateSelectionActions();
 }
 
 
@@ -344,24 +371,154 @@ function handleKeydown(e) {
             trimWs.setTime(trimWs.getCurrentTime() + SNAP_INTERVAL_SECONDS);
             break;
 
-        case "Enter":
-            handleApplyTrim();
-            break;
     }
 }
 
 
+/** Wheel deltas arrive in pixels, lines or pages depending on the device. */
+function normalizeWheelDelta(delta, deltaMode) {
+    if (!Number.isFinite(delta)) return 0;
+    if (deltaMode === 1) return delta * WHEEL_LINE_HEIGHT_PX;
+    if (deltaMode === 2) return delta * WHEEL_PAGE_HEIGHT_PX;
+    return delta;
+}
+
+
+function getWaveViewportWidth() {
+    const scrollContainer = getWaveScrollContainer();
+    return scrollContainer?.clientWidth || trimWaveEl?.clientWidth || 0;
+}
+
+
+/** Zoom level at which the whole track fills the viewport exactly. */
+function getFitZoomLevel() {
+    const duration = trimWs?.getDuration?.() || 0;
+    const viewportWidth = getWaveViewportWidth();
+    if (!(duration > 0) || !(viewportWidth > 0)) return DEFAULT_ZOOM_LEVEL;
+
+    return viewportWidth / duration;
+}
+
+
+function panWaveBy(deltaPx) {
+    if (!trimWs || !Number.isFinite(deltaPx) || deltaPx === 0) return;
+
+    const scrollContainer = getWaveScrollContainer();
+    if (!(scrollContainer instanceof HTMLElement)) return;
+
+    const maxScroll = Math.max(0, scrollContainer.scrollWidth - scrollContainer.clientWidth);
+    if (!(maxScroll > 0)) return;
+
+    trimWs.setScroll(clamp(scrollContainer.scrollLeft + deltaPx, 0, maxScroll));
+    lockWaveVerticalScroll();
+    if (trimRegion) updateSelectionOverlays(trimRegion.start, trimRegion.end);
+    scheduleBeatGridDraw();
+}
+
+
+/**
+ * Zoom, move the viewport, then render for where the viewport actually landed.
+ *
+ * WaveSurfer renders its canvas tiles around the scroll offset that is current
+ * when `zoom()` runs, and only fills in missing tiles once the browser delivers
+ * the `scroll` event - a frame or more after `setScroll()`/`setScrollTime()`.
+ * Zooming into one part of a long track and then jumping the scroll elsewhere
+ * therefore leaves the viewport showing tiles rendered for the old offset, or
+ * no tiles at all: the waveform blanks out or shows a stale fragment until the
+ * next scroll event lands. Repeating the zoom renders the tiles the viewport
+ * needs; `minPxPerSec` is unchanged, so width and scroll position survive it.
+ *
+ * @param {number} nextZoom - Target minPxPerSec.
+ * @param {() => void} moveViewport - Applies the scroll jump for this zoom.
+ */
+function zoomAndMoveViewport(nextZoom, moveViewport) {
+    if (!trimWs) return;
+
+    trimWs.zoom(nextZoom);
+    moveViewport();
+    trimWs.zoom(nextZoom);
+}
+
+
+/**
+ * Zoom while keeping the audio position under the pointer pinned in place.
+ * WaveSurfer's own reRender() anchors the scroll on the playhead instead,
+ * which throws the view back to the start of the track whenever nothing has
+ * been played yet - the waveform appears to jump away or vanish.
+ * @param {number} nextZoom - Target minPxPerSec.
+ * @param {number} [clientX] - Pointer x to keep fixed; viewport center if omitted.
+ */
+function applyZoomAnchored(nextZoom, clientX) {
+    if (!trimWs) return;
+
+    const duration = trimWs.getDuration();
+    const wrapper = typeof trimWs.getWrapper === "function" ? trimWs.getWrapper() : null;
+    const scrollContainer = getWaveScrollContainer();
+    if (!(scrollContainer instanceof HTMLElement) || !(wrapper instanceof HTMLElement) || !(duration > 0)) {
+        trimWs.zoom(nextZoom);
+        return;
+    }
+
+    const rect = scrollContainer.getBoundingClientRect();
+    const viewportWidth = scrollContainer.clientWidth || rect.width;
+    const widthBefore = wrapper.scrollWidth;
+    const pointerX = Number.isFinite(clientX)
+        ? clamp(clientX - rect.left, 0, viewportWidth)
+        : viewportWidth / 2;
+    const anchorTime = widthBefore > 0
+        ? clamp(((scrollContainer.scrollLeft + pointerX) / widthBefore) * duration, 0, duration)
+        : 0;
+
+    zoomAndMoveViewport(nextZoom, () => {
+        const widthAfter = wrapper.scrollWidth;
+        if (!(widthAfter > 0)) {
+            return;
+        }
+        const maxScroll = Math.max(0, widthAfter - viewportWidth);
+        trimWs.setScroll(clamp(((anchorTime / duration) * widthAfter) - pointerX, 0, maxScroll));
+    });
+
+    lockWaveVerticalScroll();
+    if (trimRegion) updateSelectionOverlays(trimRegion.start, trimRegion.end);
+    scheduleBeatGridDraw();
+}
+
+
+/**
+ * Wheel over the waveform: zoom around the pointer, or pan with Shift or a
+ * horizontal wheel. Zooming out stops at the full-track view instead of
+ * shrinking the waveform into an unreachable sliver.
+ */
 function handleWheelZoom(e) {
     if (!trimWs || !trimReady) return;
 
     e.preventDefault();
 
-    zoomLevel *= e.deltaY > 0 ? 1 / ZOOM_BASE : ZOOM_BASE;
-    zoomLevel = clamp(zoomLevel, 1, MAX_ZOOM_LEVEL);
+    const deltaX = normalizeWheelDelta(e.deltaX, e.deltaMode);
+    const deltaY = normalizeWheelDelta(e.deltaY, e.deltaMode);
+
+    if (e.shiftKey || Math.abs(deltaX) > Math.abs(deltaY)) {
+        panWaveBy(Math.abs(deltaX) > Math.abs(deltaY) ? deltaX : deltaY);
+        return;
+    }
+
+    // Exponential response keeps a mouse notch and a trackpad swipe comparable,
+    // and the clamp stops one large delta from jumping several zoom steps.
+    const factor = clamp(
+        Math.exp(-deltaY * ZOOM_WHEEL_SENSITIVITY),
+        1 / ZOOM_WHEEL_STEP_MAX,
+        ZOOM_WHEEL_STEP_MAX,
+    );
+    const nextZoom = clamp(zoomLevel * factor, getFitZoomLevel(), MAX_ZOOM_LEVEL);
+    if (nextZoom === zoomLevel) return;
+
+    zoomLevel = nextZoom;
+    pendingZoomClientX = e.clientX;
 
     cancelAnimationFrame(zoomRaf);
     zoomRaf = requestAnimationFrame(() => {
-        trimWs?.zoom(zoomLevel);
+        zoomRaf = 0;
+        applyZoomAnchored(zoomLevel, pendingZoomClientX);
     });
 }
 
@@ -406,7 +563,6 @@ function initElements() {
     trimInfoEl = refreshElement(trimInfoEl, "trimInfo");
     btnPlay = refreshElement(btnPlay, "trimPlay");
     btnPause = refreshElement(btnPause, "trimPause");
-    btnApply = refreshElement(btnApply, "trimApply");
     btnDownload = refreshElement(btnDownload, "trimDownload");
     btnVocals = refreshElement(btnVocals, "trimVocals");
     btnInstr = refreshElement(btnInstr, "trimInstr");
@@ -463,6 +619,14 @@ function getWaveScrollContainer() {
 }
 
 
+function lockWaveVerticalScroll() {
+    const scrollContainer = getWaveScrollContainer();
+    if (scrollContainer?.scrollTop) {
+        scrollContainer.scrollTop = 0;
+    }
+}
+
+
 function getWaveClickTime(clientX) {
     if (!trimWs) return null;
 
@@ -509,6 +673,7 @@ function applySelectionRange(start, end) {
     trimRegion.setOptions({ start: nextStart, end: nextEnd });
     updateSelectionOverlays(nextStart, nextEnd);
     updateInfo();
+    markSelectionChanged();
 }
 
 
@@ -678,6 +843,8 @@ function updateSelectionOverlays(start, end) {
     const duration = trimWs.getDuration();
     if (!(scrollContainer instanceof HTMLElement) || !(wrapper instanceof HTMLElement) || !(duration > 0)) return;
 
+    lockWaveVerticalScroll();
+
     ensureOverlays();
     if (
         !(trimOverlayLeft instanceof HTMLElement)
@@ -734,6 +901,8 @@ function fitSelectionIntoView(start, end) {
     const scrollContainer = getWaveScrollContainer();
     if (!(duration > 0) || !(scrollContainer instanceof HTMLElement)) return;
 
+    lockWaveVerticalScroll();
+
     const selectionDuration = end - start;
     const padding = selectionDuration * SELECTION_PADDING_FACTOR;
     const viewStart = Math.max(0, start - padding);
@@ -743,9 +912,26 @@ function fitSelectionIntoView(start, end) {
     const targetPx = viewportWidth * TARGET_VIEWPORT_FILL;
     const pxPerSec = targetPx / visibleDuration;
 
-    zoomLevel = clamp(pxPerSec, ZOOM_MIN, MAX_ZOOM_LEVEL);
-    trimWs.zoom(zoomLevel);
-    trimWs.setScrollTime(viewStart);
+    zoomLevel = clamp(pxPerSec, getFitZoomLevel(), MAX_ZOOM_LEVEL);
+    zoomAndMoveViewport(zoomLevel, () => trimWs.setScrollTime(viewStart));
+}
+
+
+function createDefaultSelection() {
+    if (!trimWs || !regionPlugin) return;
+
+    const duration = trimWs.getDuration();
+    const end = Math.min(DEFAULT_SELECTION_SECONDS, duration);
+    if (end < MIN_SELECTION_SECONDS) return;
+
+    trimRegion = regionPlugin.addRegion({
+        start: 0,
+        end,
+        color: SELECTION_REGION_COLOR,
+        drag: false,
+        resize: false,
+    });
+    fitSelectionIntoView(0, end);
 }
 
 
@@ -759,16 +945,17 @@ function handleWaveReset(event) {
     trimRegion?.remove();
     trimRegion = null;
     trimId = null;
+    selectionRevision += 1;
     setSelectionVisualState(false);
-    zoomLevel = DEFAULT_ZOOM_LEVEL;
+    zoomLevel = getFitZoomLevel();
     isLooping = false;
     trimWs.pause();
-    trimWs.zoom(DEFAULT_ZOOM_LEVEL);
+    trimWs.zoom(zoomLevel);
     trimWs.setTime(0);
-    resetButtons();
+    resetButtons({ preservePlayback: true });
 
     if (trimInfoEl) {
-        trimInfoEl.textContent = "Click to set start, then click again to set the end.";
+        trimInfoEl.textContent = "Click or tap to set start, then click or tap again to set the end.";
     }
 }
 
@@ -782,6 +969,25 @@ function handlePanStart(event) {
     panStartX = event.clientX;
     panScrollLeft = trimWs.getScroll();
     attachPanListeners();
+}
+
+
+/**
+ * Touch browsers do not always emit a click after a pointer gesture on the
+ * WaveSurfer shadow DOM. Treat a stationary touch release as the equivalent
+ * of a click so selecting the start and end works on phones as well.
+ */
+function handleWavePointerUp(event) {
+    if (event.pointerType !== "touch" || movedDuringPan) return;
+
+    suppressNextWaveClick = true;
+    window.clearTimeout(suppressWaveClickTimeout);
+    suppressWaveClickTimeout = window.setTimeout(() => {
+        suppressNextWaveClick = false;
+        suppressWaveClickTimeout = 0;
+    }, 700);
+
+    handleWaveClick(event, { fromTouchTap: true });
 }
 
 
@@ -842,7 +1048,7 @@ function removeEventListeners() {
 
     btnPlay?.removeEventListener("click", handlePlay);
     btnPause?.removeEventListener("click", handlePause);
-    btnApply?.removeEventListener("click", handleApplyTrim);
+    btnDownload?.removeEventListener("click", handleDownloadTrim);
     btnVocals?.removeEventListener("click", handleVocalsClick);
     btnInstr?.removeEventListener("click", handleInstrumentalClick);
     btnLoop?.removeEventListener("click", handleLoopToggle);
@@ -850,6 +1056,7 @@ function removeEventListeners() {
     trimWaveEl?.removeEventListener("wheel", handleWheelZoom);
     trimWaveEl?.removeEventListener("click", handleWaveClick);
     trimWaveEl?.removeEventListener("pointerdown", handlePanStart);
+    trimWaveEl?.removeEventListener("pointerup", handleWavePointerUp);
     trimWaveEl?.removeEventListener("dblclick", handleWaveReset);
 
     trimModalEl?.removeEventListener("shown.bs.modal", handleModalShown);
@@ -860,7 +1067,14 @@ function removeEventListeners() {
 }
 
 
-function handleWaveClick(e) {
+function handleWaveClick(e, { fromTouchTap = false } = {}) {
+    if (!fromTouchTap && suppressNextWaveClick) {
+        suppressNextWaveClick = false;
+        window.clearTimeout(suppressWaveClickTimeout);
+        suppressWaveClickTimeout = 0;
+        return;
+    }
+
     if (!trimReady || !trimWs || !regionPlugin || !trimWaveEl) return;
     if (movedDuringPan || isRegionInteractionEvent(e)) return;
 
@@ -875,7 +1089,7 @@ function handleWaveClick(e) {
         trimRegion?.remove();
         trimRegion = null;
         setSelectionVisualState(false);
-        resetButtons();
+        resetButtons({ preservePlayback: true });
         trimWs.pause();
         trimWs.setTime(pendingStart);
         if (trimInfoEl) {
@@ -898,9 +1112,9 @@ function handleWaveClick(e) {
         trimRegion?.remove();
         trimRegion = null;
         setSelectionVisualState(false);
-        resetButtons();
+        resetButtons({ preservePlayback: true });
         if (trimInfoEl) {
-            trimInfoEl.textContent = `Selection must be at least ${MIN_SELECTION_SECONDS.toFixed(1)}s. Click to choose a new start.`;
+            trimInfoEl.textContent = `Selection must be at least ${MIN_SELECTION_SECONDS.toFixed(1)}s. Click or tap to choose a new start.`;
         }
         return;
     }
@@ -953,7 +1167,7 @@ function setupEventListeners() {
 
     btnPlay?.addEventListener("click", handlePlay);
     btnPause?.addEventListener("click", handlePause);
-    btnApply?.addEventListener("click", handleApplyTrim);
+    btnDownload?.addEventListener("click", handleDownloadTrim);
     btnVocals?.addEventListener("click", handleVocalsClick);
     btnInstr?.addEventListener("click", handleInstrumentalClick);
     btnLoop?.addEventListener("click", handleLoopToggle);
@@ -961,6 +1175,7 @@ function setupEventListeners() {
     trimWaveEl?.addEventListener("wheel", handleWheelZoom, { passive: false });
     trimWaveEl?.addEventListener("click", handleWaveClick);
     trimWaveEl?.addEventListener("pointerdown", handlePanStart);
+    trimWaveEl?.addEventListener("pointerup", handleWavePointerUp);
     trimWaveEl?.addEventListener("dblclick", handleWaveReset);
 
     trimModalEl.addEventListener("shown.bs.modal", handleModalShown);
@@ -990,12 +1205,40 @@ function updateInfo() {
 }
 
 /**
- * Show/hide loading state
+ * Show/hide loading state.
+ *
+ * Only the loader is toggled. #trimWave stays in the layout the whole time -
+ * the loader is an overlay on top of it - because WaveSurfer measures the
+ * container when it is created and would otherwise render at width 0.
  */
 function setLoading(loading) {
     loaderEl?.classList.toggle("d-none", !loading);
-    trimWaveEl?.classList.toggle("d-none", loading);
     setPlaybackControlsEnabled(!loading && trimReady);
+}
+
+/**
+ * Resolve once #trimWave has real geometry.
+ *
+ * Bootstrap only sets the modal to `display: block` after its backdrop
+ * transition, so `trimModal.show()` returning does not mean the container has
+ * been laid out yet. Creating WaveSurfer against a zero-width container makes
+ * its first render bail out (`renderMultiCanvas` computes a chunk width of 0)
+ * and seeds its ResizeObserver with width 0, which then fires a second, full
+ * re-render roughly 100 ms after the waveform is already on screen.
+ *
+ * @param {number} [maxFrames] - Frames to wait before giving up.
+ * @returns {Promise<boolean>} Whether the container reported a usable width.
+ */
+async function waitForWaveContainerWidth(maxFrames = 90) {
+    for (let frame = 0; frame < maxFrames; frame += 1) {
+        if ((trimWaveEl?.clientWidth || 0) > 0) {
+            return true;
+        }
+        await new Promise((resolve) => {
+            requestAnimationFrame(() => resolve());
+        });
+    }
+    return (trimWaveEl?.clientWidth || 0) > 0;
 }
 
 /**
@@ -1063,6 +1306,12 @@ export async function openTrimModal(jobId, options = {}) {
         return;
     }
 
+    await waitForWaveContainerWidth();
+    if (session !== trimSession) {
+        isOpening = false;
+        return;
+    }
+
     try {
         if (session !== trimSession) return;
 
@@ -1072,14 +1321,15 @@ export async function openTrimModal(jobId, options = {}) {
         // Create WaveSurfer instance
         trimWs = WaveSurfer.create({
             container: trimWaveEl,
-            waveColor: "rgba(255, 255, 255, 0.12)",
-            progressColor: "rgba(255, 255, 255, 0.35)",
+            waveColor: "rgba(226, 232, 240, 0.45)",
+            progressColor: "rgba(255, 255, 255, 0.7)",
             cursorColor: "#f59e0b",
             cursorWidth: 2,
             height: 100,
             barWidth: 2,
             barGap: 1,
             barRadius: 2,
+            barMinHeight: 1,
             normalize: true,
             interact: false,
             dragToSeek: false,
@@ -1096,11 +1346,16 @@ export async function openTrimModal(jobId, options = {}) {
 
             trimReady = true;
             setLoading(false);
+            // Start on the full track: minPxPerSec alone would open a long
+            // file scrolled into an arbitrary few seconds of audio.
+            zoomLevel = getFitZoomLevel();
+            trimWs.zoom(zoomLevel);
+            lockWaveVerticalScroll();
             scheduleBeatGridDraw();
 
-            // No default selection - user must click once for start and again for end
-            // Buttons stay disabled until selection is made
-            if (trimInfoEl) trimInfoEl.textContent = "Click to set start, then click again to set the end.";
+            // Start with a small, editable range so the common short-clip case
+            // needs no extra interaction.
+            createDefaultSelection();
         });
 
         // Enable buttons when region is created
@@ -1109,7 +1364,8 @@ export async function openTrimModal(jobId, options = {}) {
             trimRegion = region;
             setSelectionVisualState(true);
             updateSelectionOverlays(region.start, region.end);
-            setButtonState(btnApply, { disabled: false });
+            setPlaybackControlsEnabled(trimReady);
+            markSelectionChanged();
             updateInfo();
         });
 
@@ -1119,6 +1375,7 @@ export async function openTrimModal(jobId, options = {}) {
 
             trimRegion = null;
             setSelectionVisualState(false);
+            markSelectionChanged();
         });
 
         regionPlugin.on("region-update-end", (region) => {
@@ -1126,6 +1383,7 @@ export async function openTrimModal(jobId, options = {}) {
             if (region !== trimRegion) return;
 
             updateSelectionOverlays(region.start, region.end);
+            markSelectionChanged();
             updateInfo();
         });
 
@@ -1134,12 +1392,14 @@ export async function openTrimModal(jobId, options = {}) {
             if (session !== trimSession) return;
             if (region === trimRegion) {
                 updateSelectionOverlays(region.start, region.end);
+                markSelectionChanged();
                 updateInfo();
             }
         });
 
         trimWs.on("scroll", () => {
             if (session !== trimSession) return;
+            lockWaveVerticalScroll();
             if (trimRegion) updateSelectionOverlays(trimRegion.start, trimRegion.end);
             scheduleBeatGridDraw();
         });
@@ -1208,16 +1468,22 @@ function handlePause() {
 }
 
 /**
- * Apply trim and prepare for Lalal processing
+ * Materialize the current selection only when a downstream action needs it.
+ * The waveform selection remains the sole user-facing confirmation step.
  */
-async function handleApplyTrim() {
-    if (trimRequestBusy) return;
-    if (!trimJobId) return;
+async function ensureTrimSelection() {
+    if (trimId) return true;
+    if (trimRequestBusy) {
+        showToast("Preparing the current selection…", "info");
+        return false;
+    }
+    if (!trimJobId) return false;
     if (!trimRegion) {
         showToast("Please select a range in the waveform first", "info");
-        return;
+        return false;
     }
     const session = trimSession;
+    const revision = selectionRevision;
     const abortController = trimAbortController;
 
     const start = trimRegion.start;
@@ -1227,25 +1493,25 @@ async function handleApplyTrim() {
     // Validate selection
     if (duration < 1) {
         showToast("Selection too short (minimum 1 second)", "warning");
-        return;
+        return false;
     }
 
     if (duration > LALAL_MAX_DURATION_SECONDS) {
         showToast(`Selection too long (maximum ${LALAL_MAX_DURATION_MINUTES} minutes)`, "warning");
-        return;
+        return false;
     }
-
-    if (!btnApply) return;
 
     let csrfToken;
     try {
         csrfToken = requireCsrfToken();
     } catch (err) {
         showToast(err.message, "danger");
-        return;
+        return false;
     }
 
-    setButtonState(btnApply, { disabled: true, text: "Processing..." });
+    setButtonState(btnDownload, { disabled: true });
+    setButtonState(btnVocals, { disabled: true });
+    setButtonState(btnInstr, { disabled: true });
 
     trimRequestBusy = true;
     const requestController = new AbortController();
@@ -1264,9 +1530,11 @@ async function handleApplyTrim() {
             signal: requestController.signal,
         });
         const data = await parseApiResponse(res, "Trim failed");
-        if (session !== trimSession) return;
+        if (session !== trimSession || revision !== selectionRevision) {
+            return false;
+        }
 
-        // Store trim_id for Lalal processing
+        // Keep the generated file bound to the exact selection that produced it.
         trimId = data.trim_id || buildTrimId(start, end);
         const normalizedTrimDuration = Number(data.duration);
         trimDurationSeconds = Number.isFinite(normalizedTrimDuration)
@@ -1274,37 +1542,38 @@ async function handleApplyTrim() {
             ? normalizedTrimDuration
             : null;
 
-        // Enable Lalal buttons only when the integration is configured and duration is not blocked.
-        const durationBlockedForLalal = isTrimDurationBlocked();
-        if (isLalalEnabled() && !durationBlockedForLalal && btnVocals) btnVocals.disabled = false;
-        if (isLalalEnabled() && !durationBlockedForLalal && btnInstr) btnInstr.disabled = false;
-
-        // Show and configure download button
-        if (btnDownload) {
-            btnDownload.href = `/api/trim/${encodeURIComponent(trimJobId)}/${encodeURIComponent(trimId)}/download`;
-            btnDownload.classList.remove("d-none");
-        }
+        updateSelectionActions();
 
         const cachedNote = data.cached ? " (cached)" : "";
         showToast(`Trimmed ${duration.toFixed(1)}s of audio${cachedNote}`, "success");
-        setButtonState(btnApply, { text: "✓ Ready" });
+        return true;
 
     } catch (err) {
         if (err?.name === "AbortError") {
             if (session === trimSession) {
                 showToast("Trim timed out. Please try again.", "warning");
-                setButtonState(btnApply, { disabled: false, text: "Use Selection" });
+                updateSelectionActions();
             }
-            return;
+            return false;
         }
-        if (session !== trimSession) return;
+        if (session !== trimSession) return false;
         showToast(`Trim failed: ${err.message}`, "danger");
-        setButtonState(btnApply, { disabled: false, text: "Use Selection" });
+        updateSelectionActions();
+        return false;
     } finally {
         window.clearTimeout(timeoutId);
         abortController.signal.removeEventListener("abort", abortRequest);
         trimRequestBusy = false;
     }
+}
+
+
+async function handleDownloadTrim() {
+    if (!await ensureTrimSelection() || !trimJobId || !trimId) return;
+
+    triggerDownload(
+        `/api/trim/${encodeURIComponent(trimJobId)}/${encodeURIComponent(trimId)}/download`,
+    );
 }
 
 /**
@@ -1316,10 +1585,12 @@ async function runLalal(stem) {
         return;
     }
 
-    if (!trimJobId || !trimId) {
-        showToast("Please trim the audio first", "warning");
+    if (!trimJobId) {
+        showToast("Please select a range in the waveform first", "warning");
         return;
     }
+
+    if (!await ensureTrimSelection() || !trimId) return;
 
     if (isTrimDurationBlocked()) {
         showToast(
@@ -1390,7 +1661,9 @@ async function runLalal(stem) {
             triggerDownload(data.download_url);
         }
 
-        // Show cached indicator (no API credits used)
+        // Show cached indicator (no API credits used). The button stays
+        // disabled on purpose: the result belongs to this exact selection, so
+        // changing the selection (updateSelectionActions) is what re-arms it.
         const statusText = data.cached ? "✓ Cached" : "✓ Done";
         setButtonState(btn, { text: statusText });
 
@@ -1429,6 +1702,10 @@ function cleanup() {
         cancelAnimationFrame(zoomRaf);
         zoomRaf = 0;
     }
+    pendingZoomClientX = null;
+    window.clearTimeout(suppressWaveClickTimeout);
+    suppressWaveClickTimeout = 0;
+    suppressNextWaveClick = false;
     if (beatGridRaf) {
         cancelAnimationFrame(beatGridRaf);
         beatGridRaf = 0;
@@ -1476,7 +1753,7 @@ export function initTrim() {
         e.preventDefault();
         const jobId = btn.dataset.jobId;
         if (jobId) {
-            const row = btn.closest("tr[data-job-id]");
+            const row = btn.closest("[data-bpm]");
             const bpmValue = row?.dataset?.bpm ? Number(row.dataset.bpm) : null;
             const beatOffsetValue = btn.dataset.beatOffset ? Number(btn.dataset.beatOffset) : 0;
             await openTrimModal(jobId, { bpm: bpmValue, beatOffset: beatOffsetValue });

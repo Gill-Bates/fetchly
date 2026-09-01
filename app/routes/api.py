@@ -18,6 +18,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from time import time
 from typing import TYPE_CHECKING, Any, Protocol
+from urllib.parse import quote
 from weakref import WeakKeyDictionary
 
 import httpx
@@ -88,6 +89,7 @@ _PERSISTED_CANCELLABLE_JOB_STATUSES = (
     "downloading",
     "transcoding",
 )
+_RETRYABLE_JOB_STATUSES = frozenset({"error", "cancelled"})
 
 # Module-level state
 _templates: "Jinja2Templates | None" = None
@@ -138,7 +140,7 @@ class JobRecord(Protocol):
     def __getitem__(self, key: str) -> Any: ...
 
 
-def job_to_dict(job: JobRecord) -> dict[str, object]:
+def job_to_dict(job: JobRecord) -> dict[str, Any]:
     """Convert a job record to a dictionary for JSON responses."""
     return {
         "id": job["id"],
@@ -163,7 +165,7 @@ def job_to_dict(job: JobRecord) -> dict[str, object]:
     }
 
 
-async def get_cached_stats() -> dict[str, int]:
+async def get_cached_stats() -> dict[str, int | float]:
     """Return dashboard stats from a short TTL cache to avoid repeated scans."""
     now_ts = time()
     cached = _stats_cache.get("data")
@@ -197,15 +199,22 @@ def health() -> dict[str, str]:
 
 @router.get("/api/stats")
 @limiter.limit("30/minute")
-async def api_stats(request: Request, _: str = Depends(require_user_json)) -> dict[str, int]:
-    """Return fresh dashboard stats for live UI updates."""
+async def api_stats(request: Request, _: str = Depends(require_user_json)) -> dict[str, int | float]:
+    """Return fresh dashboard stats for live UI updates.
+
+    Annotated int | float, not int: get_stats() rounds total_minutes and
+    total_lalal_minutes to one decimal. FastAPI enforces this annotation as the
+    response model, and pydantic only accepts a float as an int when it carries
+    no fractional part - so "dict[str, int]" happened to pass while the totals
+    landed on whole minutes, and returned 500 the moment one did not.
+    """
     _ = request
     return await asyncio.to_thread(get_stats)
 
 
 @router.post("/api/stats/reset")
 @limiter.limit("5/minute")
-async def api_reset_stats(request: Request, _user: str = Depends(require_session)):
+async def api_reset_stats(request: Request, _user: str = Depends(require_session)) -> dict[str, Any]:
     """Reset dashboard statistics without deleting jobs or their files."""
     _ = request
 
@@ -222,7 +231,7 @@ async def api_reset_stats(request: Request, _user: str = Depends(require_session
 
 
 @router.get("/", response_class=HTMLResponse)
-async def index(request: Request):
+async def index(request: Request) -> Response:
     """Dashboard home page."""
     redirect = require_html_auth(request)
     if redirect:
@@ -246,7 +255,7 @@ async def index(request: Request):
 
 
 @router.get("/settings", response_class=HTMLResponse)
-async def settings_page(request: Request):
+async def settings_page(request: Request) -> Response:
     """Settings page."""
     redirect = require_html_auth(request)
     if redirect:
@@ -281,7 +290,7 @@ async def settings_page(request: Request):
 
 @router.get("/api/updates")
 @limiter.limit("30/minute")
-async def api_updates(request: Request, _user: str = Depends(require_user)):
+async def api_updates(request: Request, _user: str = Depends(require_user)) -> dict[str, Any]:
     """Report whether newer upstream releases exist for fetchly and its tools.
 
     Purely informational: nothing here updates anything, since fetchly and
@@ -304,7 +313,12 @@ async def api_updates(request: Request, _user: str = Depends(require_user)):
 
 @router.get("/api/jobs")
 @limiter.limit("60/minute")
-async def api_jobs(request: Request, _user: str = Depends(require_user), offset: int = 0, limit: int = 50):
+async def api_jobs(
+    request: Request,
+    _user: str = Depends(require_user),
+    offset: int = 0,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
     """List jobs with pagination."""
     _ = request
 
@@ -317,7 +331,7 @@ async def api_jobs(request: Request, _user: str = Depends(require_user), offset:
 
 @router.get("/api/jobs/{job_id}")
 @limiter.limit("60/minute")
-async def api_job(request: Request, job_id: uuid.UUID, _user: str = Depends(require_user)):
+async def api_job(request: Request, job_id: uuid.UUID, _user: str = Depends(require_user)) -> dict[str, Any]:
     """Return a single job snapshot by id."""
     _ = request
 
@@ -330,7 +344,11 @@ async def api_job(request: Request, job_id: uuid.UUID, _user: str = Depends(requ
 
 @router.get("/api/stats/bpm-clusters")
 @limiter.limit("30/minute")
-async def api_bpm_clusters(request: Request, _user: str = Depends(require_user), limit: int = 1000):
+async def api_bpm_clusters(
+    request: Request,
+    _user: str = Depends(require_user),
+    limit: int = 1000,
+) -> list[dict[str, int]]:
     """Get BPM clusters for visualization."""
     _ = request
     safe_limit = min(max(1, limit), 2000)
@@ -344,8 +362,6 @@ async def api_bpm_clusters(request: Request, _user: str = Depends(require_user),
 
 async def _tiktok_oembed_thumbnail(url: str) -> str | None:
     """Fetch thumbnail from TikTok oEmbed API (no cookies/yt-dlp needed)."""
-    from urllib.parse import quote
-
     oembed_url = f"https://www.tiktok.com/oembed?url={quote(url, safe='')}"
     try:
         async with httpx.AsyncClient(timeout=6.0, follow_redirects=True, max_redirects=3) as client:
@@ -362,7 +378,7 @@ async def _tiktok_oembed_thumbnail(url: str) -> str | None:
 
 @router.get("/api/info")
 @limiter.limit("20/minute")
-async def api_info(request: Request, url: str, _user: str = Depends(require_user)):
+async def api_info(request: Request, url: str, _user: str = Depends(require_user)) -> dict[str, Any]:
     """Extract video metadata using yt-dlp."""
     _ = request
     is_valid, error_msg = validate_media_url(url)
@@ -492,12 +508,19 @@ def _thumbnail_signature_matches(data: bytes, content_type: str) -> bool:
 
 
 def _is_allowed_thumbnail_url(url: str) -> bool:
+    """Allowlist check for outbound thumbnail fetches.
+
+    Parsed with httpx.URL - the same parser httpx uses to build the actual
+    request - so the host that is validated here is exactly the host that gets
+    contacted. urlparse and httpx disagree on enough edge cases (backslashes,
+    percent-encoded and IDN hosts) that using the other parser would leave a
+    gap between the check and the request.
+    """
     try:
-        from urllib.parse import urlparse
-        parsed = urlparse(url)
+        parsed = httpx.URL(url)
         if parsed.scheme != "https":
             return False
-        host = (parsed.hostname or "").lower()
+        host = (parsed.host or "").lower()
         return any(host == s.lstrip(".") or host.endswith(s) for s in _THUMBNAIL_ALLOWED_SUFFIXES)
     except Exception:
         return False
@@ -563,14 +586,26 @@ def _read_cached_thumbnail(cache_key: str) -> tuple[bytes, str] | None:
 
 
 def _write_cached_thumbnail(cache_key: str, data: bytes, content_type: str) -> None:
+    """Publish a thumbnail into the cache via unique temp files + atomic rename.
+
+    The temp names carry a random token because the cache key is shared by
+    definition: two concurrent resolves of the same URL land on the same key,
+    and a key-derived temp name would have them writing the same file while the
+    other one is mid-write, publishing a half-written image.
+    """
     _THUMB_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     data_path, content_type_path = _thumb_cache_paths(cache_key)
-    tmp_data = data_path.with_suffix(data_path.suffix + ".tmp")
-    tmp_content_type = content_type_path.with_suffix(content_type_path.suffix + ".tmp")
-    tmp_data.write_bytes(data)
-    tmp_content_type.write_text(content_type, encoding="utf-8")
-    tmp_data.replace(data_path)
-    tmp_content_type.replace(content_type_path)
+    token = uuid.uuid4().hex
+    tmp_data = data_path.parent / f"{data_path.name}.{token}.tmp"
+    tmp_content_type = content_type_path.parent / f"{content_type_path.name}.{token}.tmp"
+    try:
+        tmp_data.write_bytes(data)
+        tmp_content_type.write_text(content_type, encoding="utf-8")
+        tmp_data.replace(data_path)
+        tmp_content_type.replace(content_type_path)
+    finally:
+        tmp_data.unlink(missing_ok=True)
+        tmp_content_type.unlink(missing_ok=True)
 
 
 async def _fetch_thumbnail_payload(url: str) -> tuple[bytes, str]:
@@ -707,9 +742,14 @@ async def api_thumbnail_resolve(
         thumbnail_url = await _tiktok_oembed_thumbnail(info_url) or ""
 
     if not thumbnail_url:
-        info = await asyncio.wait_for(load_video_info_async(info_url), timeout=20.0)
-        if info:
-            thumbnail_url = str(info.get("thumbnail") or "").strip()
+        # Best-effort only: a timeout or extractor error here must fall through
+        # to the yt-dlp thumbnail extraction below, not surface as a 500.
+        try:
+            info = await asyncio.wait_for(load_video_info_async(info_url), timeout=20.0)
+            if info:
+                thumbnail_url = str(info.get("thumbnail") or "").strip()
+        except Exception as exc:
+            logger.debug("Metadata lookup failed while resolving thumbnail for %s: %s", info_url, exc)
 
     data: bytes | None = None
     content_type = "image/jpeg"
@@ -790,7 +830,7 @@ async def api_thumbnail_proxy(
 
 @router.get("/api/settings")
 @limiter.limit("60/minute")
-async def api_get_settings(request: Request, _user: str = Depends(require_user)):
+async def api_get_settings(request: Request, _user: str = Depends(require_user)) -> dict[str, Any]:
     """Get all settings."""
     _ = request
     settings = await asyncio.to_thread(get_settings, include_secrets=True)
@@ -810,9 +850,15 @@ def _parse_bool(value: Any, name: str) -> bool:
     raise HTTPException(status_code=400, detail=f"{name} must be a boolean")
 
 
-@router.post("/api/settings")
+# response_model=None: the annotated union includes a JSONResponse (password
+# changes clear the session cookie on the way out), which FastAPI cannot turn
+# into a schema. The annotation is there for the type checker, not for OpenAPI.
+@router.post("/api/settings", response_model=None)
 @limiter.limit("5/minute")
-async def api_set_settings(request: Request, _user: str = Depends(require_session)):
+async def api_set_settings(
+    request: Request,
+    _user: str = Depends(require_session),
+) -> dict[str, Any] | JSONResponse:
     """Update retention/download/session settings and optional admin password."""
     payload = await get_json_body(request)
 
@@ -884,7 +930,9 @@ async def api_set_settings(request: Request, _user: str = Depends(require_sessio
         raise HTTPException(status_code=500, detail="Internal server error")
 
 
-@router.post("/api/submit")
+# response_model=None: see api_set_settings - the 409 duplicate-job branch
+# returns a JSONResponse, so the union cannot be schema-generated.
+@router.post("/api/submit", response_model=None)
 @limiter.limit("10/minute")
 async def api_submit(
     request: Request,
@@ -893,7 +941,7 @@ async def api_submit(
     quality: str = Form(...),
     confirm_duplicate: bool = Form(False),
     _user: str = Depends(require_user),
-):
+) -> dict[str, Any] | JSONResponse:
     """Submit a new download job."""
     _ = request
     media_type = str(media_type).strip().lower()
@@ -963,12 +1011,21 @@ async def api_submit(
             logger.exception("Failed to mark job %s as errored after queue overflow", job_id)
         raise HTTPException(status_code=503, detail="Job queue is full, please try again later") from exc
     job = await asyncio.to_thread(get_job, job_id)
+    if not job:
+        # Row vanished between insert and read (concurrent retention sweep or
+        # manual delete). The job is queued either way, but there is nothing to
+        # hand back, so say so instead of failing inside job_to_dict().
+        raise HTTPException(status_code=500, detail="Submitted job could not be loaded")
     return job_to_dict(job)
 
 
 @router.post("/api/jobs/{job_id}/cancel")
 @limiter.limit("30/minute")
-async def cancel_job(request: Request, job_id: uuid.UUID, _user: str = Depends(require_user_json)):
+async def cancel_job(
+    request: Request,
+    job_id: uuid.UUID,
+    _user: str = Depends(require_user_json),
+) -> dict[str, Any]:
     """Cancel a running or queued job."""
     _ = request
 
@@ -976,7 +1033,7 @@ async def cancel_job(request: Request, job_id: uuid.UUID, _user: str = Depends(r
     job = await asyncio.to_thread(get_job, job_id_str)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
-    
+
     status = job["status"] or ""
     if status in TERMINAL_JOB_STATUSES:
         raise HTTPException(status_code=400, detail=f"Cannot cancel job with status: {status}")
@@ -997,4 +1054,81 @@ async def cancel_job(request: Request, job_id: uuid.UUID, _user: str = Depends(r
     logger.info("Cancellation requested for job %s (status: %s)", job_id_str, status)
 
     job = await asyncio.to_thread(get_job, job_id_str)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return job_to_dict(job)
+
+
+@router.post("/api/jobs/{job_id}/retry")
+@limiter.limit("10/minute")
+async def retry_job(
+    request: Request,
+    job_id: uuid.UUID,
+    _user: str = Depends(require_user_json),
+) -> dict[str, Any]:
+    """Re-queue a failed or cancelled job in place, keeping its row and id.
+
+    Only allowed from "error" and "cancelled": retrying a job that is still
+    in flight (or already succeeded) would race the worker or duplicate a
+    completed download. Resetting the existing row - rather than inserting a
+    new one - is what makes this a refresh of the same list entry instead of
+    a second job appearing above it; every result field the previous attempt
+    left behind (message, filesize, codec, ...) is cleared so the row does
+    not show stale data from the failed run while the retry is in flight.
+    """
+    _ = request
+
+    job_id_str = str(job_id)
+    job = await asyncio.to_thread(get_job, job_id_str)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    status = job["status"] or ""
+    if status not in _RETRYABLE_JOB_STATUSES:
+        raise HTTPException(status_code=400, detail=f"Cannot retry job with status: {status}")
+
+    job_queue = get_job_queue()
+    if job_queue.full():
+        raise HTTPException(status_code=503, detail="Job queue is full, please try again later")
+
+    requeued = await asyncio.to_thread(
+        update_job_if_status,
+        job_id_str,
+        (status,),
+        status="queued",
+        message="",
+        filename=None,
+        finished_at=None,
+        filesize_bytes=None,
+        duration_seconds=None,
+        codec=None,
+        bitrate_kbps=None,
+        bpm=None,
+        bpm_confidence=None,
+        audio_hash=None,
+        lalal_split_done=0,
+    )
+    if not requeued:
+        raise HTTPException(status_code=409, detail="Job state changed before retry")
+
+    try:
+        job_queue.put_nowait((job_id_str, job["url"], job["type"], job["quality"]))
+    except Full as exc:
+        try:
+            await asyncio.to_thread(
+                update_job,
+                job_id_str,
+                status="error",
+                message="Queue full at retry time",
+                finished_at=utc_timestamp(),
+            )
+        except Exception:
+            logger.exception("Failed to mark job %s as errored after retry queue overflow", job_id_str)
+        raise HTTPException(status_code=503, detail="Job queue is full, please try again later") from exc
+
+    logger.info("Retry requested for job %s (was: %s)", job_id_str, status)
+
+    job = await asyncio.to_thread(get_job, job_id_str)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
     return job_to_dict(job)

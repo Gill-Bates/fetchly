@@ -128,6 +128,18 @@ _TIMEOUT_TRANSCODE: Final = _env_int("WORKER_TIMEOUT_TC", 7200)
 # while allowing deployments with larger managed volumes to raise the limit.
 _MAX_DOWNLOAD_FILESIZE: Final = os.environ.get("WORKER_MAX_FILESIZE", "4G").strip() or "4G"
 _COMMAND_POLL_INTERVAL: Final = 1.0
+# yt-dlp writes no machine-readable progress by default, so downloads used to
+# report nothing at all - the status pill sat on a placeholder for the whole
+# transfer. --newline plus this template makes it print one parseable line per
+# update on stdout; "NA" stands in for any value the extractor does not know.
+_YTDLP_PROGRESS_MARKER: Final = "FETCHLY_DL"
+_YTDLP_PROGRESS_FIELDS: Final = 6
+_YTDLP_PROGRESS_TEMPLATE: Final = (
+    f"download:{_YTDLP_PROGRESS_MARKER} "
+    "%(progress.downloaded_bytes)s %(progress.total_bytes)s "
+    "%(progress.total_bytes_estimate)s %(progress.eta)s "
+    "%(progress.fragment_index)s %(progress.fragment_count)s"
+)
 # Bounds for the user-configurable --concurrent-fragments value. The API
 # clamps to the same range; this guard also covers values written directly
 # into the settings table.
@@ -412,15 +424,7 @@ def _run_cmd(
 
                 if proc.returncode != 0:
                     executable = cmd[0] if cmd else "command"
-                    stderr_tail = ""
-                    if stderr_tmp is not None:
-                        try:
-                            stderr_tmp.seek(0)
-                            stderr_text = stderr_tmp.read()
-                            stderr_tail = stderr_text[-800:].strip()
-                        except Exception:
-                            stderr_tail = ""
-
+                    stderr_tail = _stderr_tail(stderr_tmp)
                     if stderr_tail:
                         logger.warning("%s failed with exit code %s. stderr tail: %s", executable, proc.returncode, stderr_tail)
                         raise RuntimeError(f"{executable} failed with exit code {proc.returncode}: {stderr_tail}")
@@ -451,6 +455,18 @@ def _run_cmd(
     return stdout_value if capture_stdout else ""
 
 
+def _parse_ytdlp_number(raw: str) -> float | None:
+    """Parse one field of a yt-dlp progress line ("NA" means unknown)."""
+    value = raw.strip()
+    if not value or value == "NA":
+        return None
+    try:
+        parsed = float(value)
+    except ValueError:
+        return None
+    return parsed if parsed >= 0 else None
+
+
 def _parse_ffmpeg_timecode(value: str) -> float | None:
     try:
         hours, minutes, seconds = value.split(":", 2)
@@ -476,6 +492,17 @@ def _ffmpeg_out_seconds(progress_state: dict[str, str]) -> float | None:
             continue
 
     return None
+
+
+def _stderr_tail(stderr_tmp: Any, *, limit: int = 800) -> str:
+    """Return the tail of a subprocess' captured stderr for error messages."""
+    if stderr_tmp is None:
+        return ""
+    try:
+        stderr_tmp.seek(0)
+        return stderr_tmp.read()[-limit:].strip()
+    except Exception:
+        return ""
 
 
 def _read_progress_lines(pipe: Any, target_queue: queue.Queue[str | None]) -> None:
@@ -518,30 +545,147 @@ def _emit_ffmpeg_progress(
     return pct
 
 
-def _run_ffmpeg_transcode(
+class _DownloadProgress:
+    """Turn yt-dlp's per-file counters into one job-wide percentage.
+
+    yt-dlp reports progress per downloaded file, and a video job usually pulls
+    two (separate video and audio streams, merged afterwards), each counting
+    from zero. The percentage is therefore derived from aggregate bytes: when a
+    file's counter restarts, the finished file's size is folded into a base
+    offset, so the number keeps climbing instead of resetting halfway through.
+
+    Sources that report no size at all (some fragmented HLS/DASH streams) fall
+    back to the fragment count, and emit nothing when even that is missing -
+    the status pill then shows a plain "DOWNLOADING" rather than a fake 0%.
+    """
+
+    __slots__ = ("_base_bytes", "_current_bytes", "_last_pct", "_message", "_job_id")
+
+    def __init__(self, job_id: str, message: str) -> None:
+        self._job_id = job_id
+        self._message = message
+        self._base_bytes = 0.0
+        self._current_bytes = 0.0
+        self._last_pct = -1
+
+    def feed(self, line: str) -> None:
+        if not line.startswith(_YTDLP_PROGRESS_MARKER):
+            return
+
+        fields = line[len(_YTDLP_PROGRESS_MARKER):].split()
+        if len(fields) != _YTDLP_PROGRESS_FIELDS:
+            return
+
+        downloaded = _parse_ytdlp_number(fields[0])
+        if downloaded is None:
+            return
+
+        total = _parse_ytdlp_number(fields[1]) or _parse_ytdlp_number(fields[2])
+        eta = _parse_ytdlp_number(fields[3])
+        fragment_index = _parse_ytdlp_number(fields[4])
+        fragment_count = _parse_ytdlp_number(fields[5])
+
+        if downloaded < self._current_bytes:
+            # The counter restarted: the previous stream finished, so keep its
+            # transferred bytes as the floor for everything that follows.
+            self._base_bytes += self._current_bytes
+        self._current_bytes = downloaded
+
+        fraction = self._fraction(downloaded, total, fragment_index, fragment_count)
+        if fraction is None:
+            return
+
+        # Capped below 100 while the process runs: a job that reads "100%" but
+        # keeps working (merging, or a second stream still to come) is worse
+        # than one that sits at 99% for a moment. finish() closes the gap.
+        pct = min(99, max(0, int(fraction * 100)))
+        if pct <= self._last_pct:
+            return
+        self._last_pct = pct
+
+        _emit(
+            self._job_id,
+            "downloading",
+            self._message,
+            progress=pct,
+            eta_seconds=int(eta) if eta is not None else None,
+        )
+
+    def _fraction(
+        self,
+        downloaded: float,
+        total: float | None,
+        fragment_index: float | None,
+        fragment_count: float | None,
+    ) -> float | None:
+        if total is not None and total > 0:
+            overall_total = self._base_bytes + total
+            if overall_total > 0:
+                return min(1.0, (self._base_bytes + downloaded) / overall_total)
+        if fragment_count is not None and fragment_count > 0 and fragment_index is not None:
+            return min(1.0, fragment_index / fragment_count)
+        return None
+
+    def finish(self) -> None:
+        """Emit the closing 100% - only if a percentage was ever shown."""
+        if self._last_pct < 0:
+            return
+        _emit(self._job_id, "downloading", self._message, progress=100, eta_seconds=0)
+
+
+def _run_ytdlp_download(cmd: list[str], *, job_id: str, message: str) -> None:
+    """Run a yt-dlp download command and stream its progress to the client."""
+    tracker = _DownloadProgress(job_id, message)
+    _run_cmd_streaming(cmd, timeout=_TIMEOUT_DOWNLOAD, job_id=job_id, on_line=tracker.feed)
+    tracker.finish()
+
+
+def _handle_progress_line(job_id: str, line: str, on_line: Callable[[str], None]) -> None:
+    """Feed one output line to a progress handler, absorbing handler failures.
+
+    Progress reporting is cosmetic: a handler bug must never abort a download or
+    transcode that is otherwise fine.
+    """
+    try:
+        on_line(line)
+    except Exception:
+        logger.debug("Progress handler failed for job %s", job_id, exc_info=True)
+
+
+def _run_cmd_streaming(
     cmd: list[str],
     *,
     timeout: int,
     job_id: str,
-    message: str,
-    duration_seconds: float | None,
+    on_line: Callable[[str], None],
 ) -> None:
-    logger.debug("Executing ffmpeg with progress: %s", " ".join(cmd))
+    """Run *cmd*, feeding every stdout line to *on_line* while it still runs.
+
+    Shared by the ffmpeg transcode and the yt-dlp download so both report live
+    progress under identical cancellation, shutdown and timeout handling. A
+    reader thread drains stdout because a full pipe would otherwise block the
+    child forever; stderr is captured to a temp file so its tail can be
+    surfaced in the error message without a second pipe to deadlock on.
+
+    Progress reporting is cosmetic, so a raising *on_line* is logged and
+    swallowed rather than allowed to abort the command mid-flight.
+    """
+    logger.debug("Executing command with progress: %s", " ".join(cmd))
     _check_cancellation(job_id)
     _check_shutdown()
 
     started = time.monotonic()
     proc: subprocess.Popen[str] | None = None
+    stderr_tmp: tempfile._TemporaryFileWrapper[str] | None = None
     progress_lines: queue.Queue[str | None] = queue.Queue(maxsize=500)
     reader_thread: threading.Thread | None = None
-    progress_state: dict[str, str] = {}
-    last_progress = -1
 
     try:
+        stderr_tmp = tempfile.NamedTemporaryFile(mode="w+", encoding="utf-8", errors="replace", delete=True)
         with subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
+            stderr=stderr_tmp,
             start_new_session=True,
             text=True,
             encoding="utf-8",
@@ -579,44 +723,38 @@ def _run_ffmpeg_transcode(
 
                     if line is None:
                         continue
-                    if "=" not in line:
-                        continue
 
-                    key, value = line.split("=", 1)
-                    progress_state[key] = value
-                    if key != "progress":
-                        continue
+                    _handle_progress_line(job_id, line, on_line)
 
-                    out_seconds = _ffmpeg_out_seconds(progress_state)
-                    if out_seconds is not None:
-                        last_progress = _emit_ffmpeg_progress(
-                            job_id,
-                            message=message,
-                            out_seconds=out_seconds,
-                            duration_seconds=duration_seconds,
-                            started_at=started,
-                            last_progress=last_progress,
-                        )
-
-                    if value == "end":
-                        last_progress = _emit_ffmpeg_progress(
-                            job_id,
-                            message=message,
-                            out_seconds=float(duration_seconds or 0),
-                            duration_seconds=duration_seconds,
-                            started_at=started,
-                            last_progress=last_progress,
-                        )
-                    progress_state.clear()
+                # The child can exit with lines still queued: a command that
+                # finishes inside one poll interval would otherwise have its
+                # last - and possibly only - progress update dropped. Let the
+                # reader finish off the closed pipe first, then drain; the queue
+                # is bounded, so this cannot run away.
+                if reader_thread is not None:
+                    reader_thread.join(timeout=_COMMAND_POLL_INTERVAL)
+                while True:
+                    try:
+                        pending = progress_lines.get_nowait()
+                    except queue.Empty:
+                        break
+                    if pending is None:
+                        break
+                    _handle_progress_line(job_id, pending, on_line)
 
                 _check_cancellation(job_id)
                 _check_shutdown()
 
                 if proc.returncode != 0:
-                    raise RuntimeError(f"Command failed: {proc.returncode}")
-
-                if duration_seconds and last_progress < 100:
-                    _emit(job_id, "transcoding", message, progress=100, eta_seconds=0)
+                    executable = cmd[0] if cmd else "command"
+                    stderr_tail = _stderr_tail(stderr_tmp)
+                    if stderr_tail:
+                        logger.warning(
+                            "%s failed with exit code %s. stderr tail: %s",
+                            executable, proc.returncode, stderr_tail,
+                        )
+                        raise RuntimeError(f"{executable} failed with exit code {proc.returncode}: {stderr_tail}")
+                    raise RuntimeError(f"{executable} failed with exit code {proc.returncode}")
             except Exception:
                 if proc.poll() is None:
                     _terminate_process(proc)
@@ -633,8 +771,63 @@ def _run_ffmpeg_transcode(
             _terminate_process(proc)
         if reader_thread is not None:
             reader_thread.join(timeout=0.2)
+        if stderr_tmp is not None:
+            try:
+                stderr_tmp.close()
+            except Exception:
+                logger.debug("Could not close temporary stderr file", exc_info=True)
         if proc is not None:
             _unregister_active_process(job_id, proc)
+
+
+def _run_ffmpeg_transcode(
+    cmd: list[str],
+    *,
+    timeout: int,
+    job_id: str,
+    message: str,
+    duration_seconds: float | None,
+) -> None:
+    started = time.monotonic()
+    progress_state: dict[str, str] = {}
+    last_progress = -1
+
+    def handle_line(line: str) -> None:
+        nonlocal last_progress
+        if "=" not in line:
+            return
+
+        key, value = line.split("=", 1)
+        progress_state[key] = value
+        if key != "progress":
+            return
+
+        out_seconds = _ffmpeg_out_seconds(progress_state)
+        if out_seconds is not None:
+            last_progress = _emit_ffmpeg_progress(
+                job_id,
+                message=message,
+                out_seconds=out_seconds,
+                duration_seconds=duration_seconds,
+                started_at=started,
+                last_progress=last_progress,
+            )
+
+        if value == "end":
+            last_progress = _emit_ffmpeg_progress(
+                job_id,
+                message=message,
+                out_seconds=float(duration_seconds or 0),
+                duration_seconds=duration_seconds,
+                started_at=started,
+                last_progress=last_progress,
+            )
+        progress_state.clear()
+
+    _run_cmd_streaming(cmd, timeout=timeout, job_id=job_id, on_line=handle_line)
+
+    if duration_seconds and last_progress < 100:
+        _emit(job_id, "transcoding", message, progress=100, eta_seconds=0)
 
 
 _WIN_RESERVED_NAMES = frozenset({
@@ -725,6 +918,11 @@ def _build_ytdlp_cmd(
     cmd = [
         "yt-dlp",
         "--no-playlist",
+        # Progress on discrete lines instead of one carriage-return-rewritten
+        # line, so it survives being read from a pipe (see _DownloadProgress).
+        "--newline",
+        "--progress-template",
+        _YTDLP_PROGRESS_TEMPLATE,
         "--max-filesize",
         _MAX_DOWNLOAD_FILESIZE,
         # Parallel fragment downloads for DASH/HLS sources; ignored for
@@ -807,7 +1005,8 @@ def _download_media(job_id: str, url: str, *, quality: str, media_type: str) -> 
     stem = _build_output_stem(job_id, clean_url, quality, media_type)
     if media_type == "audio":
         # Download lossless audio (no transcode) - we'll convert to MP3 on download
-        _transition_worker_status(job_id, "downloading", "Downloading audio (lossless)")
+        audio_message = "Downloading audio (lossless)"
+        _transition_worker_status(job_id, "downloading", audio_message)
         cmd = _build_ytdlp_cmd(
             clean_url,
             str(job_dir / f"{stem}.source.%(ext)s"),
@@ -816,7 +1015,7 @@ def _download_media(job_id: str, url: str, *, quality: str, media_type: str) -> 
             lossless_audio=True,
         )
         _check_cancellation(job_id)
-        _run_cmd(cmd, timeout=_TIMEOUT_DOWNLOAD, job_id=job_id)
+        _run_ytdlp_download(cmd, job_id=job_id, message=audio_message)
         _check_cancellation(job_id)
         _rename_thumbnail(job_dir)
         
@@ -828,6 +1027,8 @@ def _download_media(job_id: str, url: str, *, quality: str, media_type: str) -> 
         return source_file
 
     if quality == "max":
+        max_message = "Downloading best video+audio"
+        _transition_worker_status(job_id, "downloading", max_message)
         cmd = _build_ytdlp_cmd(
             clean_url,
             str(job_dir / f"{stem}.%(ext)s"),
@@ -835,7 +1036,7 @@ def _download_media(job_id: str, url: str, *, quality: str, media_type: str) -> 
             quality=quality,
         )
         _check_cancellation(job_id)
-        _run_cmd(cmd, timeout=_TIMEOUT_DOWNLOAD, job_id=job_id)
+        _run_ytdlp_download(cmd, job_id=job_id, message=max_message)
         _check_cancellation(job_id)
         _rename_thumbnail(job_dir)
 
@@ -851,16 +1052,17 @@ def _download_media(job_id: str, url: str, *, quality: str, media_type: str) -> 
     out = job_dir / f"{stem}.mp4"
 
     _check_cancellation(job_id)
-    _transition_worker_status(job_id, "downloading", "Downloading source for transcoding")
-    _run_cmd(
+    source_message = "Downloading source for transcoding"
+    _transition_worker_status(job_id, "downloading", source_message)
+    _run_ytdlp_download(
         _build_ytdlp_cmd(
             clean_url,
             str(job_dir / f"{stem}.source.%(ext)s"),
             media_type=media_type,
             quality=quality,
         ),
-        timeout=_TIMEOUT_DOWNLOAD,
         job_id=job_id,
+        message=source_message,
     )
     _rename_thumbnail(job_dir)
 
@@ -1010,11 +1212,8 @@ def process_job(job: Job) -> None:
     try:
         _check_cancellation(job_id)
         _check_shutdown()
-        if type_ == "audio":
-            _transition_worker_status(job_id, "downloading", "Downloading audio stream")
-        elif quality == "max":
-            _transition_worker_status(job_id, "downloading", "Downloading best video+audio")
-
+        # _download_media() owns the "downloading" transition for every path
+        # now, so the message matches the phase its progress events report.
         out_path = _download_media(job_id, url, quality=quality, media_type=type_)
 
         filesize_bytes = _get_filesize(out_path)

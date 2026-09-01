@@ -3,9 +3,9 @@
 // Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 //
 
-import { DOWNLOADABLE_STATUSES, TERMINAL_STATUSES } from "/static/js/config.js?v=20260823b";
-import { getStatusPillClass, getStatusText } from "/static/js/ui.js?v=20260823c";
-import { fetchJob } from "/static/js/api.js";
+import { DOWNLOADABLE_STATUSES, TERMINAL_STATUSES } from "./config.js?v=20260831b";
+import { getStatusPillClass, getStatusText, toProgressPercent } from "./ui.js?v=20260831c";
+import { fetchJob } from "./api.js";
 
 const script = document.getElementById("jobStatusScript");
 const jobId = script?.dataset.jobId;
@@ -36,10 +36,10 @@ function updateStatus(payload) {
 }
 
 function updateProgress(payload) {
-    if (payload.progress != null) {
+    const pct = toProgressPercent(payload.progress);
+    if (pct !== null) {
         progressRow.classList.remove("d-none");
         progressLabel.classList.remove("d-none");
-        const pct = Math.max(0, Math.min(100, Number(payload.progress) || 0));
         progressBar.style.width = `${pct}%`;
         progressBar.setAttribute("aria-valuenow", String(pct));
     }
@@ -53,7 +53,7 @@ function updateProgress(payload) {
 }
 
 function applyPayload(payload) {
-    if (!payload || String(payload.id) !== String(jobId)) {
+    if (!payload || String(payload.id) !== jobId) {
         return;
     }
 
@@ -100,7 +100,7 @@ function handleMessage(event) {
     }
 
     if (payload.type === "resync_required") {
-        if (payload.job_id && payload.job_id !== jobId) {
+        if (payload.job_id && String(payload.job_id) !== jobId) {
             return;
         }
         void reconcileJob().catch(() => {
@@ -109,7 +109,7 @@ function handleMessage(event) {
         return;
     }
 
-    if (payload.id !== jobId) {
+    if (String(payload.id) !== jobId) {
         return;
     }
 

@@ -42,11 +42,11 @@ function isAbortSignalLike(signal) {
 export function createTimeoutSignal(timeoutMs) {
     const durationMs = Number(timeoutMs);
     if (!(durationMs > 0)) {
-        return { signal: undefined, cleanup() {} };
+        return { signal: undefined, cleanup() { } };
     }
 
     if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
-        return { signal: AbortSignal.timeout(durationMs), cleanup() {} };
+        return { signal: AbortSignal.timeout(durationMs), cleanup() { } };
     }
 
     const controller = new AbortController();
@@ -63,14 +63,14 @@ export function createTimeoutSignal(timeoutMs) {
 export function combineAbortSignals(signals) {
     const validSignals = (signals || []).filter(isAbortSignalLike);
     if (validSignals.length === 0) {
-        return { signal: undefined, cleanup() {} };
+        return { signal: undefined, cleanup() { } };
     }
     if (validSignals.length === 1) {
-        return { signal: validSignals[0], cleanup() {} };
+        return { signal: validSignals[0], cleanup() { } };
     }
 
     if (typeof AbortSignal !== "undefined" && typeof AbortSignal.any === "function") {
-        return { signal: AbortSignal.any(validSignals), cleanup() {} };
+        return { signal: AbortSignal.any(validSignals), cleanup() { } };
     }
 
     const controller = new AbortController();
@@ -189,6 +189,10 @@ export function humanSize(bytes) {
                 : `${(value / divisor).toFixed(precision)} ${unit}`;
         }
     }
+
+    // Unreachable while SIZE_UNITS ends in a divisor of 1, but callers compare
+    // against EMPTY_VALUE - never hand them undefined.
+    return EMPTY_VALUE;
 }
 
 /**
@@ -546,7 +550,35 @@ export function subscribeToLalalProgress(jobId, stem, onProgress, signal) {
     );
 }
 
+/**
+ * Return whether the current browser is iOS/iPadOS Safari.
+ * iPadOS reports as "MacIntel" with touch points, so the platform check is
+ * required in addition to the userAgent check.
+ * @returns {boolean}
+ * @private
+ */
+function isIosBrowser() {
+    const nav = globalThis.navigator;
+    if (!nav) return false;
+    if (/iPad|iPhone|iPod/.test(nav.userAgent || "")) return true;
+    return nav.platform === "MacIntel" && Number(nav.maxTouchPoints) > 1;
+}
+
+/**
+ * Start a download for a same-origin URL.
+ *
+ * Callers typically invoke this after an `await`, at which point iOS Safari has
+ * already dropped the user-gesture context and blocks synthetic anchor clicks.
+ * Direct navigation still works there because the download endpoints respond
+ * with `Content-Disposition: attachment`.
+ * @param {string} url
+ */
 export function triggerDownload(url) {
+    if (isIosBrowser()) {
+        window.location.assign(url);
+        return;
+    }
+
     const anchor = document.createElement("a");
     anchor.href = url;
     anchor.download = "";

@@ -80,9 +80,23 @@ function initLogin() {
     }
 
     let isSubmitting = false;
+    const DEFAULT_SUBMIT_LABEL = submitBtnLabel?.textContent ?? "Sign in";
 
     function clearSensitiveInput() {
         passwordIn.value = "";
+    }
+
+    /** Return the form to its idle, interactive state. */
+    function resetSubmitState() {
+        isSubmitting = false;
+        submitBtn.disabled = false;
+        usernameIn.disabled = false;
+        passwordIn.disabled = false;
+        submitBtn.removeAttribute("aria-busy");
+        submitSpinner?.classList.add("d-none");
+        if (submitBtnLabel) {
+            submitBtnLabel.textContent = DEFAULT_SUBMIT_LABEL;
+        }
     }
 
     window.addEventListener("pagehide", clearSensitiveInput);
@@ -113,7 +127,6 @@ function initLogin() {
         submitBtn.disabled = true;
         usernameIn.disabled = true;
         passwordIn.disabled = true;
-        const originalLabel = submitBtnLabel?.textContent ?? "Sign in";
         submitBtn.setAttribute("aria-busy", "true");
         submitSpinner?.classList.remove("d-none");
         if (submitBtnLabel) {
@@ -214,15 +227,7 @@ function initLogin() {
 
             if (!success) {
                 if (passwordIn) passwordIn.value = "";
-                isSubmitting = false;
-                submitBtn.disabled = false;
-                usernameIn.disabled = false;
-                passwordIn.disabled = false;
-                submitBtn.removeAttribute("aria-busy");
-                submitSpinner?.classList.add("d-none");
-                if (submitBtnLabel) {
-                    submitBtnLabel.textContent = originalLabel;
-                }
+                resetSubmitState();
                 focusAfterSubmit?.focus();
             }
         }
@@ -293,9 +298,14 @@ function initLogin() {
 
     setupIOSKeyboardStabilization();
     window.addEventListener("pageshow", (event) => {
-        if (event.persisted) {
-            setupIOSKeyboardStabilization();
+        if (!event.persisted) {
+            return;
         }
+        // A successful login deliberately leaves the form locked while the
+        // redirect runs. Coming back through the BFCache restores that locked
+        // state, so the form has to be re-armed here.
+        resetSubmitState();
+        setupIOSKeyboardStabilization();
     });
 }
 

@@ -38,12 +38,12 @@ function getContainer() {
         return container;
     }
 
+    // Plain wrapper on purpose: each toast is its own live region via its role
+    // (alert = assertive for errors, status = polite otherwise). An aria-live
+    // container around them makes screen readers announce the message twice.
     container = document.createElement("div");
     container.id = "toastContainer";
     container.className = "toast-container";
-    container.setAttribute("aria-live", "polite");
-    container.setAttribute("aria-atomic", "false");
-    container.setAttribute("aria-relevant", "additions");
     document.body.appendChild(container);
     return container;
 }
@@ -116,6 +116,7 @@ export function showToast(message, type = "info", duration = TOAST_DURATION) {
     const state = getToastState(toast);
     toast.className = `toast toast--${resolvedType}`;
     toast.setAttribute("role", resolvedType === "danger" ? "alert" : "status");
+    toast.setAttribute("aria-atomic", "true");
 
     const iconName = TOAST_ICONS[resolvedType] || TOAST_ICONS.info;
     toast.appendChild(icon(iconName));

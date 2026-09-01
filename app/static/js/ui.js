@@ -3,28 +3,42 @@
 // Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 //
 
-import { CANCELLABLE_STATUSES, DOWNLOADABLE_STATUSES, LALAL_MAX_DURATION_MINUTES, LALAL_MAX_DURATION_SECONDS } from "./config.js";
+import { CANCELLABLE_STATUSES, DOWNLOADABLE_STATUSES, LALAL_MAX_DURATION_MINUTES, LALAL_MAX_DURATION_SECONDS, RETRYABLE_STATUSES } from "./config.js?v=20260831b";
 import { EMPTY_VALUE, humanSize } from "./utils.js";
 
 export const ACTION_CATEGORY = Object.freeze({
     DOWNLOAD: "download",
     CANCEL: "cancel",
+    RETRY: "retry",
     DETAIL: "detail",
 });
 
+// One label per phase: "Running" told the user nothing about whether the job is
+// still fetching bytes, re-encoding them, or analysing the result. Keep the
+// wording in sync with status_label() in app/utils/template_filters.py so the
+// server-rendered pill does not change text on the first SSE update.
 export const STATUS_META = Object.freeze({
     analysis: { color: "primary", label: "Analyzing" },
     analysis_done: { color: "success", label: "Done" },
     cancelled: { color: "secondary", label: "Cancelled" },
     done: { color: "success", label: "Done" },
-    downloading: { color: "primary", label: "Running" },
+    downloading: { color: "primary", label: "Downloading" },
     error: { color: "danger", label: "Error" },
-    processing: { color: "primary", label: "Running" },
+    processing: { color: "primary", label: "Preparing" },
     queued: { color: "primary", label: "Queued" },
-    transcoding: { color: "primary", label: "Running" },
+    transcoding: { color: "primary", label: "Transcoding" },
 });
 
 const PROGRESS_STATUSES = new Set(["analysis", "downloading", "processing", "transcoding"]);
+
+/**
+ * Canonical form of a job status for comparisons.
+ * @param {string | null | undefined} status
+ * @returns {string}
+ */
+export function normalizeStatus(status) {
+    return String(status || "queued").trim().toLowerCase();
+}
 
 export function getStatusMeta(status) {
     const normalizedStatus = status || "queued";
@@ -37,13 +51,37 @@ export function getStatusMeta(status) {
 export function getStatusText(status, progress = null) {
     const normalizedStatus = status || "queued";
     const meta = getStatusMeta(normalizedStatus);
-    const parsedProgress = Number(progress);
 
-    if (PROGRESS_STATUSES.has(normalizedStatus) && Number.isFinite(parsedProgress) && parsedProgress >= 0) {
-        return `${meta.label} ${Math.round(parsedProgress)}%`;
+    if (!PROGRESS_STATUSES.has(normalizedStatus)) {
+        return meta.label;
     }
 
-    return meta.label;
+    // Number(null) and Number("") are both 0, so an absent measurement used to
+    // render as a hard "0%" that never moved. Only an actual number counts.
+    const parsedProgress = toProgressPercent(progress);
+    return parsedProgress === null ? meta.label : `${meta.label} ${parsedProgress}%`;
+}
+
+/**
+ * Coerce a progress value to a 0-100 integer, or null when there is no
+ * measurement to show (null, undefined, "", NaN, booleans).
+ * @param {unknown} progress
+ * @returns {number | null}
+ */
+export function toProgressPercent(progress) {
+    if (progress === null || progress === undefined || typeof progress === "boolean") {
+        return null;
+    }
+    if (typeof progress === "string" && progress.trim() === "") {
+        return null;
+    }
+
+    const parsed = Number(progress);
+    if (!Number.isFinite(parsed) || parsed < 0) {
+        return null;
+    }
+
+    return Math.min(100, Math.round(parsed));
 }
 
 export function getStatusPillClass(status) {
@@ -309,6 +347,13 @@ function createCancelAction(job, className) {
     });
 }
 
+function createRetryAction(job, className) {
+    return createButton(className, "Retry", "refresh", {
+        title: "Retry",
+        dataset: { action: "retry-job", jobId: getJobId(job) },
+    });
+}
+
 function createDetailAction(job, className) {
     return createButton(className, "Details", "info", {
         title: "Details",
@@ -319,7 +364,7 @@ function createDetailAction(job, className) {
 /**
  * Resolve the action button category for a given job status.
  * @param {string} status
- * @returns {"download" | "cancel" | "detail"}
+ * @returns {"download" | "cancel" | "retry" | "detail"}
  */
 export function getActionButtonCategory(status) {
     const normalizedStatus = status || "";
@@ -328,6 +373,9 @@ export function getActionButtonCategory(status) {
     }
     if (CANCELLABLE_STATUSES.has(normalizedStatus)) {
         return ACTION_CATEGORY.CANCEL;
+    }
+    if (RETRYABLE_STATUSES.has(normalizedStatus)) {
+        return ACTION_CATEGORY.RETRY;
     }
     return ACTION_CATEGORY.DETAIL;
 }
@@ -381,16 +429,12 @@ export function createStatusElement(status, sizeBytes, progress = null, message 
     }
 
     const normalizedMessage = typeof message === "string" ? message.trim() : "";
-    if (normalizedStatus(status) === "error" && normalizedMessage) {
+    if (normalizeStatus(status) === "error" && normalizedMessage) {
         pill.title = normalizedMessage;
         pill.setAttribute("aria-label", `${statusText}: ${normalizedMessage}`);
     }
 
     return wrapper;
-}
-
-function normalizedStatus(status) {
-    return String(status || "queued").trim().toLowerCase();
 }
 
 /**
@@ -430,6 +474,15 @@ function renderDesktopAction(action) {
         return wrapper;
     }
 
+    if (action.category === ACTION_CATEGORY.RETRY) {
+        wrapper.classList.add("action-buttons--retry");
+        wrapper.append(
+            createRetryAction(action.job, "btn btn-outline-secondary btn-sm btn-icon"),
+            createDetailAction(action.job, "btn btn-sm btn-outline-secondary btn-icon"),
+        );
+        return wrapper;
+    }
+
     wrapper.appendChild(createDetailAction(action.job, "btn btn-sm btn-outline-secondary btn-icon"));
     return wrapper;
 }
@@ -452,6 +505,16 @@ function renderPrimaryAction(action) {
 
     if (action.category === ACTION_CATEGORY.CANCEL) {
         return createCancelAction(action.job, "btn jobs-mobile-action");
+    }
+
+    if (action.category === ACTION_CATEGORY.RETRY) {
+        const group = document.createElement("div");
+        group.className = "btn-group jobs-mobile-action-group";
+        group.append(
+            createRetryAction(action.job, "btn jobs-mobile-action jobs-mobile-action--retry"),
+            createDetailAction(action.job, "btn jobs-mobile-action jobs-mobile-action--menu"),
+        );
+        return group;
     }
 
     return createDetailAction(action.job, "btn jobs-mobile-action");

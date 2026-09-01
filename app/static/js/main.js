@@ -3,14 +3,15 @@
 // Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 //
 
-import { AUDIO_TYPE, CONFIG, DOWNLOADABLE_STATUSES, TERMINAL_STATUSES } from "./config.js";
+import { AUDIO_TYPE, CONFIG, DOWNLOADABLE_STATUSES, RETRYABLE_STATUSES, TERMINAL_STATUSES } from "./config.js?v=20260831b";
 import { fetchJobs, fetchResolvedThumbnail, fetchStats, submitJob, fetchVideoInfo, toErrorMessage } from "./api.js";
 import { reportWarning } from "./errors.js";
 import { createTimeoutSignal, getCsrfToken, humanSize, isValidMediaUrl, detectPlatform, platformPillLabel, PLATFORM, extractYouTubeVideoId, formatDuration, isSafeRedirect, subscribeToLalalProgress, triggerDownload } from "./utils.js";
-import { prependJob, loadMore, applyJobUpdate, getJobById, applyStoredJobTitleFilter, formatCreatedText } from "./jobs.js?v=20260831a";
+import { prependJob, loadMore, applyJobUpdate, getJobById, applyStoredJobTitleFilter, formatCreatedText, isMobileJobsView, buildDesktopEmptyState, buildMobileEmptyState } from "./jobs.js?v=20260831a";
 import { EVENT_NAMES, dispatchJobUpdate, setEventStreamEnabled } from "./events.js?v=20260831a";
+import { normalizeStatus } from "./ui.js?v=20260831c";
 import { showToast } from "./toast.js";
-import { initTrim } from "./trim.js?v=20260831a";
+import { initTrim } from "./trim.js?v=20260901c";
 
 const submitForm = document.getElementById("submitForm");
 const urlInput = document.getElementById("urlInput");
@@ -265,10 +266,6 @@ function scheduleDashboardStatsRefresh() {
     }, 250);
 }
 
-function syncDashboardEventStream() {
-    setEventStreamEnabled(true);
-}
-
 jobsRenderRoot?.addEventListener("mouseover", (event) => {
     const cell = event.target.closest(".job-title-popover-target");
     if (!(cell instanceof HTMLElement) || cell === activeTitleCell) return;
@@ -382,57 +379,36 @@ function removeFilterEmptyState() {
     document.getElementById("jobsFilterEmptyState")?.remove();
 }
 
+const FILTER_EMPTY_MESSAGE = "No jobs match this title or URL search.";
+
 function getOrCreateFilterEmptyState() {
-    if (window.matchMedia("(max-width: 1024px)").matches) {
+    // jobs.js owns both the breakpoint and the empty-state markup; reusing them
+    // keeps this placeholder in sync with the surface it is mounted into.
+    if (isMobileJobsView()) {
         if (!jobsMobileList) return null;
 
-        let state = document.getElementById("jobsFilterEmptyState");
-        if (state) return state;
+        const existing = document.getElementById("jobsFilterEmptyState");
+        if (existing) return existing;
 
-        state = document.createElement("div");
-        state.id = "jobsFilterEmptyState";
-        state.className = "jobs-mobile-empty empty-state empty-state--mobile d-none";
-
-        const iconDiv = document.createElement("div");
-        iconDiv.className = "material-symbols-outlined icon";
-        iconDiv.setAttribute("aria-hidden", "true");
-        iconDiv.textContent = "search";
-
-        const p = document.createElement("p");
-        p.textContent = "No jobs match this title or URL search.";
-
-        state.append(iconDiv, p);
+        const state = buildMobileEmptyState(FILTER_EMPTY_MESSAGE, {
+            id: "jobsFilterEmptyState",
+            icon: "search",
+        });
+        state.classList.add("d-none");
         jobsMobileList.append(state);
         return state;
     }
 
     if (!jobsTbody) return null;
 
-    let row = document.getElementById("jobsFilterEmptyRow");
-    if (row) return row;
+    const existingRow = document.getElementById("jobsFilterEmptyRow");
+    if (existingRow) return existingRow;
 
-    row = document.createElement("tr");
-    row.id = "jobsFilterEmptyRow";
+    const row = buildDesktopEmptyState(FILTER_EMPTY_MESSAGE, {
+        id: "jobsFilterEmptyRow",
+        icon: "search",
+    });
     row.classList.add("d-none");
-
-    const td = document.createElement("td");
-    td.colSpan = 8;
-
-    const wrapper = document.createElement("div");
-    wrapper.className = "empty-state";
-
-    const iconDiv = document.createElement("div");
-    iconDiv.className = "material-symbols-outlined icon";
-    iconDiv.setAttribute("aria-hidden", "true");
-    iconDiv.textContent = "search";
-
-    const p = document.createElement("p");
-    p.textContent = "No jobs match this title or URL search.";
-
-    wrapper.append(iconDiv, p);
-
-    td.appendChild(wrapper);
-    row.appendChild(td);
     jobsTbody.appendChild(row);
     return row;
 }
@@ -490,7 +466,6 @@ async function maybeLoadMoreJobs() {
     isLoadingMore = true;
     try {
         await loadMore(fetchJobs);
-        syncDashboardEventStream();
         scheduleJobTitleFilter();
     } catch (err) {
         reportWarning("loadMore failed", {
@@ -635,29 +610,14 @@ function abortAndResetPreview() {
     abortPreviewRequest();
 }
 
-function updateQualityOptions(formats) {
-    if (!qualitySelect) return;
-
-    // For audio, keep default quality options (quality is ignored for audio anyway)
-    if (typeSelect?.value === AUDIO_TYPE) {
-        resetQualityOptions();
-        return;
-    }
-
-    qualitySelect.replaceChildren();
-    if (!Array.isArray(formats) || formats.length === 0) {
-        resetQualityOptions();
-        return;
-    }
-
-    const fragment = document.createDocumentFragment();
-    for (const q of defaultQualityOptions) {
-        const option = document.createElement("option");
-        option.value = q.value;
-        option.textContent = q.text;
-        fragment.appendChild(option);
-    }
-    qualitySelect.appendChild(fragment);
+/**
+ * Restore the quality select after a preview load.
+ *
+ * The options are static for both audio and video: the server-reported formats
+ * do not narrow them, and quality is ignored for audio downloads entirely.
+ */
+function updateQualityOptions() {
+    resetQualityOptions();
 }
 
 function normalizePreviewFormatLabel(resolution) {
@@ -813,7 +773,7 @@ async function updateVideoPreview() {
         setText(metaTitle, info.title);
         renderPreviewSummary(info);
         renderPreviewFormats(info.formats, info.formats_total, info.formats_truncated);
-        updateQualityOptions(info.formats || []);
+        updateQualityOptions();
 
         // For non-YouTube platforms, resolve and render a server-local cached thumbnail.
         if (platform !== PLATFORM.YOUTUBE) {
@@ -822,7 +782,11 @@ async function updateVideoPreview() {
                 const resolved = await fetchResolvedThumbnail(url, { signal: controller.signal });
                 thumbnailSrc = typeof resolved.thumbnail_url === "string" ? resolved.thumbnail_url.trim() : "";
             } catch (resolveError) {
-                reportWarning("thumbnail-resolve-failed", resolveError);
+                reportWarning("Thumbnail resolve failed", {
+                    module: "main",
+                    action: "updateVideoPreview",
+                    error: resolveError?.message || String(resolveError),
+                });
             }
 
             if (!thumbnailSrc && info.thumbnail) {
@@ -883,7 +847,7 @@ function abortDetailInfoRequest() {
 }
 
 function formatDetailStatus(status) {
-    const normalized = String(status || "queued").trim().toLowerCase();
+    const normalized = normalizeStatus(status);
     if (DETAIL_STATUS_LABELS[normalized]) {
         return DETAIL_STATUS_LABELS[normalized];
     }
@@ -1119,7 +1083,7 @@ function renderDetailTitle(job, text) {
 }
 
 function updateOpenDetailStatus(job) {
-    const normalizedStatus = String(job?.status || "queued").trim().toLowerCase();
+    const normalizedStatus = normalizeStatus(job?.status);
     const statusEl = document.getElementById("mStatus");
     setText(statusEl, formatDetailStatus(normalizedStatus));
     statusEl?.setAttribute("data-status", normalizedStatus);
@@ -1146,6 +1110,12 @@ function updateOpenDetailStatus(job) {
     const downloadBtn = document.getElementById("mDownloadBtn");
     if (downloadBtn instanceof HTMLAnchorElement) {
         downloadBtn.classList.toggle("d-none", !DOWNLOADABLE_STATUSES.has(job.status || ""));
+    }
+
+    const retryBtn = document.getElementById("mRetryBtn");
+    if (retryBtn instanceof HTMLButtonElement) {
+        retryBtn.classList.toggle("d-none", !RETRYABLE_STATUSES.has(job.status || ""));
+        retryBtn.dataset.jobId = getJobById(job.id)?.id || job.id || "";
     }
 }
 
@@ -1292,6 +1262,27 @@ async function handleCancelJob(btn) {
     }
 }
 
+async function handleRetryJob(btn) {
+    const jobId = btn.dataset.jobId;
+    if (!jobId) return;
+
+    try {
+        // The server resets the existing row back to "queued" instead of
+        // inserting a new one, so this refreshes the same list entry in place
+        // rather than adding a second job above it.
+        const payload = await handleActionPost(btn, `/api/jobs/${encodeURIComponent(jobId)}/retry`);
+        if (payload && typeof payload === "object") {
+            const updatedJob = applyJobUpdate(payload);
+            dispatchJobUpdate(updatedJob || payload);
+            showToast("Retry started", "success", 2200);
+        }
+    } catch (err) {
+        if (err?.name !== "AbortError") {
+            showToast(`Retry failed: ${err.message}`, "danger");
+        }
+    }
+}
+
 /**
  * Write text to the clipboard, falling back to a hidden textarea where the
  * async Clipboard API is unavailable (non-secure contexts, older browsers).
@@ -1355,7 +1346,7 @@ async function handleShareJob(btn) {
 
     try {
         await writeToClipboard(url);
-        showToast(`Share link copied${limitNote}`, "success", 2600);
+        showToast(`Sharing link added to clipboard${limitNote}`, "success", 2600);
     } catch (error) {
         // The link exists either way - show it so it is not lost to a
         // clipboard permission the browser refused.
@@ -1375,6 +1366,14 @@ const ACTION_HANDLERS = Object.freeze({
     "cancel-job": (btn, event) => {
         event.preventDefault();
         void handleCancelJob(btn);
+    },
+    "retry-job": (btn, event) => {
+        event.preventDefault();
+        void handleRetryJob(btn);
+    },
+    "retry-detail": (btn, event) => {
+        event.preventDefault();
+        void handleRetryJob(btn).then(() => detailModal?.hide());
     },
     "copy-detail": (btn, event) => {
         event.preventDefault();
@@ -1418,13 +1417,11 @@ document.addEventListener(EVENT_NAMES.JOB_UPDATE, (event) => {
         }
     }
 
-    syncDashboardEventStream();
     scheduleJobTitleFilter();
 });
 
 window.addEventListener("jobs-layout-change", () => {
     hideTitlePopover();
-    syncDashboardEventStream();
     scheduleJobTitleFilter();
 });
 
@@ -1494,7 +1491,6 @@ function describeDuplicateJob(existingJob) {
 
 function onSubmitSuccess(job) {
     prependJob(job);
-    syncDashboardEventStream();
     scheduleJobTitleFilter();
     showToast("Download job started", "success", 2500);
 
@@ -1637,7 +1633,6 @@ window.addEventListener("pagehide", () => {
 window.addEventListener("pageshow", (event) => {
     if (event.persisted) {
         observeJobDropdowns();
-        syncDashboardEventStream();
         scheduleJobTitleFilter();
     }
 });
@@ -1736,7 +1731,8 @@ async function handleActionPost(btn, url, options = {}) {
 }
 
 initMobileJobHistoryToggle();
-syncDashboardEventStream();
+// events.js owns reconnect, visibility and BFCache handling from here on.
+setEventStreamEnabled(true);
 applyJobTitleFilter();
 setupInfiniteJobsScroll();
 observeJobDropdowns();

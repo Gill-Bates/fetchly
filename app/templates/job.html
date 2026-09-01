@@ -32,8 +32,8 @@
                 <dt>URL</dt>
                 <dd>
                     {% if platform_pill_label %}
-                    <span class="platform-pill platform-pill--{{ platform_pill_id | e }}" title="{{ platform_pill_label | e }}"
-                        role="img" aria-label="{{ platform_pill_label | e }}">
+                    <span class="platform-pill platform-pill--{{ platform_pill_id | e }}"
+                        title="{{ platform_pill_label | e }}" role="img" aria-label="{{ platform_pill_label | e }}">
                         <span class="platform-pill__icon platform-pill__icon--{{ platform_pill_id | e }}"
                             aria-hidden="true"></span>
                     </span>
@@ -55,8 +55,7 @@
                 <dt>Status</dt>
                 <dd>
                     <span id="status" class="status-pill status-pill-{{ job['status'] | status_class }}">
-                        <span id="statusText">{{ (('Cancelled' if job['status'] == 'cancelled' else ('done' if
-                            job['status'] == 'analysis_done' else job['status'])) | upper) | e }}</span>
+                        <span id="statusText">{{ (job['status'] | status_label | upper) | e }}</span>
                     </span>
                 </dd>
 
@@ -100,13 +99,8 @@
         </div>
     </div>
 
-    <script
-        id="jobStatusScript"
-        type="module"
-        src="/static/js/job.js?v=20260823b"
-        data-job-id="{{ job['id'] | e }}"
-        data-initial-status="{{ job['status'] | e }}"
-    ></script>
+    <script id="jobStatusScript" type="module" src="/static/js/job.js?v=20260823b" data-job-id="{{ job['id'] | e }}"
+        data-initial-status="{{ job['status'] | e }}"></script>
     {% endif %}
 </div>
 {% endblock %}

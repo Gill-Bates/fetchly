@@ -37,8 +37,9 @@ logger = logging.getLogger(__name__)
 CACHE_FILENAME = "update_check.json"
 # Bumped when the cache layout changes; files written by another layout are
 # discarded rather than migrated - it is a cache, refetching costs one request.
-# 3: added the "fetchly" self-check component.
-CACHE_SCHEMA = 3
+# 4: fetchly checks Git tags rather than GitHub Releases, so a newly pushed
+# release tag is visible immediately even before a GitHub Release is created.
+CACHE_SCHEMA = 4
 # Successful check: do not ask GitHub again for 24 hours.
 CACHE_TTL_SECONDS = 24 * 60 * 60
 # Failed check: retry sooner, but never on every page load.
@@ -78,13 +79,13 @@ class _Component:
 
     label: str
     repo: str
-    # "releases" uses the GitHub releases API; "ffmpeg-builds" reads the asset
-    # list of the rolling BtbN release the image is actually built from.
-    source: Literal["releases", "ffmpeg-builds"]
+    # "releases" uses the GitHub releases API, "tags" uses the Git tags API,
+    # and "ffmpeg-builds" reads the rolling BtbN release's asset list.
+    source: Literal["releases", "tags", "ffmpeg-builds"]
 
 
 COMPONENTS: dict[str, _Component] = {
-    "fetchly": _Component(label="fetchly", repo="Gill-Bates/fetchly", source="releases"),
+    "fetchly": _Component(label="fetchly", repo="Gill-Bates/fetchly", source="tags"),
     "ytdlp": _Component(label="yt-dlp", repo="yt-dlp/yt-dlp", source="releases"),
     "ytdlp_ejs": _Component(label="yt-dlp-ejs", repo="yt-dlp/ejs", source="releases"),
     "js_runtime": _Component(label="deno", repo="denoland/deno", source="releases"),
@@ -143,6 +144,36 @@ def _is_newer(latest: str | None, current: str | None) -> bool:
 # asyncio.timeout there). 3 pages * 50 = 150 releases, comfortably more than
 # any of the configured repos has ever published.
 _MAX_RELEASE_PAGES = 3
+# GitHub's release and tag lists are normally only a few KiB. The limit leaves
+# generous room for valid metadata while keeping an upstream response from
+# consuming unbounded memory.
+_MAX_API_RESPONSE_BYTES = 1024 * 1024
+# The checksum manifest is far smaller in normal operation; use the same
+# practical ceiling because it is downloaded through a redirect.
+_MAX_FFMPEG_CHECKSUM_BYTES = 1024 * 1024
+
+
+async def _read_response_bytes(
+    client: httpx.AsyncClient, url: str, *, max_bytes: int
+) -> tuple[httpx.Response, bytes]:
+    """Stream one response, rejecting it before it can exceed *max_bytes*."""
+    async with client.stream("GET", url) as response:
+        response.raise_for_status()
+        content_length = response.headers.get("content-length")
+        if content_length is not None:
+            try:
+                declared_length = int(content_length)
+            except ValueError:
+                declared_length = None
+            if declared_length is not None and declared_length > max_bytes:
+                raise ValueError(f"upstream response exceeds {max_bytes} byte limit")
+
+        body = bytearray()
+        async for chunk in response.aiter_bytes():
+            if len(body) + len(chunk) > max_bytes:
+                raise ValueError(f"upstream response exceeds {max_bytes} byte limit")
+            body.extend(chunk)
+        return response, bytes(body)
 
 
 async def _fetch_latest_release(client: httpx.AsyncClient, repo: str) -> str | None:
@@ -165,9 +196,10 @@ async def _fetch_latest_release(client: httpx.AsyncClient, repo: str) -> str | N
     for _ in range(_MAX_RELEASE_PAGES):
         if url is None:
             break
-        response = await client.get(url)
-        response.raise_for_status()
-        payload = response.json()
+        response, body = await _read_response_bytes(
+            client, url, max_bytes=_MAX_API_RESPONSE_BYTES
+        )
+        payload = json.loads(body)
         if not isinstance(payload, list):
             break
 
@@ -177,6 +209,42 @@ async def _fetch_latest_release(client: httpx.AsyncClient, repo: str) -> str | N
             if release.get("draft") or release.get("prerelease"):
                 continue
             tag = str(release.get("tag_name") or "").strip()
+            if not tag or _is_prerelease_tag(tag):
+                continue
+            parts = _parse_version(tag)
+            if parts and parts > best_parts:
+                best_tag, best_parts = tag, parts
+
+        url = response.links.get("next", {}).get("url")
+
+    return best_tag
+
+
+async def _fetch_latest_tag(client: httpx.AsyncClient, repo: str) -> str | None:
+    """Return the highest stable version tag from a repository.
+
+    fetchly publishes images from Git tags. A GitHub Release may be created
+    later or not at all, so the tag list is the authoritative self-update
+    source and avoids a stale "unavailable" result after a new deployment.
+    """
+    best_tag: str | None = None
+    best_parts: tuple[int, ...] = ()
+    url: str | None = f"https://api.github.com/repos/{repo}/tags?per_page=100"
+
+    for _ in range(_MAX_RELEASE_PAGES):
+        if url is None:
+            break
+        response, body = await _read_response_bytes(
+            client, url, max_bytes=_MAX_API_RESPONSE_BYTES
+        )
+        payload = json.loads(body)
+        if not isinstance(payload, list):
+            break
+
+        for entry in payload:
+            if not isinstance(entry, dict):
+                continue
+            tag = str(entry.get("name") or "").strip()
             if not tag or _is_prerelease_tag(tag):
                 continue
             parts = _parse_version(tag)
@@ -199,12 +267,13 @@ async def _fetch_latest_ffmpeg_build(client: httpx.AsyncClient) -> str | None:
     publishes, not the one an unmodified rebuild would actually produce; there
     is no build-time record of that pin for this runtime check to read.
     """
-    response = await client.get(FFMPEG_CHECKSUMS_URL)
-    response.raise_for_status()
+    _, body = await _read_response_bytes(
+        client, FFMPEG_CHECKSUMS_URL, max_bytes=_MAX_FFMPEG_CHECKSUM_BYTES
+    )
 
     best_series: str | None = None
     best_parts: tuple[int, ...] = ()
-    for line in response.text.splitlines():
+    for line in body.decode("utf-8").splitlines():
         parts = line.split()
         if len(parts) != 2:
             continue
@@ -235,6 +304,8 @@ async def _fetch_component(
     try:
         if component.source == "ffmpeg-builds":
             tag = await _fetch_latest_ffmpeg_build(client)
+        elif component.source == "tags":
+            tag = await _fetch_latest_tag(client, component.repo)
         else:
             tag = await _fetch_latest_release(client, component.repo)
     except httpx.HTTPStatusError as exc:
@@ -314,17 +385,28 @@ def _parse_timestamp(value: Any) -> float:
     return timestamp
 
 
+_MAX_CACHE_BYTES = 64 * 1024
+
+
 def _read_cache_file() -> dict[str, Any] | None:
     """Load the on-disk cache; None when missing, stale-schema, or unusable."""
+    path = _cache_path()
     try:
-        raw = _cache_path().read_text(encoding="utf-8")
-    except OSError:
-        return None
-
-    try:
+        # A valid cache is only a few hundred bytes. Read at most one extra byte
+        # after the stat check too, so a concurrent external writer cannot turn
+        # this best-effort cache into an unbounded allocation.
+        if path.stat().st_size > _MAX_CACHE_BYTES:
+            logger.debug("Discarding oversized update cache at %s", path)
+            return None
+        with path.open("rb") as handle:
+            raw = handle.read(_MAX_CACHE_BYTES + 1)
+        if len(raw) > _MAX_CACHE_BYTES:
+            logger.debug("Discarding oversized update cache at %s", path)
+            return None
         payload = json.loads(raw)
-    except json.JSONDecodeError:
-        logger.debug("Discarding malformed update cache at %s", _cache_path())
+    except (OSError, ValueError, RecursionError):
+        # ValueError covers JSONDecodeError and UnicodeDecodeError.
+        logger.debug("Discarding unusable update cache at %s", path)
         return None
 
     if not isinstance(payload, dict) or payload.get("schema") != CACHE_SCHEMA:
@@ -440,6 +522,8 @@ def _release_url(component: _Component, tag: str | None) -> str:
     """
     if component.source == "ffmpeg-builds":
         return f"https://github.com/{component.repo}/releases/tag/latest"
+    if component.source == "tags" and tag:
+        return f"https://github.com/{component.repo}/tree/{quote(tag, safe='')}"
     if tag:
         # Tag names may contain path characters ("release/8.0").
         return f"https://github.com/{component.repo}/releases/tag/{quote(tag, safe='')}"
