@@ -14,7 +14,6 @@ from unittest.mock import patch
 from fastapi import HTTPException
 
 os.environ.setdefault("FETCHLY_SECRET_KEY", "test-lalal-route-secret")
-os.environ.setdefault("FETCHLY_ADMIN_PASSWORD", "test-lalal-route-password")
 
 from app.routes import lalal
 

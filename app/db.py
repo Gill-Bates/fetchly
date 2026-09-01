@@ -12,7 +12,9 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import Any, Final
 
+from .utils.credentials import normalize_admin_username
 from .utils.fs import get_data_dir
+from .utils.public_url import normalize_public_hostname
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +46,8 @@ __all__ = [
     "get_share_link",
     "consume_share_link",
     "delete_share_links_for_jobs",
+    "list_job_ids",
+    "delete_jobs_and_share_links",
     "COMPLETED_STATUSES",
     "DOWNLOADABLE_STATUSES",
     "TERMINAL_JOB_STATUSES",
@@ -108,9 +112,15 @@ _JOB_STATUS_SQL_VALUES: Final[str] = ", ".join(
 )
 
 _SETTINGS_DEFAULTS: Final[dict[str, str]] = {
-    "retention_days": "7",
+    # 0 means unlimited: job files are retained until explicitly removed.
+    "retention_days": "0",
     "login_required": "false",
-    "enable_authentication": "true",
+    # Off on a fresh install, and no credentials exist to go with it. The admin
+    # account is created in Settings -> Security; authentication cannot be
+    # switched on before a username and password are stored (see
+    # app/routes/api.py::api_set_settings).
+    "enable_authentication": "false",
+    "admin_username": "",
     "session_idle_minutes": "60",
     "download_concurrent_fragments": "3",
     # Default on: the downloaded file is played back in the browser (player,
@@ -128,6 +138,11 @@ _SETTINGS_DEFAULTS: Final[dict[str, str]] = {
     # value is snapshotted onto each link at creation time so changing it
     # later never retroactively re-opens or closes links already handed out.
     "share_link_max_uses": "0",
+    # Public hostname (or IP) that share links are built from. Empty means
+    # "use the host of the request that created the link". Set this behind a
+    # reverse proxy that does not forward X-Forwarded-Host. See
+    # app/utils/public_url.py.
+    "public_hostname": "",
 }
 
 
@@ -194,10 +209,11 @@ TERMINAL_JOB_STATUSES: Final[frozenset[str]] = COMPLETED_STATUSES | frozenset({"
 _RECOVERABLE_IN_FLIGHT_STATUSES: Final[frozenset[str]] = frozenset({"processing", "downloading", "transcoding"})
 
 _SETTINGS_TYPES: Final[dict[str, Callable[[object], Any]]] = {
-    "retention_days": lambda value: _parse_bounded_int(value, minimum=1, maximum=365),
+    "retention_days": lambda value: _parse_bounded_int(value, minimum=0, maximum=365),
     "statistics_reset_at": str,
     "login_required": _parse_bool,
     "enable_authentication": _parse_bool,
+    "admin_username": lambda value: normalize_admin_username(value if isinstance(value, str) else ""),
     "session_idle_minutes": lambda value: _parse_bounded_int(value, minimum=1, maximum=24 * 60),
     "session_version": _parse_nonnegative_int,
     "download_concurrent_fragments": lambda value: _parse_bounded_int(value, minimum=1, maximum=16),
@@ -209,6 +225,7 @@ _SETTINGS_TYPES: Final[dict[str, Callable[[object], Any]]] = {
     "lalalaai_auth_last_error": str,
     "lalalaai_duration_guard": _parse_bool,
     "share_link_max_uses": lambda value: _parse_bounded_int(value, minimum=0, maximum=10000),
+    "public_hostname": lambda value: normalize_public_hostname(value if isinstance(value, str) else ""),
 }
 
 
@@ -740,6 +757,45 @@ def delete_share_links_for_jobs(job_ids: list[str]) -> int:
     return deleted
 
 
+def list_job_ids() -> list[str]:
+    """Return a stable snapshot of every job ID for an explicit bulk removal."""
+    with get_db() as con:
+        rows = con.execute("SELECT id FROM jobs").fetchall()
+    return [str(row["id"]) for row in rows]
+
+
+def delete_jobs_and_share_links(job_ids: list[str]) -> tuple[int, int]:
+    """Delete selected jobs and invalidate their share links atomically.
+
+    The explicit link deletion supports databases created before the foreign-key
+    cascade was added. Callers clean the corresponding filesystem artifacts
+    before invoking this function, so an unsuccessful cleanup leaves the job
+    records and their links intact for a safe retry.
+    """
+    if not job_ids:
+        return (0, 0)
+
+    job_ids = list(dict.fromkeys(job_ids))
+    jobs_deleted = 0
+    links_deleted = 0
+    with get_db() as con:
+        for start in range(0, len(job_ids), _DELETE_BATCH_SIZE):
+            batch = job_ids[start:start + _DELETE_BATCH_SIZE]
+            placeholders = ",".join("?" * len(batch))
+            links_cursor = con.execute(
+                f"DELETE FROM share_links WHERE job_id IN ({placeholders})",
+                tuple(batch),
+            )
+            jobs_cursor = con.execute(
+                f"DELETE FROM jobs WHERE id IN ({placeholders})",
+                tuple(batch),
+            )
+            links_deleted += max(links_cursor.rowcount, 0)
+            jobs_deleted += max(jobs_cursor.rowcount, 0)
+        con.commit()
+    return (jobs_deleted, links_deleted)
+
+
 def job_exists(job_id: str) -> bool:
     """Check if a job exists in the database."""
     with get_db() as con:
@@ -825,6 +881,8 @@ def list_expired_job_ids(keep_days: int) -> list[str]:
         raise TypeError("keep_days must be a non-negative integer")
     if keep_days < 0:
         raise ValueError("keep_days must be non-negative")
+    if keep_days == 0:
+        return []
 
     statuses = tuple(sorted(TERMINAL_JOB_STATUSES))
     placeholders = _in_placeholders(statuses)

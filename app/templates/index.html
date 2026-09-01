@@ -10,7 +10,7 @@
 
 {% block navbar %}
 {% from "macros/navbar.html" import navbar %}
-{{ navbar(show_back=False, show_settings=True, csrf_token=csrf_token) }}
+{{ navbar(show_back=False, show_settings=True, show_logout=auth_enabled, csrf_token=csrf_token) }}
 {% endblock %}
 
 {% block content %}
@@ -112,7 +112,7 @@
                 <div class="jobs-quick-filter" id="jobsQuickFilter" data-active-filter="all" role="group"
                     aria-label="Filter jobs by status">
                     <span class="jobs-quick-filter__indicator" aria-hidden="true"></span>
-                    <button type="button" class="jobs-quick-filter__btn is-active" data-job-filter="all"
+                    <button type="button" class="jobs-quick-filter__btn" data-job-filter="all"
                         aria-pressed="true">All</button>
                     <button type="button" class="jobs-quick-filter__btn" data-job-filter="done"
                         aria-pressed="false">Done</button>
@@ -184,7 +184,8 @@
                 <!-- Time display -->
                 <div class="d-flex flex-wrap gap-2 justify-content-between align-items-baseline">
                     <div class="text-muted small" id="trimInfo">–</div>
-                    <div class="text-muted small trim-hint">Scroll = zoom · Drag = pan · Double-click or double-tap = reset</div>
+                    <div class="text-muted small trim-hint">Scroll = zoom · Drag = pan · Double-click or double-tap =
+                        reset</div>
                 </div>
 
                 <!-- Playback controls -->
@@ -314,7 +315,7 @@
                     Retry
                 </button>
                 <a id="mDownloadBtn" class="btn btn-primary d-none" href="#">
-                    <span class="material-symbols-outlined">download</span>
+                    <span class="material-symbols-outlined" aria-hidden="true">download</span>
                     Download
                 </a>
                 <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Close</button>
@@ -350,5 +351,5 @@
 {% endblock %}
 
 {% block page_scripts %}
-<script type="module" src="/static/js/main.js?v=20260901c"></script>
+<script type="module" src="/static/js/main.js?v=20260901f"></script>
 {% endblock %}

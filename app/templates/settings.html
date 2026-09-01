@@ -6,7 +6,7 @@
 
 {% block navbar %}
 {% from "macros/navbar.html" import navbar %}
-{{ navbar(show_back=True, show_settings=False, csrf_token=csrf_token) }}
+{{ navbar(show_back=True, show_settings=False, show_logout=settings.enable_authentication, csrf_token=csrf_token) }}
 {% endblock %}
 
 {% block content %}
@@ -48,23 +48,58 @@
                             <div>
                                 <div class="settings-section">
                                     <div class="mb-3">
-                                        <label for="retentionDays" class="form-label">Max. Job retention (days)</label>
-                                        <input type="number" class="form-control ui-input" id="retentionDays"
-                                            name="retention_days" min="1" max="365"
-                                            value="{{ settings.retention_days | default(7) }}">
-                                        <small class="setting-hint setting-hint--with-icon">
+                                        <div class="settings-slider-header">
+                                            <label for="retentionDays" class="form-label mb-0">Max. Job retention
+                                                (days)</label>
+                                            <output class="settings-slider-value" id="retentionDaysValue"
+                                                for="retentionDays" aria-live="polite">Unlimited</output>
+                                        </div>
+                                        <div class="settings-range-control">
+                                            <input type="range" class="form-range settings-range" id="retentionDays"
+                                                min="0" max="6" step="1" value="0"
+                                                data-retention-days="{{ settings.retention_days | default(0) }}"
+                                                aria-describedby="retentionDaysValue retentionDaysHint"
+                                                aria-valuetext="Unlimited">
+                                            <div class="settings-range-ticks" aria-hidden="true">
+                                                <span class="settings-range-tick"></span>
+                                                <span class="settings-range-tick"></span>
+                                                <span class="settings-range-tick"></span>
+                                                <span class="settings-range-tick"></span>
+                                                <span class="settings-range-tick"></span>
+                                                <span class="settings-range-tick"></span>
+                                                <span class="settings-range-tick"></span>
+                                            </div>
+                                        </div>
+                                        <input type="hidden" id="retentionDaysInput" name="retention_days"
+                                            value="{{ settings.retention_days | default(0) }}">
+                                        <div class="settings-range-labels" aria-hidden="true">
+                                            <span>∞</span>
+                                            <span>7d</span>
+                                            <span>14d</span>
+                                            <span>30d</span>
+                                            <span>90d</span>
+                                            <span>180d</span>
+                                            <span>1y</span>
+                                        </div>
+                                        <small class="setting-hint setting-hint--with-icon" id="retentionDaysHint">
                                             <span class="material-symbols-outlined setting-hint-icon"
                                                 aria-hidden="true">info</span>
-                                            <span>Job files will be removed after this period; dashboard history and
-                                                statistics are kept</span>
+                                            <span>Job files follow this period; history and statistics stay.</span>
                                         </small>
-                                        <button type="button"
-                                            class="btn btn-outline-danger btn-sm w-50 d-block ms-auto mt-3"
-                                            id="resetStatsBtn">
-                                            <span class="material-symbols-outlined icon-inline"
-                                                aria-hidden="true">restart_alt</span>
-                                            Reset Statistics
-                                        </button>
+                                        <div class="settings-danger-actions mt-3">
+                                            <button type="button" class="btn btn-outline-danger btn-sm"
+                                                id="resetStatsBtn">
+                                                <span class="material-symbols-outlined icon-inline"
+                                                    aria-hidden="true">restart_alt</span>
+                                                Reset Statistics
+                                            </button>
+                                            <button type="button" class="btn btn-outline-danger btn-sm"
+                                                id="removeAllJobsBtn">
+                                                <span class="material-symbols-outlined icon-inline"
+                                                    aria-hidden="true">delete_forever</span>
+                                                Remove all Jobs
+                                            </button>
+                                        </div>
                                     </div>
                                 </div>
                             </div>
@@ -87,8 +122,7 @@
                                         <small class="setting-hint setting-hint--with-icon">
                                             <span class="material-symbols-outlined setting-hint-icon"
                                                 aria-hidden="true">info</span>
-                                            <span>Speeds up segmented DASH/HLS sources; higher values raise bandwidth
-                                                and CPU load</span>
+                                            <span>Speeds up DASH/HLS downloads; uses more CPU and bandwidth.</span>
                                         </small>
                                     </div>
                                     <div class="mt-3 pt-3 border-top">
@@ -100,8 +134,11 @@
                                                 Prefer H.264/AAC for max quality
                                             </label>
                                         </div>
-                                        <small class="setting-hint">Maximises device compatibility by skipping VP9/AV1
-                                            renditions</small>
+                                        <small class="setting-hint setting-hint--with-icon">
+                                            <span class="material-symbols-outlined setting-hint-icon"
+                                                aria-hidden="true">info</span>
+                                            <span>Improves compatibility by skipping VP9/AV1.</span>
+                                        </small>
                                     </div>
                                 </div>
                             </div>
@@ -116,16 +153,65 @@
                             <div>
                                 <div class="settings-section">
                                     <div class="mb-3">
-                                        <label for="shareLinkMaxUses" class="form-label">Max. uses per share
-                                            link</label>
-                                        <input type="number" class="form-control ui-input" id="shareLinkMaxUses"
-                                            name="share_link_max_uses" min="0" max="10000"
-                                            value="{{ settings.share_link_max_uses | default(0) }}">
+                                        <label for="publicHostname" class="form-label">Public hostname</label>
+                                        <div class="input-group">
+                                            <input type="text" class="form-control ui-input" id="publicHostname"
+                                                name="public_hostname" maxlength="253" autocomplete="off"
+                                                autocapitalize="off" autocorrect="off" spellcheck="false"
+                                                placeholder="fetchly.example.com"
+                                                value="{{ settings.public_hostname | default('') }}">
+                                            <button type="button" class="btn btn-outline-secondary"
+                                                id="publicHostnameDetectBtn"
+                                                aria-label="Auto-detect from current address"
+                                                title="Auto-detect from current address">
+                                                <span class="material-symbols-outlined icon-inline"
+                                                    aria-hidden="true">auto_fix_high</span>
+                                            </button>
+                                        </div>
                                         <small class="setting-hint setting-hint--with-icon">
                                             <span class="material-symbols-outlined setting-hint-icon"
                                                 aria-hidden="true">info</span>
-                                            <span>0 means unlimited; the limit is fixed onto each link when it is
-                                                created, so changing this never alters links already shared</span>
+                                            <span>Hostname or IP only. Used for HTTPS share links.</span>
+                                        </small>
+                                    </div>
+                                    <div class="mb-3">
+                                        <div class="settings-slider-header">
+                                            <label for="shareLinkMaxUses" class="form-label mb-0">Max. uses per share
+                                                link</label>
+                                            <output class="settings-slider-value" id="shareLinkMaxUsesValue"
+                                                for="shareLinkMaxUses" aria-live="polite">Unlimited</output>
+                                        </div>
+                                        <div class="settings-range-control">
+                                            <input type="range" class="form-range settings-range" id="shareLinkMaxUses"
+                                                min="0" max="6" step="1" value="0"
+                                                data-share-link-max-uses="{{ settings.share_link_max_uses | default(0) }}"
+                                                aria-describedby="shareLinkMaxUsesValue shareLinkMaxUsesHint"
+                                                aria-valuetext="Unlimited">
+                                            <div class="settings-range-ticks" aria-hidden="true">
+                                                <span class="settings-range-tick"></span>
+                                                <span class="settings-range-tick"></span>
+                                                <span class="settings-range-tick"></span>
+                                                <span class="settings-range-tick"></span>
+                                                <span class="settings-range-tick"></span>
+                                                <span class="settings-range-tick"></span>
+                                                <span class="settings-range-tick"></span>
+                                            </div>
+                                        </div>
+                                        <input type="hidden" id="shareLinkMaxUsesInput" name="share_link_max_uses"
+                                            value="{{ settings.share_link_max_uses | default(0) }}">
+                                        <div class="settings-range-labels" aria-hidden="true">
+                                            <span>∞</span>
+                                            <span>1</span>
+                                            <span>10</span>
+                                            <span>100</span>
+                                            <span>1k</span>
+                                            <span>5k</span>
+                                            <span>10k</span>
+                                        </div>
+                                        <small class="setting-hint setting-hint--with-icon" id="shareLinkMaxUsesHint">
+                                            <span class="material-symbols-outlined setting-hint-icon"
+                                                aria-hidden="true">info</span>
+                                            <span>0 is unlimited. Limits apply only to new links.</span>
                                         </small>
                                     </div>
                                 </div>
@@ -141,7 +227,7 @@
                     <span class="material-symbols-outlined icon-inline" aria-hidden="true">extension</span>
                     Lalal.ai
                 </h2>
-                <div class="settings-grid">
+                <div class="settings-grid settings-security-grid">
                     <div class="settings-grid-item">
                         <div class="ui-card h-100">
                             <div>
@@ -183,13 +269,80 @@
                                                 Limit long tracks
                                             </label>
                                         </div>
-                                        <small class="setting-hint">Block tracks longer than {{
-                                            LALAL_MAX_DURATION_MINUTES }} minutes</small>
+                                        <small class="setting-hint setting-hint--with-icon">
+                                            <span class="material-symbols-outlined setting-hint-icon"
+                                                aria-hidden="true">info</span>
+                                            <span>Blocks tracks over {{ LALAL_MAX_DURATION_MINUTES }} minutes.</span>
+                                        </small>
                                     </div>
                                 </div>
                             </div>
                         </div>
                     </div>
+                </div>
+
+                <h2 class="settings-panel-title fw-semibold mb-3 mt-4 d-flex align-items-center gap-1">
+                    <span class="material-symbols-outlined icon-inline" aria-hidden="true">cookie</span>
+                    Cookies
+                </h2>
+                <p class="setting-hint setting-hint--with-icon mb-3">
+                    <span class="material-symbols-outlined setting-hint-icon" aria-hidden="true">info</span>
+                    <span>Paste the cookie header from your browser's dev tools to download
+                        age-restricted or login-gated content. Cookies are checked when they arrive; while
+                        they are missing or expired, downloads for that platform simply run signed out.</span>
+                </p>
+                <div class="settings-grid settings-security-grid settings-grid--cols-2" id="cookieTiles">
+                    {% for platform in [
+                    {"id": "youtube", "label": "YouTube"},
+                    {"id": "tiktok", "label": "TikTok"},
+                    {"id": "instagram", "label": "Instagram"},
+                    {"id": "facebook", "label": "Facebook"},
+                    ] %}
+                    {% set cookie_status = (cookie_statuses | selectattr("platform", "equalto", platform.id) | first) %}
+                    <div class="settings-grid-item">
+                        <div class="ui-card h-100">
+                            <div>
+                                <div class="settings-section cookie-tile-section"
+                                    data-cookie-platform="{{ platform.id }}">
+                                    <div class="cookie-tile-header mb-3">
+                                        <span class="platform-pill platform-pill--{{ platform.id }} cookie-tile-logo"
+                                            role="img" aria-label="{{ platform.label }}">
+                                            <span class="platform-pill__icon platform-pill__icon--{{ platform.id }}"
+                                                aria-hidden="true"></span>
+                                        </span>
+                                        <span class="cookie-tile-name">{{ platform.label }}</span>
+                                        {% set status_value = cookie_status.status if cookie_status else 'missing' %}
+                                        {% set badge_type = {"valid": "success", "expired": "danger", "invalid":
+                                        "danger", "missing": "secondary"}[status_value] %}
+                                        <span class="badge bg-{{ badge_type }} cookie-status-badge"
+                                            data-cookie-status-badge data-status="{{ status_value }}">
+                                            {{ {"valid": "Valid", "expired": "Expired", "invalid": "Invalid", "missing":
+                                            "None stored"}[status_value] }}
+                                        </span>
+                                    </div>
+                                    <p class="cookie-tile-detail setting-hint" data-cookie-detail>
+                                        {{ cookie_status.detail if cookie_status and cookie_status.detail else '' }}
+                                    </p>
+                                    <div class="cookie-tile-actions">
+                                        <button type="button" class="btn btn-outline-secondary btn-sm"
+                                            data-cookie-paste-btn data-platform="{{ platform.id }}">
+                                            <span class="material-symbols-outlined icon-inline"
+                                                aria-hidden="true">content_paste</span>
+                                            Paste cookies
+                                        </button>
+                                        <button type="button"
+                                            class="btn btn-outline-danger btn-sm {{ '' if (cookie_status and cookie_status.present) else 'd-none' }}"
+                                            data-cookie-remove-btn data-platform="{{ platform.id }}">
+                                            <span class="material-symbols-outlined icon-inline"
+                                                aria-hidden="true">delete</span>
+                                            Remove
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    {% endfor %}
                 </div>
             </section>
 
@@ -207,26 +360,40 @@
                                     <div class="form-check form-switch">
                                         <input class="form-check-input" type="checkbox" role="switch"
                                             id="enableAuthentication" name="enable_authentication" {{ 'checked' if
-                                            settings.enable_authentication | default(true) else '' }}>
+                                            settings.enable_authentication else '' }}>
                                         <label class="form-check-label" for="enableAuthentication">
                                             Enable Authentication
                                         </label>
                                     </div>
+                                    <small class="setting-hint setting-hint--with-icon">
+                                        <span class="material-symbols-outlined setting-hint-icon"
+                                            aria-hidden="true">info</span>
+                                        <span>When off, anyone who can reach this server has full access.</span>
+                                    </small>
+                                    <div id="authCredentialsRequired" class="settings-auth-callout d-none"
+                                        role="status">
+                                        <span class="material-symbols-outlined icon-inline"
+                                            aria-hidden="true">info</span>
+                                        <span>Set an admin account first — enter the credentials below.</span>
+                                    </div>
                                 </div>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="settings-grid-item">
-                        <h2 class="settings-panel-title fw-semibold mb-3 d-flex align-items-center gap-1">
-                            <span class="material-symbols-outlined icon-inline" aria-hidden="true">password</span>
-                            Change password
-                        </h2>
-                        <div class="ui-card h-100">
-                            <div>
-                                <div class="settings-section">
+                                <div class="settings-section d-none" id="credentialsSection">
+                                    <h3 class="settings-section-title">Admin account</h3>
                                     <div class="settings-field-stack">
                                         <div>
-                                            <label class="form-label" for="adminPassword">New password</label>
+                                            <label class="form-label" for="adminUsername">Username</label>
+                                            <input type="text" class="form-control ui-input" id="adminUsername"
+                                                value="{{ admin_username | default('') }}" maxlength="64"
+                                                autocomplete="username" autocapitalize="off" autocorrect="off"
+                                                spellcheck="false" placeholder="admin">
+                                            <small class="setting-hint setting-hint--with-icon">
+                                                <span class="material-symbols-outlined setting-hint-icon"
+                                                    aria-hidden="true">info</span>
+                                                <span>Letters and <code>- _</code>.</span>
+                                            </small>
+                                        </div>
+                                        <div>
+                                            <label class="form-label" for="adminPassword">Password</label>
                                             <div class="input-group">
                                                 <input type="password" class="form-control ui-input" id="adminPassword"
                                                     value="" autocomplete="new-password">
@@ -238,10 +405,14 @@
                                                         aria-hidden="true">visibility</span>
                                                 </button>
                                             </div>
-                                            <small class="setting-hint">At least 8 characters</small>
+                                            <small class="setting-hint setting-hint--with-icon">
+                                                <span class="material-symbols-outlined setting-hint-icon"
+                                                    aria-hidden="true">info</span>
+                                                <span>At least 8 characters</span>
+                                            </small>
                                         </div>
                                         <div>
-                                            <label class="form-label" for="adminPasswordConfirm">Confirm new
+                                            <label class="form-label" for="adminPasswordConfirm">Confirm
                                                 password</label>
                                             <div class="input-group">
                                                 <input type="password" class="form-control ui-input"
@@ -258,7 +429,8 @@
                                         <div id="passwordError" class="invalid-feedback d-none"></div>
                                         <div class="d-flex justify-content-end">
                                             <button id="passwordSaveBtn" class="btn btn-primary btn-sm" type="button">
-                                                Update password
+                                                <span id="passwordSaveBtnLabel">{{ 'Update credentials' if
+                                                    has_admin_credentials else 'Create admin account' }}</span>
                                             </button>
                                         </div>
                                     </div>
@@ -272,9 +444,59 @@
             <section class="settings-group tab-pane fade" id="settingsSystemPanel" role="tabpanel"
                 aria-labelledby="settingsSystemTab" tabindex="0">
                 <h2 class="settings-panel-title fw-semibold mb-3 d-flex align-items-center gap-1">
-                    <span class="material-symbols-outlined icon-inline" aria-hidden="true">dns</span>
+                    <span class="material-symbols-outlined icon-inline" aria-hidden="true">monitoring</span>
                     System information
                 </h2>
+                <div class="row g-3 mb-4 stats-row settings-host-stats" data-host-stats>
+                    <div class="col-6 col-md-3">
+                        <div class="ui-card ui-card--stat stat-card" role="group" aria-label="Free video storage"
+                            data-host-metric="storage">
+                            <div class="stat-value">
+                                <span class="material-symbols-outlined stat-icon" aria-hidden="true">hard_drive</span>
+                                <span class="stat-num-line">
+                                    <span data-stat-value>–</span><span class="stat-unit" data-stat-unit hidden></span>
+                                </span>
+                            </div>
+                            <div class="stat-label">Free video storage</div>
+                        </div>
+                    </div>
+                    <div class="col-6 col-md-3">
+                        <div class="ui-card ui-card--stat stat-card" role="group" aria-label="CPU usage"
+                            data-host-metric="cpu">
+                            <div class="stat-value">
+                                <span class="material-symbols-outlined stat-icon" aria-hidden="true">speed</span>
+                                <span class="stat-num-line">
+                                    <span data-stat-value>–</span><span class="stat-unit" data-stat-unit hidden></span>
+                                </span>
+                            </div>
+                            <div class="stat-label">CPU usage</div>
+                        </div>
+                    </div>
+                    <div class="col-6 col-md-3">
+                        <div class="ui-card ui-card--stat stat-card" role="group" aria-label="Memory usage"
+                            data-host-metric="memory">
+                            <div class="stat-value">
+                                <span class="material-symbols-outlined stat-icon" aria-hidden="true">memory</span>
+                                <span class="stat-num-line">
+                                    <span data-stat-value>–</span><span class="stat-unit" data-stat-unit hidden></span>
+                                </span>
+                            </div>
+                            <div class="stat-label">Memory usage</div>
+                        </div>
+                    </div>
+                    <div class="col-6 col-md-3">
+                        <div class="ui-card ui-card--stat stat-card" role="group" aria-label="Uptime"
+                            data-host-metric="uptime">
+                            <div class="stat-value">
+                                <span class="material-symbols-outlined stat-icon" aria-hidden="true">schedule</span>
+                                <span class="stat-num-line">
+                                    <span data-stat-value>–</span><span class="stat-unit" data-stat-unit hidden></span>
+                                </span>
+                            </div>
+                            <div class="stat-label">Uptime</div>
+                        </div>
+                    </div>
+                </div>
                 <div class="settings-grid">
                     <div class="settings-grid-item">
                         <div class="ui-card h-100">
@@ -397,6 +619,22 @@
                         </section>
                     </div>
                 </div>
+
+                <div class="settings-changelog">
+                    <h2 class="settings-panel-title fw-semibold mb-3 d-flex align-items-center gap-1"
+                        id="changelog-card-title">
+                        <span class="material-symbols-outlined icon-inline" aria-hidden="true">history</span>
+                        Changelog
+                    </h2>
+                    <section class="ui-card settings-changelog-card" aria-labelledby="changelog-card-title">
+                        <div class="ui-card-body changelog-content" data-changelog>
+                            {# Safe: get_changelog_html() renders CHANGELOG.md and passes it through
+                            nh3.clean() with a tag/attribute + http/https/mailto URL-scheme
+                            allowlist before it reaches here. See app/utils/changelog.py. #}
+                            {{ changelog_html | default('<p>Changelog not found.</p>') | safe }}
+                        </div>
+                    </section>
+                </div>
             </section>
         </div>
     </form>
@@ -429,9 +667,11 @@
                                 aria-hidden="true">verified</span>
                             Activation Key
                         </div>
-                        <p class="small text-muted mb-2">Get your activation key from your <a
-                                href="https://www.lalal.ai/api/" target="_blank" rel="noopener">Lalal.ai profile</a>
-                            (log in, open profile settings, copy the key).</p>
+                        <p class="setting-hint setting-hint--with-icon mb-2">
+                            <span class="material-symbols-outlined setting-hint-icon" aria-hidden="true">info</span>
+                            <span>Get your key from your <a href="https://www.lalal.ai/api/" target="_blank"
+                                    rel="noopener">Lalal.ai profile</a>.</span>
+                        </p>
                         <div class="d-flex justify-content-end">
                             <a href="https://www.lalal.ai/api/" target="_blank" rel="noopener noreferrer"
                                 class="btn btn-sm btn-outline-light">Open Lalal.ai</a>
@@ -476,7 +716,8 @@
 <script id="settingsBootstrapData" type="application/json">{{ {
     "lalal_configured": lalal_configured,
     "lalal_status": (lalal_status or "Not configured"),
-    "lalal_email": (lalal_email or "")
+    "lalal_email": (lalal_email or ""),
+    "has_admin_credentials": (has_admin_credentials | default(false))
 } | tojson }}</script>
-<script type="module" src="/static/js/settings.js?v=20260831a"></script>
+<script type="module" src="/static/js/settings.js?v=20260901n"></script>
 {% endblock %}

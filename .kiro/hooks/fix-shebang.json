@@ -1,0 +1,15 @@
+{
+  "version": "v1",
+  "hooks": [
+    {
+      "name": "Fix Shebang",
+      "trigger": "PostFileSave",
+      "action": {
+        "type": "command",
+        "command": "python /opt/python/.utils/fix_shebang.py"
+      },
+      "description": "Updates the shebang whenever a file is saved.",
+      "enabled": false
+    }
+  ]
+}

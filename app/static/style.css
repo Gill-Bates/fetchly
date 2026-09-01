@@ -36,16 +36,34 @@
     height: 34px;
 }
 
+@media (hover: hover) and (prefers-reduced-motion: no-preference) {
+    .top-navbar .navbar-brand:hover .logo {
+        animation: logo-easter-pulse 0.9s ease-in-out infinite;
+    }
+}
+
+@keyframes logo-easter-pulse {
+
+    0%,
+    100% {
+        transform: scale(1);
+        filter: drop-shadow(0 0 0 transparent);
+    }
+
+    50% {
+        transform: scale(1.06);
+        filter: drop-shadow(0 0 0.45rem color-mix(in srgb, var(--primary) 60%, transparent));
+    }
+}
+
 /* ─────────────────────────────────────────────
    Fix: Ghost scrollbars in tables
    ───────────────────────────────────────────── */
 
 .table-responsive {
     overflow-x: auto;
+    /* Prevent a vertical ghost scrollbar while retaining horizontal scroll. */
     overflow-y: hidden;
-    /* verhindert ghost scroll */
-    /* Use auto gutter to avoid ghost scrollbar when content doesn't overflow */
-    scrollbar-gutter: auto;
     scrollbar-width: thin;
     scrollbar-color: rgba(255, 255, 255, 0.2) transparent;
     position: relative;
@@ -123,6 +141,7 @@
     /* Colors */
     --primary: #5b5fdc;
     --primary-hover: #4f46e5;
+    --focus-ring: #818cf8;
     --success: #22c55e;
     --danger: #ef4444;
     --warning: #f59e0b;
@@ -134,6 +153,8 @@
     --text: var(--text-default);
     /* Stronger muted text for readability */
     --text-muted: #d0d9e8;
+    /* Supporting copy inside Settings cards; intentionally quieter than labels. */
+    --text-hint: #aebbd0;
 
     --card-radius: 18px;
 
@@ -149,8 +170,8 @@
     --surface-strong: #0f172a;
     --surface-elevated: #111827;
     --surface-hover: #1e293b;
-    --surface-success-row: #142b24;
-    --surface-danger-row: #2b1e2d;
+    --surface-success-row: #11201d;
+    --surface-danger-row: #21171c;
 }
 
 /* color-mix() is required (Baseline 2023). Do NOT add a preceding static
@@ -174,7 +195,7 @@
 }
 
 :focus-visible {
-    outline: 2px solid var(--primary);
+    outline: 2px solid var(--focus-ring);
     outline-offset: 2px;
 }
 
@@ -182,16 +203,12 @@
     outline: none;
 }
 
-.btn:focus-visible {
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 40%, transparent);
-}
-
 button:focus-visible,
 .btn:focus-visible,
 input:focus-visible,
 select:focus-visible,
 textarea:focus-visible {
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 35%, transparent);
+    box-shadow: 0 0 0 3px var(--focus-ring);
 }
 
 .app-root {
@@ -336,13 +353,13 @@ body {
     display: flex;
     align-items: center;
     justify-content: center;
-    flex-wrap: nowrap;
+    flex-wrap: wrap;
     gap: 0.35rem;
     text-align: center;
     font-size: 0.85rem;
     line-height: 1.25;
     color: var(--text-muted);
-    white-space: nowrap;
+    white-space: normal;
 }
 
 .wb-footer-link {
@@ -379,8 +396,6 @@ body {
 @media (max-width: 576px) {
     .wb-footer-content {
         font-size: 0.75rem;
-        flex-wrap: wrap;
-        white-space: normal;
     }
 }
 
@@ -777,24 +792,15 @@ button .material-symbols-outlined,
     color: var(--text-strong);
 }
 
-.jobs-quick-filter__btn.is-active,
 .jobs-quick-filter__btn[aria-pressed="true"] {
     background: transparent;
     color: #ffffff;
 }
 
-.jobs-quick-filter__btn.is-active:hover,
-.jobs-quick-filter__btn.is-active:focus-visible,
 .jobs-quick-filter__btn[aria-pressed="true"]:hover,
 .jobs-quick-filter__btn[aria-pressed="true"]:focus-visible {
     background: transparent;
     color: #ffffff;
-}
-
-@media (prefers-reduced-motion: reduce) {
-    .jobs-quick-filter__indicator {
-        transition: none;
-    }
 }
 
 /* ── Input with leading icon ────────────────────────────────────────────── */
@@ -837,23 +843,23 @@ button .material-symbols-outlined,
 
 .jobs-search-wrap>.jobs-search-input {
     width: 100%;
-    padding-right: 2.25rem;
+    padding-right: 3rem;
 }
 
 /* Keep the placeholder clear of the leading search glyph. The extra
    specificity wins over Bootstrap's .form-control-sm padding shorthand. */
 .jobs-search-wrap>input.jobs-search-input.form-control-sm {
     padding-left: 2.75rem;
-    padding-right: 2.25rem;
+    padding-right: 3rem;
 }
 
 .jobs-search-clear {
     position: absolute;
     top: 50%;
-    right: 0.35rem;
+    right: 0;
     display: inline-grid;
-    width: 1.75rem;
-    height: 1.75rem;
+    width: 44px;
+    height: 44px;
     padding: 0;
     transform: translateY(-50%);
     place-items: center;
@@ -966,8 +972,8 @@ html body .text-muted {
 
 .form-control:focus,
 .form-select:focus {
-    border-color: var(--primary);
-    box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary) 35%, transparent);
+    border-color: var(--focus-ring);
+    box-shadow: 0 0 0 2px var(--focus-ring);
     background: color-mix(in srgb, var(--surface) 92%, transparent);
     color: var(--text);
 }
@@ -998,9 +1004,8 @@ html body .text-muted {
     cursor: not-allowed;
 }
 
-/* Optional readonly state for better UX than disabled */
-.form-control[readonly],
-.form-select[readonly] {
+/* Optional readonly state for form controls when editing is not allowed. */
+.form-control[readonly] {
     background: color-mix(in srgb, var(--surface-strong) 92%, transparent);
     color: var(--text);
     cursor: default;
@@ -1018,8 +1023,8 @@ html body .text-muted {
 }
 
 .btn-primary:disabled {
-    background: #4c5198;
-    border-color: #4c5198;
+    background: color-mix(in srgb, var(--primary) 70%, var(--base));
+    border-color: color-mix(in srgb, var(--primary) 70%, var(--base));
 }
 
 .btn-danger {
@@ -1040,32 +1045,32 @@ html body .text-muted {
 }
 
 .btn-outline-secondary:hover {
-    background: rgba(255, 255, 255, 0.08);
     background: color-mix(in srgb, white 8%, transparent);
     border-color: var(--border);
     color: #fff;
 }
 
 .btn-outline-warning {
-    border-color: #f59e0b;
-    color: #f59e0b;
+    border-color: var(--warning);
+    color: var(--warning);
 }
 
 .btn-outline-warning:hover {
-    background: rgba(245, 158, 11, 0.15);
-    border-color: #f59e0b;
-    color: #fbbf24;
+    background: color-mix(in srgb, var(--warning) 15%, transparent);
+    border-color: var(--warning);
+    color: var(--warning);
 }
 
 .btn-outline-danger {
-    color: #ff9aa2;
-    border-color: #ff9aa2;
+    color: var(--danger);
+    border-color: var(--danger);
 }
 
 .btn-outline-danger:hover,
 .btn-outline-danger:focus-visible {
+    background: color-mix(in srgb, var(--danger) 15%, transparent);
     color: #fff;
-    border-color: #ff9aa2;
+    border-color: var(--danger);
 }
 
 /* Checkbox consistency */
@@ -1129,21 +1134,21 @@ html body .text-muted {
     font-size: 0.9rem;
 }
 
-.ui-card .setting-hint {
+.app-root--settings .setting-hint {
     display: block;
     margin-top: var(--space-2);
-    color: var(--text-muted);
+    color: var(--text-hint);
     font-size: 0.8rem;
     line-height: 1.4;
 }
 
-.ui-card .setting-hint--with-icon {
+.app-root--settings .setting-hint--with-icon {
     display: inline-flex;
     align-items: flex-start;
     gap: 0.35rem;
 }
 
-.ui-card .setting-hint-icon {
+.app-root--settings .setting-hint-icon {
     font-size: 1em;
     line-height: 1.4;
     flex: 0 0 auto;
@@ -1187,16 +1192,20 @@ html body .text-muted {
     white-space: nowrap;
 }
 
-.settings-tabs .nav-link:hover,
-.settings-tabs .nav-link:focus-visible {
+.settings-tabs .nav-link:hover {
     color: var(--text);
     border-color: color-mix(in srgb, var(--primary) 50%, var(--border));
 }
 
+.settings-tabs .nav-link:focus-visible {
+    color: var(--text);
+    border-color: color-mix(in srgb, var(--focus-ring) 50%, var(--border));
+}
+
 .settings-tabs .nav-link.active {
     color: #fff;
-    background: #5b5fdc;
-    border-color: #5b5fdc;
+    background: var(--primary);
+    border-color: var(--primary);
 }
 
 .settings-info-row-group {
@@ -1339,21 +1348,18 @@ html body .text-muted {
     animation: settings-app-update-spin 0.9s linear infinite;
 }
 
-@media (prefers-reduced-motion: reduce) {
-    .settings-app-update-spin {
-        animation: none;
-    }
-}
-
 @keyframes settings-app-update-spin {
     to {
         transform: rotate(360deg);
     }
 }
 
-.settings-group .row {
-    margin-top: 0.25rem;
-}
+/* Removed: previously forced margin-top: 0.25rem on every .row inside a
+   settings panel (in practice only .settings-host-stats). That clobbered
+   Bootstrap's negative gutter compensation, so the row's own
+   `> * { padding-top: var(--bs-gutter-y) }` (16px from g-3) stacked on top of
+   the title's mb-3 and pushed the System tab's stat cards 32px below the
+   heading while every other tab sat at 16px. See .settings-host-stats. */
 
 .settings-group .ui-card {
     height: 100%;
@@ -1459,9 +1465,11 @@ html body .text-muted {
     font-weight: 600;
 }
 
-.settings-group>h2 {
-    margin-bottom: var(--space-5) !important;
-}
+/* Removed: previously forced margin-bottom: var(--space-5) (24px) on
+   direct-child <h2> titles (Integrations, System), while titles nested one
+   level deeper inside .settings-grid-item (General, Security) kept
+   Bootstrap's mb-3 (16px). Letting mb-3 apply everywhere keeps the
+   title-to-card gap consistent across all four tabs. */
 
 /* Settings form controls */
 .ui-card .form-control {
@@ -1478,10 +1486,172 @@ html body .text-muted {
     margin-bottom: var(--space-2);
 }
 
+/* Retention slider: native range semantics with a Fetchly-styled track. */
+.settings-slider-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-3);
+}
+
+.settings-slider-value {
+    flex: 0 0 auto;
+    min-width: 4.25rem;
+    padding: 0.2rem 0.5rem;
+    border: 1px solid color-mix(in srgb, var(--primary) 35%, var(--border));
+    border-radius: var(--radius-sm);
+    background: color-mix(in srgb, var(--primary) 12%, var(--surface));
+    color: var(--text);
+    font-size: 0.8rem;
+    font-variant-numeric: tabular-nums;
+    line-height: 1.2;
+    text-align: center;
+    white-space: nowrap;
+}
+
+.settings-range-control {
+    position: relative;
+}
+
+.settings-range {
+    width: 100%;
+    height: 2.75rem;
+    margin: var(--space-2) 0 0;
+    accent-color: var(--primary);
+    cursor: pointer;
+    position: relative;
+    z-index: 1;
+}
+
+.settings-range:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 3px;
+}
+
+.settings-range-ticks {
+    position: absolute;
+    inset: var(--space-2) 0 0;
+    display: grid;
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+    align-items: center;
+    padding-inline: 0.55rem;
+    pointer-events: none;
+    z-index: 2;
+}
+
+.settings-range-tick {
+    justify-self: start;
+    width: 1px;
+    height: 0.7rem;
+    background: color-mix(in srgb, var(--text-muted) 70%, transparent);
+}
+
+.settings-range-tick:nth-child(1) {
+    grid-column: 1;
+}
+
+.settings-range-tick:nth-child(2) {
+    grid-column: 2;
+}
+
+.settings-range-tick:nth-child(3) {
+    grid-column: 3;
+}
+
+.settings-range-tick:nth-child(4) {
+    grid-column: 4;
+}
+
+.settings-range-tick:nth-child(5) {
+    grid-column: 5;
+}
+
+.settings-range-tick:nth-child(6) {
+    grid-column: 6;
+}
+
+.settings-range-tick:nth-child(7) {
+    grid-column: 6;
+    justify-self: end;
+}
+
+.settings-range[data-active-index="0"]~.settings-range-ticks .settings-range-tick:nth-child(1),
+.settings-range[data-active-index="1"]~.settings-range-ticks .settings-range-tick:nth-child(2),
+.settings-range[data-active-index="2"]~.settings-range-ticks .settings-range-tick:nth-child(3),
+.settings-range[data-active-index="3"]~.settings-range-ticks .settings-range-tick:nth-child(4),
+.settings-range[data-active-index="4"]~.settings-range-ticks .settings-range-tick:nth-child(5),
+.settings-range[data-active-index="5"]~.settings-range-ticks .settings-range-tick:nth-child(6),
+.settings-range[data-active-index="6"]~.settings-range-ticks .settings-range-tick:nth-child(7) {
+    visibility: hidden;
+}
+
+.settings-range-labels {
+    display: grid;
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+    padding-inline: 0.55rem;
+    margin-top: -0.15rem;
+    color: var(--text-muted);
+    font-size: 0.75rem;
+    line-height: 1.2;
+    user-select: none;
+}
+
+.settings-range-labels span {
+    justify-self: start;
+}
+
+.settings-range-labels span:nth-child(1) {
+    grid-column: 1;
+}
+
+.settings-range-labels span:nth-child(2) {
+    grid-column: 2;
+}
+
+.settings-range-labels span:nth-child(3) {
+    grid-column: 3;
+}
+
+.settings-range-labels span:nth-child(4) {
+    grid-column: 4;
+}
+
+.settings-range-labels span:nth-child(5) {
+    grid-column: 5;
+}
+
+.settings-range-labels span:nth-child(6) {
+    grid-column: 6;
+}
+
+.settings-range-labels span:nth-child(7) {
+    grid-column: 6;
+    justify-self: end;
+    transform: translateX(50%);
+}
+
+.settings-range-labels span:nth-child(1) {
+    transform: translateX(-50%);
+}
+
+.settings-range-labels span:nth-child(n + 2):nth-child(-n + 6) {
+    transform: translateX(-50%);
+}
+
+.settings-danger-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--space-2);
+}
+
+.settings-danger-actions .btn {
+    width: 100%;
+}
+
 /* Focus state for accessibility + structure */
 .ui-card:focus-within {
-    border-color: var(--primary);
-    box-shadow: 0 0 0 1px color-mix(in srgb, var(--primary) 30%, transparent);
+    border-color: var(--focus-ring);
+    box-shadow: 0 0 0 1px var(--focus-ring);
 }
 
 .ui-card-header {
@@ -1566,8 +1736,456 @@ html body .text-muted {
     gap: var(--space-2);
 }
 
+/* ── Cookie tiles (Settings → Integrations) ────────────────────────────── */
+.cookie-tile-section {
+    border-top: none;
+    margin-top: 0;
+    padding-top: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-2);
+}
+
+.cookie-tile-header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-3);
+    border-radius: var(--radius-md);
+    border: 1px solid var(--border);
+    background: var(--surface-elevated);
+}
+
+.cookie-tile-logo {
+    flex: 0 0 auto;
+    width: 28px;
+    height: 28px;
+}
+
+.cookie-tile-name {
+    flex: 1 1 auto;
+    font-weight: 600;
+}
+
+.cookie-status-badge {
+    flex: 0 0 auto;
+}
+
+.cookie-tile-detail {
+    margin: 0;
+    min-height: 1.1em;
+}
+
+.cookie-tile-detail:empty {
+    display: none;
+}
+
+.cookie-tile-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-2);
+}
+
 #lalalStatusLine {
     text-align: right;
+}
+
+/* Cookie paste dialog (app/static/js/cookie-paste.js). All four providers use
+   this component; the data attribute supplies the brand accent while the
+   controls, layout and interaction remain identical. */
+.cookie-connect-modal {
+    --cookie-accent: var(--primary);
+    --cookie-on-accent: #ffffff;
+}
+
+.cookie-connect-modal[data-cookie-platform="youtube"] {
+    --cookie-accent: #dc002a;
+}
+
+.cookie-connect-modal[data-cookie-platform="tiktok"] {
+    --cookie-accent: #25f4ee;
+    --cookie-on-accent: #071018;
+}
+
+.cookie-connect-modal[data-cookie-platform="instagram"] {
+    --cookie-accent: #dc2743;
+}
+
+.cookie-connect-modal[data-cookie-platform="facebook"] {
+    --cookie-accent: #0866ff;
+}
+
+.cookie-connect-modal .modal-dialog {
+    max-width: 900px;
+}
+
+.cookie-connect-content {
+    position: relative;
+    overflow: hidden;
+    background: var(--surface-solid);
+    border-color: color-mix(in srgb, var(--cookie-accent) 22%, var(--border));
+    box-shadow: 0 24px 80px rgb(0 0 0 / 0.48);
+}
+
+.cookie-connect-content::before {
+    position: absolute;
+    z-index: 2;
+    top: 0;
+    right: 0;
+    left: 0;
+    height: 3px;
+    content: "";
+    background: linear-gradient(90deg,
+            transparent,
+            var(--cookie-accent) 22%,
+            color-mix(in srgb, var(--cookie-accent) 58%, white) 50%,
+            var(--cookie-accent) 78%,
+            transparent);
+}
+
+.cookie-connect-header {
+    align-items: center;
+    gap: var(--space-4);
+    padding: 1.25rem 1.5rem;
+    background:
+        radial-gradient(circle at 6% 12%,
+            color-mix(in srgb, var(--cookie-accent) 13%, transparent),
+            transparent 38%),
+        var(--surface-solid);
+}
+
+.cookie-connect-identity {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: var(--space-3);
+}
+
+.cookie-connect-platform {
+    width: 44px;
+    height: 44px;
+    margin: 0;
+    flex-basis: 44px;
+    box-shadow: 0 0 0 5px color-mix(in srgb, var(--cookie-accent) 11%, transparent);
+}
+
+.cookie-connect-platform .platform-pill__icon {
+    transform: scale(1.35);
+}
+
+.cookie-connect-heading {
+    min-width: 0;
+}
+
+.cookie-connect-eyebrow {
+    display: block;
+    margin-bottom: 0.15rem;
+    color: color-mix(in srgb, var(--cookie-accent) 68%, var(--text-strong));
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    line-height: 1.2;
+    text-transform: uppercase;
+}
+
+.cookie-connect-title {
+    color: var(--text-strong);
+    font-size: 1.3rem;
+    font-weight: 680;
+    letter-spacing: -0.015em;
+    line-height: 1.25;
+}
+
+.cookie-connect-subtitle {
+    margin: 0.2rem 0 0;
+    color: var(--text-hint);
+    font-size: 0.82rem;
+    line-height: 1.35;
+}
+
+.cookie-connect-header .cookie-connect-close {
+    width: 44px;
+    height: 44px;
+    flex: 0 0 auto;
+    margin: 0 !important;
+    padding: 0;
+    border-radius: var(--radius-sm);
+    background-position: center;
+    background-size: 12px;
+    transition: background-color 0.18s ease, opacity 0.18s ease;
+}
+
+.cookie-connect-header .cookie-connect-close:hover,
+.cookie-connect-header .cookie-connect-close:focus-visible {
+    background-color: color-mix(in srgb, var(--cookie-accent) 10%, transparent);
+    opacity: 1;
+}
+
+.cookie-connect-body {
+    padding: 1.25rem 1.5rem 1.5rem;
+    background: color-mix(in srgb, var(--surface-strong) 96%, var(--cookie-accent));
+}
+
+.cookie-connect-layout {
+    display: grid;
+    grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.05fr);
+    align-items: stretch;
+    gap: var(--space-4);
+}
+
+.cookie-connect-panel {
+    min-width: 0;
+    padding: var(--space-4);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    background: var(--surface-elevated);
+}
+
+.cookie-connect-paste-panel {
+    border-color: color-mix(in srgb, var(--cookie-accent) 20%, var(--border));
+    background: linear-gradient(145deg,
+            color-mix(in srgb, var(--cookie-accent) 5%, var(--surface-elevated)),
+            var(--surface-elevated) 52%);
+}
+
+.cookie-connect-panel-header {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-2);
+    margin-bottom: var(--space-3);
+}
+
+.cookie-connect-panel-icon {
+    display: inline-flex;
+    width: 32px;
+    height: 32px;
+    flex: 0 0 32px;
+    align-items: center;
+    justify-content: center;
+    border-radius: var(--radius-sm);
+    background: color-mix(in srgb, var(--cookie-accent) 13%, transparent);
+    color: color-mix(in srgb, var(--cookie-accent) 72%, var(--text-strong));
+    font-size: 18px;
+}
+
+.cookie-connect-panel-title {
+    display: block;
+    margin: 0;
+    color: var(--text-strong);
+    font-size: 0.9rem;
+    font-weight: 650;
+    line-height: 1.3;
+}
+
+.cookie-connect-panel-meta {
+    margin: 0.15rem 0 0;
+    color: var(--text-hint);
+    font-size: 0.72rem;
+    line-height: 1.35;
+}
+
+.cookie-paste-steps {
+    margin: 0;
+    padding: 0;
+    counter-reset: cookie-step;
+    display: flex;
+    flex-direction: column;
+    gap: 0.55rem;
+    list-style: none;
+    color: var(--text-hint);
+    font-size: 0.78rem;
+    line-height: 1.38;
+}
+
+.cookie-paste-steps li {
+    display: grid;
+    grid-template-columns: 24px minmax(0, 1fr);
+    align-items: start;
+    gap: var(--space-2);
+    counter-increment: cookie-step;
+}
+
+.cookie-paste-steps li::before {
+    display: inline-flex;
+    width: 22px;
+    height: 22px;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid color-mix(in srgb, var(--cookie-accent) 28%, var(--border));
+    border-radius: var(--radius-pill);
+    background: color-mix(in srgb, var(--cookie-accent) 9%, transparent);
+    color: color-mix(in srgb, var(--cookie-accent) 72%, var(--text-strong));
+    content: counter(cookie-step);
+    font-size: 0.68rem;
+    font-weight: 700;
+    line-height: 1;
+}
+
+.cookie-connect-formats {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-1);
+    margin-top: var(--space-2);
+}
+
+.cookie-connect-format {
+    padding: 0.2rem 0.45rem;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-pill);
+    background: rgb(255 255 255 / 0.025);
+    color: var(--text-hint);
+    font-size: 0.66rem;
+    font-weight: 600;
+    line-height: 1.2;
+}
+
+.cookie-paste-hint {
+    margin: var(--space-3) 0 0;
+    padding: 0.55rem 0.65rem;
+    border: 1px solid color-mix(in srgb, var(--warning) 18%, var(--border));
+    border-radius: var(--radius-sm);
+    background: color-mix(in srgb, var(--warning) 6%, transparent);
+    color: var(--text-hint);
+    font-size: 0.7rem;
+    line-height: 1.38;
+}
+
+.cookie-paste-input {
+    width: 100%;
+    height: auto;
+    min-height: 152px;
+    padding: 0.75rem;
+    resize: vertical;
+    background: color-mix(in srgb, var(--surface-strong) 95%, transparent);
+    font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+    font-size: 0.74rem;
+    line-height: 1.5;
+    word-break: break-all;
+}
+
+.cookie-paste-input:focus {
+    border-color: var(--cookie-accent);
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--cookie-accent) 42%, transparent);
+}
+
+.cookie-paste-error {
+    margin: var(--space-2) 0 0;
+    padding: 0.55rem 0.65rem;
+    border: 1px solid color-mix(in srgb, var(--danger) 36%, var(--border));
+    border-radius: var(--radius-sm);
+    background: color-mix(in srgb, var(--danger) 9%, transparent);
+    color: color-mix(in srgb, var(--danger) 70%, white);
+    font-size: 0.74rem;
+    line-height: 1.4;
+}
+
+.cookie-connect-footer {
+    justify-content: space-between;
+    gap: var(--space-4);
+    padding: 1rem 1.5rem;
+    background: color-mix(in srgb, var(--surface-elevated) 62%, var(--surface-solid));
+}
+
+.cookie-connect-privacy {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: var(--space-2);
+    color: var(--text-hint);
+    font-size: 0.72rem;
+}
+
+.cookie-connect-privacy .material-symbols-outlined {
+    color: color-mix(in srgb, var(--success) 74%, var(--text-strong));
+    font-size: 18px;
+}
+
+.cookie-connect-actions {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    gap: var(--space-2);
+}
+
+.cookie-connect-save {
+    min-width: 138px;
+    background: var(--cookie-accent);
+    border-color: var(--cookie-accent);
+    color: var(--cookie-on-accent);
+}
+
+.cookie-connect-save:hover,
+.cookie-connect-save:focus-visible {
+    background: color-mix(in srgb, var(--cookie-accent) 86%, white);
+    border-color: color-mix(in srgb, var(--cookie-accent) 86%, white);
+    color: var(--cookie-on-accent);
+}
+
+.cookie-connect-save:disabled {
+    background: color-mix(in srgb, var(--cookie-accent) 38%, var(--surface-elevated));
+    border-color: color-mix(in srgb, var(--cookie-accent) 28%, var(--border));
+    color: color-mix(in srgb, var(--cookie-on-accent) 62%, transparent);
+}
+
+.cookie-connect-save-icon {
+    font-size: 18px;
+}
+
+.cookie-connect-save-icon--busy {
+    animation: cookie-connect-spin 0.9s linear infinite;
+}
+
+@keyframes cookie-connect-spin {
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+@media (max-width: 767.98px) {
+    .cookie-connect-modal .modal-dialog {
+        margin: var(--space-2);
+    }
+
+    .cookie-connect-header,
+    .cookie-connect-body,
+    .cookie-connect-footer {
+        padding-right: var(--space-4);
+        padding-left: var(--space-4);
+    }
+
+    .cookie-connect-layout {
+        grid-template-columns: 1fr;
+    }
+
+    .cookie-connect-footer {
+        align-items: stretch;
+        flex-direction: column;
+    }
+
+    .cookie-connect-privacy {
+        justify-content: center;
+    }
+
+    .cookie-connect-actions {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1.35fr);
+        width: 100%;
+    }
+
+    .cookie-connect-actions .btn {
+        width: 100%;
+        min-width: 0;
+    }
+}
+
+@media (max-width: 399.98px) {
+    .cookie-connect-subtitle {
+        display: none;
+    }
+
+    .cookie-connect-panel {
+        padding: var(--space-3);
+    }
 }
 
 .lalal-status-email {
@@ -1604,59 +2222,24 @@ html body .text-muted {
     min-width: 0;
 }
 
-/* ─── Collapse when empty ───────────────────────────────────────────── */
-
-/* If container has no actual content → remove it visually */
-#videoPreviewGrid:empty {
-    display: none !important;
-}
-
-/* If JS keeps nodes but no data → also collapse */
-#videoPreviewGrid.is-empty {
-    display: none !important;
-}
-
-/* Prevent parent from reserving space */
+/* Visibility is controlled exclusively through Bootstrap's d-none utility. */
 #videoPreviewGrid.d-none {
     display: none !important;
     margin-top: 0 !important;
 }
 
-/* Extra safety: no phantom height */
-#videoPreviewGrid {
+/* ── Submit Form Card ────────────────────────────────────────────────────── */
+
+/* The identified submit card and its wrapper should shrink to their content. */
+#submitCard {
+    height: auto;
+    flex: 0 0 auto;
     min-height: 0;
 }
 
-/* When visible → restore spacing */
-#videoPreviewGrid:not(.d-none) {
-    margin-top: 1rem;
-}
-
-/* ── Submit Form Card ────────────────────────────────────────────────────── */
-
-/* Card containing the submit form should shrink to fit content */
-#submitCard {
-    height: auto !important;
-    flex: 0 0 auto !important;
-    min-height: 0 !important;
-}
-
-/* Inner wrapper div */
 #submitCard>div {
-    flex: 0 0 auto !important;
-    height: auto !important;
-}
-
-/* Fallback using :has() for broader support */
-.ui-card:has(#submitForm) {
-    height: auto !important;
-    flex: 0 0 auto !important;
-    min-height: 0 !important;
-}
-
-.ui-card:has(#submitForm)>div {
-    flex: 0 0 auto !important;
-    height: auto !important;
+    flex: 0 0 auto;
+    height: auto;
 }
 
 #submitCard {
@@ -2135,7 +2718,7 @@ td[data-label="Title"] {
 }
 
 .job-copy-url-btn:focus-visible {
-    outline: 2px solid color-mix(in srgb, var(--primary) 40%, transparent);
+    outline: 2px solid var(--focus-ring);
     outline-offset: 2px;
 }
 
@@ -2200,6 +2783,14 @@ td[data-label="Title"] {
     background: var(--surface-danger-row);
 }
 
+.table tbody tr.row-done>td:first-child {
+    box-shadow: inset 3px 0 0 var(--success);
+}
+
+.table tbody tr.row-error>td:first-child {
+    box-shadow: inset 3px 0 0 var(--danger);
+}
+
 /* Bootstrap's table-hover paints every cell on hover. Keep that state
    transparent so the row owns one continuous background without seams. */
 .jobs-table.table-hover>tbody>tr:hover>* {
@@ -2220,7 +2811,7 @@ td[data-label="Title"] {
     flex-direction: column;
     min-height: 0;
     overflow: hidden;
-    touch-action: pan-y;
+    touch-action: pan-y pinch-zoom;
     overscroll-behavior-x: none;
 }
 
@@ -2236,7 +2827,7 @@ td[data-label="Title"] {
     flex: 0 0 auto;
     min-height: auto;
     overflow: visible;
-    touch-action: pan-y;
+    touch-action: pan-y pinch-zoom;
     overscroll-behavior: auto;
     -webkit-overflow-scrolling: auto;
     /* Reset scrollbar properties */
@@ -2421,7 +3012,7 @@ td[data-label="Title"] {
     -webkit-tap-highlight-color: transparent;
 }
 
-.jobs-mobile-action[href^="/download/"] {
+.jobs-mobile-action--download {
     border-color: color-mix(in srgb, var(--primary) 48%, transparent);
     background:
         linear-gradient(180deg, rgba(129, 140, 248, 0.24), rgba(99, 102, 241, 0.09)),
@@ -2462,7 +3053,7 @@ td[data-label="Title"] {
 }
 
 .jobs-mobile-action:focus-visible {
-    outline: 2px solid var(--primary);
+    outline: 2px solid var(--focus-ring);
     outline-offset: 3px;
     filter: brightness(1.1);
     transform: translateY(-1px);
@@ -2580,7 +3171,7 @@ td[data-label="Title"] {
 }
 
 .job-item__body[data-action="open-detail"]:focus-visible {
-    outline: 2px solid color-mix(in srgb, var(--primary) 70%, transparent);
+    outline: 2px solid var(--focus-ring);
     outline-offset: 4px;
 }
 
@@ -2660,13 +3251,6 @@ td[data-label="Title"] {
     padding: 0;
 }
 
-.job-item__primary-action .jobs-mobile-action-group .jobs-mobile-action--menu {
-    flex: 0 0 32px;
-    width: 32px;
-    min-width: 32px;
-    max-width: 32px;
-}
-
 .job-item__details {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -2681,7 +3265,7 @@ td[data-label="Title"] {
     min-width: 0;
 }
 
-.job-item__detail:last-child {
+.job-item__detail:nth-child(odd):last-child {
     grid-column: 1 / -1;
 }
 
@@ -2689,8 +3273,7 @@ td[data-label="Title"] {
     color: color-mix(in srgb, var(--text-muted) 88%, white 12%);
     font-size: 0.75rem;
     font-weight: 650;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
+    letter-spacing: 0.02em;
 }
 
 .job-item__detail-value {
@@ -2706,6 +3289,29 @@ td[data-label="Title"] {
 .job-item.row-pending {
     position: relative;
     overflow: hidden;
+}
+
+.job-item.row-done,
+.job-item.row-error {
+    border-color: var(--border);
+}
+
+.job-item.row-done {
+    background:
+        linear-gradient(90deg, color-mix(in srgb, var(--success) 8%, var(--surface-elevated)), var(--surface-elevated) 52%),
+        var(--surface-elevated);
+    box-shadow:
+        inset 3px 0 0 var(--success),
+        0 14px 34px rgba(2, 6, 23, 0.16);
+}
+
+.job-item.row-error {
+    background:
+        linear-gradient(90deg, color-mix(in srgb, var(--danger) 8%, var(--surface-elevated)), var(--surface-elevated) 52%),
+        var(--surface-elevated);
+    box-shadow:
+        inset 3px 0 0 var(--danger),
+        0 14px 34px rgba(2, 6, 23, 0.16);
 }
 
 .job-item.row-pending::after {
@@ -2844,10 +3450,8 @@ td[data-label="Title"] {
     align-items: center;
     min-height: 28px;
     padding: 0.22rem 0.6rem;
-    border: 1px solid currentColor;
     border: 1px solid color-mix(in srgb, currentColor 32%, transparent);
     border-radius: 999px;
-    background: transparent;
     background: color-mix(in srgb, currentColor 12%, transparent);
     font-size: 0.78rem;
     line-height: 1.1;
@@ -3052,13 +3656,9 @@ td[data-label="Title"] {
     min-width: 72px;
 }
 
-/* Ensure dropdown menus can escape table overflow */
+/* Let Bootstrap/Popper provide fixed positioning and coordinates inline. */
 .action-cell-wrap .dropdown-menu {
-    position: fixed;
-    z-index: var(--z-dropdown);
-    /* Fallback in case JS positioning fails */
-    top: -9999px;
-    left: -9999px;
+    z-index: var(--z-popover);
 }
 
 /* ── Status ──────────────────────────────────────────────────────────────── */
@@ -3560,7 +4160,7 @@ td:last-child {
 }
 
 #trimWave ::part(cursor) {
-    background: #f59e0b !important;
+    background: var(--warning) !important;
     width: 2px !important;
     opacity: 0.9;
 }
@@ -3920,21 +4520,29 @@ td:last-child {
     .lalal-tile-header #lalalStatusBadge {
         max-width: none;
     }
+
+    .cookie-tile-actions {
+        flex-direction: column;
+    }
+
+    .cookie-tile-actions .btn {
+        width: 100%;
+    }
 }
 
-.toast-container {
+.fx-toast-container {
     position: fixed;
     top: calc(var(--nav-offset) + var(--space-2));
     right: 1rem;
     z-index: var(--z-toast);
     display: flex;
     flex-direction: column;
-    gap: 0.5rem;
+    gap: var(--space-1);
     pointer-events: none;
     max-width: 360px;
 }
 
-.toast {
+.fx-toast {
     display: flex;
     align-items: center;
     gap: 0.625rem;
@@ -3953,31 +4561,27 @@ td:last-child {
     transition: opacity 0.2s ease, transform 0.2s ease;
 }
 
-.toast[class*="toast--"] {
-    display: flex;
-}
-
-.toast--visible {
+.fx-toast--visible {
     opacity: 1;
     transform: translateX(0);
 }
 
-.toast--hiding {
+.fx-toast--hiding {
     opacity: 0;
     transform: translateX(100%);
 }
 
-.toast-icon {
+.fx-toast__icon {
     font-size: 1.25rem;
     flex-shrink: 0;
 }
 
-.toast-message {
+.fx-toast__message {
     flex: 1;
     min-width: 0;
 }
 
-.toast-close {
+.fx-toast__close {
     background: none;
     border: none;
     color: var(--text-muted);
@@ -3988,54 +4592,56 @@ td:last-child {
     cursor: pointer;
     opacity: 0.7;
     transition: opacity 0.15s;
-    min-width: 32px;
-    min-height: 32px;
+    min-width: 44px;
+    min-height: 44px;
     display: inline-flex;
     align-items: center;
     justify-content: center;
 }
 
-.toast-close:hover {
+.fx-toast__close:hover {
     opacity: 1;
 }
 
 /* Toast types */
-.toast--success {
+.fx-toast--success {
     border-left: 3px solid var(--success);
 }
 
-.toast--success .toast-icon {
+.fx-toast--success .fx-toast__icon {
     color: var(--success);
 }
 
-.toast--danger {
+.fx-toast--danger {
     border-left: 3px solid var(--danger);
 }
 
-.toast--danger .toast-icon {
+.fx-toast--danger .fx-toast__icon {
     color: var(--danger);
 }
 
-.toast--warning {
-    border-left: 3px solid #f59e0b;
+.fx-toast--warning {
+    border-left: 3px solid var(--warning);
 }
 
-.toast--warning .toast-icon {
-    color: #f59e0b;
+.fx-toast--warning .fx-toast__icon {
+    color: var(--warning);
 }
 
-.toast--info {
+.fx-toast--info {
     border-left: 3px solid var(--primary);
 }
 
-.toast--info .toast-icon {
+.fx-toast--info .fx-toast__icon {
     color: var(--primary);
 }
 
 @media (max-width: 576px) {
-    .toast-container {
-        left: 1rem;
-        right: 1rem;
+    .fx-toast-container {
+        left: 0;
+        right: 0;
+        width: min(calc(100% - 2rem), 360px);
+        margin-inline: auto;
     }
 
     #jobsCard {
@@ -4197,15 +4803,15 @@ td:last-child {
         order: 1;
     }
 
-    .toast {
+    .fx-toast {
         transform: translateY(-20px);
     }
 
-    .toast--visible {
+    .fx-toast--visible {
         transform: translateY(0);
     }
 
-    .toast--hiding {
+    .fx-toast--hiding {
         transform: translateY(-20px);
     }
 }
@@ -4338,7 +4944,6 @@ td:last-child {
     }
 
     .job-item__status .status-pill {
-        border-color: currentColor;
         border: 1px solid color-mix(in srgb, currentColor 32%, transparent);
         font-size: 0.75rem;
         padding: 0.25rem 0.55rem;
@@ -4476,8 +5081,8 @@ td:last-child {
         overflow: visible;
     }
 
-    /* toast backdrop-filter can trigger compositor bugs on older iPhones */
-    .toast {
+    /* Toast backdrop-filter can trigger compositor bugs on older iPhones. */
+    .fx-toast {
         backdrop-filter: none;
         -webkit-backdrop-filter: none;
     }
@@ -4561,7 +5166,8 @@ td:last-child {
     *::before,
     *::after {
         animation: none !important;
-        transition: none !important;
+        transition-duration: 0.01ms !important;
+        transition-delay: 0ms !important;
         scroll-behavior: auto !important;
     }
 }
@@ -4772,6 +5378,7 @@ td:last-child {
     border-radius: var(--radius-xl);
     box-shadow: 0 22px 60px rgba(0, 0, 0, 0.55);
     backdrop-filter: var(--blur-md);
+    -webkit-backdrop-filter: var(--blur-md);
 }
 
 .lost-kicker {
@@ -4841,12 +5448,165 @@ td:last-child {
     }
 }
 
-/* Motion is decorative here: hold every layer still when the visitor asks for
-   reduced motion. The parallax script checks the same query. */
-@media (prefers-reduced-motion: reduce) {
-
-    .lost-stars,
-    .lost-astronaut__body {
-        animation: none !important;
-    }
+/* ---------------------------------------------------------------------------
+   Settings -> System: Changelog card
+   Renders the sanitized HTML from app/utils/changelog.py. Ported from the
+   About-page changelog card in the wirebuddy sister project.
+   --------------------------------------------------------------------------- */
+.settings-changelog {
+    margin-top: var(--space-4);
 }
+
+.settings-changelog-card {
+    padding: 0;
+    /* The cap lives on .changelog-content below, not here: the scroll
+       container has to be the element that is height-limited, otherwise the
+       card clamps its own box while the body keeps growing out of it. */
+    min-height: 0;
+}
+
+.changelog-content {
+    /* Hard cap on the scroll container itself, so expanding "Previous
+       versions" grows the scrollbar instead of the tile. Deliberately not
+       tied to the card's current scroll position - a viewport-relative
+       budget measured from where the card happens to sit is unstable (it
+       changes the page height, which changes the position it was measured
+       from), so it either lets the tile overflow or collapses it to a
+       sliver. A fixed cap can do neither. */
+    max-height: min(60vh, 30rem);
+    max-height: min(60dvh, 30rem);
+    min-height: 0;
+    overflow-y: auto;
+    overscroll-behavior-y: contain;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(255, 255, 255, 0.2) transparent;
+    font-size: 0.875rem;
+    line-height: 1.5;
+    color: var(--text);
+}
+
+.changelog-content::-webkit-scrollbar {
+    width: 8px;
+}
+
+.changelog-content::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.changelog-content::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.2);
+    border-radius: 999px;
+}
+
+.changelog-content> :first-child {
+    margin-top: 0;
+}
+
+.changelog-content> :last-child {
+    margin-bottom: 0;
+}
+
+.changelog-content h2 {
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--text);
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 0.4rem;
+    margin: 1.25rem 0 0.75rem;
+}
+
+.changelog-content h2:first-child {
+    margin-top: 0;
+}
+
+.changelog-content ul {
+    padding-left: 1.25rem;
+    margin: 0 0 0.5rem;
+}
+
+.changelog-content li {
+    margin-bottom: 0.35rem;
+}
+
+.changelog-content li::marker {
+    color: var(--text-muted);
+}
+
+.changelog-content code {
+    font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+    font-size: 0.78rem;
+    padding: 0.08rem 0.4rem;
+    border-radius: var(--radius-sm);
+    border: 1px solid color-mix(in srgb, var(--primary) 28%, var(--border));
+    background: color-mix(in srgb, var(--primary) 12%, var(--surface));
+    color: var(--text);
+    white-space: nowrap;
+}
+
+.changelog-content a {
+    color: var(--primary);
+    text-decoration: underline;
+}
+
+.changelog-content details {
+    margin-top: 1rem;
+    border-top: 1px solid var(--border);
+    padding-top: 0.85rem;
+}
+
+.changelog-content summary {
+    cursor: pointer;
+    font-weight: 500;
+    color: var(--text-muted);
+}
+
+.changelog-content summary:hover {
+    color: var(--text);
+}
+
+.changelog-content details[open] summary {
+    margin-bottom: 0.85rem;
+}
+
+.changelog-details-content {
+    overflow: hidden;
+}
+
+/* Shown while "Enable Authentication" is switched on but no admin account
+   exists yet - the flag is only persisted once credentials are saved. */
+.settings-auth-callout {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.5rem;
+    margin-top: var(--space-3);
+    padding: 0.65rem 0.75rem;
+    border: 1px solid color-mix(in srgb, var(--warning) 45%, var(--border));
+    border-radius: var(--radius-sm);
+    background: color-mix(in srgb, var(--warning) 12%, var(--surface));
+    color: var(--text-hint);
+    font-size: 0.82rem;
+    line-height: 1.4;
+}
+
+.settings-auth-callout .icon-inline {
+    flex: 0 0 auto;
+    font-size: 1.1em;
+    color: var(--text-hint);
+}
+
+/* The host stats always render as a single row (col-md-3 on desktop, the
+   custom 4-column grid below 768px), so the vertical gutter is never used --
+   it only leaked out as padding-top on the first row of columns and added to
+   the panel title's mb-3. Dropping --bs-gutter-y (and the inherited negative
+   .stats-row margin) makes the title-to-card gap exactly 16px, matching the
+   General, Integrations and Security tabs. */
+.settings-host-stats {
+    margin-top: 0;
+    --bs-gutter-y: 0;
+}
+
+/* Removed: previously forced margin-bottom: var(--space-3) (12px) on the
+   System tab's first title, an extra override on top of the .settings-group>h2
+   rule above. With that rule gone, this override is no longer needed either -
+   Bootstrap's mb-3 (16px) now applies uniformly across all settings tabs. */

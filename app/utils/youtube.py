@@ -18,6 +18,7 @@ from time import monotonic
 from typing import Any, TypedDict
 from urllib.parse import parse_qs, urlparse, urlsplit, urlunsplit
 
+from .cookie_status import cookie_file_is_usable
 from .cookies import find_cookie_file
 
 logger = logging.getLogger(__name__)
@@ -82,7 +83,12 @@ def _is_youtube_host(host: str) -> bool:
 
 
 def _resolve_cookie_path(url: str) -> Path | None:
-    """Return the platform-specific cookie file for a URL, if it exists."""
+    """Return the platform's cookie file for a URL, if it exists and is usable.
+
+    An expired jar is skipped for the same reason as in app/worker.py: yt-dlp
+    would still send it, and a stale login is answered less kindly than an
+    anonymous probe.
+    """
     # Imported lazily: platform.py imports this module at import time, so a
     # module-level import here would close the cycle.
     from .platform import PLATFORM_COOKIE_FILENAMES, detect_platform
@@ -95,7 +101,10 @@ def _resolve_cookie_path(url: str) -> Path | None:
     if not filename:
         return None
 
-    return find_cookie_file(filename)
+    cookie_path = find_cookie_file(filename)
+    if cookie_path is None or not cookie_file_is_usable(cookie_path, platform):
+        return None
+    return cookie_path
 
 
 def _url_for_log(url: str) -> str:

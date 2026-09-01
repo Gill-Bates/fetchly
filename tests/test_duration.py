@@ -15,7 +15,6 @@ from unittest.mock import patch
 # Route imports load the session module, which intentionally requires these
 # values at application startup. Dummy values keep this unit test isolated.
 os.environ.setdefault("FETCHLY_SECRET_KEY", "test-duration-secret")
-os.environ.setdefault("FETCHLY_ADMIN_PASSWORD", "test-duration-password")
 
 from app import db
 from app.routes.trim import _duration_validation_error

@@ -401,6 +401,8 @@ function renderDesktopTitle(job) {
     td.dataset.label = "Title";
     td.className = "job-title-cell job-title-cell--wide col-title job-title-popover-target";
     td.dataset.popoverText = job?.video_meta_hover || job?.url || "";
+    td.tabIndex = 0;
+    td.setAttribute("aria-describedby", "titlePopover");
 
     const content = document.createElement("div");
     content.className = "job-title-cell__content";
@@ -685,6 +687,8 @@ function patchDesktopJobNode(row, job) {
     const titleCell = row.querySelector(".job-title-cell");
     if (titleCell instanceof HTMLElement) {
         titleCell.dataset.popoverText = job?.video_meta_hover || job?.url || "";
+        titleCell.tabIndex = 0;
+        titleCell.setAttribute("aria-describedby", "titlePopover");
         const titleText = titleCell.querySelector(".job-title-text");
         if (titleText instanceof HTMLElement) {
             titleText.textContent = getTitleText(job);

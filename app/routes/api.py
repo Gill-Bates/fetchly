@@ -30,12 +30,14 @@ from ..common.rate_limit import limiter
 from ..bpm_cluster import cluster_bpms
 from ..db import (
     TERMINAL_JOB_STATUSES,
+    delete_jobs_and_share_links,
     find_active_job_for_submission,
     get_job,
     get_settings,
     get_stats,
     insert_job,
     list_completed_bpms,
+    list_job_ids,
     paginate_jobs,
     set_settings,
     update_job,
@@ -43,7 +45,14 @@ from ..db import (
     utc_timestamp,
 )
 from ..utils.fs import get_data_dir, get_json_body
-from ..utils.cookies import default_cookie_file, find_cookie_file
+from ..utils.host_stats import get_host_stats
+from ..utils.housekeeping import cleanup_job_directory
+from ..utils.cookie_status import cookie_file_is_usable
+from ..utils.cookies import default_cookie_file
+from .cookies import list_cookie_statuses
+from ..utils.public_url import normalize_public_hostname
+from ..utils.changelog import get_changelog_html
+from ..utils.credentials import normalize_admin_username, validate_admin_password
 from ..session import delete_session_cookie, refresh_session_settings_cache
 from ..utils.template_filters import is_lalala_configured, public_settings
 from ..utils.platform import PLATFORM_COOKIE_FILENAMES, detect_platform, validate_media_url
@@ -64,6 +73,7 @@ from ..utils.youtube import (
 )
 from ..worker import cancel_job as cancel_worker_job, get_job_queue
 from .auth import (
+    has_admin_credentials,
     hash_password,
     require_html_auth,
     require_session,
@@ -93,19 +103,14 @@ _RETRYABLE_JOB_STATUSES = frozenset({"error", "cancelled"})
 
 # Module-level state
 _templates: "Jinja2Templates | None" = None
-_DEFAULT_USER: str = ""
 _stats_cache: dict[str, Any] = {"data": None, "ts": 0.0}
 _stats_locks: "WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock]" = WeakKeyDictionary()
 
 
-def init_api(
-    templates: "Jinja2Templates",
-    default_user: str,
-) -> None:
+def init_api(templates: "Jinja2Templates") -> None:
     """Initialize the API module with required dependencies."""
-    global _templates, _DEFAULT_USER
+    global _templates
     _templates = templates
-    _DEFAULT_USER = default_user
 
 
 
@@ -124,6 +129,12 @@ def _get_stats_lock() -> asyncio.Lock:
         lock = asyncio.Lock()
         _stats_locks[loop] = lock
     return lock
+
+
+def _remove_job_artifacts(job_ids: list[str]) -> list[str]:
+    """Remove only the job directories identified by the database snapshot."""
+    data_dir = get_data_dir()
+    return [job_id for job_id in job_ids if not cleanup_job_directory(job_id, data_dir)]
 
 
 def _clamp_int(value: Any, min_value: int, max_value: int, name: str) -> int:
@@ -230,6 +241,53 @@ async def api_reset_stats(request: Request, _user: str = Depends(require_session
     return {"ok": True, "message": "Statistics reset"}
 
 
+@router.post("/api/jobs/remove-all")
+@limiter.limit("2/minute")
+async def api_remove_all_jobs(request: Request, _user: str = Depends(require_session)) -> dict[str, Any]:
+    """Cancel and permanently remove every current job, artifact, and share link."""
+    _ = request
+
+    job_ids = await asyncio.to_thread(list_job_ids)
+    if not job_ids:
+        return {
+            "ok": True,
+            "message": "No jobs to remove",
+            "jobs_deleted": 0,
+            "files_deleted": 0,
+            "share_links_deleted": 0,
+        }
+
+    # A worker may still own a subprocess or be about to start one. Marking
+    # every snapshot job cancelled makes its next cancellation check stop it;
+    # subsequent database updates become harmless no-ops after row removal.
+    for job_id in job_ids:
+        cancel_worker_job(job_id)
+
+    failed_cleanup = await asyncio.to_thread(_remove_job_artifacts, job_ids)
+    if failed_cleanup:
+        logger.error("Refusing to remove jobs after %d artifact cleanup failure(s)", len(failed_cleanup))
+        raise HTTPException(
+            status_code=500,
+            detail="Could not remove every job file; no jobs or shared links were deleted",
+        )
+
+    async with _get_stats_lock():
+        jobs_deleted, share_links_deleted = await asyncio.to_thread(
+            delete_jobs_and_share_links,
+            job_ids,
+        )
+        _stats_cache["data"] = None
+        _stats_cache["ts"] = 0.0
+
+    return {
+        "ok": True,
+        "message": f"Removed {jobs_deleted} job(s)",
+        "jobs_deleted": jobs_deleted,
+        "files_deleted": len(job_ids),
+        "share_links_deleted": share_links_deleted,
+    }
+
+
 @router.get("/", response_class=HTMLResponse)
 async def index(request: Request) -> Response:
     """Dashboard home page."""
@@ -250,6 +308,7 @@ async def index(request: Request) -> Response:
         "stats": stats,
         "lalal_enabled": lalal_enabled,
         "lalal_duration_guard": lalal_duration_guard,
+        "auth_enabled": bool(settings.get("enable_authentication", False)),
         "csrf_token": getattr(request.state, "csrf_token", ""),
     })
 
@@ -270,6 +329,11 @@ async def settings_page(request: Request) -> Response:
     js_runtime_version = await asyncio.to_thread(get_js_runtime_version)
     ffmpeg_version = await asyncio.to_thread(get_ffmpeg_version)
     wavesurfer_version = get_wavesurfer_version()
+    changelog_html = await asyncio.to_thread(get_changelog_html)
+    # Reads the internal settings itself - the page's own snapshot deliberately
+    # excludes admin_password_hash.
+    credentials_present = await asyncio.to_thread(has_admin_credentials)
+    cookie_statuses = [status.model_dump() for status in await list_cookie_statuses()]
     return templates.TemplateResponse(
         request=request,
         name="settings.html",
@@ -283,6 +347,11 @@ async def settings_page(request: Request) -> Response:
             "js_runtime_version": js_runtime_version,
             "ffmpeg_version": ffmpeg_version,
             "wavesurfer_version": wavesurfer_version,
+            "changelog_html": changelog_html,
+            "admin_username": str(settings.get("admin_username", "") or ""),
+            "has_admin_credentials": credentials_present,
+            "auth_enabled": bool(settings.get("enable_authentication", False)),
+            "cookie_statuses": cookie_statuses,
             "csrf_token": getattr(request.state, "csrf_token", ""),
         },
     )
@@ -309,6 +378,20 @@ async def api_updates(request: Request, _user: str = Depends(require_user)) -> d
         "wavesurfer": get_wavesurfer_version(),
     }
     return await get_update_status(current)
+
+
+@router.get("/api/system/host")
+@limiter.limit("60/minute")
+async def api_system_host(request: Request, _user: str = Depends(require_user)) -> dict[str, Any]:
+    """Return a snapshot of host resource usage for the Settings -> System panel.
+
+    Informational only: disk space for the download volume, host CPU and memory
+    load, and host uptime. Each field is null when the host does not expose it.
+    CPU is measured as the delta since the previous call (with a short inline
+    sample the first time), so polling this every few seconds gives live load.
+    """
+    _ = request
+    return await get_host_stats(get_data_dir())
 
 
 @router.get("/api/jobs")
@@ -531,11 +614,18 @@ def _thumb_cache_key(url: str) -> str:
 
 
 def _cookies_args_for_url(url: str) -> list[str]:
+    """Cookie arguments for a thumbnail fetch, on the same terms as a download.
+
+    Existence alone is not enough: an expired or login-free jar is still sent
+    by yt-dlp (it loads with ignore_expires=True) and a stale session is
+    answered less kindly than an anonymous request. app/worker.py and
+    app/utils/youtube.py gate their yt-dlp calls the same way.
+    """
     platform = detect_platform(url)
     if not platform:
         return []
     cookie_path = _resolve_cookie_file(platform)
-    if cookie_path and cookie_path.is_file():
+    if cookie_path and cookie_file_is_usable(cookie_path, platform):
         return ["--cookies", str(cookie_path)]
     return []
 
@@ -545,7 +635,7 @@ def _resolve_cookie_file(platform: str) -> Path | None:
     if not filename:
         return None
 
-    return find_cookie_file(filename) or default_cookie_file(filename)
+    return default_cookie_file(filename)
 
 
 def _cookie_hint_for_url(url: str) -> str | None:
@@ -863,10 +953,10 @@ async def api_set_settings(
     payload = await get_json_body(request)
 
     settings_to_update: dict[str, Any] = {}
-    password_changed = False
+    credentials_changed = False
 
     if "retention_days" in payload:
-        settings_to_update["retention_days"] = _clamp_int(payload["retention_days"], 1, 365, "retention_days")
+        settings_to_update["retention_days"] = _clamp_int(payload["retention_days"], 0, 365, "retention_days")
 
     if "download_concurrent_fragments" in payload:
         settings_to_update["download_concurrent_fragments"] = _clamp_int(
@@ -878,50 +968,87 @@ async def api_set_settings(
             payload["share_link_max_uses"], 0, 10000, "share_link_max_uses"
         )
 
+    if "public_hostname" in payload:
+        try:
+            settings_to_update["public_hostname"] = normalize_public_hostname(
+                str(payload["public_hostname"] or "")
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"Public hostname: {exc}") from exc
+
     if "download_mp4_preset" in payload:
         enabled = _parse_bool(payload["download_mp4_preset"], "download_mp4_preset")
         settings_to_update["download_mp4_preset"] = "true" if enabled else "false"
-
-    if "enable_authentication" in payload:
-        enabled = _parse_bool(payload["enable_authentication"], "enable_authentication")
-        settings_to_update["enable_authentication"] = "true" if enabled else "false"
 
     if "lalalaai_duration_guard" in payload:
         enabled = _parse_bool(payload["lalalaai_duration_guard"], "lalalaai_duration_guard")
         settings_to_update["lalalaai_duration_guard"] = "true" if enabled else "false"
 
+    want_authentication: bool | None = None
+    if "enable_authentication" in payload:
+        want_authentication = _parse_bool(payload["enable_authentication"], "enable_authentication")
+
     try:
-        if "admin_password" in payload and payload["admin_password"]:
-            new_password = str(payload["admin_password"]).strip()
-            if len(new_password) < 8:
-                raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
+        current_settings = await asyncio.to_thread(get_settings, include_internal=True)
+        auth_was_enabled = bool(current_settings.get("enable_authentication", False))
 
-            current_settings = await asyncio.to_thread(get_settings, include_internal=True)
-            current_session_version = int(current_settings.get("session_version", 0) or 0)
+        # Credentials are always set as a pair: the PBKDF2 salt is derived from
+        # the username, so a rename has to re-hash, which needs the plaintext.
+        if payload.get("admin_password") or payload.get("admin_username"):
+            try:
+                new_username = normalize_admin_username(str(payload.get("admin_username") or ""))
+                new_password = validate_admin_password(str(payload.get("admin_password") or ""))
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            if not new_username:
+                raise HTTPException(status_code=400, detail="Username is required")
 
+            settings_to_update["admin_username"] = new_username
             settings_to_update["admin_password_hash"] = await asyncio.to_thread(
                 hash_password,
-                _DEFAULT_USER,
+                new_username,
                 new_password,
             )
-            settings_to_update["session_version"] = current_session_version + 1
-            password_changed = True
+            # Invalidate every existing session: the credential they were
+            # issued against no longer exists.
+            settings_to_update["session_version"] = (
+                int(current_settings.get("session_version", 0) or 0) + 1
+            )
+            credentials_changed = True
+
+        if want_authentication is not None:
+            # Turning authentication on without an account would brick the
+            # instance: nobody could log in and every page would redirect to a
+            # login that rejects everything.
+            if want_authentication and not credentials_changed and not has_admin_credentials(current_settings):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Set a username and password before enabling authentication",
+                )
+            settings_to_update["enable_authentication"] = "true" if want_authentication else "false"
 
         if settings_to_update:
             await asyncio.to_thread(set_settings, settings_to_update, allow_internal=True)
             await asyncio.to_thread(refresh_session_settings_cache)
 
-        if password_changed:
+        auth_is_enabled = want_authentication if want_authentication is not None else auth_was_enabled
+        # Only bounce to the login page when there is actually a login to
+        # perform. Changing credentials while authentication is off would
+        # otherwise redirect to /login, which immediately sends the user back.
+        if auth_is_enabled and (credentials_changed or not auth_was_enabled):
+            message = (
+                "Authentication enabled. Please sign in."
+                if not auth_was_enabled
+                else "Credentials updated. Please log in again."
+            )
             response = JSONResponse(
-                content={
-                    "ok": True,
-                    "message": "Password updated. Please log in again.",
-                    "redirect": "/login",
-                }
+                content={"ok": True, "message": message, "redirect": "/login"}
             )
             delete_session_cookie(response, request)
             return response
 
+        if credentials_changed:
+            return {"ok": True, "message": "Credentials updated"}
         return {"ok": True, "message": "Settings updated"}
     except HTTPException:
         raise

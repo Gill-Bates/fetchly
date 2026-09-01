@@ -1,4 +1,4 @@
-{% macro navbar(show_back=False, show_settings=True, show_logout=True, csrf_token='') %}
+{% macro navbar(show_back=False, show_settings=True, show_logout=False, csrf_token='') %}
 <nav class="navbar navbar-expand-lg navbar-dark top-navbar fixed-top">
     <div class="app-shell-container top-navbar__inner">
         <a class="navbar-brand" href="/" aria-label="fetchly">
@@ -6,25 +6,23 @@
         </a>
         <div class="ms-auto d-flex align-items-center gap-2">
             {% if show_back %}
-            <a href="/" class="btn btn-sm btn-outline-secondary btn-icon"
-               title="Back to Dashboard" aria-label="Back to Dashboard">
-                <span class="material-symbols-outlined">arrow_back</span>
+            <a href="/" class="btn btn-sm btn-outline-secondary btn-icon" title="Back to Dashboard"
+                aria-label="Back to Dashboard">
+                <span class="material-symbols-outlined" aria-hidden="true">arrow_back</span>
             </a>
             {% endif %}
 
             {% if show_settings %}
-            <a id="settingsBtn" href="/settings"
-               class="btn btn-sm btn-outline-secondary btn-icon"
-               title="Settings" aria-label="Settings">
-                <span class="material-symbols-outlined">settings</span>
+            <a id="settingsBtn" href="/settings" class="btn btn-sm btn-outline-secondary btn-icon" title="Settings"
+                aria-label="Settings">
+                <span class="material-symbols-outlined" aria-hidden="true">settings</span>
             </a>
             {% endif %}
 
             {% if show_logout %}
             <form class="d-inline m-0" action="/logout" method="post">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token | default('') | e }}">
-                <button id="logoutBtn" type="submit"
-                        class="btn btn-sm btn-outline-secondary">
+                <button id="logoutBtn" type="submit" class="btn btn-sm btn-outline-secondary">
                     Logout
                 </button>
             </form>

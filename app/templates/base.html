@@ -14,9 +14,11 @@
     {% block head_meta %}{% endblock %}
     <title>{% block title %}fetchly - next-gen Video Downloader{% endblock %}</title>
     {% block head_preconnect %}{% endblock %}
+    <link rel="preload" href="/static/fonts/roboto-flex.woff2" as="font" type="font/woff2" crossorigin>
+    <link rel="preload" href="/static/fonts/material-symbols-outlined.woff2" as="font" type="font/woff2" crossorigin>
     <link href="/static/vendor/bootstrap.min.css?v=20260428b" rel="stylesheet">
     {% block app_styles %}
-    <link href="/static/style.css?v=20260901a" rel="stylesheet">
+    <link href="/static/style.css?v=20260901m" rel="stylesheet">
     {% endblock %}
     {% block head_extra %}{% endblock %}
 </head>
@@ -34,7 +36,7 @@
         </main>
         {% endblock %}
 
-        <div id="titlePopover" aria-hidden="true"></div>
+        <div id="titlePopover" role="tooltip" aria-hidden="true"></div>
 
         {% block footer %}
         <footer class="wb-footer">

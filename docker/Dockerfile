@@ -264,11 +264,11 @@ ARG WAVESURFER_VERSION=7.12.11
 ARG WAVESURFER_ESM_SHA256=49fc9b562f0c0322882aba6fdf354d54e4c81470611a50771bbd1fd398631e13
 ARG WAVESURFER_REGIONS_SHA256=14780f7d3f7cabfc4fb9a37ddf81c4fcc1045cfdb0b93c4a8c4c6acd52d03a7f
 
-# Install builder dependencies without recommends.
-# git is required: requirements.txt pulls madmom via git+https.
+# Install builder dependencies without recommends. No git here: every
+# requirement now resolves from an index, and the essentia stage above brings
+# its own for the one source checkout this image still does.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
-    git \
     ca-certificates \
     build-essential \
     unzip \
@@ -488,16 +488,15 @@ RUN python -m pip check && \
     deno --version | head -n 1 && \
     [[ "$(command -v ffmpeg)" == "/usr/local/bin/ffmpeg" ]]
 
-# madmom and beat-this are the two dependencies the application itself treats
-# as optional: app/bpm.py falls back to an Essentia-only result and
-# app/bpm_beat_this.py disables DBN postprocessing when they cannot be
-# imported. Failing the build over them would be stricter than the runtime
-# contract, so their status is recorded in the build log instead - a WARNING
+# beat-this is the one dependency the application itself treats as optional:
+# app/bpm.py falls back to an Essentia-only result when it cannot be
+# imported. Failing the build over it would be stricter than the runtime
+# contract, so its status is recorded in the build log instead - a WARNING
 # here means the image ships with degraded BPM accuracy.
 RUN python <<'PYCHECK'
 import importlib
 
-for name in ("madmom", "beat_this.inference"):
+for name in ("beat_this.inference",):
     try:
         importlib.import_module(name)
     except Exception as exc:
@@ -517,14 +516,26 @@ RUN useradd -u 1000 -m --no-log-init appuser
 # Jinja templates, or the JavaScript served to browsers. Only /app/data below
 # is made writable. PYTHONDONTWRITEBYTECODE=1 keeps Python from wanting to
 # create __pycache__ directories next to the sources.
+#
+# COPY preserves the source mode bits from the build context, so a checkout
+# where a single file ended up mode 0600 (a stray editor/tool umask) would
+# ship an image whose worker cannot import that module once the entrypoint
+# drops to appuser - "PermissionError: [Errno 13]" at boot. The chmod below
+# normalizes the tree to "readable by all, traversable where already
+# executable" (a+rX), which is exactly the read-only contract described
+# above, without touching ownership or the root-owned protection.
 COPY app ./app
 COPY middleware ./middleware
+RUN chmod -R a+rX ./app ./middleware
 # BUILD_INFO is gitignored and only exists when the release recipe in
 # setup.conf writes it (git SHA) right before this build. A wildcard COPY
 # tolerates its absence in a plain "docker build ." from a fresh checkout -
 # app/utils/version.py already falls back to "dev" when the file is missing,
 # so this simply lets the build honour that same fallback instead of failing.
 COPY VERSION BUILD_INFO* ./
+# Rendered into the Settings -> System "Changelog" card at runtime by
+# app/utils/changelog.py.
+COPY CHANGELOG.md ./
 COPY --from=builder /build/static/vendor/wavesurfer ./app/static/vendor/wavesurfer
 COPY --chmod=755 docker/entrypoint.sh /entrypoint.sh
 
@@ -539,7 +550,7 @@ RUN bash -n /entrypoint.sh && \
 # Prepare the image-baked default data directory. If a volume or bind mount
 # is attached at /app/data instead, its ownership is handled separately by
 # the entrypoint's bootstrap step at container start.
-RUN mkdir -p /app/data/downloads && \
+RUN mkdir -p /app/data/downloads /app/data/cookies && \
     chown -R appuser:appuser /app/data
 
 # WORKERS=1: the job queue and the SSE status broadcast (app/main.py) live in

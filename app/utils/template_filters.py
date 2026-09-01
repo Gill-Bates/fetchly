@@ -107,6 +107,7 @@ _PUBLIC_SETTING_KEYS: frozenset[str] = frozenset({
     "download_concurrent_fragments",
     "download_mp4_preset",
     "share_link_max_uses",
+    "public_hostname",
     "lalalaai_email",
     "lalalaai_auth_checked_at",
     "lalalaai_auth_is_valid",

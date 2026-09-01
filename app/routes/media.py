@@ -6,11 +6,12 @@
 
 """Media routes for downloads, thumbnails, and job pages.
 
-Single-identity application: there is exactly one credential (``_DEFAULT_USER``
-plus the ``admin_password_hash`` setting in app/routes/auth.py) and the ``jobs``
-table has no owner column. Every job therefore belongs to the only account that
-can authenticate, and ``current_user(request)`` is the complete authorization
-check for these routes - there is no second principal to isolate a job from.
+Single-identity application: there is at most one credential (the
+``admin_username`` / ``admin_password_hash`` settings, see app/routes/auth.py)
+and the ``jobs`` table has no owner column. Every job therefore belongs to the
+only account that can authenticate, and ``current_user(request)`` is the
+complete authorization check for these routes - there is no second principal to
+isolate a job from.
 Introducing additional accounts would require an owner column plus per-job
 filtering here before that stays true.
 """
@@ -32,7 +33,7 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 
 from ..bpm_naming import tagged_download_name
 from ..common.rate_limit import limiter
-from ..db import DOWNLOADABLE_STATUSES, get_job
+from ..db import DOWNLOADABLE_STATUSES, get_job, get_settings
 from ..utils.fs import AUDIO_SOURCE_EXTENSIONS, path_is_file
 from ..governor import governor
 from .api import job_to_dict
@@ -374,19 +375,21 @@ async def job_page(request: Request, job_id: uuid.UUID):
 
     job_id_str = str(job_id)
     job = await asyncio.to_thread(get_job, job_id_str)
+    settings = await asyncio.to_thread(get_settings)
+    auth_enabled = bool(settings.get("enable_authentication", False))
     csrf_token = getattr(request.state, "csrf_token", "")
     if not job:
         return templates.TemplateResponse(
             request=request,
             name="job.html",
-            context={"job": None, "job_id": job_id_str, "csrf_token": csrf_token},
+            context={"job": None, "job_id": job_id_str, "auth_enabled": auth_enabled, "csrf_token": csrf_token},
             status_code=404,
         )
 
     return templates.TemplateResponse(
         request=request,
         name="job.html",
-        context={"job": job_to_dict(job), "csrf_token": csrf_token},
+        context={"job": job_to_dict(job), "auth_enabled": auth_enabled, "csrf_token": csrf_token},
     )
 
 

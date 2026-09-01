@@ -80,14 +80,12 @@ services:
       - "8000:8000"
     environment:
       FETCHLY_SECRET_KEY: ${FETCHLY_SECRET_KEY:?generate with: openssl rand -base64 32}
-      FETCHLY_ADMIN_PASSWORD: ${FETCHLY_ADMIN_PASSWORD:?the admin login password}
     volumes:
       - ./data:/app/data
 ```
 
 ```bash
 export FETCHLY_SECRET_KEY="$(openssl rand -base64 32)"
-export FETCHLY_ADMIN_PASSWORD="change-me"
 docker compose up -d
 ```
 
@@ -99,12 +97,12 @@ A fuller compose file with logging, timezone, and reverse-proxy notes lives in [
 docker run --rm \
   -p 8000:8000 \
   -e FETCHLY_SECRET_KEY="$(openssl rand -base64 32)" \
-  -e FETCHLY_ADMIN_PASSWORD="change-me" \
   -v "$PWD/data:/app/data" \
   giiibates/fetchly:latest
 ```
 
-Then open <http://127.0.0.1:8000> and sign in as `admin`.
+Then open <http://127.0.0.1:8000>. Authentication is off on a fresh install — create an
+admin account under **Settings → Security** to require a login.
 
 To build the image yourself: `docker build -f docker/Dockerfile -t fetchly .`
 
@@ -115,7 +113,6 @@ Requires Linux, Python 3.13, and `ffmpeg`, `yt-dlp`, `deno` on `PATH`.
 ```bash
 pip install -r requirements.txt && pip install yt-dlp yt-dlp-ejs
 export FETCHLY_SECRET_KEY="$(openssl rand -base64 32)"
-export FETCHLY_ADMIN_PASSWORD="change-me"
 python run.py
 ```
 
@@ -126,15 +123,18 @@ Everything is set through environment variables (with Compose, put them in an `.
 | Variable | Default | Description |
 | --- | --- | --- |
 | `FETCHLY_SECRET_KEY` | — | **Required.** Signs session cookies. Generate with `openssl rand -base64 32`; the app refuses to start without it. |
-| `FETCHLY_ADMIN_PASSWORD` | — | **Required.** Password for the admin login. |
-| `FETCHLY_ADMIN_USER` | `admin` | Admin login username. |
 | `FETCHLY_BEHIND_HTTPS` | `0` | Set to `1` when serving over HTTPS (e.g. behind a reverse proxy) so session cookies are marked `Secure`. |
-| `FETCHLY_COOKIES_DIR` | `data/` | Directory scanned for a `cookies.txt` that yt-dlp uses for age- or login-gated content. |
 | `TZ` | `Etc/UTC` | Container timezone, used for timestamps in the UI and logs. |
 | `LOG_LEVEL` | `info` | One of `debug`, `info`, `warning`, `error`. |
 | `PORT` / `HOST` | `8000` / `0.0.0.0` | Bind address for the standalone server (`python run.py`). |
 
+**Authentication** is off by default and there is no built-in account. Create an admin
+username and password under **Settings → Security**; saving them switches the login on.
+Credentials live in the database only — no environment variable can set or override them.
+
 **Lalal.ai** stem separation is enabled by entering your Lalal.ai **activation key** under **Settings** in the app — no environment variable required.
+
+**Cookies** for age- or login-gated YouTube, TikTok, Instagram and Facebook content are uploaded per platform under **Settings → Integrations** (Netscape format, exported from your browser). They are stored on the data volume at `data/cookies/` and checked for validity on upload.
 
 ### Reverse proxy
 

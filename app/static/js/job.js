@@ -36,12 +36,20 @@ function updateStatus(payload) {
 }
 
 function updateProgress(payload) {
+    // Derived from the current payload every time, not only cleared on a
+    // terminal status: a status change (e.g. downloading -> analysis) that
+    // carries no progress/eta must not leave the previous phase's progress
+    // bar and ETA on screen.
     const pct = toProgressPercent(payload.progress);
-    if (pct !== null) {
-        progressRow.classList.remove("d-none");
-        progressLabel.classList.remove("d-none");
+    const hasProgress = pct !== null;
+    progressRow.classList.toggle("d-none", !hasProgress);
+    progressLabel.classList.toggle("d-none", !hasProgress);
+    if (hasProgress) {
         progressBar.style.width = `${pct}%`;
         progressBar.setAttribute("aria-valuenow", String(pct));
+    } else {
+        progressBar.style.width = "0%";
+        progressBar.setAttribute("aria-valuenow", "0");
     }
 
     if (payload.eta_seconds != null) {
@@ -49,6 +57,8 @@ function updateProgress(payload) {
         etaText.textContent = seconds > 60
             ? `~${Math.round(seconds / 60)} min remaining`
             : `~${seconds}s remaining`;
+    } else {
+        etaText.textContent = "";
     }
 }
 
@@ -71,13 +81,17 @@ function applyPayload(payload) {
 
     updateProgress(payload);
 
+    // Downloadable is not the same as terminal (e.g. "analysis" is
+    // downloadable while BPM analysis is still pending), so the link must be
+    // toggled on every status update, not only once the job reaches a
+    // terminal state.
+    if (payload.status) {
+        linkEl.classList.toggle("d-none", !DOWNLOADABLE_STATUSES.has(payload.status));
+    }
+
     if (payload.status && TERMINAL_STATUSES.has(payload.status)) {
         shouldReconnect = false;
         stream?.close();
-        etaText.textContent = "";
-        progressRow.classList.add("d-none");
-        progressLabel.classList.add("d-none");
-        linkEl.classList.toggle("d-none", !DOWNLOADABLE_STATUSES.has(payload.status));
     }
 }
 
@@ -94,8 +108,12 @@ function handleMessage(event) {
         return;
     }
     if (payload.type === "authentication_required") {
+        // The session is gone server-side (expired or invalidated); stop
+        // reconnecting and close the stream before navigating so a delayed
+        // error/pageshow event cannot open a new one.
         shouldReconnect = false;
         stream?.close();
+        window.location.replace("/login");
         return;
     }
 

@@ -6,14 +6,17 @@
 
 from __future__ import annotations
 
-"""BPM detection using beat_this with optional DBN postprocessing.
+"""BPM detection using beat_this.
 
-beat_this is a state-of-the-art beat tracker from CPJKU/beat_this that
-provides accurate beat and downbeat detection. BPM is derived from the
-median inter-beat interval.
+beat_this is a state-of-the-art beat tracker from CPJKU/beat_this. BPM is
+derived from the median inter-beat interval.
 
-When DBN postprocessing is enabled (requires madmom), the model uses a
-Dynamic Bayesian Network to smooth beat predictions.
+beat_this can hand its framewise predictions to madmom's DBN instead of its
+own peak picker. That is deliberately not used here. The DBN is a downbeat
+and meter tracker - this module discards the downbeats - and it feeds a BPM
+that is a *median* inter-beat interval, already robust against the jitter the
+DBN smooths. In exchange it cost a git+https dependency on a library with no
+release since 2018, compiled from source at image build time.
 """
 
 import logging
@@ -33,7 +36,6 @@ logger = logging.getLogger(__name__)
 # Cache the model to avoid reloading on every call
 _model_lock = threading.RLock()
 _model_instance: "File2Beats | None" = None
-_DBN_DEFAULT_ENABLED: Final[bool] = True
 
 # Minimum number of beats required for reliable BPM calculation
 _MIN_BEATS_FOR_BPM: Final[int] = 4
@@ -47,20 +49,6 @@ class BeatThisResult(NamedTuple):
     num_beats: int
 
 
-def _dbn_enabled() -> bool:
-    """Return whether DBN postprocessing can be enabled in this runtime."""
-    if not _DBN_DEFAULT_ENABLED:
-        return False
-
-    try:
-        import madmom  # noqa: F401
-    except ImportError:
-        logger.info("madmom not available, disabling beat_this DBN postprocessing")
-        return False
-
-    return True
-
-
 def _get_model() -> "File2Beats":
     """Return the cached File2Beats model instance (thread-safe)."""
     global _model_instance
@@ -72,18 +60,13 @@ def _get_model() -> "File2Beats":
         # Lazy import to avoid loading heavy libraries at module level
         from beat_this.inference import File2Beats
 
-        use_dbn = _dbn_enabled()
-
-        logger.info(
-            "Loading beat_this model (dbn=%s)...",
-            use_dbn,
-        )
+        logger.info("Loading beat_this model...")
 
         # Use CPU by default for compatibility; GPU detection could be added
         _model_instance = File2Beats(
             checkpoint_path="final0",
             device="cpu",
-            dbn=use_dbn,
+            dbn=False,
         )
 
         logger.info("beat_this model loaded successfully")
@@ -131,9 +114,6 @@ def _bpm_from_beats(beats: np.ndarray) -> tuple[float, float]:
 
 def extract_bpm_beat_this(audio_path: Path) -> BeatThisResult:
     """Extract BPM using beat_this.
-
-    DBN postprocessing is used when madmom is available; otherwise raw beat
-    predictions are used directly.
 
     Args:
         audio_path: Path to audio file (any format supported by torchaudio/ffmpeg).

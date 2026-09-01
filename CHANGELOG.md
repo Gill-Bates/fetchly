@@ -1,3 +1,20 @@
+## [1.1.0] - 2026-09-01
+
+- ``New`` Create and manage the admin account in Settings → Security, then enable login when needed; authentication is off by default.
+- ``New`` Configure a public hostname or IP for HTTPS share links, with detection from the current browser address.
+- ``New`` Keep job files indefinitely (the new default) or for up to one year, and permanently remove all jobs and their share links from Settings.
+- ``New`` View download-volume space, CPU, memory, uptime, and current or previous release notes in Settings → System.
+- ``New`` Connect YouTube, TikTok, Instagram and Facebook cookies from Settings → Integrations by pasting them straight from the browser's dev tools; each tile reports how long the stored cookies stay valid.
+- ``Fix`` BPM detection no longer depends on madmom: its beat-smoothing step tracked downbeats fetchly discards and changed nothing about the median-interval tempo, while costing an unpinned source dependency last released in 2018.
+- ``Fix`` Job cancellation, disabling authentication, resetting statistics, and removing all jobs now use consistent in-app confirmation dialogs instead of browser popups.
+- ``Fix`` Platform cookie files are managed entirely under Settings → Integrations and stored in their own `data/cookies/` folder, created automatically on first start; the `FETCHLY_COOKIES_DIR` variable and the top-level data-directory fallback are gone.
+- ``Fix`` Downloads now skip an expired cookie file and fall back to an anonymous request instead of sending a stale session; the login-required message tells you whether to add or refresh cookies.
+- ``Fix`` Settings fields stay editable and keep focus while a change is saving in the background.
+
+
+<details markdown="1">
+<summary>Previous versions...</summary>
+
 ## [1.0.1] - 2026-09-01
 
 - ``New`` Retry a failed or cancelled job in one click, from the job list or its details, without creating a duplicate.
@@ -14,10 +31,6 @@
 - ``Security`` Update checks reject oversized upstream responses and corrupted or oversized cache files.
 - ``Security`` Outbound thumbnail fetches are validated with the same URL parser that issues the request, closing host allowlist edge cases.
 - ``Security`` Turning off authentication now requires an explicit confirmation.
-
-
-<details markdown="1">
-<summary>Previous versions...</summary>
 
 ## [1.0.0] - 2026-08-31
 

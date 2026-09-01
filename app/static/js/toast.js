@@ -43,7 +43,7 @@ function getContainer() {
     // container around them makes screen readers announce the message twice.
     container = document.createElement("div");
     container.id = "toastContainer";
-    container.className = "toast-container";
+    container.className = "fx-toast-container";
     document.body.appendChild(container);
     return container;
 }
@@ -95,7 +95,7 @@ function removeToast(toast, state) {
  */
 function icon(name) {
     const span = document.createElement("span");
-    span.className = "material-symbols-outlined toast-icon";
+    span.className = "material-symbols-outlined fx-toast__icon";
     span.setAttribute("aria-hidden", "true");
     span.textContent = name;
     return span;
@@ -114,7 +114,7 @@ export function showToast(message, type = "info", duration = TOAST_DURATION) {
 
     const toast = document.createElement("div");
     const state = getToastState(toast);
-    toast.className = `toast toast--${resolvedType}`;
+    toast.className = `fx-toast fx-toast--${resolvedType}`;
     toast.setAttribute("role", resolvedType === "danger" ? "alert" : "status");
     toast.setAttribute("aria-atomic", "true");
 
@@ -122,13 +122,13 @@ export function showToast(message, type = "info", duration = TOAST_DURATION) {
     toast.appendChild(icon(iconName));
 
     const text = document.createElement("span");
-    text.className = "toast-message";
+    text.className = "fx-toast__message";
     text.textContent = typeof message === "string" ? message : String(message ?? "");
     toast.appendChild(text);
 
     const closeBtn = document.createElement("button");
     closeBtn.type = "button";
-    closeBtn.className = "toast-close";
+    closeBtn.className = "fx-toast__close";
     closeBtn.setAttribute("aria-label", "Close notification");
     closeBtn.textContent = "×";
     closeBtn.addEventListener("click", () => dismissToast(toast));
@@ -138,7 +138,7 @@ export function showToast(message, type = "info", duration = TOAST_DURATION) {
 
     requestAnimationFrame(() => {
         if (!state.dismissing && toast.isConnected) {
-            toast.classList.add("toast--visible");
+            toast.classList.add("fx-toast--visible");
         }
     });
 
@@ -165,16 +165,22 @@ function dismissToast(toast) {
         state.autoTimerId = null;
     }
 
-    toast.classList.remove("toast--visible");
-    toast.classList.add("toast--hiding");
+    toast.classList.remove("fx-toast--visible");
+    toast.classList.add("fx-toast--hiding");
 
-    const doRemove = () => removeToast(toast, state);
-
-    toast.addEventListener("transitionend", (event) => {
-        if (event.target === toast) {
-            doRemove();
+    const doRemove = () => {
+        toast.removeEventListener("transitionend", onTransitionEnd);
+        removeToast(toast, state);
+    };
+    function onTransitionEnd(event) {
+        if (event.target !== toast || event.propertyName !== "opacity") {
+            return;
         }
-    }, { once: true });
+        toast.removeEventListener("transitionend", onTransitionEnd);
+        doRemove();
+    }
+
+    toast.addEventListener("transitionend", onTransitionEnd);
 
     // Fallback removal if transition doesn't fire
     state.fallbackTimerId = window.setTimeout(doRemove, TOAST_DISMISS_TIMEOUT);
@@ -191,7 +197,7 @@ export function clearToasts() {
     }
 
     const wrapper = container;
-    wrapper.querySelectorAll(".toast").forEach((t) => dismissToast(t));
+    wrapper.querySelectorAll(".fx-toast").forEach((t) => dismissToast(t));
 }
 
 // Convenience aliases

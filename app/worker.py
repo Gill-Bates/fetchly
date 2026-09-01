@@ -24,7 +24,8 @@ from .analysis_worker import SubmitResult, submit_analysis
 from .utils.duration import round_seconds
 from .db import get_settings, update_job, update_job_if_status, utc_timestamp
 from .governor import governor
-from .utils.cookies import default_cookie_file, find_cookie_file
+from .utils.cookie_status import cookie_file_is_usable
+from .utils.cookies import default_cookie_file
 from .utils.platform import PLATFORM_COOKIE_FILENAMES, detect_platform
 from .utils.fs import AUDIO_SOURCE_EXTENSIONS, get_data_dir
 from .utils.youtube import normalize_info_url
@@ -54,12 +55,9 @@ def _resolve_cookie_file(platform: str) -> Path:
     if not filename:
         return Path("")
 
-    cookie_path = find_cookie_file(filename)
-    if cookie_path is None:
-        return default_cookie_file(filename)
-
+    cookie_path = default_cookie_file(filename)
     try:
-        if cookie_path.stat().st_mode & 0o077:
+        if cookie_path.is_file() and cookie_path.stat().st_mode & 0o077:
             logger.warning("Cookie file %s is group/world accessible", cookie_path)
     except OSError:
         logger.warning("Could not inspect permissions for cookie file %s", cookie_path)
@@ -67,15 +65,31 @@ def _resolve_cookie_file(platform: str) -> Path:
 
 
 def _cookies_args_for_url(url: str) -> list[str]:
-    """Return platform-specific cookie arguments when a cookie file exists."""
+    """Return cookie arguments when a *usable* cookie file exists.
+
+    A jar whose session cookies have all expired is deliberately left out:
+    yt-dlp loads cookie files with ignore_expires=True, so it would send the
+    dead session anyway, and platforms answer a stale login with a harder
+    block than an anonymous request. Without the flag the download falls back
+    to exactly the anonymous path it takes when no cookies were ever stored.
+    """
     platform = detect_platform(url)
     if not platform:
         return []
 
     cookie_path = _resolve_cookie_file(platform)
-    if cookie_path.is_file():
-        return ["--cookies", str(cookie_path)]
-    return []
+    if not cookie_path.is_file():
+        return []
+
+    if not cookie_file_is_usable(cookie_path, platform):
+        logger.warning(
+            "Ignoring unusable cookie file for %s (%s) - downloading without cookies",
+            platform,
+            cookie_path,
+        )
+        return []
+
+    return ["--cookies", str(cookie_path)]
 
 
 
@@ -190,11 +204,12 @@ def _user_facing_error(url: str, exc: Exception) -> str:
         platform = detect_platform(url)
         cookie_file = PLATFORM_COOKIE_FILENAMES.get(platform or "", "")
         cookie_path = _resolve_cookie_file(platform or "") if platform else Path("")
-        if platform and cookie_file and not cookie_path.is_file():
+        if platform and cookie_file and not cookie_file_is_usable(cookie_path, platform):
+            action = "Refresh" if cookie_path.is_file() else "Add"
             return (
                 f"{platform.capitalize()} requires authentication. "
-                f"Place a Netscape-format cookie file at "
-                f"data/{cookie_file} or set FETCHLY_COOKIES_DIR."
+                f"{action} the cookies for {platform.capitalize()} under "
+                f"Settings → Integrations."
             )
         return f"Platform requires authentication: {raw[:200]}"
 

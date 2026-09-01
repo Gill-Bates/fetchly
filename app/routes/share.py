@@ -27,6 +27,7 @@ from fastapi.responses import JSONResponse, Response
 
 from ..common.rate_limit import limiter
 from ..db import consume_share_link, create_share_link, get_settings, get_share_link
+from ..utils.public_url import build_public_base_url
 from .auth import require_user_json
 from .media import build_job_file_response
 
@@ -68,8 +69,9 @@ def _unavailable(request: Request) -> Response:
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
 
 
-def _share_url(request: Request, token: str) -> str:
-    return f"{str(request.base_url).rstrip('/')}/share/{token}"
+def _share_url(request: Request, token: str, public_hostname: str = "") -> str:
+    base = build_public_base_url(request, public_hostname)
+    return f"{base}/share/{token}"
 
 
 @router.post("/api/share/{job_id}")
@@ -93,13 +95,15 @@ async def create_share(
         max_uses = 0
     max_uses = max(0, max_uses)
 
+    public_hostname = str(settings.get("public_hostname", "") or "")
+
     token = await asyncio.to_thread(create_share_link, str(job_id), max_uses)
     logger.info("Created share link for job %s (max_uses=%d)", job_id, max_uses)
 
     return JSONResponse(
         content={
             "ok": True,
-            "url": _share_url(request, token),
+            "url": _share_url(request, token, public_hostname),
             "max_uses": max_uses,
         }
     )

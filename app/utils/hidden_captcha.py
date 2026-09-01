@@ -23,8 +23,8 @@ sister project (vocalix):
    base64url(payload + hmac) shape this reuses). On submit the token must:
    - be present and carry a valid signature (a bot POSTing straight at the
      endpoint without first loading the page has no valid token),
-   - not be older than ``max_age_seconds`` (a stale, cached, or replayed
-     form is rejected),
+   - not be older than ``max_age_seconds`` (a stale form is rejected; tokens
+     remain valid until expiry and are not single-use),
    - not be *younger* than ``min_age_seconds`` (a form submitted
      implausibly fast after being served is almost certainly scripted).
 
@@ -57,7 +57,8 @@ HONEYPOT_FIELD_NAME = "website"
 # tampered value.
 _TOKEN_VERSION = "v1"
 
-# A form older than this is rejected as stale/replayed.
+# A form older than this is rejected as stale. Tokens remain valid until
+# expiry and are not single-use.
 DEFAULT_MAX_AGE_SECONDS = 6 * 60 * 60  # 6 hours
 
 # A form submitted faster than this after being served is treated as

@@ -4,7 +4,7 @@
 
 {% block navbar %}
 {% from "macros/navbar.html" import navbar %}
-{{ navbar(show_back=True, show_settings=False, csrf_token=csrf_token) }}
+{{ navbar(show_back=True, show_settings=False, show_logout=auth_enabled, csrf_token=csrf_token) }}
 {% endblock %}
 
 {% block content %}

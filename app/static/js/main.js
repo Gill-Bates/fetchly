@@ -7,10 +7,11 @@ import { AUDIO_TYPE, CONFIG, DOWNLOADABLE_STATUSES, RETRYABLE_STATUSES, TERMINAL
 import { fetchJobs, fetchResolvedThumbnail, fetchStats, submitJob, fetchVideoInfo, toErrorMessage } from "./api.js";
 import { reportWarning } from "./errors.js";
 import { createTimeoutSignal, getCsrfToken, humanSize, isValidMediaUrl, detectPlatform, platformPillLabel, PLATFORM, extractYouTubeVideoId, formatDuration, isSafeRedirect, subscribeToLalalProgress, triggerDownload } from "./utils.js";
-import { prependJob, loadMore, applyJobUpdate, getJobById, applyStoredJobTitleFilter, formatCreatedText, isMobileJobsView, buildDesktopEmptyState, buildMobileEmptyState } from "./jobs.js?v=20260831a";
+import { prependJob, loadMore, applyJobUpdate, getJobById, applyStoredJobTitleFilter, formatCreatedText, isMobileJobsView, buildDesktopEmptyState, buildMobileEmptyState } from "./jobs.js?v=20260901b";
 import { EVENT_NAMES, dispatchJobUpdate, setEventStreamEnabled } from "./events.js?v=20260831a";
 import { normalizeStatus } from "./ui.js?v=20260831c";
-import { showToast } from "./toast.js";
+import { showToast } from "./toast.js?v=20260901a";
+import { confirmModal } from "./confirm.js";
 import { initTrim } from "./trim.js?v=20260901c";
 
 const submitForm = document.getElementById("submitForm");
@@ -168,10 +169,14 @@ function showTitlePopover(target) {
     if (!titlePopover) return;
 
     const text = target.dataset.popoverText || "";
-    if (!text.trim()) return;
+    if (!text.trim()) {
+        hideTitlePopover();
+        return;
+    }
 
     activeTitleCell = target;
     titlePopover.textContent = text;
+    titlePopover.setAttribute("aria-hidden", "false");
     positionTitlePopover(target);
     titlePopover.classList.add("visible");
 }
@@ -179,6 +184,7 @@ function showTitlePopover(target) {
 function hideTitlePopover() {
     if (!titlePopover) return;
     titlePopover.classList.remove("visible");
+    titlePopover.setAttribute("aria-hidden", "true");
     titlePopover.textContent = "";
     delete titlePopover.dataset.placement;
     activeTitleCell = null;
@@ -273,6 +279,25 @@ jobsRenderRoot?.addEventListener("mouseover", (event) => {
 });
 
 jobsRenderRoot?.addEventListener("mouseout", (event) => {
+    if (!activeTitleCell || activeTitleCell === document.activeElement) return;
+
+    const relatedCell = event.relatedTarget instanceof Element
+        ? event.relatedTarget.closest(".job-title-popover-target")
+        : null;
+
+    if (relatedCell === activeTitleCell) return;
+    hideTitlePopover();
+});
+
+jobsRenderRoot?.addEventListener("focusin", (event) => {
+    const cell = event.target instanceof Element
+        ? event.target.closest(".job-title-popover-target")
+        : null;
+    if (!(cell instanceof HTMLElement) || cell === activeTitleCell) return;
+    showTitlePopover(cell);
+});
+
+jobsRenderRoot?.addEventListener("focusout", (event) => {
     if (!activeTitleCell) return;
 
     const relatedCell = event.relatedTarget instanceof Element
@@ -556,7 +581,7 @@ function resetQualityOptions() {
 
 function hideVideoPreview() {
     if (videoPreviewGrid) {
-        videoPreviewGrid.classList.add("d-none", "is-empty");
+        videoPreviewGrid.classList.add("d-none");
     }
     if (thumbnailPreview) {
         thumbnailPreview.replaceChildren();
@@ -566,7 +591,7 @@ function hideVideoPreview() {
 }
 
 function showVideoPreview() {
-    videoPreviewGrid?.classList.remove("d-none", "is-empty");
+    videoPreviewGrid?.classList.remove("d-none");
 }
 
 function isPreviewVisible() {
@@ -1245,7 +1270,14 @@ async function handleCancelJob(btn) {
     const jobId = btn.dataset.jobId;
     if (!jobId) return;
 
-    if (!confirm("Are you sure you want to cancel this job?")) {
+    const confirmed = await confirmModal({
+        title: "Cancel job",
+        message: "Are you sure you want to cancel this job?",
+        confirmText: "Cancel job",
+        cancelText: "Keep running",
+        variant: "danger",
+    });
+    if (!confirmed) {
         return;
     }
 
@@ -1438,7 +1470,6 @@ jobsQuickFilter?.addEventListener("click", (event) => {
     jobsQuickFilter.dataset.activeFilter = requestedFilter;
     jobsQuickFilter.querySelectorAll("[data-job-filter]").forEach((filterButton) => {
         const isActive = filterButton === button;
-        filterButton.classList.toggle("is-active", isActive);
         filterButton.setAttribute("aria-pressed", String(isActive));
     });
     scheduleJobTitleFilter();
@@ -1507,6 +1538,13 @@ submitForm?.addEventListener("submit", async (event) => {
 
     setError("");
 
+    // Snapshotted once, before the request, and reused as-is if the server
+    // reports a conflict: the form stays editable while the request is in
+    // flight, so re-reading its live values in the catch block could confirm
+    // and submit a different (url, type, quality) than the one the 409 (and
+    // the modal's description of `existing_job`) actually refers to.
+    let submittedFormData = null;
+
     try {
         const urlValue = urlInput?.value.trim() || "";
         if (!isValidMediaUrl(urlValue)) {
@@ -1518,20 +1556,17 @@ submitForm?.addEventListener("submit", async (event) => {
         abortAndResetPreview();
         setSubmitBusy(true);
 
-        const formData = new FormData(submitForm);
+        submittedFormData = new FormData(submitForm);
         // Audio downloads ignore quality selection - always use max (best audio)
         if (typeSelect?.value === AUDIO_TYPE) {
-            formData.set("quality", "max");
+            submittedFormData.set("quality", "max");
         }
 
-        const job = await submitJob(formData, getCsrfToken());
+        const job = await submitJob(submittedFormData, getCsrfToken());
         onSubmitSuccess(job);
     } catch (error) {
-        if (isDuplicateJobError(error) && duplicateJobModal) {
-            pendingDuplicateFormData = new FormData(submitForm);
-            if (typeSelect?.value === AUDIO_TYPE) {
-                pendingDuplicateFormData.set("quality", "max");
-            }
+        if (isDuplicateJobError(error) && duplicateJobModal && submittedFormData) {
+            pendingDuplicateFormData = submittedFormData;
             if (duplicateJobMessage) {
                 duplicateJobMessage.textContent = describeDuplicateJob(error.body.existing_job);
             }

@@ -55,6 +55,7 @@ readonly ACCESS_LOG_FORMAT="${ACCESS_LOG_FORMAT:-[%(t)s] %(h)s \"%(r)s\" %(s)s %
 readonly -a REQUIRED_DIRS=(
     "${DATA_DIR}"
     "${DATA_DIR}/downloads"
+    "${DATA_DIR}/cookies"
     "$(dirname "${TORCH_HOME}")"
     "${TORCH_HOME}"
 )

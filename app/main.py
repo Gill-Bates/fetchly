@@ -50,7 +50,16 @@ from .db import (
 )
 from .governor import governor
 from .lalal_policy import LALAL_MAX_DURATION_MINUTES, LALAL_MAX_DURATION_SECONDS
-from .routes import auth_router, api_router, events_router, lalal_router, media_router, share_router, trim_router
+from .routes import (
+    auth_router,
+    api_router,
+    cookies_router,
+    events_router,
+    lalal_router,
+    media_router,
+    share_router,
+    trim_router,
+)
 from .routes.auth import init_auth
 from .routes.api import init_api
 from .routes.lalal import init_lalal
@@ -64,6 +73,7 @@ from .routes.events import (
 )
 from .session import SESSION_COOKIE, refresh_session_settings_cache, renew_session, set_session_cookie
 from .utils.housekeeping import cleanup_expired_jobs, cleanup_orphaned_directories, cleanup_thumbnail_cache
+from .utils.cookies import ensure_data_cookies_dir
 from .utils.duration import round_seconds
 from .utils.fs import get_data_dir
 from .utils.template_filters import register_filters
@@ -87,11 +97,9 @@ _SECRET_KEY = os.environ.get("FETCHLY_SECRET_KEY")
 if not _SECRET_KEY:
     raise RuntimeError("FETCHLY_SECRET_KEY environment variable is required")
 
-_DEFAULT_USER = os.environ.get("FETCHLY_ADMIN_USER", "admin")
-_DEFAULT_PASS = os.environ.get("FETCHLY_ADMIN_PASSWORD")
-if not _DEFAULT_PASS:
-    raise RuntimeError("FETCHLY_ADMIN_PASSWORD environment variable is required")
-
+# No admin credentials come from the environment. fetchly starts with
+# authentication switched off and an empty account; the admin username and
+# password are created in Settings -> Security and stored in the database.
 _CSRF_COOKIE = "fetchly_csrf"
 _HOUSEKEEPING_INTERVAL = 3600  # Every hour
 _ANALYSIS_BACKLOG_POLL_INTERVAL = 5.0
@@ -124,10 +132,10 @@ templates.env.globals["CSRF_COOKIE_NAME"] = _CSRF_COOKIE
 templates.env.globals["LALAL_MAX_DURATION_SECONDS"] = LALAL_MAX_DURATION_SECONDS
 templates.env.globals["LALAL_MAX_DURATION_MINUTES"] = LALAL_MAX_DURATION_MINUTES
 
-# Auth routes only depend on templates and env-backed credentials, so initialize
-# them eagerly as well as during lifespan. This keeps TestClient(app) usable for
+# Auth routes only depend on templates and the signing key, so initialize them
+# eagerly as well as during lifespan. This keeps TestClient(app) usable for
 # login/logout checks even when startup events have not run yet.
-init_auth(templates, _SECRET_KEY, _DEFAULT_USER, _DEFAULT_PASS)
+init_auth(templates, _SECRET_KEY)
 
 
 def _should_skip_session_renewal(request_path: str) -> bool:
@@ -193,7 +201,7 @@ async def _event_broadcaster(queue: EventQueue) -> None:
 def _run_housekeeping_once() -> None:
     """Load retention settings and clean expired job files in one worker-thread call."""
     settings = get_settings()
-    keep_days = settings.get("retention_days", 7)
+    keep_days = settings.get("retention_days", 0)
     expired_ids = list_expired_job_ids(keep_days)
     cleanup_expired_jobs(keep_days, DATA_DIR, lambda _days: expired_ids)
     # Artifacts for these jobs are gone, so their share links can only 404 from
@@ -408,6 +416,7 @@ async def lifespan(app: FastAPI):
     _ = app
     _check_dependencies()
     await asyncio.to_thread(DATA_DIR.mkdir, parents=True, exist_ok=True)
+    await asyncio.to_thread(ensure_data_cookies_dir)
     await asyncio.to_thread(init_db)
     init_sse_shutdown_event()
     restore_shutdown_signals = _install_shutdown_signal_hook()
@@ -423,7 +432,7 @@ async def lifespan(app: FastAPI):
     await asyncio.to_thread(governor.configure)
     
     # Initialize route modules
-    init_api(templates, _DEFAULT_USER)
+    init_api(templates)
     init_media(DATA_DIR, BASE_DIR, templates)
     init_share(templates)
     init_lalal(DATA_DIR, enqueue_event)
@@ -613,6 +622,7 @@ async def handle_rate_limit_exceeded(_request: Request, _exc: RateLimitExceeded)
 # Include route modules
 app.include_router(auth_router)
 app.include_router(api_router)
+app.include_router(cookies_router)
 app.include_router(lalal_router)
 app.include_router(media_router)
 app.include_router(share_router)

@@ -1,40 +1,17 @@
-# fetchly - run the published image from Docker Hub:
-#   https://hub.docker.com/r/giiibates/fetchly
-#
-#   docker compose pull && docker compose up -d
-#
-# FETCHLY_SECRET_KEY and FETCHLY_ADMIN_PASSWORD are hard requirements -
-# app/main.py raises at import time without them - and are deliberately not
-# baked into this file. Put them in a .env next to this compose file, or
-# export them before `docker compose up`:
-#
-#   FETCHLY_SECRET_KEY=$(head -c 32 /dev/urandom | base64)
-#   FETCHLY_ADMIN_PASSWORD=change-me
-#
-# Everything else has a working default, so this file runs as-is on any host
-# once those two are set. Sign in at http://127.0.0.1:8000 with user `admin`
-# (or FETCHLY_ADMIN_USER) and that password.
+# Set FETCHLY_SECRET_KEY in .env before starting Compose.
 services:
   fetchly:
-    # Multi-arch manifest (linux/amd64, linux/arm64). Pin a release with
-    # FETCHLY_TAG=1.5 to stop tracking the floating 'latest'.
     image: giiibates/fetchly:${FETCHLY_TAG:-latest}
     container_name: fetchly
     restart: always
     stop_grace_period: 20s
-    # No cpus: limit -> the container sees all host cores and the app's
-    # Governor scales its download/transcode thread pool accordingly.
-    # Set `cpus:` here to throttle it.
     ports:
       - "${FETCHLY_PORT:-8000}:8000"
     environment:
       LOG_LEVEL: ${LOG_LEVEL:-info}
       TZ: ${TZ:-Etc/UTC}
       TIMEOUT: 60
-      # No default: compose refuses to start rather than bringing the app up
-      # with a guessable session key or password.
       FETCHLY_SECRET_KEY: "${FETCHLY_SECRET_KEY:?required - generate with head -c 32 /dev/urandom | base64}"
-      FETCHLY_ADMIN_PASSWORD: "${FETCHLY_ADMIN_PASSWORD:?required - the admin login password}"
     logging:
       driver: json-file
       options:
@@ -43,18 +20,4 @@ services:
     security_opt:
       - no-new-privileges:true
     volumes:
-      # Jobs, SQLite database and downloads. Owned by uid 1000 inside the
-      # container; the entrypoint fixes the mount's ownership on start.
       - ./data:/app/data
-
-# Deployment behind a reverse proxy on a fixed address (see ../Caddyfile):
-# drop the `ports:` block above, and attach the service to the proxy network
-# instead.
-#
-#    networks:
-#      cloudnet:
-#        ipv4_address: 10.30.0.153
-#
-# networks:
-#   cloudnet:
-#     external: true

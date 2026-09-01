@@ -67,9 +67,10 @@ async def get_json_body(request: Request) -> dict[str, Any]:
     """Read the request body as JSON, bounded, and ensure the payload is a dict."""
     body = bytearray()
     async for chunk in request.stream():
-        body.extend(chunk)
-        if len(body) > _MAX_JSON_BODY_BYTES:
+        remaining = _MAX_JSON_BODY_BYTES - len(body)
+        if len(chunk) > remaining:
             raise HTTPException(status_code=413, detail="Request body too large")
+        body.extend(chunk)
 
     try:
         payload = json.loads(body)

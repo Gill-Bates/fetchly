@@ -327,10 +327,14 @@ function handleMessage(data) {
         }
 
         if (payload.type === "authentication_required") {
+            // The session is gone server-side (expired or invalidated); stop
+            // reconnecting and tear the stream down before navigating so a
+            // delayed error/visibility event cannot open a new one.
             shouldReconnect = false;
             if (activeStream) {
                 teardown(activeStream);
             }
+            window.location.replace("/login");
             return;
         }
 

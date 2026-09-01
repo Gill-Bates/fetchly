@@ -221,7 +221,8 @@ jobs:
             test_image: fetchly:test-amd64
             container_name: fetchly-test-amd64
             image_suffix: amd64
-            # madmom compiles from git, torch and essentia install as wheels.
+            # Every dependency installs as a wheel here - torch and essentia
+            # included - so nothing is compiled from source on this arch.
             timeout: 90
           - arch: arm64
             runner: ubuntu-24.04-arm
@@ -329,7 +330,6 @@ jobs:
           docker run -d --name "${{ matrix.container_name }}" \
             --platform "${{ matrix.platform }}" \
             -e FETCHLY_SECRET_KEY="ci-smoke-test-key-not-for-production" \
-            -e FETCHLY_ADMIN_PASSWORD="ci-smoke-test-password" \
             -e LOG_LEVEL="info" \
             "${{ matrix.test_image }}"
 
@@ -553,7 +553,7 @@ jobs:
           # Trivy's own log recommends for scan time.
           scanners: 'vuln'
           # Longer than the 10m upstream default: the venv this image ships
-          # (torch, essentia, madmom, beat-this and their transitive deps) is a
+          # (torch, essentia, beat-this and their transitive deps) is a
           # large library surface to walk.
           timeout: '15m'
           # Accepted findings live in .trivyignore at the repository root, one
@@ -1133,9 +1133,9 @@ jobs:
               // opening tags sit below the newest entry and whose </details>
               // closes at the end of the file. Cutting on headings alone would
               // therefore carry an unclosed <details>/<summary> into the
-              // release body, where GitHub swallows everything after it - the
-              // Source footer - into a collapsed element. The section ends at
-              // whichever comes first: the next heading, or that marker.
+              // release body, along with every older entry it folds away. The
+              // section ends at whichever comes first: the next heading, or
+              // that marker.
               //
               // A <details> used deliberately inside one entry is cut along
               // with it; folding is expected around entries, not within one.
@@ -1201,9 +1201,7 @@ jobs:
               '> Scanned with [Trivy](https://trivy.dev/) for HIGH and CRITICAL severity vulnerabilities (unfixed CVEs ignored).',
               '',
               '### Changelog',
-              changelogSection || '_No matching CHANGELOG entry found for this version._',
-              '',
-              '**Source:** [fetchly Repository](https://github.com/' + context.repo.owner + '/' + context.repo.repo + ')'
+              changelogSection || '_No matching CHANGELOG entry found for this version._'
             ].join('\n');
 
             const releaseFields = {

@@ -11,9 +11,8 @@ from __future__ import annotations
 import asyncio
 import hmac
 import logging
-import os
 from hashlib import pbkdf2_hmac, sha256
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -50,11 +49,16 @@ _CAPTCHA_REJECTED_MESSAGE = (
     "We couldn't verify your submission. Please reload the page and try again."
 )
 
+# Effective identity while authentication is switched off. fetchly has a single
+# admin account and no per-user data ownership, so the authorization
+# dependencies just need *some* stable truthy principal to hand back. This is
+# never a login name: with authentication off there is no login at all, and
+# with it on the real name comes from the admin_username setting.
+LOCAL_USER: Final = "local"
+
 # Module-level state (set during init)
 _templates: "Jinja2Templates | None" = None
 _SECRET_KEY: str = ""
-_DEFAULT_USER: str = ""
-_DEFAULT_HASH: str = ""
 
 
 def _login_template_context(request: Request, **extra: object) -> dict[str, object]:
@@ -64,21 +68,16 @@ def _login_template_context(request: Request, **extra: object) -> dict[str, obje
     return context
 
 
-def init_auth(
-    templates: "Jinja2Templates",
-    secret_key: str,
-    default_user: str,
-    default_password: str,
-) -> None:
+def init_auth(templates: "Jinja2Templates", secret_key: str) -> None:
     """Initialize the auth module with required dependencies.
-    
-    Must be called before routes are used.
+
+    Must be called before routes are used. There is deliberately no bootstrap
+    credential to pass in: the admin account is created in Settings → Security
+    and lives only in the database.
     """
-    global _templates, _SECRET_KEY, _DEFAULT_USER, _DEFAULT_HASH
+    global _templates, _SECRET_KEY
     _templates = templates
     _SECRET_KEY = secret_key
-    _DEFAULT_USER = default_user
-    _DEFAULT_HASH = hash_password(default_user, default_password)
 
 
 def _derive_salt(username: str) -> bytes:
@@ -97,39 +96,66 @@ def hash_password(username: str, password: str) -> str:
     return pbkdf2_hmac("sha256", peppered, _derive_salt(username), 200_000).hex()
 
 
+def has_admin_credentials(settings: dict[str, object] | None = None) -> bool:
+    """Return whether a username *and* password hash are stored.
+
+    Authentication cannot be switched on without both; the settings API refuses
+    the flag otherwise, so an enabled-but-credential-less state should never be
+    reachable.
+    """
+    if settings is None:
+        try:
+            settings = get_settings(include_internal=True)
+        except Exception:
+            logger.exception("Unable to load admin credentials")
+            return False
+    username = str(settings.get("admin_username") or "").strip()
+    password_hash = str(settings.get("admin_password_hash") or "").strip()
+    return bool(username and password_hash)
+
+
 def verify_login(username: str, password: str) -> bool:
-    """Verify login credentials against stored hash."""
-    # Check if a custom password hash is stored in settings.
+    """Verify login credentials against the stored admin account."""
     try:
         settings = get_settings(include_internal=True)
     except Exception:
-        # Never fall back to the bootstrap password when the persisted
-        # credential cannot be read. That would turn a storage failure into an
-        # authentication bypass after the password has been changed.
+        # A storage failure must never authenticate anyone: there is no
+        # fallback credential to fall back to.
         logger.exception("Unable to load authentication settings")
         return False
 
-    custom_hash = settings.get("admin_password_hash")
-    stored_hash = str(custom_hash).strip() if custom_hash and str(custom_hash).strip() else _DEFAULT_HASH
+    stored_user = str(settings.get("admin_username") or "").strip()
+    stored_hash = str(settings.get("admin_password_hash") or "").strip()
+    if not stored_user or not stored_hash:
+        # Authentication is on but no account exists - an inconsistent state
+        # the settings API prevents. Fail closed; recovering means clearing
+        # enable_authentication in the settings table.
+        logger.error(
+            "Authentication is enabled but no admin account is stored; login is impossible"
+        )
+        return False
 
-    password_ok = hmac.compare_digest(hash_password(_DEFAULT_USER, password), stored_hash)
-    username_ok = hmac.compare_digest(username, _DEFAULT_USER)
+    # The salt is derived from the username, so the candidate hash has to be
+    # computed against the *stored* name, not the submitted one.
+    password_ok = hmac.compare_digest(hash_password(stored_user, password), stored_hash)
+    # Compared as bytes: compare_digest() rejects str operands containing
+    # non-ASCII, so a submitted username like "bäcker" would raise TypeError
+    # and surface as a 500 instead of a plain failed login.
+    username_ok = hmac.compare_digest(username.encode("utf-8"), stored_user.encode("utf-8"))
     return username_ok and password_ok
 
 
 def current_user(request: Request) -> str | None:
     """Get current authenticated user from request cookies."""
     if not is_authentication_enabled():
-        # The application has one configured admin identity and no per-user
-        # data ownership. Treat the configured identity as the effective user
-        # while authentication is disabled so all existing authorization
-        # dependencies continue to work consistently.
-        return _DEFAULT_USER
+        # No login gate at all: hand back the local principal so every
+        # authorization dependency keeps working unchanged.
+        return LOCAL_USER
     return validate_session(request.cookies.get(SESSION_COOKIE))
 
 
 def is_authentication_enabled() -> bool:
-    """Return whether the settings page requires application authentication.
+    """Return whether the application requires a login.
 
     Fail closed when the setting cannot be read: authentication remains
     required if a database/storage problem prevents loading the setting.
@@ -139,7 +165,7 @@ def is_authentication_enabled() -> bool:
     except Exception:
         logger.exception("Unable to load authentication mode")
         return True
-    return bool(settings.get("enable_authentication", True))
+    return bool(settings.get("enable_authentication", False))
 
 
 def require_user(request: Request) -> str:

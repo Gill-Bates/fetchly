@@ -30,6 +30,7 @@ const JOBS_JS_PATH = new URL('../../app/static/js/jobs.js', import.meta.url);
 const UI_JS_PATH = new URL('../../app/static/js/ui.js', import.meta.url);
 const SETTINGS_JS_PATH = new URL('../../app/static/js/settings.js', import.meta.url);
 const SETTINGS_TEMPLATE_PATH = new URL('../../app/templates/settings.html', import.meta.url);
+const SETTINGS_STYLE_PATH = new URL('../../app/static/style.css', import.meta.url);
 
 let jobsSourceContractMetricsPromise;
 let settingsSourceContractMetricsPromise;
@@ -102,21 +103,38 @@ async function getJobsSourceContractMetrics() {
 async function getSettingsSourceContractMetrics() {
     if (!settingsSourceContractMetricsPromise) {
         settingsSourceContractMetricsPromise = (async () => {
-            const [settingsJsSource, settingsTemplateSource] = await Promise.all([
+            const [settingsJsSource, settingsTemplateSource, settingsStyleSource] = await Promise.all([
                 readFile(SETTINGS_JS_PATH, 'utf8'),
                 readFile(SETTINGS_TEMPLATE_PATH, 'utf8'),
+                readFile(SETTINGS_STYLE_PATH, 'utf8'),
             ]);
 
-            const successUsesToast = /showToast\(\s*payload\.message\s*\|\|\s*["']Settings updated["']\s*,\s*["']success["']\s*\)/.test(settingsJsSource);
             const validationUsesToast = /showToast\(\s*validation\.error\s*,\s*["']danger["']\s*\)/.test(settingsJsSource);
+            const autosaveSuccessToast = /showToast\(\s*payload\.message\s*\|\|\s*["']Settings updated["']\s*,\s*["']success["']\s*\)/.test(settingsJsSource);
             const jsUsesInlineSaveStatus = /\b(?:AUTO_SAVE_STATE|setAutoSaveState|autoSaveIndicator|settingsSaveBtn|settingsAlert)\b/.test(settingsJsSource);
             const templateHasInlineSaveStatus = /(?:id=["'](?:autoSaveIndicator|settingsSaveBtn|settingsAlert)["']|class=["'][^"']*settings-status-bar)/.test(settingsTemplateSource);
 
+            const hints = [...settingsTemplateSource.matchAll(
+                /<(small|p)\b[^>]*\bclass=["'][^"']*\bsetting-hint\b[^"']*["'][^>]*>([\s\S]*?)<\/\1>/g,
+            )];
+            const hintContractBroken = hints.length === 0 || hints.some((hint) => {
+                const openingTag = hint[0].slice(0, hint[0].indexOf('>') + 1);
+                const content = hint[2];
+                return !openingTag.includes('setting-hint--with-icon')
+                    || !/^\s*<span\b[^>]*\bclass=["'][^"']*\bmaterial-symbols-outlined\b[^"']*\bsetting-hint-icon\b[^"']*["'][^>]*>\s*info\s*<\/span>/.test(content);
+            });
+            const hintStyleContractBroken = !(
+                /--text-hint\s*:/.test(settingsStyleSource)
+                && /\.app-root--settings\s+\.setting-hint\s*\{[\s\S]*?color:\s*var\(--text-hint\)/.test(settingsStyleSource)
+                && /\.app-root--settings\s+\.setting-hint--with-icon\s*\{[\s\S]*?display:\s*inline-flex/.test(settingsStyleSource)
+            );
+
             return {
-                settingsSaveToastContractBroken: !successUsesToast
-                    || !validationUsesToast
+                settingsSaveToastContractBroken: !validationUsesToast
+                    || autosaveSuccessToast
                     || jsUsesInlineSaveStatus
                     || templateHasInlineSaveStatus,
+                settingsHintContractBroken: hintContractBroken || hintStyleContractBroken,
             };
         })();
     }
@@ -376,6 +394,7 @@ function formatResultSummary(result) {
     if (metrics.videoPreviewContractBroken) parts.push('videoPreviewContractBroken=true');
     if (metrics.settingsFieldStackContractBroken) parts.push('settingsFieldStackContractBroken=true');
     if (metrics.settingsSaveToastContractBroken) parts.push('settingsSaveToastContractBroken=true');
+    if (metrics.settingsHintContractBroken) parts.push('settingsHintContractBroken=true');
     if (metrics.lalalMobileActionLayoutBroken) parts.push('lalalMobileActionLayoutBroken=true');
     if (metrics.trimDefaultSelectionInvalid) parts.push('trimDefaultSelection=invalid');
     if (metrics.uiCardChildExpands) parts.push(`uiCardChildExpands=${metrics.uiCardChildExpands}`);
@@ -392,6 +411,7 @@ function formatResultSummary(result) {
     if (metrics.flexMinHeightOverflowHidden?.length > 0) {
         parts.push(`flexMinHeightOverflowHidden=${metrics.flexMinHeightOverflowHidden.length}`);
     }
+    if (metrics.settingsTabTitleGapInconsistent) parts.push('settingsTabTitleGap=inconsistent');
     return parts.join(' ');
 }
 
@@ -500,6 +520,7 @@ const BASE_METRICS = Object.freeze({
     videoPreviewContractBroken: false,
     settingsFieldStackContractBroken: false,
     settingsSaveToastContractBroken: false,
+    settingsHintContractBroken: false,
     lalalMobileActionLayoutBroken: false,
     trimDefaultSelectionInvalid: false,
     uiCardChildExpands: 0,
@@ -514,6 +535,8 @@ const BASE_METRICS = Object.freeze({
     mobileJobsPageScrollTrap: false,
     flexMinHeightOverflowHidden: 0,
     emptyStateHoverHighlight: false,
+    settingsTabTitleGapInconsistent: false,
+    settingsTabTitleGaps: {},
 });
 
 /**
@@ -2536,9 +2559,6 @@ async function collectMetrics(page, view) {
             return issues;
         })();
 
-        // 13. iOS background-attachment:fixed without @supports fallback
-        //     Detects fixed attachment on .app-root / body without a matching scroll override.
-
         // ─── iOS / Rendering Stability Checks ────────────────────────────────────
 
         // 1. Broken or zero-size icons (SVG / IMG)
@@ -2612,17 +2632,17 @@ async function collectMetrics(page, view) {
         );
         const missingMomentumScroll = isMobile && supportsMomentumScroll
             ? Array.from(document.querySelectorAll('*'))
-            .filter(el => isLayoutVisible(el))
-            .filter(el => {
-                const style = window.getComputedStyle(el);
-                const scrollable = style.overflowY === 'auto' || style.overflowY === 'scroll';
-                if (!scrollable) return false;
-                return style.webkitOverflowScrolling !== 'touch';
-            })
-            .map(el => ({
-                tag: el.tagName.toLowerCase(),
-                id: el.id || null,
-            }))
+                .filter(el => isLayoutVisible(el))
+                .filter(el => {
+                    const style = window.getComputedStyle(el);
+                    const scrollable = style.overflowY === 'auto' || style.overflowY === 'scroll';
+                    if (!scrollable) return false;
+                    return style.webkitOverflowScrolling !== 'touch';
+                })
+                .map(el => ({
+                    tag: el.tagName.toLowerCase(),
+                    id: el.id || null,
+                }))
             : [];
 
         // 6. Backdrop-filter without iOS fallback (runtime check)
@@ -2656,6 +2676,9 @@ async function collectMetrics(page, view) {
                 tag: el.tagName.toLowerCase(),
                 id: el.id || null,
             }));
+
+        // 8. iOS background-attachment:fixed without @supports fallback.
+        // Detects fixed attachment on .app-root / body without a matching scroll override.
         const backgroundAttachmentFixedWithoutFallback = (() => {
             const roots = [document.querySelector('.app-root'), document.body].filter(Boolean);
             for (const el of roots) {
@@ -3016,7 +3039,7 @@ async function collectMetrics(page, view) {
             );
         })();
 
-        // Lalal actions share one equal two-column row on mobile. If the
+        // 26. Lalal actions share one equal two-column row on mobile. If the
         // disconnect action is hidden, the remaining connect action expands
         // across both tracks instead of leaving an empty half-row.
         const lalalMobileActionLayoutBroken = (() => {
@@ -3055,7 +3078,7 @@ async function collectMetrics(page, view) {
             );
         })();
 
-        // 25. Trim modal should open with a small selection at the track start.
+        // 27. Trim modal should open with a small selection at the track start.
         const trimDefaultSelectionInvalid = (() => {
             const trimModal = document.querySelector('#trimModal');
             if (!trimModal || !trimModal.classList.contains('show')) return false;
@@ -3065,7 +3088,7 @@ async function collectMetrics(page, view) {
             return regions.length === 0 || !text.startsWith('0:00.00');
         })();
 
-        // 26. UI card children should not expand unless explicitly needed
+        // 28. UI card children should not expand unless explicitly needed
         const uiCardChildExpands = (() => {
             let count = 0;
             // Check generic .ui-card > div children (not header/body)
@@ -3319,13 +3342,13 @@ async function openView(page, view, replacements = {}) {
         const style = await page.addStyleTag({ content: VISUAL_STABILITY_CSS });
         await style.evaluate((element) => {
             element.dataset.uiLintInjected = 'true';
-        }).catch(() => {});
+        }).catch(() => { });
     }
     if (view.device === 'mobile') {
         const style = await page.addStyleTag({ content: MOBILE_VISUAL_STABILITY_CSS });
         await style.evaluate((element) => {
             element.dataset.uiLintInjected = 'true';
-        }).catch(() => {});
+        }).catch(() => { });
     }
     await waitForMedia(page);
     await waitForLayoutStability(page, view);
@@ -3458,6 +3481,60 @@ async function auditEmptyStateHover(page, view) {
 }
 
 /**
+ * Clicks through every settings tab and measures the vertical gap between
+ * each panel's title and the content block directly beneath it. The four
+ * tabs (General, Integrations, Security, System) must render this gap
+ * identically - a per-tab DOM nesting difference (title as a direct child
+ * of .settings-group vs. nested inside .settings-grid-item) previously let
+ * conflicting !important margin-bottom overrides apply to only some tabs,
+ * so the same visual gap silently drifted between 12px, 16px, and 24px.
+ * @param {import('playwright').Page} page
+ * @param {object} view
+ * @returns {Promise<{settingsTabTitleGapInconsistent: boolean, settingsTabTitleGaps: object}>}
+ */
+async function auditSettingsTabTitleGap(page, view) {
+    if (view.name !== 'settings') {
+        return { settingsTabTitleGapInconsistent: false, settingsTabTitleGaps: {} };
+    }
+
+    const tabs = [
+        { tabId: 'settingsGeneralTab', panelId: 'settingsGeneralPanel' },
+        { tabId: 'settingsIntegrationsTab', panelId: 'settingsIntegrationsPanel' },
+        { tabId: 'settingsSecurityTab', panelId: 'settingsSecurityPanel' },
+        { tabId: 'settingsSystemTab', panelId: 'settingsSystemPanel' },
+    ];
+
+    const gaps = {};
+    for (const { tabId, panelId } of tabs) {
+        const tabButton = page.locator(`#${tabId}`);
+        if (await tabButton.count() === 0) continue;
+        await tabButton.click();
+        await page.waitForTimeout(350);
+
+        // eslint-disable-next-line no-await-in-loop
+        const gap = await page.evaluate((id) => {
+            const panel = document.getElementById(id);
+            if (!panel) return null;
+            const title = panel.querySelector('h2, .settings-panel-title');
+            if (!title) return null;
+            const titleRect = title.getBoundingClientRect();
+            const next = title.nextElementSibling;
+            if (!next) return null;
+            const nextRect = next.getBoundingClientRect();
+            return Math.round((nextRect.top - titleRect.bottom) * 100) / 100;
+        }, panelId);
+
+        if (gap !== null) gaps[tabId] = gap;
+    }
+
+    const values = Object.values(gaps);
+    const settingsTabTitleGapInconsistent = values.length > 1
+        && Math.max(...values) - Math.min(...values) > 1;
+
+    return { settingsTabTitleGapInconsistent, settingsTabTitleGaps: gaps };
+}
+
+/**
  * Opens the first real trim trigger and exercises keyboard behavior with
  * Playwright input. The dashboard may legitimately have no audio jobs, in
  * which case the dynamic audit is reported as skipped.
@@ -3559,8 +3636,8 @@ async function auditTrimModal(page, view) {
             trimKeyboardConflicts.push('space-scroll');
         }
 
-        await page.locator('#trimModal .btn-close').click().catch(() => {});
-        await page.locator('#trimModal.show').waitFor({ state: 'hidden', timeout: 5000 }).catch(() => {});
+        await page.locator('#trimModal .btn-close').click().catch(() => { });
+        await page.locator('#trimModal.show').waitFor({ state: 'hidden', timeout: 5000 }).catch(() => { });
         return {
             failures: [],
             warnings: [],
@@ -3578,9 +3655,9 @@ async function auditTrimModal(page, view) {
                 }
                 delete window.__uiLintTrimKeyProbe;
                 delete window.__uiLintTrimKeyEvents;
-            }).catch(() => {});
+            }).catch(() => { });
         }
-        await page.locator('#trimModal .btn-close').click().catch(() => {});
+        await page.locator('#trimModal .btn-close').click().catch(() => { });
         return {
             failures: [`trim modal interaction failed: ${error instanceof Error ? error.message : String(error)}`],
             warnings: [],
@@ -3776,6 +3853,7 @@ async function runView(browser, storageState, view, replacements = {}) {
         const footerHistoryAudit = await auditFooterHistoryToggle(page, view);
         const trimAudit = await auditTrimModal(page, view);
         const emptyStateHoverAudit = await auditEmptyStateHover(page, view);
+        const settingsTabTitleGapAudit = await auditSettingsTabTitleGap(page, view);
         const jobsSourceContracts = viewAuditsJobsList(view)
             ? await getJobsSourceContractMetrics()
             : {
@@ -3786,12 +3864,13 @@ async function runView(browser, storageState, view, replacements = {}) {
             };
         const settingsSourceContracts = viewAuditsSettings(view)
             ? await getSettingsSourceContractMetrics()
-            : { settingsSaveToastContractBroken: false };
+            : { settingsSaveToastContractBroken: false, settingsHintContractBroken: false };
         const metrics = {
             ...runtimeMetrics,
             ...footerHistoryAudit,
             ...trimAudit.metrics,
             ...emptyStateHoverAudit,
+            ...settingsTabTitleGapAudit,
             ...jobsSourceContracts,
             ...settingsSourceContracts,
         };
@@ -4010,7 +4089,10 @@ async function runView(browser, storageState, view, replacements = {}) {
             failures.push('settings field stack is missing shrink-safe flex min-width rules');
         }
         if (metrics.settingsSaveToastContractBroken) {
-            failures.push('settings changes must use toasts and must not render an inline save-status row');
+            failures.push('settings autosave must stay quiet, while errors use toasts and no inline save-status row is rendered');
+        }
+        if (metrics.settingsHintContractBroken) {
+            failures.push('settings explanation hints must use the info-icon hint style');
         }
         if (metrics.lalalMobileActionLayoutBroken) {
             failures.push('Lalal mobile actions must use one equal two-column row');
@@ -4023,6 +4105,9 @@ async function runView(browser, storageState, view, replacements = {}) {
         }
         if (metrics.emptyStateHoverHighlight) {
             failures.push('empty jobs table row highlights on hover like an interactive row');
+        }
+        if (metrics.settingsTabTitleGapInconsistent) {
+            failures.push(`settings tab title-to-content gap is inconsistent across tabs: ${JSON.stringify(metrics.settingsTabTitleGaps)}`);
         }
         applyMetricRules(metrics, failures, warnings);
 
@@ -4141,6 +4226,9 @@ async function runView(browser, storageState, view, replacements = {}) {
                 videoPreviewContractBroken: metrics.videoPreviewContractBroken || false,
                 settingsFieldStackContractBroken: metrics.settingsFieldStackContractBroken || false,
                 settingsSaveToastContractBroken: metrics.settingsSaveToastContractBroken || false,
+                settingsHintContractBroken: metrics.settingsHintContractBroken || false,
+                settingsTabTitleGapInconsistent: metrics.settingsTabTitleGapInconsistent || false,
+                settingsTabTitleGaps: metrics.settingsTabTitleGaps || {},
                 lalalMobileActionLayoutBroken: metrics.lalalMobileActionLayoutBroken || false,
                 trimDefaultSelectionInvalid: metrics.trimDefaultSelectionInvalid || false,
                 uiCardChildExpands: metrics.uiCardChildExpands || 0,
