@@ -6,7 +6,6 @@
 
 import json
 import logging
-import os
 import queue
 import re
 import signal
@@ -17,7 +16,7 @@ import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, NamedTuple
 from urllib.parse import parse_qs, urlparse
 
 from .analysis_worker import SubmitResult, submit_analysis
@@ -122,25 +121,6 @@ _active_lock = threading.Lock()
 _active_processes: dict[str, subprocess.Popen[str]] = {}
 
 
-def _env_int(name: str, default: int) -> int:
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    try:
-        value = int(raw)
-    except ValueError:
-        logger.warning("Invalid %s=%r; using default %d", name, raw, default)
-        return default
-    if value <= 0:
-        logger.warning("Non-positive %s=%r; using default %d", name, raw, default)
-        return default
-    return value
-
-_TIMEOUT_DOWNLOAD: Final = _env_int("WORKER_TIMEOUT_DL", 3600)
-_TIMEOUT_TRANSCODE: Final = _env_int("WORKER_TIMEOUT_TC", 7200)
-# yt-dlp accepts human-readable sizes such as ``4G``. Keep a safe default
-# while allowing deployments with larger managed volumes to raise the limit.
-_MAX_DOWNLOAD_FILESIZE: Final = os.environ.get("WORKER_MAX_FILESIZE", "4G").strip() or "4G"
 _COMMAND_POLL_INTERVAL: Final = 1.0
 # yt-dlp writes no machine-readable progress by default, so downloads used to
 # report nothing at all - the status pill sat on a placeholder for the whole
@@ -162,6 +142,9 @@ _MAX_CONCURRENT_FRAGMENTS: Final = 16
 _DEFAULT_CONCURRENT_FRAGMENTS: Final = 3
 # Mirrors the "download_mp4_preset" default in app/db.py.
 _DEFAULT_MP4_PRESET: Final = True
+_DEFAULT_DOWNLOAD_TIMEOUT_MINUTES: Final = 60
+_DEFAULT_TRANSCODE_TIMEOUT_MINUTES: Final = 120
+_DEFAULT_DOWNLOAD_MAX_FILESIZE_GIB: Final = 4
 
 
 _QUALITY_LABELS: Final[dict[str, str]] = {
@@ -184,6 +167,12 @@ class JobCancelledError(Exception):
 
 class ShutdownError(Exception):
     """Raised when a running command fails because the worker is shutting down."""
+
+
+class DownloadRuntimeLimits(NamedTuple):
+    download_timeout_seconds: int
+    transcode_timeout_seconds: int
+    max_filesize_arg: str
 
 
 _LOGIN_REQUIRED_PATTERNS: Final[tuple[str, ...]] = (
@@ -214,6 +203,31 @@ def _user_facing_error(url: str, exc: Exception) -> str:
         return f"Platform requires authentication: {raw[:200]}"
 
     return f"Job failed: {raw[:300]}"
+
+
+def _download_runtime_limits() -> DownloadRuntimeLimits:
+    """Return persisted download/transcode limits with documented fallbacks."""
+    try:
+        settings = get_settings()
+    except Exception:
+        logger.warning("Could not read runtime download limits; falling back to defaults", exc_info=True)
+        return DownloadRuntimeLimits(
+            download_timeout_seconds=_DEFAULT_DOWNLOAD_TIMEOUT_MINUTES * 60,
+            transcode_timeout_seconds=_DEFAULT_TRANSCODE_TIMEOUT_MINUTES * 60,
+            max_filesize_arg=f"{_DEFAULT_DOWNLOAD_MAX_FILESIZE_GIB}G",
+        )
+
+    download_timeout_minutes = max(1, int(settings.get("download_timeout_minutes", _DEFAULT_DOWNLOAD_TIMEOUT_MINUTES)))
+    transcode_timeout_minutes = max(
+        1,
+        int(settings.get("transcode_timeout_minutes", _DEFAULT_TRANSCODE_TIMEOUT_MINUTES)),
+    )
+    max_filesize_gib = max(1, int(settings.get("download_max_filesize_gib", _DEFAULT_DOWNLOAD_MAX_FILESIZE_GIB)))
+    return DownloadRuntimeLimits(
+        download_timeout_seconds=download_timeout_minutes * 60,
+        transcode_timeout_seconds=transcode_timeout_minutes * 60,
+        max_filesize_arg=f"{max_filesize_gib}G",
+    )
 
 
 def _now_iso() -> str:
@@ -651,7 +665,13 @@ class _DownloadProgress:
 def _run_ytdlp_download(cmd: list[str], *, job_id: str, message: str) -> None:
     """Run a yt-dlp download command and stream its progress to the client."""
     tracker = _DownloadProgress(job_id, message)
-    _run_cmd_streaming(cmd, timeout=_TIMEOUT_DOWNLOAD, job_id=job_id, on_line=tracker.feed)
+    limits = _download_runtime_limits()
+    _run_cmd_streaming(
+        cmd,
+        timeout=limits.download_timeout_seconds,
+        job_id=job_id,
+        on_line=tracker.feed,
+    )
     tracker.finish()
 
 
@@ -930,6 +950,7 @@ def _build_ytdlp_cmd(
         lossless_audio: When True, download the source audio without re-encoding.
     """
     concurrent_fragments, mp4_preset = _download_tuning()
+    runtime_limits = _download_runtime_limits()
     cmd = [
         "yt-dlp",
         "--no-playlist",
@@ -939,7 +960,7 @@ def _build_ytdlp_cmd(
         "--progress-template",
         _YTDLP_PROGRESS_TEMPLATE,
         "--max-filesize",
-        _MAX_DOWNLOAD_FILESIZE,
+        runtime_limits.max_filesize_arg,
         # Parallel fragment downloads for DASH/HLS sources; ignored for
         # progressive single-file downloads.
         "--concurrent-fragments", str(concurrent_fragments),
@@ -1129,7 +1150,7 @@ def _download_media(job_id: str, url: str, *, quality: str, media_type: str) -> 
                     "-nostats",
                     str(out),
                 ],
-                timeout=_TIMEOUT_TRANSCODE,
+                timeout=_download_runtime_limits().transcode_timeout_seconds,
                 job_id=job_id,
                 message=transcode_message,
                 duration_seconds=source_duration_seconds,

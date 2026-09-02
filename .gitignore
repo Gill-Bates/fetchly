@@ -49,3 +49,9 @@ BUILD_INFO
 
 # Python bytecode
 *.py[cod]
+
+# Documentation
+site/
+.mkdocs-cache/
+docs/changelog.md
+docs/license.md

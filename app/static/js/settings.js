@@ -205,6 +205,15 @@ const credentialsSectionEl = document.getElementById("credentialsSection");
 
 const RETENTION_DAY_OPTIONS = [0, 7, 14, 30, 90, 180, 365];
 const SHARE_LINK_MAX_USE_OPTIONS = [0, 1, 10, 100, 1_000, 5_000, 10_000];
+const RUNTIME_LIMITS = [
+    ["download_worker_count", "Download workers", 0, 8],
+    ["download_timeout_minutes", "Download timeout", 1, 240],
+    ["transcode_timeout_minutes", "Transcode timeout", 1, 480],
+    ["download_max_filesize_gib", "Maximum input size", 1, 100],
+    ["audio_analysis_max_minutes", "BPM analysis track limit", 0, 240],
+    ["audio_analysis_timeout_minutes", "BPM analysis timeout", 1, 60],
+    ["lalal_max_download_gib", "Lalal result limit", 1, 100],
+];
 
 let saveTimeoutId = null;
 let isSaving = false;
@@ -212,6 +221,7 @@ let activeSettingsSave = null;
 let isPagehideSaving = false;
 let activePagehideSave = null;
 let pendingSave = false;
+let pendingSettingsSuccessToast = null;
 let settingsDirty = false;
 let isSavingAuthentication = false;
 let isAuthUseKeyBusy = false;
@@ -290,9 +300,13 @@ function updateLalalAuthButtonLabel(statusText) {
     lalalAuthBtnLabel.textContent = shouldReconnect ? "Reconnect" : "Click to Connect";
 }
 
-function setLalalStatus(text, type = "secondary") {
+// badgeClass is the complete class list. A real status uses Bootstrap's
+// .badge with a bg-* utility; the unconfigured state is not a status and uses
+// .ui-badge, the app's shared non-status badge. Mixing the two does not work:
+// the bg-* utilities are !important. Same split as COOKIE_STATUS_BADGE_CLASSES.
+function setLalalStatus(text, badgeClass = "ui-badge") {
     if (lalalStatusBadge) {
-        lalalStatusBadge.className = `badge bg-${type}`;
+        lalalStatusBadge.className = badgeClass;
         lalalStatusBadge.textContent = text;
     }
     updateLalalAuthButtonLabel(text);
@@ -337,7 +351,7 @@ function renderLalalStatusLine({ email, remainingMinutes }) {
 function applyInitialLalalState() {
     setLalalStatus(
         bootstrapData.lalal_status,
-        bootstrapData.lalal_configured ? "success" : "secondary",
+        bootstrapData.lalal_configured ? "badge bg-success" : "ui-badge",
     );
 
     if (bootstrapData.lalal_configured) {
@@ -370,21 +384,21 @@ async function loadLalalStatus({ forceRefresh = false } = {}) {
         const payload = await parseResponsePayload(res);
 
         if (!res.ok) {
-            setLalalStatus("Error", "danger");
+            setLalalStatus("Error", "badge bg-danger");
             setLalalStatusLine(payload.detail || "Unable to check status");
             setDisconnectVisible(false);
             return;
         }
 
         if (payload.configured && payload.token_valid === false) {
-            setLalalStatus("Token invalid", "danger");
+            setLalalStatus("Token invalid", "badge bg-danger");
             setLalalStatusLine(payload.validation_error || "Stored Lalal token is invalid. Please authenticate again.");
             setDisconnectVisible(true);
             return;
         }
 
         if (payload.configured) {
-            setLalalStatus("Connected", "success");
+            setLalalStatus("Connected", "badge bg-success");
             renderLalalStatusLine({
                 email: payload.email || "",
                 remainingMinutes: payload.remaining_minutes,
@@ -393,11 +407,11 @@ async function loadLalalStatus({ forceRefresh = false } = {}) {
             return;
         }
 
-        setLalalStatus("Not configured", "secondary");
+        setLalalStatus("Not configured");
         setLalalStatusLine("Click 'Authenticate' to connect your Lalal.ai account");
         setDisconnectVisible(false);
     } catch (err) {
-        setLalalStatus("Error", "danger");
+        setLalalStatus("Error", "badge bg-danger");
         setLalalStatusLine(err?.message || "Unable to check status");
         setDisconnectVisible(false);
     }
@@ -420,6 +434,15 @@ function validateSettings() {
         return { valid: false, error: "Max. uses per share link must be between 0 and 10000" };
     }
 
+    const runtimeLimits = {};
+    for (const [key, label, minimum, maximum] of RUNTIME_LIMITS) {
+        const value = parseInt(String(form.get(key) || ""), 10);
+        if (!Number.isFinite(value) || value < minimum || value > maximum) {
+            return { valid: false, error: `${label} must be between ${minimum} and ${maximum}` };
+        }
+        runtimeLimits[key] = value;
+    }
+
     const publicHostname = String(form.get("public_hostname") || "").trim();
     // Cheap sanity check only; app/utils/public_url.py does the real validation.
     if (publicHostname && (publicHostname.length > 253 || !/^[A-Za-z0-9.:-]+$/.test(publicHostname))) {
@@ -435,6 +458,7 @@ function validateSettings() {
             public_hostname: publicHostname,
             download_mp4_preset: mp4PresetEl ? mp4PresetEl.checked : true,
             lalalaai_duration_guard: lalalDurationGuard ? lalalDurationGuard.checked : true,
+            ...runtimeLimits,
         },
     };
 }
@@ -538,8 +562,11 @@ function renderAuthState({ animate = true } = {}) {
     }
 }
 
-function scheduleAutoSave(delay = AUTO_SAVE_DELAY_MS) {
+function scheduleAutoSave(delay = AUTO_SAVE_DELAY_MS, successToast = null) {
     settingsDirty = true;
+    if (successToast) {
+        pendingSettingsSuccessToast = successToast;
+    }
     if (isSaving || isPagehideSaving || isSavingAuthentication) {
         pendingSave = true;
         return;
@@ -562,17 +589,20 @@ function saveSettings() {
 
     const validation = validateSettings();
     if (!validation.valid) {
+        pendingSettingsSuccessToast = null;
         showToast(validation.error, "danger");
         return Promise.resolve();
     }
 
+    const successToast = pendingSettingsSuccessToast;
+    pendingSettingsSuccessToast = null;
     isSaving = true;
     pendingSave = false;
-    activeSettingsSave = performSettingsSave(validation.data);
+    activeSettingsSave = performSettingsSave(validation.data, successToast);
     return activeSettingsSave;
 }
 
-async function performSettingsSave(data) {
+async function performSettingsSave(data, successToast = null) {
     try {
         const res = await fetchWithTimeout("/api/settings", {
             method: "POST",
@@ -591,6 +621,9 @@ async function performSettingsSave(data) {
 
         if (!pendingSave) {
             settingsDirty = false;
+        }
+        if (successToast) {
+            showToast(payload.message || successToast, "success");
         }
     } catch (err) {
         const message = err?.name === "AbortError"
@@ -985,14 +1018,17 @@ window.addEventListener("pageshow", (event) => {
 });
 
 const AUTO_SAVE_INPUT_SELECTOR = [
-    "#retentionDays",
-    "#shareLinkMaxUses",
-    '[name="retention_days"]',
     '[name="download_concurrent_fragments"]',
-    '[name="share_link_max_uses"]',
     '[name="public_hostname"]',
     '[name="download_mp4_preset"]',
     '[name="lalalaai_duration_guard"]',
+    '[name="download_worker_count"]',
+    '[name="download_timeout_minutes"]',
+    '[name="transcode_timeout_minutes"]',
+    '[name="download_max_filesize_gib"]',
+    '[name="audio_analysis_max_minutes"]',
+    '[name="audio_analysis_timeout_minutes"]',
+    '[name="lalal_max_download_gib"]',
 ].join(", ");
 
 function bindSettingsInputs() {
@@ -1060,6 +1096,9 @@ function bindRetentionSlider() {
         retentionDaysEl.value = String(exactIndex >= 0 ? exactIndex : closestIndex);
     }
     retentionDaysEl?.addEventListener("input", updateRetentionDaysPreview);
+    retentionDaysEl?.addEventListener("change", () => {
+        scheduleAutoSave(0, "Retention updated");
+    });
     updateRetentionDaysPreview();
 }
 
@@ -1072,6 +1111,9 @@ function bindShareLinkMaxUsesSlider() {
         shareLinkMaxUsesEl.value = String(exactIndex >= 0 ? exactIndex : closestIndex);
     }
     shareLinkMaxUsesEl?.addEventListener("input", updateShareLinkMaxUsesPreview);
+    shareLinkMaxUsesEl?.addEventListener("change", () => {
+        scheduleAutoSave(0, "Share-link limit updated");
+    });
     updateShareLinkMaxUsesPreview();
 }
 
@@ -1250,11 +1292,17 @@ const COOKIE_AGE_FORMATTER = new Intl.RelativeTimeFormat("en", { numeric: "alway
 
 const DAY_MS = 86_400_000;
 
-const COOKIE_STATUS_BADGE_TYPES = {
-    valid: "success",
-    expired: "danger",
-    invalid: "danger",
-    missing: "secondary",
+// Kept in sync with the same map in app/templates/settings.html, which renders
+// the initial state before this script takes over.
+//
+// A real status uses Bootstrap's .badge with a bg-* utility. "missing" is an
+// empty state rather than a status, so it uses .ui-badge - the same shared
+// non-status badge as the detail chips below the header.
+const COOKIE_STATUS_BADGE_CLASSES = {
+    valid: "badge bg-success",
+    expired: "badge bg-danger",
+    invalid: "badge bg-danger",
+    missing: "ui-badge",
 };
 
 function cookieTileElements(platform) {
@@ -1382,16 +1430,22 @@ function renderCookieStatus(platform, status) {
     if (!els) return;
 
     const normalized = String(status?.status || "missing").toLowerCase();
-    const badgeType = COOKIE_STATUS_BADGE_TYPES[normalized] || "secondary";
+    const badgeClass = COOKIE_STATUS_BADGE_CLASSES[normalized] ?? "ui-badge";
     const label = COOKIE_STATUS_LABELS[normalized] || normalized;
 
     if (els.badge) {
-        els.badge.className = `badge bg-${badgeType} cookie-status-badge`;
+        els.badge.className = `${badgeClass} cookie-status-badge`;
         els.badge.dataset.status = normalized;
         els.badge.textContent = label;
     }
     if (els.detail) {
-        els.detail.textContent = describeCookieValidity(status);
+        const detailParts = describeCookieValidity(status).split(" \u00b7 ").filter(Boolean);
+        els.detail.replaceChildren(...detailParts.map((part) => {
+            const badge = document.createElement("span");
+            badge.className = "ui-badge";
+            badge.textContent = part;
+            return badge;
+        }));
         const tooltip = describeCookieValidityTooltip(status);
         if (tooltip) {
             els.detail.title = tooltip;
@@ -1551,7 +1605,7 @@ function bindLalalEvents() {
                 throw new Error(payload.detail || `HTTP ${res.status}`);
             }
 
-            setLalalStatus("Not configured", "secondary");
+            setLalalStatus("Not configured");
             setLalalStatusLine("Session disconnected. Click 'Authenticate' to reconnect.");
             setDisconnectVisible(false);
             showToast("Lalal.ai session disconnected", "success");

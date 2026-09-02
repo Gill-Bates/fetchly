@@ -178,7 +178,9 @@ class GovernorConfig:
     def from_env(cls) -> Self:
         """Create config from environment variables."""
         return cls(
-            worker_count=_env_int("WORKER_COUNT", 0, min_value=0),
+            # Worker count comes from the persisted settings store and is
+            # applied at startup from app/main.py.
+            worker_count=0,
             queue_maxsize=_env_int("WORKER_QUEUE_MAXSIZE", 0, min_value=0),
             cpu_semaphore_limit=_env_int("CPU_SEMAPHORE_LIMIT", 0, min_value=0),
             analysis_semaphore_limit=_env_int("ANALYSIS_SEMAPHORE_LIMIT", 0, min_value=0),

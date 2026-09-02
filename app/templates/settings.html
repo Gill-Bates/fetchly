@@ -51,7 +51,7 @@
                                         <div class="settings-slider-header">
                                             <label for="retentionDays" class="form-label mb-0">Max. Job retention
                                                 (days)</label>
-                                            <output class="settings-slider-value" id="retentionDaysValue"
+                                            <output class="ui-badge settings-slider-value" id="retentionDaysValue"
                                                 for="retentionDays" aria-live="polite">Unlimited</output>
                                         </div>
                                         <div class="settings-range-control">
@@ -160,7 +160,7 @@
                                                 autocapitalize="off" autocorrect="off" spellcheck="false"
                                                 placeholder="fetchly.example.com"
                                                 value="{{ settings.public_hostname | default('') }}">
-                                            <button type="button" class="btn btn-outline-secondary"
+                                            <button type="button" class="btn btn-outline-secondary btn-icon"
                                                 id="publicHostnameDetectBtn"
                                                 aria-label="Auto-detect from current address"
                                                 title="Auto-detect from current address">
@@ -178,7 +178,7 @@
                                         <div class="settings-slider-header">
                                             <label for="shareLinkMaxUses" class="form-label mb-0">Max. uses per share
                                                 link</label>
-                                            <output class="settings-slider-value" id="shareLinkMaxUsesValue"
+                                            <output class="ui-badge settings-slider-value" id="shareLinkMaxUsesValue"
                                                 for="shareLinkMaxUses" aria-live="polite">Unlimited</output>
                                         </div>
                                         <div class="settings-range-control">
@@ -218,6 +218,61 @@
                             </div>
                         </div>
                     </div>
+                    <div class="settings-grid-item settings-grid-item--titled">
+                        <h2 class="settings-panel-title fw-semibold mb-3 d-flex align-items-center gap-1">
+                            <span class="material-symbols-outlined icon-inline" aria-hidden="true">tune</span>
+                            Runtime limits
+                        </h2>
+                        <div class="ui-card h-100">
+                            <div>
+                                <div class="settings-section">
+                                    <div class="settings-field-stack">
+                                        <div>
+                                            <label for="downloadWorkerCount" class="form-label">Download workers</label>
+                                            <select class="form-select ui-input" id="downloadWorkerCount"
+                                                name="download_worker_count">
+                                                <option value="0" {{ 'selected' if settings.download_worker_count | default(0) == 0 else '' }}>Automatic</option>
+                                                {% for count in range(1, 9) %}
+                                                <option value="{{ count }}" {{ 'selected' if settings.download_worker_count | default(0) == count else '' }}>{{ count }}</option>
+                                                {% endfor %}
+                                            </select>
+                                            <small class="setting-hint setting-hint--with-icon">
+                                                <span class="material-symbols-outlined setting-hint-icon"
+                                                    aria-hidden="true">info</span>
+                                                <span>Automatic uses the available CPU quota. Changes apply after the
+                                                    next app restart.</span>
+                                            </small>
+                                        </div>
+                                        <div class="row g-3">
+                                            <div class="col-sm-6">
+                                                <label for="downloadTimeoutMinutes" class="form-label">Download timeout
+                                                    (min)</label>
+                                                <input type="number" class="form-control ui-input"
+                                                    id="downloadTimeoutMinutes" name="download_timeout_minutes" min="1"
+                                                    max="240"
+                                                    value="{{ settings.download_timeout_minutes | default(60) }}">
+                                            </div>
+                                            <div class="col-sm-6">
+                                                <label for="transcodeTimeoutMinutes" class="form-label">Transcode timeout
+                                                    (min)</label>
+                                                <input type="number" class="form-control ui-input"
+                                                    id="transcodeTimeoutMinutes" name="transcode_timeout_minutes" min="1"
+                                                    max="480"
+                                                    value="{{ settings.transcode_timeout_minutes | default(120) }}">
+                                            </div>
+                                        </div>
+                                        <div>
+                                            <label for="downloadMaxFilesizeGiB" class="form-label">Maximum input size
+                                                (GiB)</label>
+                                            <input type="number" class="form-control ui-input" id="downloadMaxFilesizeGiB"
+                                                name="download_max_filesize_gib" min="1" max="100"
+                                                value="{{ settings.download_max_filesize_gib | default(4) }}">
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
                 </div>
             </section>
 
@@ -234,46 +289,89 @@
                                 <div class="settings-section lalal-tile-section">
                                     <div class="lalal-tile-header mb-3">
                                         <img src="/static/img/lalal_ai.svg" alt="Lalal.ai" class="lalal-tile-logo">
+                                        {# "Not configured" is an empty state, not a status, so it gets .ui-badge
+                                           rather than Bootstrap's .badge - see the .ui-badge rule in style.css. #}
                                         <span id="lalalStatusBadge"
-                                            class="badge {{ 'bg-success' if lalal_configured else 'bg-secondary' }}">{{
+                                            class="{{ 'badge bg-success' if lalal_configured else 'ui-badge' }}">{{
                                             lalal_status or 'Not configured' }}</span>
                                     </div>
 
-                                    <div class="lalal-tile-actions">
-                                        <div class="lalal-tile-action-row">
-                                            <button type="button" class="btn btn-outline-primary btn-sm"
-                                                id="lalalAuthBtn" data-bs-toggle="modal"
-                                                data-bs-target="#lalalAuthModal">
-                                                <span class="material-symbols-outlined icon-inline"
-                                                    aria-hidden="true">key</span>
-                                                <span id="lalalAuthBtnLabel">{{ 'Reconnect' if lalal_configured else
-                                                    'Click to Connect' }}</span>
-                                            </button>
-                                            <button type="button"
-                                                class="btn btn-outline-danger btn-sm {{ '' if lalal_configured else 'd-none' }}"
-                                                id="lalalDisconnectBtn" {{ 'disabled' if not lalal_configured else ''
-                                                }}>
-                                                <span class="material-symbols-outlined icon-inline"
-                                                    aria-hidden="true">link_off</span>
-                                                Disconnect
-                                            </button>
-                                        </div>
-                                    </div>
+                                    <div class="lalal-tile-body">
+                                        <div class="lalal-tile-col">
+                                            <div class="lalal-tile-actions">
+                                                <div class="lalal-tile-action-row">
+                                                    <button type="button" class="btn btn-outline-primary btn-sm"
+                                                        id="lalalAuthBtn" data-bs-toggle="modal"
+                                                        data-bs-target="#lalalAuthModal">
+                                                        <span class="material-symbols-outlined icon-inline"
+                                                            aria-hidden="true">key</span>
+                                                        <span id="lalalAuthBtnLabel">{{ 'Reconnect' if lalal_configured
+                                                            else 'Click to Connect' }}</span>
+                                                    </button>
+                                                    <button type="button"
+                                                        class="btn btn-outline-danger btn-sm {{ '' if lalal_configured else 'd-none' }}"
+                                                        id="lalalDisconnectBtn" {{ 'disabled' if not lalal_configured
+                                                        else '' }}>
+                                                        <span class="material-symbols-outlined icon-inline"
+                                                            aria-hidden="true">link_off</span>
+                                                        Disconnect
+                                                    </button>
+                                                </div>
+                                            </div>
 
-                                    <div class="mt-3 pt-3 border-top">
-                                        <div class="form-check form-switch">
-                                            <input class="form-check-input" type="checkbox" role="switch"
-                                                id="lalalDurationGuard" name="lalalaai_duration_guard" {{ 'checked' if
-                                                settings.lalalaai_duration_guard | default(true) else '' }}>
-                                            <label class="form-check-label" for="lalalDurationGuard">
-                                                Limit long tracks
-                                            </label>
+                                            <div class="mt-3 pt-3 border-top">
+                                                <div class="form-check form-switch">
+                                                    <input class="form-check-input" type="checkbox" role="switch"
+                                                        id="lalalDurationGuard" name="lalalaai_duration_guard" {{
+                                                        'checked' if settings.lalalaai_duration_guard | default(true) else
+                                                        '' }}>
+                                                    <label class="form-check-label" for="lalalDurationGuard">
+                                                        Limit long tracks
+                                                    </label>
+                                                </div>
+                                                <small class="setting-hint setting-hint--with-icon">
+                                                    <span class="material-symbols-outlined setting-hint-icon"
+                                                        aria-hidden="true">info</span>
+                                                    <span>Blocks tracks over {{ LALAL_MAX_DURATION_MINUTES }}
+                                                        minutes.</span>
+                                                </small>
+                                            </div>
                                         </div>
-                                        <small class="setting-hint setting-hint--with-icon">
-                                            <span class="material-symbols-outlined setting-hint-icon"
-                                                aria-hidden="true">info</span>
-                                            <span>Blocks tracks over {{ LALAL_MAX_DURATION_MINUTES }} minutes.</span>
-                                        </small>
+
+                                        <div class="lalal-tile-col lalal-tile-col--analysis">
+                                            <h3 class="settings-section-title">Analysis &amp; stem limits</h3>
+                                            <div class="settings-field-stack">
+                                                <div>
+                                                    <label for="audioAnalysisMaxMinutes" class="form-label">BPM analysis
+                                                        track limit (min)</label>
+                                                    <input type="number" class="form-control ui-input"
+                                                        id="audioAnalysisMaxMinutes" name="audio_analysis_max_minutes"
+                                                        min="0" max="240"
+                                                        value="{{ settings.audio_analysis_max_minutes | default(15) }}">
+                                                    <small class="setting-hint setting-hint--with-icon">
+                                                        <span class="material-symbols-outlined setting-hint-icon"
+                                                            aria-hidden="true">info</span>
+                                                        <span>Set 0 to analyze tracks of any length.</span>
+                                                    </small>
+                                                </div>
+                                                <div>
+                                                    <label for="audioAnalysisTimeoutMinutes" class="form-label">BPM
+                                                        analysis timeout (min)</label>
+                                                    <input type="number" class="form-control ui-input"
+                                                        id="audioAnalysisTimeoutMinutes"
+                                                        name="audio_analysis_timeout_minutes" min="1" max="60"
+                                                        value="{{ settings.audio_analysis_timeout_minutes | default(5) }}">
+                                                </div>
+                                                <div>
+                                                    <label for="lalalMaxDownloadGiB" class="form-label">Lalal result
+                                                        limit (GiB)</label>
+                                                    <input type="number" class="form-control ui-input"
+                                                        id="lalalMaxDownloadGiB" name="lalal_max_download_gib" min="1"
+                                                        max="100"
+                                                        value="{{ settings.lalal_max_download_gib | default(4) }}">
+                                                </div>
+                                            </div>
+                                        </div>
                                     </div>
                                 </div>
                             </div>
@@ -285,12 +383,6 @@
                     <span class="material-symbols-outlined icon-inline" aria-hidden="true">cookie</span>
                     Cookies
                 </h2>
-                <p class="setting-hint setting-hint--with-icon mb-3">
-                    <span class="material-symbols-outlined setting-hint-icon" aria-hidden="true">info</span>
-                    <span>Paste the cookie header from your browser's dev tools to download
-                        age-restricted or login-gated content. Cookies are checked when they arrive; while
-                        they are missing or expired, downloads for that platform simply run signed out.</span>
-                </p>
                 <div class="settings-grid settings-security-grid settings-grid--cols-2" id="cookieTiles">
                     {% for platform in [
                     {"id": "youtube", "label": "YouTube"},
@@ -312,9 +404,11 @@
                                         </span>
                                         <span class="cookie-tile-name">{{ platform.label }}</span>
                                         {% set status_value = cookie_status.status if cookie_status else 'missing' %}
-                                        {% set badge_type = {"valid": "success", "expired": "danger", "invalid":
-                                        "danger", "missing": "secondary"}[status_value] %}
-                                        <span class="badge bg-{{ badge_type }} cookie-status-badge"
+                                        {# "missing" is an empty state, not a failure, so it gets .ui-badge like the
+                                           detail chips below instead of Bootstrap's .badge - see style.css. #}
+                                        {% set badge_class = {"valid": "badge bg-success", "expired": "badge bg-danger",
+                                        "invalid": "badge bg-danger", "missing": "ui-badge"}[status_value] %}
+                                        <span class="{{ badge_class }} cookie-status-badge"
                                             data-cookie-status-badge data-status="{{ status_value }}">
                                             {{ {"valid": "Valid", "expired": "Expired", "invalid": "Invalid", "missing":
                                             "None stored"}[status_value] }}
@@ -389,7 +483,8 @@
                                             <small class="setting-hint setting-hint--with-icon">
                                                 <span class="material-symbols-outlined setting-hint-icon"
                                                     aria-hidden="true">info</span>
-                                                <span>Letters and <code>- _</code>.</span>
+                                                <span>Letters, hyphens and underscores only — no spaces, digits or
+                                                    other symbols. Up to 64 characters.</span>
                                             </small>
                                         </div>
                                         <div>
@@ -497,6 +592,7 @@
                         </div>
                     </div>
                 </div>
+
                 <div class="settings-grid">
                     <div class="settings-grid-item">
                         <div class="ui-card h-100">
@@ -512,7 +608,7 @@
                                                         aria-hidden="true">upgrade</span>
                                                     <span>Update available</span>
                                                 </a>
-                                                <span class="settings-version-badge font-monospace">{{ ytdlp_version |
+                                                <span class="ui-badge settings-version-badge font-monospace">{{ ytdlp_version |
                                                     default('unavailable') }}</span>
                                             </dd>
                                         </div>
@@ -525,7 +621,7 @@
                                                         aria-hidden="true">upgrade</span>
                                                     <span>Update available</span>
                                                 </a>
-                                                <span class="settings-version-badge font-monospace">{{ ytdlp_ejs_version
+                                                <span class="ui-badge settings-version-badge font-monospace">{{ ytdlp_ejs_version
                                                     | default('unavailable') }}</span>
                                             </dd>
                                         </div>
@@ -538,7 +634,7 @@
                                                         aria-hidden="true">upgrade</span>
                                                     <span>Update available</span>
                                                 </a>
-                                                <span class="settings-version-badge font-monospace">{{
+                                                <span class="ui-badge settings-version-badge font-monospace">{{
                                                     js_runtime_version | default('unavailable') }}</span>
                                             </dd>
                                         </div>
@@ -551,7 +647,7 @@
                                                         aria-hidden="true">upgrade</span>
                                                     <span>Update available</span>
                                                 </a>
-                                                <span class="settings-version-badge font-monospace">{{ ffmpeg_version |
+                                                <span class="ui-badge settings-version-badge font-monospace">{{ ffmpeg_version |
                                                     default('unavailable') }}</span>
                                             </dd>
                                         </div>
@@ -564,7 +660,7 @@
                                                         aria-hidden="true">upgrade</span>
                                                     <span>Update available</span>
                                                 </a>
-                                                <span class="settings-version-badge font-monospace">{{
+                                                <span class="ui-badge settings-version-badge font-monospace">{{
                                                     wavesurfer_version | default('unavailable') }}</span>
                                             </dd>
                                         </div>
@@ -599,12 +695,12 @@
                                     <dl class="settings-info-row-group">
                                         <div class="settings-info-row">
                                             <dt>Current</dt>
-                                            <dd><span class="settings-version-badge font-monospace"
+                                            <dd><span class="ui-badge settings-version-badge font-monospace"
                                                     data-app-update-current>v{{ VERSION | e }}</span></dd>
                                         </div>
                                         <div class="settings-info-row">
                                             <dt>Latest</dt>
-                                            <dd><span class="settings-version-badge font-monospace"
+                                            <dd><span class="ui-badge settings-version-badge font-monospace"
                                                     data-app-update-latest>–</span></dd>
                                         </div>
                                     </dl>
@@ -657,7 +753,7 @@
                 <!-- Step 1: Email -->
                 <div id="lalalAuthStep1">
                     <div class="auth-step-header mb-3">
-                        <span class="badge auth-step-badge">Step 1</span>
+                        <span class="ui-badge auth-step-badge">Step 1</span>
                         <h6 class="mb-0">Connect with activation key</h6>
                     </div>
 

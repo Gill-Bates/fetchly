@@ -21,6 +21,7 @@ from unittest.mock import patch
 os.environ.setdefault("FETCHLY_SECRET_KEY", "test-auth-credentials-secret")
 
 from app import db
+from app import session
 from app.routes import auth
 from app.utils.credentials import normalize_admin_username, validate_admin_password
 
@@ -114,6 +115,18 @@ class LocalUserTests(_IsolatedSettingsDb):
         db.set_settings({"enable_authentication": True})
         request = type("R", (), {"cookies": {}})()
         self.assertIsNone(auth.current_user(request))
+
+
+class SecureCookieResolutionTests(unittest.TestCase):
+    def test_https_proxy_override_marks_cookies_secure_for_http_upstreams(self):
+        request = type("R", (), {"url": type("U", (), {"scheme": "http"})()})()
+        with patch.dict(os.environ, {"FETCHLY_BEHIND_HTTPS": "1"}):
+            self.assertTrue(session._resolve_cookie_secure(request))
+
+    def test_plain_http_without_proxy_override_keeps_cookies_non_secure(self):
+        request = type("R", (), {"url": type("U", (), {"scheme": "http"})()})()
+        with patch.dict(os.environ, {"FETCHLY_BEHIND_HTTPS": ""}):
+            self.assertFalse(session._resolve_cookie_secure(request))
 
 
 class CredentialValidationTests(unittest.TestCase):

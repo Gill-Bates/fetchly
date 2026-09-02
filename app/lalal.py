@@ -11,7 +11,6 @@
 
 import asyncio
 import logging
-import os
 import re
 import time
 from collections.abc import AsyncIterator, Callable
@@ -21,16 +20,15 @@ from typing import Any, Self, TypedDict
 
 import httpx
 
+from .db import get_settings
+
 logger = logging.getLogger(__name__)
 
 LALAL_API_BASE = "https://www.lalal.ai"
 LALAL_API_PREFIX = "/api/v1"
 _TRANSFER_CHUNK_SIZE = 65536
-_MAX_RESULT_DOWNLOAD_BYTES = int(
-    os.environ.get("FETCHLY_LALAL_MAX_DOWNLOAD_BYTES", str(4 * 1024 * 1024 * 1024))
-)
-if _MAX_RESULT_DOWNLOAD_BYTES <= 0:
-    raise RuntimeError("FETCHLY_LALAL_MAX_DOWNLOAD_BYTES must be positive")
+_DEFAULT_LALAL_MAX_DOWNLOAD_GIB = 4
+_BYTES_PER_GIB = 1024 * 1024 * 1024
 
 type ProgressCallback = Callable[[int], None]
 type StageProgressCallback = Callable[[str, int], None]
@@ -180,6 +178,18 @@ def _extract_processing_error(error: Any, default: str = "Processing failed") ->
     return message or default
 
 
+def _max_result_download_bytes() -> int:
+    """Return the persisted maximum Lalal result size in bytes."""
+    try:
+        settings = get_settings()
+    except Exception:
+        logger.warning("Could not read Lalal download limit; falling back to default", exc_info=True)
+        return _DEFAULT_LALAL_MAX_DOWNLOAD_GIB * _BYTES_PER_GIB
+
+    max_download_gib = max(1, int(settings.get("lalal_max_download_gib", _DEFAULT_LALAL_MAX_DOWNLOAD_GIB)))
+    return max_download_gib * _BYTES_PER_GIB
+
+
 async def _iter_file_chunks(file_path: Path, chunk_size: int = _TRANSFER_CHUNK_SIZE) -> AsyncIterator[bytes]:
     """Yield file contents in bounded chunks without loading the full file into memory."""
     with file_path.open("rb") as file_handle:
@@ -317,18 +327,19 @@ class _BaseLalalClient:
 
         part_path = output_path.with_suffix(f"{output_path.suffix}.part")
         downloaded = 0
+        max_download_bytes = _max_result_download_bytes()
         try:
             async with httpx.AsyncClient(timeout=120.0, follow_redirects=False) as transfer_client:
                 async with transfer_client.stream("GET", url) as response:
                     response.raise_for_status()
                     total = _content_length(response)
-                    if total is not None and total > _MAX_RESULT_DOWNLOAD_BYTES:
+                    if total is not None and total > max_download_bytes:
                         raise LalalError("Download exceeds configured size limit")
 
                     with part_path.open("wb") as output_file:
                         async for chunk in response.aiter_bytes(chunk_size=_TRANSFER_CHUNK_SIZE):
                             downloaded += len(chunk)
-                            if downloaded > _MAX_RESULT_DOWNLOAD_BYTES:
+                            if downloaded > max_download_bytes:
                                 raise LalalError("Download exceeds configured size limit")
                             await asyncio.to_thread(output_file.write, chunk)
 

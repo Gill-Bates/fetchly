@@ -1,0 +1,153 @@
+site_name: fetchly Documentation
+site_description: Self-hosted media downloader for YouTube, TikTok, Instagram & Facebook
+site_author: Gill-Bates
+site_url: https://gill-bates.github.io/fetchly/
+
+repo_name: Gill-Bates/fetchly
+repo_url: https://github.com/Gill-Bates/fetchly
+edit_uri: edit/main/docs/
+
+docs_dir: .
+site_dir: ../site
+
+# SEO and canonical URL configuration
+use_directory_urls: true
+
+theme:
+  name: material
+  language: en
+  favicon: assets/favicon.svg
+  palette:
+    # Light mode
+    - scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    # Dark mode
+    - scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  font:
+    text: Roboto
+    code: Roboto Mono
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - navigation.footer
+    - navigation.prune
+    - search.suggest
+    - search.highlight
+    - search.share
+    - content.code.copy
+    - content.code.annotate
+    - content.tabs.link
+  icon:
+    repo: fontawesome/brands/github
+    edit: material/pencil
+    view: material/eye
+
+plugins:
+  - search:
+      lang: en
+      separator: '[\s\-\.]+'
+  - minify:
+      minify_html: true
+  - git-revision-date-localized:
+      enable_creation_date: true
+      type: timeago
+
+markdown_extensions:
+  - abbr
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - toc:
+      permalink: true
+      toc_depth: 3
+  - pymdownx.betterem:
+      smart_enable: all
+  - pymdownx.caret
+  - pymdownx.details
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.keys
+  - pymdownx.mark
+  - pymdownx.smartsymbols
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - pymdownx.tilde
+
+extra:
+  homepage: https://gill-bates.github.io/fetchly/
+  generator: false
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/Gill-Bates
+    - icon: fontawesome/brands/docker
+      link: https://hub.docker.com/r/giiibates/fetchly
+
+extra_css:
+  - stylesheets/extra.css
+
+nav:
+  - Home: index.md
+  - Getting Started:
+    - Quick Start: getting-started/quick-start.md
+    - Installation: getting-started/installation.md
+    - First Steps: getting-started/first-steps.md
+    - Docker Setup: getting-started/docker.md
+  - Features:
+    - Downloads: features/downloads.md
+    - Job Dashboard: features/jobs.md
+    - Audio Trimming: features/trimming.md
+    - BPM Analysis: features/bpm.md
+    - Stem Separation: features/stems.md
+    - Share Links: features/sharing.md
+    - Platform Cookies: features/cookies.md
+  - Configuration:
+    - Environment Variables: configuration/environment.md
+    - Application Settings: configuration/settings.md
+    - Resources & Workers: configuration/resources.md
+    - Reverse Proxy: configuration/reverse-proxy.md
+    - Storage & Retention: configuration/storage.md
+  - Security:
+    - Overview: security/overview.md
+    - Authentication: security/authentication.md
+    - Anti-Bot Protection: security/anti-bot.md
+    - Rate Limiting: security/rate-limiting.md
+    - Best Practices: security/best-practices.md
+  - API Reference:
+    - Overview: api/overview.md
+    - Authentication: api/authentication.md
+    - Endpoints: api/endpoints.md
+  - Development:
+    - Setup: development/setup.md
+    - Architecture: development/architecture.md
+    - Contributing: development/contributing.md
+  - Troubleshooting: troubleshooting.md
+
+copyright: Copyright &copy; 2026 Gill-Bates | Licensed under AGPL-3.0

@@ -1,0 +1,130 @@
+name: Deploy Documentation
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'docs/**'
+      - 'CHANGELOG.md'
+      - 'LICENSE'
+      - '.github/workflows/docs-build.yml'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'docs/**'
+      - 'CHANGELOG.md'
+      - 'LICENSE'
+      - '.github/workflows/docs-build.yml'
+  workflow_dispatch:
+  schedule:
+    # Weekly re-scan: new CVEs in the docs dependencies would otherwise only
+    # surface when something in the repo happens to change.
+    - cron: '17 4 * * 1'
+
+permissions:
+  contents: read
+
+# Allow one concurrent deployment
+concurrency:
+  group: docs-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0  # Full history for git-based plugins
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: docs/requirements-docs.txt
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r docs/requirements-docs.txt
+
+      - name: Copy root files to docs
+        run: |
+          cp CHANGELOG.md docs/changelog.md
+          cp LICENSE docs/license.md
+
+      - name: Build documentation
+        run: |
+          mkdocs build -f docs/mkdocs.yml --strict
+
+      # Runs against the same build that gets deployed. It used to live in a
+      # separate job that rebuilt the docs from a shallow checkout, so the
+      # git-revision-date plugin saw different history than the real build.
+      - name: Check links
+        uses: lycheeverse/lychee-action@v1
+        with:
+          args: >-
+            --verbose
+            --no-progress
+            --exclude 'fonts\.gstatic\.com'
+            --exclude 'gill-bates\.github\.io/fetchly'
+            --exclude 'www\.gnu\.org/licenses/?'
+            --exclude 'apps\.apple\.com'
+            './site/**/*.html'
+          fail: true
+
+      - name: Upload artifact
+        if: |
+          github.ref == 'refs/heads/main' &&
+          (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: ./site
+
+  deploy:
+    if: |
+      github.ref == 'refs/heads/main' &&
+      (
+        github.event_name == 'push' ||
+        github.event_name == 'workflow_dispatch'
+      )
+    needs:
+      - build
+      - security-scan
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5
+
+  security-scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Trivy scan docs dependencies
+        # Pinned to an immutable commit SHA — see GHSA-69fq-xp46-6x23.
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          cache: 'false'
+          scan-type: 'fs'
+          scan-ref: 'docs/requirements-docs.txt'
+          format: 'table'
+          exit-code: '1'
+          ignore-unfixed: true
+          severity: 'CRITICAL,HIGH'
+          timeout: '5m'

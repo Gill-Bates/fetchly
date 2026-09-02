@@ -10,13 +10,6 @@ from __future__ import annotations
 
 beat_this is a state-of-the-art beat tracker from CPJKU/beat_this. BPM is
 derived from the median inter-beat interval.
-
-beat_this can hand its framewise predictions to madmom's DBN instead of its
-own peak picker. That is deliberately not used here. The DBN is a downbeat
-and meter tracker - this module discards the downbeats - and it feeds a BPM
-that is a *median* inter-beat interval, already robust against the jitter the
-DBN smooths. In exchange it cost a git+https dependency on a library with no
-release since 2018, compiled from source at image build time.
 """
 
 import logging

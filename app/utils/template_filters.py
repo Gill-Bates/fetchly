@@ -105,13 +105,20 @@ _PUBLIC_SETTING_KEYS: frozenset[str] = frozenset({
     "enable_authentication",
     "session_idle_minutes",
     "download_concurrent_fragments",
+    "download_worker_count",
+    "download_timeout_minutes",
+    "transcode_timeout_minutes",
+    "download_max_filesize_gib",
     "download_mp4_preset",
+    "audio_analysis_max_minutes",
+    "audio_analysis_timeout_minutes",
     "share_link_max_uses",
     "public_hostname",
     "lalalaai_email",
     "lalalaai_auth_checked_at",
     "lalalaai_auth_is_valid",
     "lalalaai_duration_guard",
+    "lalal_max_download_gib",
 })
 
 

@@ -48,7 +48,7 @@ from .db import (
     list_queued_jobs,
     list_jobs_requiring_audio_analysis,
 )
-from .governor import governor
+from .governor import GovernorConfig, governor
 from .lalal_policy import LALAL_MAX_DURATION_MINUTES, LALAL_MAX_DURATION_SECONDS
 from .routes import (
     auth_router,
@@ -142,6 +142,13 @@ def _should_skip_session_renewal(request_path: str) -> bool:
     if request_path in _SKIP_RENEW_EXACT:
         return True
     return any(request_path.startswith(prefix) for prefix in _SKIP_RENEW_PREFIXES)
+
+
+def _governor_config_from_settings(settings: dict[str, Any]) -> GovernorConfig:
+    """Build startup Governor config from persisted runtime settings plus env."""
+    config = GovernorConfig.from_env()
+    config.worker_count = int(settings.get("download_worker_count", 0) or 0)
+    return config
 
 
 def _make_event_callbacks(
@@ -428,8 +435,10 @@ async def lifespan(app: FastAPI):
     loop = asyncio.get_running_loop()
     enqueue_event, thread_status_callback, disable_event_dispatch = _make_event_callbacks(loop, event_queue)
     
-    # Configure Governor for resource detection (Docker cgroup-aware)
-    await asyncio.to_thread(governor.configure)
+    # Download-worker changes apply after restart because the worker pool and
+    # queue are both startup-only process-local structures.
+    startup_settings = await asyncio.to_thread(get_settings)
+    await asyncio.to_thread(governor.configure, _governor_config_from_settings(startup_settings))
     
     # Initialize route modules
     init_api(templates)

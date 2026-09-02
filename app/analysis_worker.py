@@ -23,7 +23,7 @@ from typing import Any
 from .audio_analysis import AudioAnalysisResult, extract_analysis
 from .audio_cache import get_cached, store_cache
 from .audio_hash import compute_audio_hash
-from .db import update_job_if_status, utc_timestamp
+from .db import get_settings, update_job_if_status, utc_timestamp
 from .governor import governor
 
 logger = logging.getLogger(__name__)
@@ -56,9 +56,8 @@ _SHUTDOWN_SENTINEL: object = object()
 
 # Maximum number of pending analysis jobs kept in memory.
 _QUEUE_MAXSIZE = 50
-# Tracks longer than 15 minutes are skipped to bound worst-case analysis time.
-_MAX_ANALYSIS_DURATION_SECONDS = max(0, int(os.environ.get("FETCHLY_MAX_ANALYSIS_SECONDS", "900")))
-_ANALYSIS_TIMEOUT_SECONDS = max(1, int(os.environ.get("FETCHLY_AUDIO_ANALYSIS_TIMEOUT_SECONDS", "300")))
+_DEFAULT_MAX_ANALYSIS_MINUTES = 15
+_DEFAULT_ANALYSIS_TIMEOUT_MINUTES = 5
 _analysis_queue: queue.Queue[AnalysisJob] | None = None
 _queue_lock = threading.Lock()
 _queued_job_ids: set[str] = set()
@@ -76,6 +75,20 @@ class AnalysisJob:
     job_id: str
     file_path: Path
     duration_seconds: float | None = None
+
+
+def _analysis_runtime_limits() -> tuple[int | None, int]:
+    """Return persisted BPM analysis duration/timeout limits."""
+    try:
+        settings = get_settings()
+    except Exception:
+        logger.warning("Could not read audio-analysis settings; falling back to defaults", exc_info=True)
+        return _DEFAULT_MAX_ANALYSIS_MINUTES * 60, _DEFAULT_ANALYSIS_TIMEOUT_MINUTES * 60
+
+    max_minutes = max(0, int(settings.get("audio_analysis_max_minutes", _DEFAULT_MAX_ANALYSIS_MINUTES)))
+    timeout_minutes = max(1, int(settings.get("audio_analysis_timeout_minutes", _DEFAULT_ANALYSIS_TIMEOUT_MINUTES)))
+    max_duration_seconds = None if max_minutes == 0 else max_minutes * 60
+    return max_duration_seconds, timeout_minutes * 60
 
 
 def _now_iso() -> str:
@@ -249,13 +262,14 @@ def _extract_analysis_with_timeout(path: Path) -> AudioAnalysisResult:
     The analysis runs in a separate process so an overrun can be terminated
     without leaking a running thread or releasing the governor too early.
     """
+    _, timeout_seconds = _analysis_runtime_limits()
     context = multiprocessing.get_context("spawn")
     parent_connection, child_connection = context.Pipe(duplex=False)
     process = context.Process(target=_analysis_child, args=(path, child_connection))
     try:
         process.start()
         child_connection.close()
-        process.join(_ANALYSIS_TIMEOUT_SECONDS)
+        process.join(timeout_seconds)
 
         if process.is_alive():
             process.terminate()
@@ -263,7 +277,7 @@ def _extract_analysis_with_timeout(path: Path) -> AudioAnalysisResult:
             if process.is_alive():
                 process.kill()
                 process.join()
-            raise TimeoutError(f"Audio analysis exceeded time limit ({_ANALYSIS_TIMEOUT_SECONDS}s)")
+            raise TimeoutError(f"Audio analysis exceeded time limit ({timeout_seconds}s)")
 
         if not parent_connection.poll():
             raise RuntimeError("Audio analysis process exited without a result")
@@ -339,7 +353,8 @@ def _handle_analysis_job(job: AnalysisJob) -> None:
     Skips analysis for tracks that exceed the duration limit or whose file
     has disappeared since the job was enqueued.
     """
-    if job.duration_seconds is not None and job.duration_seconds > _MAX_ANALYSIS_DURATION_SECONDS:
+    max_duration_seconds, _ = _analysis_runtime_limits()
+    if max_duration_seconds is not None and job.duration_seconds is not None and job.duration_seconds > max_duration_seconds:
         _finalize_job(
             job.job_id,
             JobStatus.DONE,

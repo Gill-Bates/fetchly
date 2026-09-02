@@ -289,9 +289,15 @@ def set_session_cookie(response: Response, token: str, request: Request) -> None
 def _resolve_cookie_secure(request: Request | None = None, *, secure: bool | None = None) -> bool:
     if secure is not None:
         return secure
+    configured_secure = str(os.environ.get(_COOKIE_SECURE_ENV, "")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
     if request is not None:
-        return request.url.scheme == "https"
-    return str(os.environ.get(_COOKIE_SECURE_ENV, "")).strip().lower() in {"1", "true", "yes", "on"}
+        return configured_secure or request.url.scheme == "https"
+    return configured_secure
 
 
 def delete_session_cookie(

@@ -123,17 +123,27 @@ _SETTINGS_DEFAULTS: Final[dict[str, str]] = {
     "admin_username": "",
     "session_idle_minutes": "60",
     "download_concurrent_fragments": "3",
+    # Startup-only worker-pool size for the next application boot. 0 means
+    # "auto-detect from CPU quota".
+    "download_worker_count": "0",
+    "download_timeout_minutes": "60",
+    "transcode_timeout_minutes": "120",
+    "download_max_filesize_gib": "4",
     # Default on: the downloaded file is played back in the browser (player,
     # waveform, trim view), and only H.264/AAC in MP4 plays everywhere -
     # VP9/AV1 renditions do not in Safari/iOS. Users who want the highest
     # resolution over compatibility can turn it off on the settings page.
     "download_mp4_preset": "true",
+    # 0 disables the duration gate so any track length is analyzed.
+    "audio_analysis_max_minutes": "15",
+    "audio_analysis_timeout_minutes": "5",
     "lalalaai_email": "",
     "lalalaai_auth_key": "",
     "lalalaai_auth_checked_at": "0",
     "lalalaai_auth_is_valid": "false",
     "lalalaai_auth_last_error": "",
     "lalalaai_duration_guard": "true",
+    "lalal_max_download_gib": "4",
     # How often a generated share link may be used. 0 means unlimited; the
     # value is snapshotted onto each link at creation time so changing it
     # later never retroactively re-opens or closes links already handed out.
@@ -217,13 +227,20 @@ _SETTINGS_TYPES: Final[dict[str, Callable[[object], Any]]] = {
     "session_idle_minutes": lambda value: _parse_bounded_int(value, minimum=1, maximum=24 * 60),
     "session_version": _parse_nonnegative_int,
     "download_concurrent_fragments": lambda value: _parse_bounded_int(value, minimum=1, maximum=16),
+    "download_worker_count": lambda value: _parse_bounded_int(value, minimum=0, maximum=8),
+    "download_timeout_minutes": lambda value: _parse_bounded_int(value, minimum=1, maximum=240),
+    "transcode_timeout_minutes": lambda value: _parse_bounded_int(value, minimum=1, maximum=480),
+    "download_max_filesize_gib": lambda value: _parse_bounded_int(value, minimum=1, maximum=100),
     "download_mp4_preset": _parse_bool,
+    "audio_analysis_max_minutes": lambda value: _parse_bounded_int(value, minimum=0, maximum=240),
+    "audio_analysis_timeout_minutes": lambda value: _parse_bounded_int(value, minimum=1, maximum=60),
     "lalalaai_email": str,
     "lalalaai_auth_key": str,
     "lalalaai_auth_checked_at": _parse_nonnegative_int,
     "lalalaai_auth_is_valid": _parse_bool,
     "lalalaai_auth_last_error": str,
     "lalalaai_duration_guard": _parse_bool,
+    "lalal_max_download_gib": lambda value: _parse_bounded_int(value, minimum=1, maximum=100),
     "share_link_max_uses": lambda value: _parse_bounded_int(value, minimum=0, maximum=10000),
     "public_hostname": lambda value: normalize_public_hostname(value if isinstance(value, str) else ""),
 }
@@ -988,7 +1005,8 @@ def get_settings(
             settings[key] = parser(value)
         except (TypeError, ValueError) as exc:
             logger.warning("Invalid stored setting %s=%r: %s; using default", key, value, exc)
-            settings[key] = _SETTINGS_DEFAULTS.get(key, value)
+            default_value = _SETTINGS_DEFAULTS.get(key, value)
+            settings[key] = parser(default_value)
 
     for key, default in _SETTINGS_DEFAULTS.items():
         if key not in allowed:

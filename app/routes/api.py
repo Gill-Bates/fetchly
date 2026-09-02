@@ -100,6 +100,15 @@ _PERSISTED_CANCELLABLE_JOB_STATUSES = (
     "transcoding",
 )
 _RETRYABLE_JOB_STATUSES = frozenset({"error", "cancelled"})
+_RUNTIME_LIMIT_BOUNDS: dict[str, tuple[int, int]] = {
+    "download_worker_count": (0, 8),
+    "download_timeout_minutes": (1, 240),
+    "transcode_timeout_minutes": (1, 480),
+    "download_max_filesize_gib": (1, 100),
+    "audio_analysis_max_minutes": (0, 240),
+    "audio_analysis_timeout_minutes": (1, 60),
+    "lalal_max_download_gib": (1, 100),
+}
 
 # Module-level state
 _templates: "Jinja2Templates | None" = None
@@ -967,6 +976,10 @@ async def api_set_settings(
         settings_to_update["share_link_max_uses"] = _clamp_int(
             payload["share_link_max_uses"], 0, 10000, "share_link_max_uses"
         )
+
+    for key, (min_value, max_value) in _RUNTIME_LIMIT_BOUNDS.items():
+        if key in payload:
+            settings_to_update[key] = _clamp_int(payload[key], min_value, max_value, key)
 
     if "public_hostname" in payload:
         try:

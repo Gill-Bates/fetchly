@@ -6,9 +6,9 @@
 
 """Cover for the tempo maths in app/bpm_beat_this.py.
 
-These exercise the part that turns beat timestamps into a BPM, which is what
-madmom's DBN used to feed. It is deliberately independent of the model: the
-checkpoint is a download away and nothing here needs it.
+These exercise the part that turns beat timestamps into a BPM. They are
+deliberately independent of the model: the checkpoint is a download away and
+nothing here needs it.
 """
 
 import unittest

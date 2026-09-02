@@ -7,7 +7,7 @@
 
 <p align="center">
   <b>Self-hosted media downloader for YouTube, TikTok, Instagram &amp; Facebook.</b><br>
-  Paste a link, preview it, pick a format — with a live job dashboard, waveform audio trimming, and Lalal.ai stem separation.
+  Paste a link, preview it, pick a format — with a live job dashboard, waveform audio trimming, BPM analysis, and Lalal.ai stem separation.
 </p>
 
 <p align="center">
@@ -31,13 +31,11 @@
   <em>Authenticated login with invisible, server-verified anti-bot protection.</em>
 </p>
 
-## Why fetchly
+## Download, shape, share
 
-- **A web UI, not the CLI** — no `yt-dlp` flags to remember; format and quality are picked from menus.
-- **It stays running** — a persistent dashboard for queued, active, done, and failed jobs, not a one-shot command.
-- **More than downloading** — trim audio on a waveform and split vocals from instrumentals without leaving the app.
-- **Share with friends and family** — hand out an unguessable link to a finished download; recipients need no account, and you can cap how often each link works.
-- **Self-hosted** — a single container, SQLite on a mounted volume, authenticated access, and a hardened default setup.
+fetchly turns `yt-dlp` into a self-hosted media workspace. Pick formats in a web UI,
+follow every job live, trim audio visually, find its tempo, create stems, and share
+finished downloads without handing your media to another service.
 
 ## Features
 
@@ -47,6 +45,7 @@
 | **Stay in control** | Follow every queued, active, completed, or failed job from a live dashboard. |
 | **Choose your quality** | Pick the format and quality you want, then let fetchly handle the conversion. |
 | **Trim with precision** | Cut audio visually with an interactive waveform before you download or process it further. |
+| **Find the tempo** | Analyze BPM and beat confidence, then use the result to guide audio trimming. |
 | **Create clean stems** | Connect Lalal.ai to separate vocals and instrumentals when you need production-ready tracks. |
 | **Share what you made** | Send friends and family a share link to a finished download — no account needed on their side, with an optional limit on how many times it can be used. |
 | **Keep it private** | Run everything yourself with persistent storage, authentication, CSRF protection, anti-bot checks, and login rate limiting. |
@@ -61,7 +60,7 @@
 | <picture><source media="(prefers-color-scheme: dark)" srcset=".github/img/social/instagram_white.svg"><img src=".github/img/social/instagram_black.svg" alt="Instagram" width="24"></picture> | **Instagram** | ✅ | ✅ |
 | <picture><source media="(prefers-color-scheme: dark)" srcset=".github/img/social/facebook_white.svg"><img src=".github/img/social/facebook_black.svg" alt="Facebook" width="24"></picture> | **Facebook** | ✅ | ✅ |
 
-> **Note:** Only publicly accessible URLs work — private videos will not download.
+> **Note:** Public URLs work without account cookies. Age- or login-gated content may work after importing a current signed-in session under **Settings → Integrations**; platforms can still reject stale or revoked sessions.
 
 ## Quickstart
 
@@ -91,68 +90,13 @@ docker compose up -d
 
 A fuller compose file with logging, timezone, and reverse-proxy notes lives in [`docker/docker-compose.yml`](docker/docker-compose.yml).
 
-### docker run
+Open <http://127.0.0.1:8000>, then create an admin account in **Settings → Security**
+before exposing fetchly beyond your local machine.
 
-```bash
-docker run --rm \
-  -p 8000:8000 \
-  -e FETCHLY_SECRET_KEY="$(openssl rand -base64 32)" \
-  -v "$PWD/data:/app/data" \
-  giiibates/fetchly:latest
-```
+## Learn more
 
-Then open <http://127.0.0.1:8000>. Authentication is off on a fresh install — create an
-admin account under **Settings → Security** to require a login.
-
-To build the image yourself: `docker build -f docker/Dockerfile -t fetchly .`
-
-### Standalone
-
-Requires Linux, Python 3.13, and `ffmpeg`, `yt-dlp`, `deno` on `PATH`.
-
-```bash
-pip install -r requirements.txt && pip install yt-dlp yt-dlp-ejs
-export FETCHLY_SECRET_KEY="$(openssl rand -base64 32)"
-python run.py
-```
-
-## Configuration
-
-Everything is set through environment variables (with Compose, put them in an `.env` file next to the compose file).
-
-| Variable | Default | Description |
-| --- | --- | --- |
-| `FETCHLY_SECRET_KEY` | — | **Required.** Signs session cookies. Generate with `openssl rand -base64 32`; the app refuses to start without it. |
-| `FETCHLY_BEHIND_HTTPS` | `0` | Set to `1` when serving over HTTPS (e.g. behind a reverse proxy) so session cookies are marked `Secure`. |
-| `TZ` | `Etc/UTC` | Container timezone, used for timestamps in the UI and logs. |
-| `LOG_LEVEL` | `info` | One of `debug`, `info`, `warning`, `error`. |
-| `PORT` / `HOST` | `8000` / `0.0.0.0` | Bind address for the standalone server (`python run.py`). |
-
-**Authentication** is off by default and there is no built-in account. Create an admin
-username and password under **Settings → Security**; saving them switches the login on.
-Credentials live in the database only — no environment variable can set or override them.
-
-**Lalal.ai** stem separation is enabled by entering your Lalal.ai **activation key** under **Settings** in the app — no environment variable required.
-
-**Cookies** for age- or login-gated YouTube, TikTok, Instagram and Facebook content are added per platform under **Settings → Integrations**. Press **Paste cookies** and follow the steps in the dialog: open the platform signed in, tick **Disable cache** in the Network tab, reload with `Ctrl+Shift+R`, then right-click the request and choose *Copy as cURL*. The hard reload matters — a page answered from the cache or a service worker shows only *provisional headers*, which carry no cookies. A bare `cookie` header, a *Copy as fetch* command, the JSON export of a cookie extension and the contents of a prepared Netscape file are accepted just as well. Each tile shows how long the stored cookies remain valid. They are stored on the data volume at `data/cookies/`, readable only by the owner. While a platform's cookies are missing or expired, its downloads simply run signed out.
-
-### Reverse proxy
-
-fetchly speaks plain HTTP inside the container. Terminate TLS at a proxy (Caddy, nginx, Traefik), forward to port `8000`, and set `FETCHLY_BEHIND_HTTPS=1`. An example [`Caddyfile`](Caddyfile) is included.
-
-## Built with
-
-- [yt-dlp](https://github.com/yt-dlp/yt-dlp) + [yt-dlp-ejs](https://github.com/yt-dlp/ejs) and [deno](https://deno.land) — media extraction and YouTube JS-challenge solving
-- [ffmpeg](https://ffmpeg.org/) — transcoding, audio trimming, and waveform generation
-- [wavesurfer.js](https://wavesurfer.xyz/) — browser-based waveform display and trim UI
-- [Gunicorn](https://gunicorn.org/) + [Uvicorn](https://www.uvicorn.org/) — ASGI server used in Docker
-- [Lalal.ai](https://www.lalal.ai/) — optional vocals/instrumental stem separation
-
-<p align="center">
-  <a href="https://www.lalal.ai/">
-    <img src=".github/img/lalal_ai.svg" alt="Lalal.ai" width="130">
-  </a>
-</p>
+The [fetchly documentation](https://gill-bates.github.io/fetchly/) covers installation,
+configuration, reverse proxies, security, platform cookies, the API, and troubleshooting.
 
 ---
 

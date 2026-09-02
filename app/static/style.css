@@ -102,7 +102,6 @@
     /* Z-index scale (normalized) */
     /* Local scale only. Bootstrap owns 1030 (.fixed-top), 1050/1055 (modal). */
     --z-sticky: 10;
-    --z-dropdown: 1080;
     --z-popover: 1100;
     --z-toast: 1110;
 
@@ -120,16 +119,12 @@
 
     /* Surface fallbacks for browsers without color-mix() */
     --surface: #0f172a;
-    --surface-35: #0f172a;
-    --surface-50: #0f172a;
     --surface-60: #0f172a;
     --surface-90: #0f172a;
     --surface-95: #0f172a;
 
     /* Blur scales */
-    --blur-sm: blur(6px);
     --blur-md: blur(10px);
-    --blur-lg: blur(12px);
 
     /* Radius scale */
     --radius-sm: 8px;
@@ -182,8 +177,6 @@
 @supports (color: color-mix(in srgb, white, black)) {
     :root {
         --surface: color-mix(in srgb, var(--base) 92%, transparent);
-        --surface-35: color-mix(in srgb, var(--base) 85%, transparent);
-        --surface-50: color-mix(in srgb, var(--base) 88%, transparent);
         --surface-60: color-mix(in srgb, var(--base) 90%, transparent);
         --surface-90: color-mix(in srgb, var(--base) 95%, transparent);
         --surface-95: color-mix(in srgb, var(--base) 97%, transparent);
@@ -1082,7 +1075,10 @@ html body .text-muted {
 /* ── Settings Page ──────────────────────────────────────────────────────── */
 
 .settings-form-layout {
-    margin-bottom: 2.5rem;
+    /* No bottom margin here: .app-main already contributes padding-bottom.
+       Stacking both pushed the footer past the viewport and left a strip of
+       empty scroll below the last card. */
+    margin-bottom: 0;
 }
 
 .ui-card {
@@ -1277,17 +1273,7 @@ html body .text-muted {
 }
 
 .settings-version-badge {
-    display: inline-flex;
-    align-items: center;
     max-width: 100%;
-    padding: 0.25rem 0.55rem;
-    border: 1px solid color-mix(in srgb, var(--primary) 28%, var(--border));
-    border-radius: var(--radius-sm);
-    background: color-mix(in srgb, var(--primary) 12%, var(--surface));
-    color: var(--text);
-    font-size: 0.8rem;
-    line-height: 1.2;
-    white-space: nowrap;
 }
 
 /* ── Fetchly self-update card (Settings → System) ─────────────────────── */
@@ -1494,19 +1480,13 @@ html body .text-muted {
     gap: var(--space-3);
 }
 
+/* Colours and geometry come from .ui-badge; this adds only what a numeric
+   readout needs so the chip does not resize as the value changes. */
 .settings-slider-value {
     flex: 0 0 auto;
     min-width: 4.25rem;
-    padding: 0.2rem 0.5rem;
-    border: 1px solid color-mix(in srgb, var(--primary) 35%, var(--border));
-    border-radius: var(--radius-sm);
-    background: color-mix(in srgb, var(--primary) 12%, var(--surface));
-    color: var(--text);
-    font-size: 0.8rem;
+    justify-content: center;
     font-variant-numeric: tabular-nums;
-    line-height: 1.2;
-    text-align: center;
-    white-space: nowrap;
 }
 
 .settings-range-control {
@@ -1530,20 +1510,26 @@ html body .text-muted {
 
 .settings-range-ticks {
     position: absolute;
-    inset: var(--space-2) 0 0;
+    inset: 0;
     display: grid;
     grid-template-columns: repeat(6, minmax(0, 1fr));
-    align-items: center;
+    align-items: start;
     padding-inline: 0.55rem;
     pointer-events: none;
     z-index: 2;
 }
 
 .settings-range-tick {
+    grid-row: 1;
     justify-self: start;
-    width: 1px;
-    height: 0.7rem;
-    background: color-mix(in srgb, var(--text-muted) 70%, transparent);
+    width: clamp(8px, 1.55vw, 10px);
+    height: clamp(8px, 1.55vw, 10px);
+    border: 1px solid color-mix(in srgb, var(--text-muted) 38%, var(--surface));
+    border-radius: var(--radius-pill);
+    background: color-mix(in srgb, var(--text-muted) 24%, var(--surface));
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--surface) 82%, transparent);
+    margin-top: calc(var(--space-2) + 1.375rem);
+    transform: translate(-50%, -50%);
 }
 
 .settings-range-tick:nth-child(1) {
@@ -1573,6 +1559,7 @@ html body .text-muted {
 .settings-range-tick:nth-child(7) {
     grid-column: 6;
     justify-self: end;
+    transform: translate(50%, -50%);
 }
 
 .settings-range[data-active-index="0"]~.settings-range-ticks .settings-range-tick:nth-child(1),
@@ -1630,12 +1617,21 @@ html body .text-muted {
     transform: translateX(50%);
 }
 
-.settings-range-labels span:nth-child(1) {
+/* Labels 1-6 sit on a column start line, so each is nudged half its own width
+   to the left to centre it on that line. The 7th sits on the *end* line of the
+   last column and is nudged the other way (see the :nth-child(7) rule above);
+   it is excluded here because -n+6 does not match it. */
+.settings-range-labels span:nth-child(-n + 6) {
     transform: translateX(-50%);
 }
 
-.settings-range-labels span:nth-child(n + 2):nth-child(-n + 6) {
-    transform: translateX(-50%);
+@media (max-width: 575.98px) {
+
+    .settings-range-ticks,
+    .settings-range-labels {
+        padding-inline: 0.7rem;
+    }
+
 }
 
 .settings-danger-actions {
@@ -1736,6 +1732,55 @@ html body .text-muted {
     gap: var(--space-2);
 }
 
+/* Two-up body: connection + guard on the left, analysis/stem limits on the right.
+   Stacks on narrow viewports, splits at lg. */
+.lalal-tile-body {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+}
+
+.lalal-tile-col {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-3);
+    min-width: 0;
+}
+
+.lalal-tile-col--analysis {
+    border-top: 1px solid var(--border);
+    padding-top: var(--space-4);
+}
+
+@media (min-width: 992px) {
+    .lalal-tile-body {
+        flex-direction: row;
+        align-items: flex-start;
+        gap: var(--space-4);
+    }
+
+    .lalal-tile-body>.lalal-tile-col {
+        flex: 1 1 0;
+    }
+
+    /* In the split layout the connect/disconnect buttons read better flush
+       left with the rest of the column than floated to its centre. */
+    .lalal-tile-body .lalal-tile-actions {
+        align-items: stretch;
+    }
+
+    .lalal-tile-body .lalal-tile-action-row {
+        justify-content: flex-start;
+    }
+
+    .lalal-tile-col--analysis {
+        border-top: 0;
+        padding-top: 0;
+        border-left: 1px solid var(--border);
+        padding-left: var(--space-4);
+    }
+}
+
 /* ── Cookie tiles (Settings → Integrations) ────────────────────────────── */
 .cookie-tile-section {
     border-top: none;
@@ -1771,9 +1816,16 @@ html body .text-muted {
     flex: 0 0 auto;
 }
 
-.cookie-tile-detail {
+.app-root--settings .cookie-tile-detail {
+    /* Overrides the block display from .setting-hint (same element): this
+       row holds badge chips, not wrapped text, so it needs to stay a flex
+       container for vertical centering to apply. */
+    display: flex;
     margin: 0;
     min-height: 1.1em;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: var(--space-1);
 }
 
 .cookie-tile-detail:empty {
@@ -2232,18 +2284,10 @@ html body .text-muted {
 
 /* The identified submit card and its wrapper should shrink to their content. */
 #submitCard {
+    position: relative;
     height: auto;
     flex: 0 0 auto;
     min-height: 0;
-}
-
-#submitCard>div {
-    flex: 0 0 auto;
-    height: auto;
-}
-
-#submitCard {
-    position: relative;
     overflow: hidden;
     background:
         radial-gradient(500px 240px at 0% 0%, rgba(56, 189, 248, 0.14), transparent 60%),
@@ -2253,6 +2297,8 @@ html body .text-muted {
 
 #submitCard>div {
     position: relative;
+    flex: 0 0 auto;
+    height: auto;
 }
 
 #submitForm {
@@ -3775,6 +3821,34 @@ td[data-label="Title"] {
     color: #86efac;
 }
 
+/* ── Non-status badges ──────────────────────────────────────────────────
+   One definition for every badge that carries information rather than
+   state: slider values, version chips, cookie detail chips, step markers,
+   and the empty states of the cookie and Lalal.ai tiles.
+
+   These deliberately do NOT carry Bootstrap's .badge class. That class is
+   reserved for real statuses (Valid / Expired / Connected), whose bg-*
+   utilities are !important and would win over anything declared here. The
+   split keeps "is this a state?" answerable from the markup alone. */
+.ui-badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 0.2rem 0.5rem;
+    border: 1px solid color-mix(in srgb, var(--primary) 35%, var(--border));
+    border-radius: var(--radius-sm);
+    background: color-mix(in srgb, var(--primary) 12%, var(--surface));
+    color: var(--text);
+    font-size: 0.8rem;
+    font-weight: 500;
+    line-height: 1.2;
+    /* Without this, a long chip like "14 cookies for .youtube.com" wraps its
+       text onto two lines instead of letting the row wrap (.cookie-tile-detail
+       already does that). The taller two-line chip then pokes above and below
+       its single-line siblings even though all are centered on the same flex
+       line. */
+    white-space: nowrap;
+}
+
 /* Action buttons in tables */
 .action-buttons {
     display: inline-flex;
@@ -3934,9 +4008,6 @@ td:last-child {
 }
 
 .auth-step-badge {
-    background: color-mix(in srgb, var(--primary) 22%, transparent);
-    color: #c7d2fe;
-    border-color: color-mix(in srgb, var(--primary) 42%, var(--border));
     margin-bottom: 0.25rem;
 }
 
@@ -4381,37 +4452,10 @@ td:last-child {
         margin-right: 0;
     }
 
-    .jobs-card-header {
-        align-items: center !important;
-        flex-wrap: wrap;
-    }
-
-    .jobs-card-controls {
-        width: 100%;
-        margin-left: 0;
-        order: 3;
-        flex: 1 0 100%;
-        flex-wrap: wrap;
-    }
-
-    .jobs-quick-filter {
-        width: 100%;
-    }
-
-    .jobs-quick-filter__btn {
-        flex: 1 1 0;
-    }
-
-    .jobs-search-wrap {
-        flex: 1 1 100%;
-        min-width: 0;
-    }
-
-    #jobsCard .jobs-list-shell {
-        flex: 0 0 auto;
-        min-height: auto;
-        overflow: visible;
-    }
+    /* The jobs-card header, controls, quick filter and list-shell overrides
+       for this width live in the (max-width: 1024px) block below, which also
+       covers this range. Duplicating them here did nothing: same specificity,
+       earlier in the file, so the 1024px copies always won. */
 
     .video-meta {
         gap: 0.75rem;
@@ -4832,6 +4876,7 @@ td:last-child {
         display: none;
         flex: 1 0 auto;
         min-height: 0;
+        overflow: visible;
     }
 
     html.mobile-job-history-enabled #jobsCard {
@@ -4859,19 +4904,14 @@ td:last-child {
         margin-left: 1rem !important;
     }
 
-    #jobsCard {
-        overflow: visible;
-    }
-
-    #jobsCard .ui-card-body,
-    #jobsCard .jobs-list-shell {
+    #jobsCard .ui-card-body {
         overflow: visible;
     }
 
     #jobsCard .jobs-list-shell {
         flex: 0 0 auto;
         min-height: auto;
-        padding: 0 var(--space-4) var(--space-2);
+        overflow: visible;
     }
 
     .jobs-card-header {
@@ -4972,6 +5012,18 @@ td:last-child {
         font-size: 0.65rem;
         line-height: 1;
         letter-spacing: 0.03em;
+    }
+}
+
+/* Tablet-only list inset. Deliberately a range and not part of the
+   (max-width: 1024px) block above: phones get the tighter var(--space-3)
+   inset from the (max-width: 576px) block, which sits *earlier* in the file
+   and would otherwise lose to an equally specific 1024px rule. The lower
+   bound is 576.02px so it complements `max-width: 576px` exactly and leaves
+   no uncovered gap at fractional viewport widths. */
+@media (min-width: 576.02px) and (max-width: 1024px) {
+    #jobsCard .jobs-list-shell {
+        padding: 0 var(--space-4) var(--space-2);
     }
 }
 
@@ -5473,8 +5525,8 @@ td:last-child {
        changes the page height, which changes the position it was measured
        from), so it either lets the tile overflow or collapses it to a
        sliver. A fixed cap can do neither. */
-    max-height: min(60vh, 30rem);
-    max-height: min(60dvh, 30rem);
+    max-height: min(80vh, 30rem);
+    max-height: min(80dvh, 30rem);
     min-height: 0;
     overflow-y: auto;
     overscroll-behavior-y: contain;

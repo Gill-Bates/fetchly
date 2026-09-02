@@ -50,11 +50,41 @@ class CookieFileLookupTests(unittest.TestCase):
             with patch.object(cookies, "_DATA_COOKIES_DIR", data_cookies_dir):
                 cookies.ensure_data_cookies_dir()
                 self.assertTrue(data_cookies_dir.is_dir())
+                # Owner-only: the directory listing alone reveals which
+                # platforms hold a live session.
+                self.assertEqual(data_cookies_dir.stat().st_mode & 0o777, 0o700)
 
                 # Idempotent: calling again on an already-existing directory
                 # must not raise.
                 cookies.ensure_data_cookies_dir()
                 self.assertTrue(data_cookies_dir.is_dir())
+
+    def test_ensure_data_cookies_dir_repairs_a_permissive_directory(self) -> None:
+        """mkdir's mode only applies on creation - an existing directory left
+        world-readable by an earlier release must be tightened as well."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_cookies_dir = Path(temp_dir) / "data" / "cookies"
+            data_cookies_dir.mkdir(parents=True)
+            data_cookies_dir.chmod(0o775)
+
+            with patch.object(cookies, "_DATA_COOKIES_DIR", data_cookies_dir):
+                cookies.ensure_data_cookies_dir()
+
+            self.assertEqual(data_cookies_dir.stat().st_mode & 0o777, 0o700)
+
+    def test_ensure_data_cookies_dir_survives_an_unwritable_permission_bit(self) -> None:
+        """A data volume owned by another account must not fail startup."""
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_cookies_dir = Path(temp_dir) / "data" / "cookies"
+            data_cookies_dir.mkdir(parents=True)
+
+            with (
+                patch.object(cookies, "_DATA_COOKIES_DIR", data_cookies_dir),
+                patch.object(Path, "chmod", side_effect=PermissionError("not owner")),
+            ):
+                cookies.ensure_data_cookies_dir()
+
+            self.assertTrue(data_cookies_dir.is_dir())
 
 
 if __name__ == "__main__":
