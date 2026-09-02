@@ -18,6 +18,17 @@ on:
       - 'LICENSE'
       - '.github/workflows/docs-build.yml'
   workflow_dispatch:
+  # A release (docker-build.yml) can ship a version/changelog bump that never
+  # touches docs/** on its own - VERSION and the tag do, CHANGELOG.md's push
+  # trigger above already covers a plain commit, but a re-run of that workflow
+  # from an existing tag would not re-fire this one otherwise. Rebuilding docs
+  # after every successful release keeps the deployed site in step with what
+  # was actually published, independent of which paths changed.
+  workflow_run:
+    workflows:
+      - 'Docker Multi-Arch Build'
+    types:
+      - completed
   schedule:
     # Weekly re-scan: new CVEs in the docs dependencies would otherwise only
     # surface when something in the repo happens to change.
@@ -33,6 +44,13 @@ concurrency:
 
 jobs:
   build:
+    # workflow_run fires on every conclusion of "Docker Multi-Arch Build"
+    # (success, failure, cancelled...). Only a successful release should
+    # trigger a docs rebuild; every other trigger (push, pull_request,
+    # workflow_dispatch, schedule) has no such conclusion to check.
+    if: >-
+      github.event_name != 'workflow_run' ||
+      github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -81,7 +99,11 @@ jobs:
       - name: Upload artifact
         if: |
           github.ref == 'refs/heads/main' &&
-          (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+          (
+            github.event_name == 'push' ||
+            github.event_name == 'workflow_dispatch' ||
+            github.event_name == 'workflow_run'
+          )
         uses: actions/upload-pages-artifact@v5
         with:
           path: ./site
@@ -91,7 +113,8 @@ jobs:
       github.ref == 'refs/heads/main' &&
       (
         github.event_name == 'push' ||
-        github.event_name == 'workflow_dispatch'
+        github.event_name == 'workflow_dispatch' ||
+        github.event_name == 'workflow_run'
       )
     needs:
       - build

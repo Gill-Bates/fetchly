@@ -89,7 +89,7 @@ pip install -r docs/requirements-docs.txt
 mkdocs serve -f docs/mkdocs.yml
 ```
 
-Then open <http://127.0.0.1:8000>. Pages rebuild on save.
+Then open `http://127.0.0.1:8000`. Pages rebuild on save.
 
 ## License
 

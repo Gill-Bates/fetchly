@@ -175,7 +175,7 @@ still reject stale or revoked sessions.
 - [ffmpeg](https://ffmpeg.org/) — transcoding, audio trimming, and waveform generation
 - [beat_this](https://github.com/CPJKU/beat_this) and [Essentia](https://essentia.upf.edu/) — BPM and beat-confidence analysis
 - [wavesurfer.js](https://wavesurfer.xyz/) — browser-based waveform display and trim UI
-- [FastAPI](https://fastapi.tiangolo.com/), [Gunicorn](https://gunicorn.org/) and [Uvicorn](https://www.uvicorn.org/) — application framework and ASGI server
+- [FastAPI](https://fastapi.tiangolo.com/), [Gunicorn](https://gunicorn.org/) and [Uvicorn](https://uvicorn.dev/) — application framework and ASGI server
 - [Lalal.ai](https://www.lalal.ai/) — optional vocals/instrumental stem separation
 
 ## Community & Support

@@ -61,7 +61,7 @@ export FETCHLY_SECRET_KEY="$(openssl rand -base64 32)"
 
 ## 3. Open the UI
 
-Navigate to <http://127.0.0.1:8000>.
+Navigate to `http://127.0.0.1:8000`.
 
 !!! warning "Authentication is off on a fresh install"
     There is no built-in account and no default password. Anyone who can reach the
