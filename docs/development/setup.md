@@ -170,7 +170,12 @@ DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile -t fetchly:dev .
 ```
 
 The Dockerfile is multi-stage; expect a longer build on the first run while the
-`ffmpeg` and `essentia` stages compile.
+`ffmpeg` and `essentia` stages compile. That applies on amd64 as much as on
+arm64: essentia is built from source on both, so that a multi-arch release
+ships the same version of it everywhere rather than a PyPI wheel on one
+architecture and a source build on the other. The commit it is built from is
+`ESSENTIA_REF` in `docker/Dockerfile`, pinned alongside `ESSENTIA_VERSION` to
+the version `pyproject.toml` pins; the build fails if the three disagree.
 
 ## Project layout
 

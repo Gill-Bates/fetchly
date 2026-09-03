@@ -218,8 +218,14 @@ jobs:
         # The only place architectures are declared. The manifest and release
         # jobs discover them from the digests these jobs publish, so adding an
         # entry here is all it takes. Both run on native runners - no QEMU -
-        # which matters most for arm64, where essentia is compiled from source
-        # rather than installed from a wheel.
+        # which matters because both compile essentia from source: the
+        # architectures must not differ in how that library was produced, or
+        # one published image analyses audio differently from the other.
+        #
+        # Hence the identical timeouts. Each job builds essentia's static
+        # 3rd-party chain (ffmpeg, fftw3, taglib, chromaprint, ...) and then
+        # the library itself, which only a cold build cache pays for - a
+        # release that does not move ESSENTIA_REF restores the stage instead.
         include:
           - arch: amd64
             runner: ubuntu-24.04
@@ -228,9 +234,7 @@ jobs:
             test_image: fetchly:test-amd64
             container_name: fetchly-test-amd64
             image_suffix: amd64
-            # Every dependency installs as a wheel here - torch and essentia
-            # included - so nothing is compiled from source on this arch.
-            timeout: 90
+            timeout: 180
           - arch: arm64
             runner: ubuntu-24.04-arm
             platform: linux/arm64
@@ -238,10 +242,6 @@ jobs:
             test_image: fetchly:test-arm64
             container_name: fetchly-test-arm64
             image_suffix: arm64
-            # Adds essentia from source on top of that: its static 3rd-party
-            # chain (ffmpeg, fftw3, taglib, chromaprint, ...) plus the library
-            # itself. Only a cold build cache pays this; a release that does
-            # not move ESSENTIA_REF restores the stage instead.
             timeout: 180
     runs-on: ${{ matrix.runner }}
     timeout-minutes: ${{ matrix.timeout }}
@@ -445,14 +445,14 @@ jobs:
           PY
 
       # The only step that proves essentia computes rather than merely imports.
-      # That matters most on arm64: upstream publishes no aarch64 wheel, so the
-      # essentia stage in docker/Dockerfile compiles it from source against a
-      # scalar FFTW, which makes this image's rhythm path a different build
-      # from the PyPI wheel amd64 installs. The runtime stage's
-      # `import essentia.standard` only shows that _essentia.so loads and
-      # resolves its symbols - an image whose RhythmExtractor2013 returned
-      # nonsense would pass every other check here and surface on a user's
-      # first analysis job instead.
+      # Both architectures compile essentia from the same pinned commit, so the
+      # library is the same everywhere except for FFTW's SIMD backend - sse2 on
+      # amd64, NEON on arm64 - and that backend is precisely the part no
+      # version pin can assert. The runtime stage's `import essentia.standard`
+      # only shows that _essentia.so loads and resolves its symbols; an image
+      # whose RhythmExtractor2013 returned nonsense would pass every other
+      # check here and surface on a user's first analysis job instead. Running
+      # it on both arches is what makes the two builds comparable.
       - name: Verify BPM analysis (${{ matrix.arch }})
         run: |
           set -euo pipefail

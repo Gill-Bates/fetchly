@@ -63,19 +63,42 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 ARG TARGETARCH
 ARG ESSENTIA_REPO=https://github.com/MTG/essentia.git
-ARG ESSENTIA_REF=master
+# Pinned to the commit MTG/essentia published to PyPI as 2.1b6.dev1389
+# (git describe: v2.1_beta5-1389-g36ec3d92, uploaded 2025-07-24). Every
+# architecture compiles from this one commit. A branch name could not give the
+# two architectures the same essentia: setup.py derives the version from `git
+# describe` - the VERSION file plus the commit count since the last tag - and
+# the amd64 and arm64 jobs run on separate runners minutes apart, so 'master'
+# would silently hand them two different versions the moment upstream lands a
+# commit between them. ESSENTIA_REF and ESSENTIA_VERSION move together, stay
+# equal to the pyproject.toml pin, and the built wheel is checked against
+# ESSENTIA_VERSION below.
+ARG ESSENTIA_REF=36ec3d929402d491cbbb1120c54631e8c205b0ff
+ARG ESSENTIA_VERSION=2.1b6.dev1389
 
 COPY docker/apt-no-distro-media.pref /etc/apt/preferences.d/no-distro-media
 
-ADD https://github.com/MTG/essentia/commits/${ESSENTIA_REF}.atom /tmp/essentia-ref.atom
-
+# Both architectures compile essentia here; neither installs it from PyPI.
+# Upstream's wheels cannot produce one essentia across a multi-arch release -
+# there has never been a linux/aarch64 wheel, and the newest cp313 x86_64 wheel
+# is a different build of the library than anything this stage could produce
+# for arm64. Taking "the wheel where one exists" would mean publishing two
+# differently-built essentias under a single tag. Compiling from one pinned
+# commit everywhere costs amd64 the build time - cached, and only paid when
+# ESSENTIA_REF moves - and buys identical rhythm analysis on both.
+#
+# The one thing that cannot be shared is FFTW's SIMD backend, which has no
+# portable spelling. Its version is held at 3.3.10 on both: upstream's default
+# of 3.3.2 predates aarch64 and is a decade behind on toolchain compatibility,
+# so pinning it forward keeps the two builds differing in the flag alone.
 RUN set -euo pipefail; \
     : "${TARGETARCH:?must be provided by BuildKit - build with DOCKER_BUILDKIT=1 or docker buildx}"; \
+    case "${TARGETARCH}" in \
+        amd64) fftw_simd=--enable-sse2 ;; \
+        arm64) fftw_simd=--enable-neon ;; \
+        *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
     mkdir -p /wheels; \
-    if [[ "${TARGETARCH}" != "arm64" ]]; then \
-        echo "TARGETARCH=${TARGETARCH}: essentia ships an upstream wheel, nothing to build here"; \
-        exit 0; \
-    fi; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
         build-essential \
@@ -89,17 +112,27 @@ RUN set -euo pipefail; \
     git clone --filter=blob:none "${ESSENTIA_REPO}" /src/essentia; \
     cd /src/essentia; \
     git checkout --detach "${ESSENTIA_REF}"; \
-    echo "essentia source: $(git describe --always --tags)"; \
-    printf '\n%s\n%s\n' \
-        'FFTW_VERSION=fftw-3.3.10' \
-        'FFTW_FLAGS="--enable-float --enable-neon"' >> packaging/build_config.sh; \
-    printf 'ac_cv_build=aarch64-unknown-linux-gnu\nac_cv_host=aarch64-unknown-linux-gnu\n' \
-        > /tmp/config.site; \
-    export CONFIG_SITE=/tmp/config.site; \
+    echo "essentia source: $(git describe --always --tags) (${TARGETARCH}, FFTW ${fftw_simd})"; \
+    printf '\nFFTW_VERSION=%s\nFFTW_FLAGS="%s %s"\n' \
+        fftw-3.3.10 --enable-float "${fftw_simd}" >> packaging/build_config.sh; \
+    if [[ "${TARGETARCH}" == "arm64" ]]; then \
+        printf 'ac_cv_build=aarch64-unknown-linux-gnu\nac_cv_host=aarch64-unknown-linux-gnu\n' \
+            > /tmp/config.site; \
+        export CONFIG_SITE=/tmp/config.site; \
+    fi; \
     export MAKEFLAGS="-j$(nproc)"; \
     pip wheel --no-cache-dir --no-deps -w /wheels .; \
-    rm -f /tmp/essentia-ref.atom; \
-    ls -l /wheels
+    ls -l /wheels; \
+    shopt -s nullglob; \
+    built=(/wheels/essentia-*.whl); \
+    (( ${#built[@]} == 1 )) || \
+        { echo "expected exactly one essentia wheel, got: ${built[*]:-none}" >&2; exit 1; }; \
+    case "$(basename "${built[0]}")" in \
+        essentia-"${ESSENTIA_VERSION}"-*) \
+            echo "built essentia ${ESSENTIA_VERSION} from ${ESSENTIA_REF}" ;; \
+        *) echo "wheel $(basename "${built[0]}") is not essentia ${ESSENTIA_VERSION} - ESSENTIA_REF no longer matches ESSENTIA_VERSION / the pyproject.toml pin" >&2; \
+            exit 1 ;; \
+    esac
 
 FROM ${PYTHON_BASE} AS builder
 
@@ -136,21 +169,68 @@ COPY --from=essentia /wheels /tmp/essentia-wheels
 # and the image grows by several gigabytes for GPU code that never runs.
 ENV TORCH_CPU_INDEX=https://download.pytorch.org/whl/cpu
 
+# essentia is the one dependency pip never resolves here: the wheel was
+# compiled from ESSENTIA_REF in the essentia stage above - on every
+# architecture, so both halves of the multi-arch manifest carry the same build
+# - and is installed from that wheel before the rest of the manifest is read.
+# Its requirement line is then dropped rather than re-resolved, so pip cannot
+# pull the PyPI wheel over the top of it on the one architecture where such a
+# wheel exists.
+#
+# A missing wheel is a hard error, not a fallback to PyPI: falling back is
+# exactly how the two architectures would silently drift apart again.
 RUN set -euo pipefail; \
     python -m venv "$VIRTUAL_ENV"; \
     pip install --upgrade pip; \
     shopt -s nullglob; \
     essentia_wheels=(/tmp/essentia-wheels/essentia-*.whl); \
-    if (( ${#essentia_wheels[@]} > 0 )); then \
-        echo "Installing locally built essentia: ${essentia_wheels[*]}"; \
-        pip install --no-cache-dir "${essentia_wheels[@]}"; \
-    fi; \
+    (( ${#essentia_wheels[@]} > 0 )) || \
+        { echo "no essentia wheel came from the essentia stage - it must build on every architecture" >&2; exit 1; }; \
+    echo "Installing locally built essentia: ${essentia_wheels[*]}"; \
+    pip install --no-cache-dir "${essentia_wheels[@]}"; \
     python -c 'import tomllib; print("\n".join(tomllib.load(open("pyproject.toml", "rb"))["project"]["dependencies"]))' \
         > /tmp/requirements.txt; \
+    echo "essentia: keeping the locally built version, dropping the pinned requirement"; \
+    sed -ri '/^essentia([[:space:]]*[<>=!~].*)?$/d' /tmp/requirements.txt; \
+    ! grep -qi '^essentia' /tmp/requirements.txt || \
+        { echo "essentia requirement survived the drop - pip would overwrite the local build" >&2; exit 1; }; \
     cat /tmp/requirements.txt; \
     pip install --no-cache-dir --extra-index-url "$TORCH_CPU_INDEX" -r /tmp/requirements.txt; \
     rm -f /tmp/requirements.txt; \
     rm -rf /tmp/essentia-wheels
+
+# essentia parity gate. Both architectures install a source build governed by
+# ESSENTIA_REF, and pyproject.toml names the version that ref is expected to
+# produce. This asserts the three agree, so a bumped ref, a stale pin, or a
+# `git describe` that resolved differently than expected fails the build here
+# rather than in a user's first BPM job. Runs on both architectures, which is
+# what makes it a parity check: the same assertion against the same manifest
+# value on each, so two images cannot pass with different essentias.
+RUN python - <<'PYCHECK'
+import re
+import sys
+import tomllib
+from importlib import metadata
+
+deps = tomllib.load(open("pyproject.toml", "rb"))["project"]["dependencies"]
+pin = next((d for d in deps if re.match(r"\s*essentia\s*==", d)), None)
+if pin is None:
+    sys.exit("pyproject.toml [project.dependencies] has no 'essentia==' pin")
+want = pin.split("==", 1)[1].strip()
+have = metadata.version("essentia")
+try:
+    from packaging.version import Version
+
+    ok = Version(have) == Version(want)
+except ModuleNotFoundError:
+    ok = have == want
+if not ok:
+    sys.exit(
+        f"essentia {have} is installed but pyproject.toml pins {want}; "
+        "sync ESSENTIA_REF / ESSENTIA_VERSION in docker/Dockerfile with the pin"
+    )
+print(f"essentia {have} matches the pyproject.toml pin")
+PYCHECK
 
 ARG YTDLP_VERSION=""
 ARG YTDLP_EJS_VERSION=""
@@ -234,6 +314,7 @@ ENV VIRTUAL_ENV=/venv \
 
 RUN python -m pip check && \
     python -c "import numpy, torch, essentia.standard, yt_dlp" && \
+    echo "essentia $(python -c 'from importlib import metadata; print(metadata.version("essentia"))')" && \
     ffmpeg -version | head -n 1 && \
     ffprobe -version | head -n 1 && \
     echo "yt-dlp $(yt-dlp --version)" && \
