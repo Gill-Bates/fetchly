@@ -38,38 +38,45 @@ classifiers = [
 # absent: they update on their own cadence as platforms change and are
 # installed unpinned (see docker/Dockerfile and docs/development/setup.md).
 #
+# Nothing here carries a version pin either. A release installs the newest
+# resolvable set, and the published images still carry identical versions
+# because the release workflow resolves that set once - for linux/amd64 and
+# linux/arm64 both, failing if the two cannot agree on one - and hands the
+# resolved constraints to every architecture build. A pin here would be a
+# second, slower-moving opinion the images do not follow. See the 'Resolve
+# runtime dependency versions' step in .github/workflows/docker-build.yml.
+#
 # beat-this pulls in torch. Install with the CPU wheel index to avoid dragging
 # in the CUDA build:
 #   pip install --extra-index-url https://download.pytorch.org/whl/cpu -e .
 dependencies = [
-    
-    
-    
-    
-    
-    
-    
-    
-    
     "beat-this>=1.1.0",
-    "essentia", # pinned
-    "fastapi==0.141.1",
-    "gunicorn==26.2.0",
-    "httpx==0.28.1",
-    "jinja2==3.1.6",
-    "markdown==3.10.3",
-    "markupsafe==3.0.3",
-    "nh3==0.3.7",
-    "numpy==2.5.2",
-    "pydantic==2.13.5",
-    "python-multipart==0.0.32",
-    "slowapi==0.1.10",
-    "starlette==1.6.0",
-    "torch==2.14.0",
-    "uvicorn[standard]==0.52.4",
-    "uvicorn-worker==0.4.0",
+    # Compiled from source in docker/Dockerfile on every architecture, because
+    # upstream publishes no linux/aarch64 wheel at all. The builder stage drops
+    # this line before pip runs, so no wheel can be resolved over the local
+    # build; outside the image pip picks whatever wheel fits the interpreter.
+    "essentia",
+    "fastapi",
+    "gunicorn",
+    "httpx",
+    "jinja2",
+    "markdown",
+    "markupsafe",
+    "nh3",
+    "numpy",
+    "pydantic",
+    "python-multipart",
+    "slowapi",
+    "starlette",
+    "torch",
+    "uvicorn[standard]",
+    "uvicorn-worker",
 ]
 
+# The one place pins remain. None of this tooling enters a published image, so
+# it has no part in the images carrying identical versions - while a ruff or
+# mkdocs release that changes its own rules would fail CI on untouched code.
+# Bumping these is a deliberate commit, not a side effect of a release.
 [project.optional-dependencies]
 dev = [
     "pytest==9.1.1",

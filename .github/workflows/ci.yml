@@ -136,11 +136,15 @@ jobs:
       # VERSION, requirements.txt and docs/requirements-docs.txt were folded
       # into pyproject.toml. Reintroducing any of them would give the release
       # workflow and the running container two versions to disagree about.
+      #
+      # constraints.txt belongs to the same rule from the other direction: the
+      # release workflow resolves it per release and hands it to the builds, so
+      # a committed copy would pin the images to a stale resolution.
       - name: Reject reintroduced manifests
         run: |
           set -euo pipefail
           failed=0
-          for stale in VERSION requirements.txt docs/requirements-docs.txt; do
+          for stale in VERSION requirements.txt docs/requirements-docs.txt constraints.txt; do
             if [ -e "$stale" ]; then
               echo "ERROR: $stale is back - pyproject.toml is the single manifest"
               failed=1

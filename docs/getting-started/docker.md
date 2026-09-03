@@ -9,7 +9,7 @@ The image is built in stages so the runtime layer carries only what the app need
 | Stage | Produces |
 |---|---|
 | `ffmpeg` | A static ffmpeg/ffprobe build |
-| `essentia` | Essentia, compiled from source on every architecture from one pinned upstream commit |
+| `essentia` | Essentia, compiled from source on every architecture from one upstream commit |
 | `builder` | The Python virtualenv and the vendored wavesurfer.js bundle |
 | `runtime` | The final image |
 

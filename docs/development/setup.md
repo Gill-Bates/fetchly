@@ -41,6 +41,12 @@ it pip resolves the CUDA wheels and pulls in gigabytes of GPU code the app never
 yt-dlp and `yt-dlp-ejs` stay outside the manifest on purpose, since yt-dlp updates on
 its own cadence as platforms change.
 
+The runtime dependencies carry no version pins, so this install takes the newest
+resolvable set — the same rule a release follows. The `dev` and `docs` extras are the
+exception: their tooling never enters an image, and a ruff or mkdocs release that
+changes its own rules should be adopted in its own commit rather than reddening CI on
+untouched code.
+
 Need a flat requirements file — for a tool that only speaks `-r`, or for a scan?
 Generate it instead of keeping a second copy:
 
@@ -173,9 +179,20 @@ The Dockerfile is multi-stage; expect a longer build on the first run while the
 `ffmpeg` and `essentia` stages compile. That applies on amd64 as much as on
 arm64: essentia is built from source on both, so that a multi-arch release
 ships the same version of it everywhere rather than a PyPI wheel on one
-architecture and a source build on the other. The commit it is built from is
-`ESSENTIA_REF` in `docker/Dockerfile`, pinned alongside `ESSENTIA_VERSION` to
-the version `pyproject.toml` pins; the build fails if the three disagree.
+architecture and a source build on the other. Upstream publishes no
+linux/aarch64 wheel at all, which is why there is no version to take instead.
+A plain `docker build` compiles `master`; `ESSENTIA_REF` selects any commit.
+
+Nothing else is pinned either — not the base image, not ffmpeg, not deno,
+not yt-dlp, and not the Python dependencies. A local build therefore takes
+whatever is newest at the moment each layer runs. A release must not, because
+its two architecture jobs run on separate runners and would each resolve
+"newest" for themselves, so `.github/workflows/docker-build.yml` resolves every
+one of those once — the base image by digest, essentia to a commit, ffmpeg to an
+immutable dated BtbN release, the dependency set to a resolved
+`constraints.txt` — and passes the same values to both builds. Before the
+manifest is published it compares every version present in the two finished
+images and refuses to push an index whose halves disagree.
 
 ## Project layout
 

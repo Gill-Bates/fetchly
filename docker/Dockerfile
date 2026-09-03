@@ -7,8 +7,21 @@ FROM ${PYTHON_BASE} AS ffmpeg
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 ARG TARGETARCH
+# Empty picks the newest stable series the release carries; set it to e.g. 9.0
+# to hold one. Only release-branch tarballs qualify:
+# 'ffmpeg-n<version>-<arch>-<variant>-<series>.tar.xz'. The <version> field
+# reads 'n9.0-latest' in the rolling release and 'n9.0.1-11-ge47273f4d9' in a
+# dated autobuild, so the selection below keys on the trailing series field
+# instead - the nightly master builds carry none, and the '-shared-' variants
+# no digits there, so neither can be selected by accident.
 ARG FFMPEG_SERIES=
 ARG FFMPEG_VARIANT=gpl
+# BtbN's 'latest' release is a rolling tag: its assets are replaced by every
+# nightly rebuild, so two architecture builds minutes apart can download two
+# different ffmpeg builds under the same file name. The release workflow
+# therefore resolves the newest dated autobuild-* release - whose assets are
+# immutable - and passes it here, so both architectures extract the same binary.
+# A plain `docker build` keeps taking 'latest'.
 ARG FFMPEG_RELEASE_URL=https://github.com/BtbN/FFmpeg-Builds/releases/download/latest
 
 COPY docker/apt-no-distro-media.pref /etc/apt/preferences.d/no-distro-media
@@ -32,17 +45,19 @@ RUN set -euo pipefail; \
         gpl|lgpl) ;; \
         *) echo "FFMPEG_VARIANT must be gpl or lgpl (statically linked), got: ${FFMPEG_VARIANT}" >&2; exit 1 ;; \
     esac; \
-    series="${FFMPEG_SERIES}"; \
-    if [[ -z "${series}" ]]; then \
-        series="$(awk '{print $2}' /tmp/checksums.sha256 \
-            | sed -n "s/^ffmpeg-n\([0-9][0-9.]*\)-latest-${ffmpeg_arch}-${FFMPEG_VARIANT}-\1\.tar\.xz$/\1/p" \
-            | sort -V | tail -n 1)"; \
+    candidates="$(awk '{print $2}' /tmp/checksums.sha256 \
+        | sed -n "s/^\(ffmpeg-n.*-${ffmpeg_arch}-${FFMPEG_VARIANT}-\([0-9][0-9.]*\)\.tar\.xz\)$/\2 \1/p" \
+        | sort -V)"; \
+    if [[ -n "${FFMPEG_SERIES}" ]]; then \
+        tarball="$(awk -v want="${FFMPEG_SERIES}" '$1 == want { print $2 }' <<< "${candidates}" | tail -n 1)"; \
+    else \
+        tarball="$(tail -n 1 <<< "${candidates}" | awk '{print $2}')"; \
     fi; \
-    if [[ -z "${series}" ]]; then \
-        echo "no stable ffmpeg series found for ${ffmpeg_arch}/${FFMPEG_VARIANT}" >&2; exit 1; \
+    if [[ -z "${tarball}" ]]; then \
+        echo "no stable ffmpeg build for ${ffmpeg_arch}/${FFMPEG_VARIANT}${FFMPEG_SERIES:+ series n${FFMPEG_SERIES}} in ${FFMPEG_RELEASE_URL}" >&2; \
+        exit 1; \
     fi; \
-    echo "Selected stable ffmpeg series: n${series}"; \
-    tarball="ffmpeg-n${series}-latest-${ffmpeg_arch}-${FFMPEG_VARIANT}-${series}.tar.xz"; \
+    echo "Selected stable ffmpeg build: ${tarball}"; \
     cd /tmp; \
     curl --proto '=https' --tlsv1.2 -L --no-progress-meter "${FFMPEG_RELEASE_URL}/${tarball}" \
         --fail --retry 5 --retry-delay 2 --connect-timeout 5 --max-time 300 -o "${tarball}"; \
@@ -162,7 +177,16 @@ ENV VIRTUAL_ENV=/venv \
 # requirements.txt). Only the [project] dependencies are materialised below -
 # the project itself is never installed, so this layer stays cached across
 # source-only changes the way the old requirements.txt layer did.
-COPY pyproject.toml ./pyproject.toml
+#
+# constraints.txt is optional and never committed: the release workflow resolves
+# the whole transitive dependency set once, for both target platforms, and drops
+# the result into the build context of every architecture job. Nothing in
+# pyproject.toml is pinned, so this file is what makes two builds started
+# minutes apart install the same versions - and, because it sits in the same
+# layer as the manifest, what makes their layer caches invalidate together
+# instead of one arch reusing an older resolution than the other. Without it -
+# a plain local `docker build` - pip simply resolves the newest set itself.
+COPY pyproject.toml constraints*.txt ./
 
 COPY --from=essentia /wheels /tmp/essentia-wheels
 
@@ -182,21 +206,30 @@ ENV TORCH_CPU_INDEX=https://download.pytorch.org/whl/cpu
 # exactly how the two architectures would silently drift apart again.
 RUN set -euo pipefail; \
     python -m venv "$VIRTUAL_ENV"; \
-    pip install --upgrade pip; \
+    pinned=(); \
+    if [[ -f constraints.txt ]]; then \
+        echo "Installing against the versions resolved once for this release:"; \
+        cat constraints.txt; \
+        pinned=(--constraint constraints.txt); \
+    else \
+        echo "No constraints.txt in the build context - resolving the newest set here"; \
+    fi; \
+    pip install --upgrade "${pinned[@]}" pip; \
     shopt -s nullglob; \
     essentia_wheels=(/tmp/essentia-wheels/essentia-*.whl); \
     (( ${#essentia_wheels[@]} > 0 )) || \
         { echo "no essentia wheel came from the essentia stage - it must build on every architecture" >&2; exit 1; }; \
     echo "Installing locally built essentia: ${essentia_wheels[*]}"; \
-    pip install --no-cache-dir "${essentia_wheels[@]}"; \
+    pip install --no-cache-dir "${pinned[@]}" "${essentia_wheels[@]}"; \
     python -c 'import tomllib; print("\n".join(tomllib.load(open("pyproject.toml", "rb"))["project"]["dependencies"]))' \
         > /tmp/requirements.txt; \
-    echo "essentia: keeping the locally built version, dropping the pinned requirement"; \
+    echo "essentia: keeping the locally built version, dropping its requirement"; \
     sed -ri '/^essentia([[:space:]]*[<>=!~].*)?$/d' /tmp/requirements.txt; \
     ! grep -qi '^essentia' /tmp/requirements.txt || \
         { echo "essentia requirement survived the drop - pip would overwrite the local build" >&2; exit 1; }; \
     cat /tmp/requirements.txt; \
-    pip install --no-cache-dir --extra-index-url "$TORCH_CPU_INDEX" -r /tmp/requirements.txt; \
+    pip install --no-cache-dir --extra-index-url "$TORCH_CPU_INDEX" \
+        "${pinned[@]}" -r /tmp/requirements.txt; \
     rm -f /tmp/requirements.txt; \
     rm -rf /tmp/essentia-wheels
 

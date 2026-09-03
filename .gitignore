@@ -55,6 +55,11 @@ requirements-docs.txt
 requirements-ci.txt
 requirements-dev.txt
 
+# Resolved once per release by .github/workflows/docker-build.yml and handed to
+# every architecture build. Committing it would pin the images to a stale
+# resolution while pyproject.toml deliberately pins nothing.
+constraints.txt
+
 # Project-generated metadata
 BUILD_INFO
 

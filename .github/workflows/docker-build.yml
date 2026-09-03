@@ -30,6 +30,7 @@ jobs:
       is_newest: ${{ steps.newest.outputs.is_newest }}
       python_base: ${{ steps.rolling.outputs.python_base }}
       essentia_ref: ${{ steps.rolling.outputs.essentia_ref }}
+      ffmpeg_release_url: ${{ steps.rolling.outputs.ffmpeg_release_url }}
       ffmpeg_series: ${{ steps.rolling.outputs.ffmpeg_series }}
       ytdlp_version: ${{ steps.rolling.outputs.ytdlp_version }}
       ytdlp_ejs_version: ${{ steps.rolling.outputs.ytdlp_ejs_version }}
@@ -126,6 +127,11 @@ jobs:
       # everything, and both images contain identical versions of it.
       - name: Resolve rolling toolchain versions
         id: rolling
+        env:
+          # Only used to read another repository's public release list at the
+          # authenticated API rate limit; unauthenticated calls share a 60/hour
+          # budget with every other job on the runner's IP.
+          GITHUB_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
@@ -149,17 +155,52 @@ jobs:
             exit 1
           fi
 
-          # The newest stable ffmpeg series in BtbN's 'latest' release, chosen
-          # with the same rule docker/Dockerfile applies when FFMPEG_SERIES is
-          # empty - here just once rather than per architecture.
-          curl --proto '=https' --tlsv1.2 -fsSL --retry 5 --retry-delay 2 \
-            -o checksums.sha256 \
-            "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/checksums.sha256"
-          ffmpeg_series="$(awk '{print $2}' checksums.sha256 \
-            | sed -n 's/^ffmpeg-n\([0-9][0-9.]*\)-latest-linux64-gpl-\1\.tar\.xz$/\1/p' \
-            | sort -V | tail -n 1)"
-          if [[ -z "$ffmpeg_series" ]]; then
-            echo "ERROR: no stable ffmpeg series found in BtbN's latest release"
+          # ffmpeg comes from BtbN's builds, and the release the Dockerfile
+          # defaults to - the one tagged 'latest' - is a rolling tag: every
+          # nightly rebuild replaces its assets under unchanged file names.
+          # Resolving only the series from it is not enough, because the two
+          # architecture jobs download the tarball itself minutes apart. The
+          # newest dated autobuild-* release carries the same builds and its
+          # assets are immutable, so both architectures get one ffmpeg.
+          #
+          # The candidates are walked newest first: an autobuild whose assets
+          # are incomplete - a build that failed for one architecture - is
+          # skipped rather than published as half a release.
+          ffmpeg_release_base="https://github.com/BtbN/FFmpeg-Builds/releases/download"
+          ffmpeg_release_url=""
+          ffmpeg_series=""
+          series_for() {
+            awk '{print $2}' checksums.sha256 \
+              | sed -n "s/^ffmpeg-n.*-$1-gpl-\([0-9][0-9.]*\)\.tar\.xz$/\1/p" \
+              | sort -u
+          }
+          while read -r release_tag; do
+            if ! curl --proto '=https' --tlsv1.2 -fsSL --retry 5 --retry-delay 2 \
+              -o checksums.sha256 \
+              "${ffmpeg_release_base}/${release_tag}/checksums.sha256"; then
+              echo "  ${release_tag}: no checksums.sha256, skipping"
+              continue
+            fi
+            # Only a series built for both architectures qualifies, chosen with
+            # the same rule docker/Dockerfile applies when FFMPEG_SERIES is
+            # empty - here once rather than per architecture.
+            ffmpeg_series="$(comm -12 <(series_for linux64) <(series_for linuxarm64) \
+              | sort -V | tail -n 1)"
+            if [[ -z "$ffmpeg_series" ]]; then
+              echo "  ${release_tag}: no stable series built for both architectures, skipping"
+              continue
+            fi
+            ffmpeg_release_url="${ffmpeg_release_base}/${release_tag}"
+            break
+          done < <(
+            curl --proto '=https' --tlsv1.2 -fsSL --retry 5 --retry-delay 2 \
+              -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+              -H 'X-GitHub-Api-Version: 2022-11-28' \
+              'https://api.github.com/repos/BtbN/FFmpeg-Builds/releases?per_page=20' \
+            | jq -r '.[] | select(.draft == false) | .tag_name | select(startswith("autobuild-"))'
+          )
+          if [[ -z "$ffmpeg_release_url" ]]; then
+            echo "ERROR: no usable BtbN autobuild release found"
             exit 1
           fi
 
@@ -187,6 +228,7 @@ jobs:
           {
             echo "python_base=${python_base}"
             echo "essentia_ref=${essentia_ref}"
+            echo "ffmpeg_release_url=${ffmpeg_release_url}"
             echo "ffmpeg_series=${ffmpeg_series}"
             echo "ytdlp_version===${ytdlp_version}"
             echo "ytdlp_ejs_version===${ytdlp_ejs_version}"
@@ -196,10 +238,84 @@ jobs:
           echo "Resolved once for every architecture:"
           echo "  python base : ${python_base}"
           echo "  essentia    : ${essentia_ref}"
-          echo "  ffmpeg      : n${ffmpeg_series}"
+          echo "  ffmpeg      : n${ffmpeg_series} from ${ffmpeg_release_url}"
           echo "  yt-dlp      : ${ytdlp_version}"
           echo "  yt-dlp-ejs  : ${ytdlp_ejs_version}"
           echo "  deno        : ${deno_version}"
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          # The interpreter the resolution below targets, and the same one
+          # ARG PYTHON_BASE=python:3.13-slim carries.
+          python-version: '3.13'
+
+      # pyproject.toml pins none of the application's dependencies, so "newest"
+      # has to be decided once per release rather than twice by two runners
+      # reaching their pip layer minutes apart. This resolves the full
+      # transitive set and hands it to every architecture build as a pip
+      # constraints file, which is also what keeps their layer caches keyed on
+      # the same versions instead of one arch reusing an older resolution.
+      #
+      # Resolving for both target platforms is the earliest point at which "both
+      # images carry the same versions" can be established or refuted: if one
+      # architecture has no wheel for the version the other would take, no build
+      # arg can reconcile that later, and the release stops here with the
+      # conflict in the log rather than after two hours of compiling.
+      - name: Resolve runtime dependency versions
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip uv
+
+          # essentia is compiled from source on every architecture and its
+          # requirement line never reaches pip (see docker/Dockerfile), so
+          # resolving it here would pin a wheel the image does not install.
+          python tools/pyproject-deps.py --exclude essentia > runtime-requirements.txt
+
+          # pip is upgraded inside the builder stage and stays in the venv the
+          # parity gate inspects, so it is resolved here with everything else -
+          # otherwise a pip release landing between the two builds would be the
+          # one version left free to differ.
+          echo pip >> runtime-requirements.txt
+          cat runtime-requirements.txt
+
+          # glibc 2.28 is the oldest manylinux tag torch publishes for. A wheel
+          # built against an older glibc still installs on the trixie-based
+          # python:3.13-slim, so targeting 2.28 can only resolve something more
+          # conservative than the image would accept, never something it
+          # cannot install.
+          for platform in x86_64-manylinux_2_28 aarch64-manylinux_2_28; do
+            uv pip compile \
+              --quiet --no-header \
+              --python-version 3.13 \
+              --python-platform "$platform" \
+              --extra-index-url https://download.pytorch.org/whl/cpu \
+              --index-strategy unsafe-best-match \
+              runtime-requirements.txt \
+              -o "constraints-${platform}.txt"
+          done
+
+          if ! diff -u \
+            constraints-x86_64-manylinux_2_28.txt \
+            constraints-aarch64-manylinux_2_28.txt; then
+            echo "ERROR: linux/amd64 and linux/arm64 do not resolve to one set of versions."
+            echo "A dependency is missing a wheel for one of them - the images could only"
+            echo "be published with different versions, so this release stops here."
+            exit 1
+          fi
+
+          mv constraints-x86_64-manylinux_2_28.txt constraints.txt
+          rm -f constraints-aarch64-manylinux_2_28.txt runtime-requirements.txt
+          echo "Both platforms resolve to the same $(grep -cE '^[^#[:space:]]' constraints.txt) versions:"
+          cat constraints.txt
+
+      - name: Upload resolved constraints
+        uses: actions/upload-artifact@v7
+        with:
+          name: constraints
+          path: constraints.txt
+          retention-days: 14
+          if-no-files-found: error
 
       # A release must not travel backwards. Re-running this workflow on an
       # older tag - v1.3 while 1.5 is published - passes every check above,
@@ -383,6 +499,15 @@ jobs:
           printf '%s\n' "${{ github.sha }}" > BUILD_INFO
           cat BUILD_INFO
 
+      # The dependency versions the meta job resolved once, dropped into the
+      # build context docker/Dockerfile reads them from. Both architectures get
+      # this same file, which is what makes their venvs identical even though
+      # pyproject.toml pins nothing.
+      - name: Download resolved constraints
+        uses: actions/download-artifact@v7
+        with:
+          name: constraints
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
         with:
@@ -416,6 +541,7 @@ jobs:
             --load \
             --build-arg "PYTHON_BASE=${{ needs.meta.outputs.python_base }}" \
             --build-arg "ESSENTIA_REF=${{ needs.meta.outputs.essentia_ref }}" \
+            --build-arg "FFMPEG_RELEASE_URL=${{ needs.meta.outputs.ffmpeg_release_url }}" \
             --build-arg "FFMPEG_SERIES=${{ needs.meta.outputs.ffmpeg_series }}" \
             --build-arg "YTDLP_VERSION=${{ needs.meta.outputs.ytdlp_version }}" \
             --build-arg "YTDLP_EJS_VERSION=${{ needs.meta.outputs.ytdlp_ejs_version }}" \
@@ -658,19 +784,26 @@ jobs:
           # legitimately differs per architecture - a wheel's platform tag, the
           # machine name - would turn this gate into a permanent failure, so it
           # records versions and nothing else.
+          #
+          # Every distribution in the venv, not a curated list: nothing in
+          # pyproject.toml is pinned, so a transitive dependency is as free to
+          # differ between the two builds as a direct one. The release workflow
+          # resolves them once and constrains both builds to that resolution;
+          # this is where that is proven rather than assumed.
           versions = {
               "python": platform.python_version(),
               "fetchly": get_version(),
-              "essentia": metadata.version("essentia"),
-              "torch": metadata.version("torch"),
-              "numpy": metadata.version("numpy"),
-              "beat-this": metadata.version("beat-this"),
               "ffmpeg": get_ffmpeg_version(),
               "yt-dlp": get_ytdlp_version(),
               "yt-dlp-ejs": get_ytdlp_ejs_version(),
               "deno": get_js_runtime_version(),
               "wavesurfer": get_wavesurfer_version(),
           }
+          for dist in metadata.distributions():
+              name = dist.metadata["Name"]
+              if name:
+                  versions[f"pypi:{name.lower().replace('_', '-')}"] = dist.version
+
           for name, value in sorted(versions.items()):
               print(f"{name}={value}")
           PY
