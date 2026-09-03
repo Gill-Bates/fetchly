@@ -115,6 +115,16 @@ _MEAN_ADVANCE_EM: Final[float] = 0.52
 _MAX_TEXT_WIDTH_FACTOR: Final[float] = 1.6
 _MIN_FONT_SIZE: Final[int] = 8
 
+# Roboto Flex's rendered ink (ascent+descent, plus the drawtext shadow/border
+# added below) measures ~0.99-1.25x the requested font size - measured via
+# ffmpeg drawtext against a transparent canvas across font sizes 12-150 and
+# both ascender/descender-heavy strings; the ratio is largest at the smallest
+# sizes because the 1px border and shadow stop shrinking with the glyphs.
+# 1.3x covers that worst case with a couple of px to spare, without padding
+# the canvas enough to reopen the gap this is meant to close: the badge's
+# bottom margin has to match its right margin.
+_TEXT_INK_FACTOR: Final[float] = 1.3
+
 _BADGE_TIMEOUT_SECONDS: Final[int] = 30
 
 
@@ -209,12 +219,20 @@ def badge_geometry(video_width: int, video_height: int, text: str) -> _Geometry:
 
     text_width = round(_MEAN_ADVANCE_EM * font_size * len(text))
     gap = max(2, round(logo_height * 0.15))
-    text_height = round(font_size * 1.45)
+    text_height = round(font_size * _TEXT_INK_FACTOR)
 
     canvas_width = max(logo_width, text_width) + shadow_offset
     return _Geometry(
         canvas_width=canvas_width,
-        canvas_height=logo_height + gap + text_height + shadow_offset,
+        # No trailing "+ shadow_offset" here: that term exists in the no-text
+        # canvas above to clear the logo's own drop shadow, which is the last
+        # thing drawn in that case. With a hostname line, the last thing drawn
+        # is the text row, whose own ink (including its border/shadow) is
+        # already sized into text_height via _TEXT_INK_FACTOR. Adding the
+        # logo's shadow_offset on top left a bottom margin bigger than the
+        # right one - most visible on large badges, where shadow_offset grows
+        # with the logo but has nothing left to clear down here.
+        canvas_height=logo_height + gap + text_height,
         logo_width=logo_width,
         logo_height=logo_height,
         # Logo and hostname are both flush right, matching the corner they sit in.
@@ -247,7 +265,7 @@ def _badge_filtergraph(geometry: _Geometry, text: str, font_file: str) -> str:
         # of stamped on.
         (f"[sh]colorchannelmixer=rr=0:gg=0:bb=0:aa={_SHADOW_ALPHA},"
         f"gblur=sigma={geometry.shadow_blur:.2f}:steps=1[shadow]"),
-        "[lg]colorchannelmixer=aa=0.92[logo]",
+        f"[lg]colorchannelmixer=aa={_LOGO_ALPHA}[logo]",
         f"[0:v][shadow]overlay={geometry.logo_x + offset}:{offset}[bg]",
         f"[bg][logo]overlay={geometry.logo_x}:0" + ("[out]" if text else ""),
     ]
@@ -258,8 +276,13 @@ def _badge_filtergraph(geometry: _Geometry, text: str, font_file: str) -> str:
             f"fontfile={font_file}:"
             f"text='{_escape_drawtext(text)}':"
             f"fontsize={geometry.font_size}:"
-            "fontcolor=white@0.92:"
-            "shadowcolor=black@0.5:"
+            # Fully opaque, plus a thin dark border rather than just a corner
+            # shadow: the logo above is deliberately translucent, but the
+            # hostname is information a viewer may need to read off, so it
+            # gets its own full-contrast treatment against any footage.
+            "fontcolor=white:"
+            "borderw=1:bordercolor=black@0.6:"
+            "shadowcolor=black@0.6:"
             f"shadowx={text_offset}:shadowy={text_offset}:"
             f"x=w-tw-{offset}:y={geometry.text_y}"
         )
