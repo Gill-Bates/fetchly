@@ -42,17 +42,17 @@ classifiers = [
 # in the CUDA build:
 #   pip install --extra-index-url https://download.pytorch.org/whl/cpu -e .
 dependencies = [
+    
+    
+    
+    
+    
+    
+    
+    
+    
     "beat-this>=1.1.0",
-    # Deliberately unpinned, unlike the rest of this list. No single version is
-    # even installable everywhere: upstream ships no linux/aarch64 wheel at
-    # all, and its newest x86_64 wheels are cp314-only while this project
-    # builds on 3.13. Left open, pip picks the newest release with a wheel for
-    # the running interpreter, which is what a local dev install wants. The
-    # Docker image never resolves this line - it compiles essentia from source
-    # on both architectures and drops the line before pip runs, so the two
-    # published images share one build. See the essentia stage in
-    # docker/Dockerfile.
-    "essentia",
+    "essentia", # pinned
     "fastapi==0.141.1",
     "gunicorn==26.2.0",
     "httpx==0.28.1",

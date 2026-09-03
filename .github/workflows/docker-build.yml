@@ -166,8 +166,10 @@ jobs:
           # yt-dlp and yt-dlp-ejs are installed unpinned by the Dockerfile.
           # Resolve the current release of each and hand it over as the exact
           # '==<version>' specifier the YTDLP_* args expect.
-          ytdlp_version="$(curl -fsSL https://pypi.org/pypi/yt-dlp/json | jq -r '.info.version')"
-          ytdlp_ejs_version="$(curl -fsSL https://pypi.org/pypi/yt-dlp-ejs/json | jq -r '.info.version')"
+          ytdlp_version="$(curl --proto '=https' --tlsv1.2 -fsSL --retry 5 --retry-delay 2 \
+            https://pypi.org/pypi/yt-dlp/json | jq -r '.info.version')"
+          ytdlp_ejs_version="$(curl --proto '=https' --tlsv1.2 -fsSL --retry 5 --retry-delay 2 \
+            https://pypi.org/pypi/yt-dlp-ejs/json | jq -r '.info.version')"
           for v in "$ytdlp_version" "$ytdlp_ejs_version"; do
             if [[ -z "$v" || "$v" == "null" ]]; then
               echo "ERROR: could not resolve a yt-dlp / yt-dlp-ejs version from PyPI"
@@ -175,7 +177,8 @@ jobs:
             fi
           done
 
-          deno_version="$(curl -fsSL https://dl.deno.land/release-latest.txt | tr -d ' \t\r\n')"
+          deno_version="$(curl --proto '=https' --tlsv1.2 -fsSL --retry 5 --retry-delay 2 \
+            https://dl.deno.land/release-latest.txt | tr -d ' \t\r\n')"
           if [[ -z "$deno_version" ]]; then
             echo "ERROR: could not resolve the latest deno release"
             exit 1
