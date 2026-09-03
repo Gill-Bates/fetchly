@@ -6,7 +6,8 @@
 import { showToast } from "./toast.js";
 import { confirmModal } from "./confirm.js";
 import { openCookiePasteDialog } from "./cookie-paste.js?v=20260901a";
-import { getCsrfToken, humanSize, isSafeSameOriginRedirect } from "./utils.js";
+import { fetchStats, toErrorMessage } from "./api.js";
+import { formatLalalMinutes, getCsrfToken, humanSize, isSafeSameOriginRedirect } from "./utils.js";
 
 const AUTO_SAVE_DELAY_MS = 800;
 const REQUEST_TIMEOUT_MS = 10_000;
@@ -18,6 +19,7 @@ const BOOTSTRAP_FALLBACK = Object.freeze({
     lalal_configured: false,
     lalal_status: "Not configured",
     lalal_email: "",
+    lalal_minutes_left: null,
     has_admin_credentials: false,
 });
 
@@ -29,10 +31,12 @@ function getBootstrapData() {
 
     try {
         const payload = JSON.parse(node.textContent || "{}");
+        const minutesLeft = Number(payload?.lalal_minutes_left);
         return {
             lalal_configured: Boolean(payload?.lalal_configured),
             lalal_status: String(payload?.lalal_status || "Not configured"),
             lalal_email: String(payload?.lalal_email || ""),
+            lalal_minutes_left: Number.isFinite(minutesLeft) ? minutesLeft : null,
             has_admin_credentials: Boolean(payload?.has_admin_credentials),
         };
     } catch {
@@ -179,6 +183,7 @@ const lalalStatusBadge = document.getElementById("lalalStatusBadge");
 const lalalStatusLine = document.getElementById("lalalStatusLine");
 const lalalAuthBtnLabel = document.getElementById("lalalAuthBtnLabel");
 const lalalDisconnectBtn = document.getElementById("lalalDisconnectBtn");
+const lalalAnalysisLimits = document.getElementById("lalalAnalysisLimits");
 const lalalAuthModal = document.getElementById("lalalAuthModal");
 const lalalAuthAlert = document.getElementById("lalalAuthAlert");
 const lalalAuthStep1 = document.getElementById("lalalAuthStep1");
@@ -189,6 +194,7 @@ const lalalAuthUseKeySpinner = document.getElementById("lalalAuthUseKeySpinner")
 const lalalActivationKey = document.getElementById("lalalActivationKey");
 const lalalDurationGuard = document.getElementById("lalalDurationGuard");
 const mp4PresetEl = document.getElementById("mp4Preset");
+const videoWatermarkEl = document.getElementById("videoWatermark");
 const enableAuthenticationEl = document.getElementById("enableAuthentication");
 const retentionDaysEl = document.getElementById("retentionDays");
 const retentionDaysValueEl = document.getElementById("retentionDaysValue");
@@ -213,6 +219,7 @@ const RUNTIME_LIMITS = [
     ["audio_analysis_max_minutes", "BPM analysis track limit", 0, 240],
     ["audio_analysis_timeout_minutes", "BPM analysis timeout", 1, 60],
     ["lalal_max_download_gib", "Lalal result limit", 1, 100],
+    ["session_idle_minutes", "Session idle timeout", 1, 1440],
 ];
 
 let saveTimeoutId = null;
@@ -318,6 +325,13 @@ function setDisconnectVisible(visible) {
     lalalDisconnectBtn.disabled = !visible;
 }
 
+// The analysis/stem limits only take effect for Lalal-backed jobs, so the
+// column is hidden while no session is connected. The inputs stay in the form
+// (d-none, not removed), so saving settings keeps their stored values.
+function setAnalysisLimitsVisible(visible) {
+    lalalAnalysisLimits?.classList.toggle("d-none", !visible);
+}
+
 function setLalalStatusLine(text) {
     if (lalalStatusLine) {
         lalalStatusLine.textContent = text;
@@ -340,10 +354,12 @@ function renderLalalStatusLine({ email, remainingMinutes }) {
         lalalStatusLine.append("Session active");
     }
 
-    if (remainingMinutes != null) {
+    const balance = formatLalalMinutes(remainingMinutes);
+    if (balance) {
         const minutes = document.createElement("span");
         minutes.className = "lalal-status-minutes";
-        minutes.textContent = ` - ${remainingMinutes} min left`;
+        minutes.textContent = ` - ${balance}`;
+        minutes.title = "Processing minutes left on this Lalal.ai account";
         lalalStatusLine.appendChild(minutes);
     }
 }
@@ -356,7 +372,12 @@ function applyInitialLalalState() {
 
     if (bootstrapData.lalal_configured) {
         if (bootstrapData.lalal_email) {
-            renderLalalStatusLine({ email: bootstrapData.lalal_email, remainingMinutes: null });
+            renderLalalStatusLine({
+                email: bootstrapData.lalal_email,
+                // Last known balance, so the tile is not blank while
+                // loadLalalStatus() is still in flight.
+                remainingMinutes: bootstrapData.lalal_minutes_left,
+            });
         } else {
             setLalalStatusLine("Session active");
         }
@@ -365,6 +386,7 @@ function applyInitialLalalState() {
     }
 
     setDisconnectVisible(bootstrapData.lalal_configured);
+    setAnalysisLimitsVisible(bootstrapData.lalal_configured);
 }
 
 function showAuthStep(step) {
@@ -385,8 +407,9 @@ async function loadLalalStatus({ forceRefresh = false } = {}) {
 
         if (!res.ok) {
             setLalalStatus("Error", "badge bg-danger");
-            setLalalStatusLine(payload.detail || "Unable to check status");
+            setLalalStatusLine(toErrorMessage(payload.detail) || "Unable to check status");
             setDisconnectVisible(false);
+            setAnalysisLimitsVisible(false);
             return;
         }
 
@@ -394,6 +417,7 @@ async function loadLalalStatus({ forceRefresh = false } = {}) {
             setLalalStatus("Token invalid", "badge bg-danger");
             setLalalStatusLine(payload.validation_error || "Stored Lalal token is invalid. Please authenticate again.");
             setDisconnectVisible(true);
+            setAnalysisLimitsVisible(true);
             return;
         }
 
@@ -404,16 +428,19 @@ async function loadLalalStatus({ forceRefresh = false } = {}) {
                 remainingMinutes: payload.remaining_minutes,
             });
             setDisconnectVisible(true);
+            setAnalysisLimitsVisible(true);
             return;
         }
 
         setLalalStatus("Not configured");
         setLalalStatusLine("Click 'Authenticate' to connect your Lalal.ai account");
         setDisconnectVisible(false);
+        setAnalysisLimitsVisible(false);
     } catch (err) {
         setLalalStatus("Error", "badge bg-danger");
         setLalalStatusLine(err?.message || "Unable to check status");
         setDisconnectVisible(false);
+        setAnalysisLimitsVisible(false);
     }
 }
 
@@ -424,9 +451,10 @@ function validateSettings() {
         return { valid: false, error: "Retention must be unlimited or between 1 and 365 days" };
     }
 
+    // 0 is the "Automatic" option: the host's CPU quota and free memory decide.
     const fragments = parseInt(String(form.get("download_concurrent_fragments") || ""), 10);
-    if (!Number.isFinite(fragments) || fragments < 1 || fragments > 16) {
-        return { valid: false, error: "Parallel fragments must be between 1 and 16" };
+    if (!Number.isFinite(fragments) || fragments < 0 || fragments > 16) {
+        return { valid: false, error: "Parallel fragments must be automatic or between 1 and 16" };
     }
 
     const shareMaxUses = parseInt(String(form.get("share_link_max_uses") || "0"), 10);
@@ -457,6 +485,7 @@ function validateSettings() {
             share_link_max_uses: shareMaxUses,
             public_hostname: publicHostname,
             download_mp4_preset: mp4PresetEl ? mp4PresetEl.checked : true,
+            video_watermark: videoWatermarkEl ? videoWatermarkEl.checked : true,
             lalalaai_duration_guard: lalalDurationGuard ? lalalDurationGuard.checked : true,
             ...runtimeLimits,
         },
@@ -616,7 +645,7 @@ async function performSettingsSave(data, successToast = null) {
 
         const payload = await parseResponsePayload(res);
         if (!res.ok) {
-            throw new Error(payload.detail || `HTTP ${res.status}`);
+            throw new Error(toErrorMessage(payload.detail) || `HTTP ${res.status}`);
         }
 
         if (!pendingSave) {
@@ -715,7 +744,7 @@ async function saveAuthenticationFlag(enabled) {
         responseReceived = true;
         const payload = await parseResponsePayload(res);
         if (!res.ok) {
-            throw new Error(payload.detail || `HTTP ${res.status}`);
+            throw new Error(toErrorMessage(payload.detail) || `HTTP ${res.status}`);
         }
 
         settingsDirty = false;
@@ -799,7 +828,7 @@ async function saveCredentials() {
         responseReceived = true;
         const payload = await parseResponsePayload(res);
         if (!res.ok) {
-            throw new Error(payload.detail || `HTTP ${res.status}`);
+            throw new Error(toErrorMessage(payload.detail) || `HTTP ${res.status}`);
         }
 
         settingsDirty = false;
@@ -866,7 +895,7 @@ async function resetStatistics() {
 
         const payload = await parseResponsePayload(res);
         if (!res.ok) {
-            throw new Error(payload.detail || `HTTP ${res.status}`);
+            throw new Error(toErrorMessage(payload.detail) || `HTTP ${res.status}`);
         }
 
         showToast(payload.message || "Statistics reset", "success");
@@ -913,7 +942,7 @@ async function removeAllJobs() {
 
         const payload = await parseResponsePayload(res);
         if (!res.ok) {
-            throw new Error(payload.detail || `HTTP ${res.status}`);
+            throw new Error(toErrorMessage(payload.detail) || `HTTP ${res.status}`);
         }
 
         showToast(payload.message || "All jobs removed", "success");
@@ -1019,8 +1048,8 @@ window.addEventListener("pageshow", (event) => {
 
 const AUTO_SAVE_INPUT_SELECTOR = [
     '[name="download_concurrent_fragments"]',
-    '[name="public_hostname"]',
     '[name="download_mp4_preset"]',
+    '[name="video_watermark"]',
     '[name="lalalaai_duration_guard"]',
     '[name="download_worker_count"]',
     '[name="download_timeout_minutes"]',
@@ -1029,6 +1058,7 @@ const AUTO_SAVE_INPUT_SELECTOR = [
     '[name="audio_analysis_max_minutes"]',
     '[name="audio_analysis_timeout_minutes"]',
     '[name="lalal_max_download_gib"]',
+    '[name="session_idle_minutes"]',
 ].join(", ");
 
 function bindSettingsInputs() {
@@ -1128,6 +1158,13 @@ function detectPublicHostname() {
 }
 
 function bindPublicHostnameDetect() {
+    // A plain "input" save without confirmation leaves it unclear whether
+    // leaving the field actually persisted anything, so this one gets its
+    // own toast on "change" (fires on blur), like the sliders below.
+    publicHostnameEl?.addEventListener("change", () => {
+        scheduleAutoSave(0, "Public hostname updated");
+    });
+
     publicHostnameDetectBtn?.addEventListener("click", () => {
         const detected = detectPublicHostname();
         if (!detected || !publicHostnameEl) {
@@ -1275,35 +1312,17 @@ function bindChangelog() {
     });
 }
 
-const COOKIE_STATUS_LABELS = {
-    valid: "Valid",
-    expired: "Expired",
-    invalid: "Invalid",
-    missing: "None stored",
-};
-
-const COOKIE_EXPIRY_FORMATTER = new Intl.DateTimeFormat("en-GB", {
-    day: "2-digit",
-    month: "short",
-    year: "numeric",
-});
-
 const COOKIE_AGE_FORMATTER = new Intl.RelativeTimeFormat("en", { numeric: "always" });
 
-const DAY_MS = 86_400_000;
+function isCookieAuthenticated(status) {
+    if (typeof status?.authenticated === "boolean") {
+        return status.authenticated;
+    }
 
-// Kept in sync with the same map in app/templates/settings.html, which renders
-// the initial state before this script takes over.
-//
-// A real status uses Bootstrap's .badge with a bg-* utility. "missing" is an
-// empty state rather than a status, so it uses .ui-badge - the same shared
-// non-status badge as the detail chips below the header.
-const COOKIE_STATUS_BADGE_CLASSES = {
-    valid: "badge bg-success",
-    expired: "badge bg-danger",
-    invalid: "badge bg-danger",
-    missing: "ui-badge",
-};
+    return String(status?.status || "missing").toLowerCase() === "valid"
+        && Array.isArray(status?.missing_login_cookies)
+        && status.missing_login_cookies.length === 0;
+}
 
 function cookieTileElements(platform) {
     const section = document.querySelector(`[data-cookie-platform="${platform}"]`);
@@ -1311,8 +1330,9 @@ function cookieTileElements(platform) {
     return {
         section,
         badge: section.querySelector("[data-cookie-status-badge]"),
-        detail: section.querySelector("[data-cookie-detail]"),
+        summary: section.querySelector("[data-cookie-summary]"),
         pasteBtn: section.querySelector("[data-cookie-paste-btn]"),
+        pasteLabel: section.querySelector("[data-cookie-paste-label]"),
         removeBtn: section.querySelector("[data-cookie-remove-btn]"),
     };
 }
@@ -1330,99 +1350,33 @@ function describeAge(unixSeconds) {
     return COOKIE_AGE_FORMATTER.format(-Math.round(seconds / 86_400), "day");
 }
 
-/**
- * Describe what is actually stored for a platform.
- *
- * Cookies imported from a copied request header carry no expiry (the header
- * has none to copy), so "no expiry date" is stated rather than guessed - see
- * app/utils/cookie_import.py. The domain is spelled out because a jar copied
- * from the wrong request is the one failure that otherwise looks identical to
- * a working one.
- *
- * @param {{
- *   status?: string, expires_at?: number | null, updated_at?: number | null,
- *   cookie_count?: number, domains?: string[], missing_login_cookies?: string[],
- *   detail?: string,
- * }} status
- * @returns {string} The line to show under the platform name.
- */
-function describeCookieValidity(status) {
+function describeCookieState(status) {
     const state = String(status?.status || "missing").toLowerCase();
-    const expiresAt = Number(status?.expires_at) || 0;
-    const expiryDate = expiresAt ? new Date(expiresAt * 1000) : null;
-
-    if (state === "missing") return "";
-    if (state === "invalid") return status?.detail || "Not a usable cookie file";
-    if (state === "expired") {
-        return expiryDate
-            ? `Expired on ${COOKIE_EXPIRY_FORMATTER.format(expiryDate)} - downloads run signed out`
-            : status?.detail || "Expired - downloads run signed out";
+    if (state === "missing") {
+        return {
+            badgeClass: "ui-badge",
+            label: "Not set up",
+            summary: "Add cookies only when this site requires you to sign in.",
+        };
     }
 
-    const parts = [];
-
-    const count = Number(status?.cookie_count) || 0;
-    const domains = Array.isArray(status?.domains) ? status.domains : [];
-    const forDomains = domains.length ? ` for ${domains.join(", ")}` : "";
-    if (count) parts.push(`${count} cookie${count === 1 ? "" : "s"}${forDomains}`);
-
-    if (expiryDate) {
-        const daysLeft = Math.floor((expiryDate.getTime() - Date.now()) / DAY_MS);
-        const remaining = daysLeft > 1 ? `${daysLeft} days left` : "less than a day left";
-        parts.push(`expires ${COOKIE_EXPIRY_FORMATTER.format(expiryDate)}, ${remaining}`);
-    } else {
-        parts.push("no expiry date");
+    if (state !== "valid" || !isCookieAuthenticated(status)) {
+        return {
+            badgeClass: "badge bg-warning text-dark",
+            label: "Needs update",
+            summary: state === "expired"
+                ? "These cookies have expired. Replace them while signed in."
+                : "Replace these cookies while signed in to enable account-only downloads.",
+        };
     }
 
-    // yt-dlp rewrites the cookie file at the end of every run, so after a
-    // download this is when the platform last rotated the session - a better
-    // liveness signal than any expiry date.
     const updatedAt = Number(status?.updated_at) || 0;
-    if (updatedAt) parts.push(`updated ${describeAge(updatedAt)}`);
-
-    // Structurally fine but useless in practice: the downloader checks for
-    // these by name and falls back to an anonymous request without them.
-    const missing = Array.isArray(status?.missing_login_cookies)
-        ? status.missing_login_cookies
-        : [];
-    if (missing.length) {
-        parts.unshift(`Missing ${missing.join(" and ")} - downloads run signed out`);
-    }
-
-    return parts.join(" \u00b7 ");
-}
-
-/**
- * The fuller story behind the one-line summary, shown on hover.
- *
- * "No expiry date" reads like a defect until you know a copied header simply
- * has no dates in it to carry over, so the tooltip says where a real one
- * would come from - and that a date is never a promise the session is alive.
- *
- * @param {{ status?: string, expires_at?: number | null }} status
- * @returns {string}
- */
-function describeCookieValidityTooltip(status) {
-    const state = String(status?.status || "missing").toLowerCase();
-    if (state !== "valid" && state !== "expired") return "";
-
-    if (state === "expired") {
-        return "Every cookie stored for this platform is past its expiry date, so downloads run signed out.";
-    }
-
-    const staleness =
-        " \u201cUpdated\u201d is when the file was last written: importing it, and then "
-        + "every download, which stores the cookies the platform rotated back into it. "
-        + "A platform can still end a session at any time, well before any date shown here.";
-
-    if (!(Number(status?.expires_at) || 0)) {
-        return (
-            "A cookie header copied from the dev tools carries no expiry dates, so there is "
-            + "none to show. The JSON export of a cookie extension does carry them."
-            + staleness
-        );
-    }
-    return "The earliest expiry among this platform's cookies." + staleness;
+    const updated = updatedAt ? ` Last updated ${describeAge(updatedAt)}.` : "";
+    return {
+        badgeClass: "badge bg-success",
+        label: "Ready",
+        summary: `Signed-in downloads are enabled.${updated}`,
+    };
 }
 
 function renderCookieStatus(platform, status) {
@@ -1430,31 +1384,23 @@ function renderCookieStatus(platform, status) {
     if (!els) return;
 
     const normalized = String(status?.status || "missing").toLowerCase();
-    const badgeClass = COOKIE_STATUS_BADGE_CLASSES[normalized] ?? "ui-badge";
-    const label = COOKIE_STATUS_LABELS[normalized] || normalized;
+    const presentation = describeCookieState(status);
 
     if (els.badge) {
-        els.badge.className = `${badgeClass} cookie-status-badge`;
+        els.badge.className = `${presentation.badgeClass} cookie-status-badge`;
         els.badge.dataset.status = normalized;
-        els.badge.textContent = label;
+        els.badge.dataset.cookieAuthenticated = String(isCookieAuthenticated(status));
+        els.badge.textContent = presentation.label;
     }
-    if (els.detail) {
-        const detailParts = describeCookieValidity(status).split(" \u00b7 ").filter(Boolean);
-        els.detail.replaceChildren(...detailParts.map((part) => {
-            const badge = document.createElement("span");
-            badge.className = "ui-badge";
-            badge.textContent = part;
-            return badge;
-        }));
-        const tooltip = describeCookieValidityTooltip(status);
-        if (tooltip) {
-            els.detail.title = tooltip;
-        } else {
-            els.detail.removeAttribute("title");
-        }
+    if (els.summary) {
+        els.summary.textContent = presentation.summary;
+        els.summary.classList.toggle("cookie-tile-summary--warning", presentation.label === "Needs update");
     }
     if (els.removeBtn) {
         els.removeBtn.classList.toggle("d-none", !status?.present);
+    }
+    if (els.pasteLabel) {
+        els.pasteLabel.textContent = status?.present ? "Replace cookies" : "Add cookies";
     }
 }
 
@@ -1474,16 +1420,6 @@ function setCookieTileBusy(els, isBusy) {
     for (const btn of [els.pasteBtn, els.removeBtn]) {
         if (btn) btn.disabled = isBusy;
     }
-}
-
-/**
- * FastAPI answers a rejected import with a readable string, but a schema
- * violation (422) puts a list of objects in the same field - never show that
- * to the user.
- */
-function cookieErrorMessage(payload, res) {
-    const detail = payload?.detail;
-    return typeof detail === "string" && detail ? detail : `HTTP ${res.status}`;
 }
 
 function cookieTileLabel(els, platform) {
@@ -1518,7 +1454,7 @@ async function pasteCookies(platform) {
 
                 const payload = await parseResponsePayload(res);
                 if (!res.ok) {
-                    throw new Error(cookieErrorMessage(payload, res));
+                    throw new Error(toErrorMessage(payload.detail) || `HTTP ${res.status}`);
                 }
 
                 renderCookieStatus(platform, payload);
@@ -1559,7 +1495,7 @@ async function removeCookieFile(platform) {
 
         const payload = await parseResponsePayload(res);
         if (!res.ok) {
-            throw new Error(cookieErrorMessage(payload, res));
+            throw new Error(toErrorMessage(payload.detail) || `HTTP ${res.status}`);
         }
 
         renderCookieStatus(platform, { platform, status: "missing", present: false });
@@ -1602,16 +1538,18 @@ function bindLalalEvents() {
 
             const payload = await parseResponsePayload(res);
             if (!res.ok) {
-                throw new Error(payload.detail || `HTTP ${res.status}`);
+                throw new Error(toErrorMessage(payload.detail) || `HTTP ${res.status}`);
             }
 
             setLalalStatus("Not configured");
             setLalalStatusLine("Session disconnected. Click 'Authenticate' to reconnect.");
             setDisconnectVisible(false);
+            setAnalysisLimitsVisible(false);
             showToast("Lalal.ai session disconnected", "success");
         } catch (err) {
             showToast(err?.message || "Failed to disconnect Lalal.ai session", "danger");
             setDisconnectVisible(true);
+            setAnalysisLimitsVisible(true);
         } finally {
             lalalDisconnectBtn.disabled = false;
         }
@@ -1654,7 +1592,7 @@ function bindLalalEvents() {
 
             const payload = await parseResponsePayload(res);
             if (!res.ok) {
-                throw new Error(payload.detail || `HTTP ${res.status}`);
+                throw new Error(toErrorMessage(payload.detail) || `HTTP ${res.status}`);
             }
 
             if (lalalActivationKey) lalalActivationKey.value = "";
@@ -1933,12 +1871,64 @@ async function loadHostStats() {
     }
 }
 
+const JOB_STATS_MOBILE_QUERY = "(max-width: 767.98px)";
+
+/**
+ * Render one dashboard stat value into its tile. Mirrors renderStatParts() in
+ * main.js -- the same four keys, formatted the same way.
+ * @param {string} statKey
+ * @param {unknown} value
+ */
+function renderJobStatParts(statKey, value) {
+    switch (statKey) {
+        case "total_bytes":
+            return splitSize(value);
+        case "total_jobs":
+            return { value: String(Math.max(0, Math.trunc(Number(value) || 0))), unit: "" };
+        case "total_minutes":
+        case "total_lalal_minutes":
+            return { value: String(Math.round(Math.max(0, Number(value) || 0) * 10) / 10), unit: "" };
+        default:
+            return { value: String(value ?? 0), unit: "" };
+    }
+}
+
+/**
+ * Refresh the dashboard stat tiles that mobile moves onto the System tab.
+ * The row is server-rendered, so this only has to catch what changed while
+ * the page stayed open -- a statistics reset, or jobs removed.
+ */
+async function refreshJobStats() {
+    const row = document.querySelector(".settings-job-stats");
+    if (!row || !window.matchMedia(JOB_STATS_MOBILE_QUERY).matches) return;
+
+    let stats;
+    try {
+        stats = await fetchStats();
+    } catch {
+        // Best-effort: the server-rendered numbers stay on screen.
+        return;
+    }
+
+    row.querySelectorAll(".stat-card[data-stat-key]").forEach((card) => {
+        const rendered = renderJobStatParts(card.dataset.statKey, stats?.[card.dataset.statKey]);
+        const valueNode = card.querySelector("[data-stat-value]");
+        const unitNode = card.querySelector("[data-stat-unit]");
+        if (valueNode) valueNode.textContent = rendered.value;
+        if (unitNode) {
+            unitNode.textContent = rendered.unit;
+            unitNode.hidden = !rendered.unit;
+        }
+    });
+}
+
 function bindHostStats() {
     const panel = document.getElementById("settingsSystemPanel");
     const tab = document.getElementById("settingsSystemTab");
     if (!panel || !tab) return;
 
     const start = () => {
+        void refreshJobStats();
         if (hostStatsTimer !== null) return;
         void loadHostStats();
         hostStatsTimer = window.setInterval(() => {

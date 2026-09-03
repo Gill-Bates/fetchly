@@ -27,7 +27,7 @@ to yt-dlp. URLs that match no known platform are rejected at submit time.
 
 ### The MP4 preset
 
-**Settings → General → MP4 preset** (on by default)
+**Settings → General → Downloads → Prefer H.264/AAC for max quality** (on by default)
 
 With the preset on, video jobs prefer an H.264/AAC MP4 rendition. That is the only
 combination that plays in every browser — VP9 and AV1 renditions do not play in
@@ -39,10 +39,36 @@ universal playback.
 
 ### Concurrent fragments
 
-**Settings → General → Concurrent fragments** (`1`–`16`, default `3`)
+**Settings → General → Downloads → Parallel fragments per download** (`Automatic` or
+`1`–`16`, default `Automatic`)
 
 Parallel fragment downloads for DASH/HLS sources. Progressive single-file downloads
 ignore it. Raise it on a fast link; lower it if a platform throttles you.
+
+`Automatic` picks the value for each download from the host's CPU quota and free
+memory — 2 fragments on a small or currently loaded container, up to 8 on a big idle
+host. The setting hint names the value it resolves to right now. See
+[Resources & Workers](../configuration/resources.md).
+
+### Video watermark
+
+**Settings → General → Watermark → Show fetchly watermark** (on by default)
+
+Burns the fetchly logo into the bottom-right corner of every downloaded **video**, with
+the [public hostname](../configuration/settings.md#general) on a second line once one is
+set. Audio-only jobs are untouched.
+
+The badge is composited once per hostname and output size and cached under
+`data/watermark-cache/`, so each encode only alpha-blends a still image into the corner.
+On `medium` and `small` quality it rides along in the transcode fetchly already runs and
+costs nothing measurable. `max` quality is otherwise a pure download and remux, so it
+gains an x264 pass (`-preset veryfast -crf 20`, audio stream-copied) that a 4K download
+will feel — turn the switch off to leave `max` downloads untouched.
+
+The hostname line uses the Roboto Flex font shipped with the app UI
+(`app/static/fonts/`); no system font package is required. If that file is missing, the
+logo is drawn alone and a warning is logged. See
+[Application Settings](../configuration/settings.md#general) for the full note.
 
 ## The pipeline
 

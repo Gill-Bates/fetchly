@@ -72,6 +72,7 @@ class CookieStatus(BaseModel):
     filename: str
     present: bool
     status: str  # "valid" | "expired" | "invalid" | "missing"
+    authenticated: bool = False
     cookie_count: int = 0
     matching_domain_count: int = 0
     expires_at: int | None = None
@@ -88,6 +89,7 @@ def _status_from_analysis(analysis: CookieAnalysis) -> CookieStatus:
         platform=analysis.platform,
         present=analysis.present,
         status=analysis.status,
+        authenticated=analysis.is_authenticated,
         cookie_count=analysis.cookie_count,
         matching_domain_count=analysis.matching_domain_count,
         expires_at=analysis.expires_at,
@@ -179,7 +181,7 @@ def _validate_and_store(platform: str, text: str, *, require_login: bool) -> Coo
         if require_login and analysis.missing_login_cookies:
             raise HTTPException(status_code=400, detail=missing_session_cookie_hint(platform))
 
-        os.replace(tmp_path, target)
+        tmp_path.replace(target)
         published = True
 
         return _status_from_analysis(analyze_cookie_file(target, platform))

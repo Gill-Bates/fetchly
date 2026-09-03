@@ -2,14 +2,23 @@
 *.db
 data/
 
+# Build / packaging artifacts
+*.egg-info/
+.eggs/
+build/
+dist/
+
 # Caches
+.eslintcache
 .mypy_cache/
 .pytest_cache/
 .ruff_cache/
+.stylelintcache
 __pycache__/
 **/__pycache__/
 
-# Editor
+# Editor / OS
+.DS_Store
 .idea/
 .vscode/
 
@@ -18,17 +27,37 @@ __pycache__/
 .env.*
 !.env.example
 
-# Git / repo metadata (CI workflows, README assets — not needed at runtime)
+# Git / repo metadata (CI workflows, README assets — not needed at runtime).
+# pyproject.toml, CHANGELOG.md and LICENSE deliberately stay in the context:
+# the builder reads dependencies out of the manifest, the runtime stage copies
+# it in for app/utils/version.py, and CHANGELOG.md is rendered by the app.
+.dockerignore
+.gitattributes
 .git/
 .gitignore
 .github/
+.trivyignore
+README.md
+
+# Documentation: built and published by .github/workflows/docs-build.yml, and
+# never read by the running container.
+docs/
+site/
+.mkdocs-cache/
 
 # Local tooling and setup
 .claude/settings.local.json
 .codex
+.kiro/
 .omx/
+node_modules/
+package.json
+package-lock.json
 setup.conf
 tools/
+
+# Tests: the image copies app/ and middleware/ only, so these are pure context.
+tests/
 
 # Python
 *.py[cod]

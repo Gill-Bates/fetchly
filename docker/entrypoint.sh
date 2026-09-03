@@ -233,6 +233,7 @@ exec gunicorn app.main:app \
     --bind "${HOST}:${PORT}" \
     --workers "${WORKERS}" \
     --worker-class uvicorn_worker.UvicornWorker \
+    --logger-class app.gunicorn_logging.FetchlyGunicornLogger \
     --log-level "${LOG_LEVEL}" \
     --timeout "${TIMEOUT}" \
     --graceful-timeout "${GRACEFUL_TIMEOUT}" \

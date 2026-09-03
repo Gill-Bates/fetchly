@@ -11,10 +11,12 @@
 
 import asyncio
 import logging
+import math
 import re
 import time
 from collections.abc import AsyncIterator, Callable
 from enum import StrEnum
+from numbers import Real
 from pathlib import Path
 from typing import Any, Self, TypedDict
 
@@ -92,25 +94,21 @@ class SplitMode(StrEnum):
 class LalalError(Exception):
     """Base exception for Lalal.ai API errors."""
 
-    pass
 
 
-class LalalQuotaExceeded(LalalError):
+class LalalQuotaError(LalalError):
     """Quota/credits exceeded."""
 
-    pass
 
 
-class LalalUploadFailed(LalalError):
+class LalalUploadError(LalalError):
     """File upload failed."""
 
-    pass
 
 
-class LalalProcessingFailed(LalalError):
+class LalalProcessingError(LalalError):
     """Processing failed."""
 
-    pass
 
 
 class UploadResult(TypedDict):
@@ -163,6 +161,28 @@ def _stringify_error_value(value: Any) -> str | None:
     return None
 
 
+def _json_object(response: httpx.Response) -> dict[str, Any]:
+    """Return the response body as a dict, or ``{}`` when it is not a JSON object.
+
+    Proxies and CDNs answer with HTML error pages, so ``response.json()`` raises
+    on exactly the responses whose status code the callers want to report. Every
+    caller already treats a non-dict body as "no usable payload", so an
+    unparseable body is folded into the same case and the status check decides
+    which LalalError to raise.
+    """
+    try:
+        payload = response.json()
+    except ValueError:
+        logger.debug(
+            "Non-JSON response from %s (HTTP %s, content-type %s)",
+            response.url,
+            response.status_code,
+            response.headers.get("content-type", "unknown"),
+        )
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
 def _extract_api_error(data: dict[str, Any]) -> str:
     """Extract a human-readable error message from Lalal.ai API variants."""
     for key in ("message", "detail", "error", "errors", "code"):
@@ -170,6 +190,27 @@ def _extract_api_error(data: dict[str, Any]) -> str:
         if message:
             return message
     return "Unknown error"
+
+
+def parse_minutes_left(quota: object) -> float | None:
+    """Read the remaining processing minutes from a check_quota() payload.
+
+    The API answers ``{"minutes_left": 261.5}`` in minutes. The web-session
+    client has no equivalent endpoint and returns constraints instead, so a
+    missing or unusable value is reported as "unknown" rather than as zero -
+    the difference between "no balance left" and "never asked".
+    """
+    if not isinstance(quota, dict):
+        return None
+
+    value = quota.get("minutes_left")
+    if isinstance(value, bool) or not isinstance(value, Real):
+        return None
+
+    minutes = float(value)
+    if not math.isfinite(minutes) or minutes < 0:
+        return None
+    return minutes
 
 
 def _extract_processing_error(error: Any, default: str = "Processing failed") -> str:
@@ -288,13 +329,13 @@ class _BaseLalalClient:
 
         while True:
             if time.monotonic() - start_time > timeout:
-                raise LalalProcessingFailed(f"Processing timed out after {timeout}s")
+                raise LalalProcessingError(f"Processing timed out after {timeout}s")
 
             task_info = await self.check_progress(task_id)
             state = self._task_state(task_info)
 
             if state in {"error", "server_error", "cancelled"}:
-                raise LalalProcessingFailed(self._task_error(task_info))
+                raise LalalProcessingError(self._task_error(task_info))
 
             if state == "success":
                 return self._build_split_result(task_info)
@@ -329,8 +370,10 @@ class _BaseLalalClient:
         downloaded = 0
         max_download_bytes = _max_result_download_bytes()
         try:
-            async with httpx.AsyncClient(timeout=120.0, follow_redirects=False) as transfer_client:
-                async with transfer_client.stream("GET", url) as response:
+            async with (
+                httpx.AsyncClient(timeout=120.0, follow_redirects=False) as transfer_client,
+                transfer_client.stream("GET", url) as response,
+            ):
                     response.raise_for_status()
                     total = _content_length(response)
                     if total is not None and total > max_download_bytes:
@@ -419,7 +462,9 @@ class LalalClient(_BaseLalalClient):
         """Check remaining API quota/credits.
 
         Returns:
-            Dictionary with quota information
+            Dictionary with quota information; ``minutes_left`` holds the
+            processing minutes the account can still spend (see
+            :func:`parse_minutes_left`).
         """
         client = await self._get_client()
         response = await client.post(f"{LALAL_API_PREFIX}/limits/minutes_left/", timeout=30.0)
@@ -427,10 +472,10 @@ class LalalClient(_BaseLalalClient):
         if response.status_code == 401:
             raise LalalError("Invalid API key")
 
-        data = response.json()
+        data = _json_object(response)
         if response.status_code >= 400:
-            raise LalalError(_extract_api_error(data if isinstance(data, dict) else {}))
-        return data if isinstance(data, dict) else {}
+            raise LalalError(_extract_api_error(data))
+        return data
 
     async def upload_file(self, file_path: Path | str) -> UploadResult:
         """Upload an audio file for processing.
@@ -464,14 +509,12 @@ class LalalClient(_BaseLalalClient):
             raise LalalError("Invalid API key")
 
         if response.status_code == 402:
-            raise LalalQuotaExceeded("Insufficient credits/quota")
+            raise LalalQuotaError("Insufficient credits/quota")
 
-        result = response.json()
+        file_info = _json_object(response)
 
         if response.status_code >= 400:
-            raise LalalUploadFailed(_extract_api_error(result if isinstance(result, dict) else {}))
-
-        file_info = result if isinstance(result, dict) else {}
+            raise LalalUploadError(_extract_api_error(file_info))
 
         return UploadResult(
             id=file_info.get("id", ""),
@@ -562,15 +605,15 @@ class LalalClient(_BaseLalalClient):
             raise LalalError("Invalid API key")
 
         if response.status_code == 402:
-            raise LalalQuotaExceeded("Insufficient credits for processing")
+            raise LalalQuotaError("Insufficient credits for processing")
 
-        result = response.json()
+        result = _json_object(response)
         if response.status_code >= 400:
-            raise LalalProcessingFailed(_extract_api_error(result if isinstance(result, dict) else {}))
+            raise LalalProcessingError(_extract_api_error(result))
 
-        task_id = str(result.get("task_id", "")).strip() if isinstance(result, dict) else ""
+        task_id = str(result.get("task_id", "")).strip()
         if not task_id:
-            raise LalalProcessingFailed("Split request failed: missing task_id")
+            raise LalalProcessingError("Split request failed: missing task_id")
         return task_id
 
     async def check_progress(self, task_id: str) -> dict[str, Any]:
@@ -592,12 +635,11 @@ class LalalClient(_BaseLalalClient):
         if response.status_code == 401:
             raise LalalError("Invalid API key")
 
-        result = response.json()
+        result = _json_object(response)
         if response.status_code >= 400:
-            payload = result if isinstance(result, dict) else {}
-            raise LalalError(_extract_api_error(payload))
+            raise LalalError(_extract_api_error(result))
 
-        result_map = result.get("result", {}) if isinstance(result, dict) else {}
+        result_map = result.get("result", {})
         if not isinstance(result_map, dict):
             return {}
         task_info = result_map.get(task_id, {})
@@ -772,12 +814,12 @@ class LalalWebSessionClient(_BaseLalalClient):
         """
         client = await self._get_client()
         response = await client.post("/api/constraints/", data={"params": "[]"}, timeout=30.0)
-        data = response.json()
         if response.status_code in {401, 403}:
             raise LalalError("Lalal.ai web session is invalid or expired")
+        data = _json_object(response)
         if response.status_code >= 400:
-            raise LalalError(f"Web session check failed: {_extract_api_error(data if isinstance(data, dict) else {})}")
-        return data if isinstance(data, dict) else {"mode": "web_session"}
+            raise LalalError(f"Web session check failed: {_extract_api_error(data)}")
+        return data or {"mode": "web_session"}
 
     async def upload_file(self, file_path: Path | str) -> UploadResult:
         file_path = Path(file_path)
@@ -799,21 +841,21 @@ class LalalWebSessionClient(_BaseLalalClient):
         if create_resp.status_code in {401, 403}:
             raise LalalError("Lalal.ai web session is invalid or expired")
         if create_resp.status_code >= 400:
-            raise LalalUploadFailed(f"Multipart create failed: HTTP {create_resp.status_code}")
+            raise LalalUploadError(f"Multipart create failed: HTTP {create_resp.status_code}")
 
-        create_data = create_resp.json()
+        create_data = _json_object(create_resp)
         if create_data.get("status") != "success":
-            raise LalalUploadFailed(f"Multipart create failed: {create_data}")
+            raise LalalUploadError(f"Multipart create failed: {create_data}")
 
         file_id = str(create_data.get("file_id", "")).strip()
         upload_id = str(create_data.get("upload_id", "")).strip()
         upload_urls = create_data.get("upload_urls", [])
         if not file_id or not upload_id or not isinstance(upload_urls, list) or not upload_urls:
-            raise LalalUploadFailed("Multipart create failed: missing upload metadata")
+            raise LalalUploadError("Multipart create failed: missing upload metadata")
 
         upload_url = str(upload_urls[0]).strip()
         if not _is_safe_download_url(upload_url):
-            raise LalalUploadFailed("Unsafe upload URL returned by API")
+            raise LalalUploadError("Unsafe upload URL returned by API")
 
         async with httpx.AsyncClient(timeout=120.0, follow_redirects=False) as transfer_client:
             put_resp = await transfer_client.put(
@@ -825,7 +867,7 @@ class LalalWebSessionClient(_BaseLalalClient):
                 },
             )
         if put_resp.status_code >= 400:
-            raise LalalUploadFailed(f"Multipart upload failed: HTTP {put_resp.status_code}")
+            raise LalalUploadError(f"Multipart upload failed: HTTP {put_resp.status_code}")
 
         complete_resp = await client.post(
             "/api/upload/multipart/complete/",
@@ -836,11 +878,11 @@ class LalalWebSessionClient(_BaseLalalClient):
             timeout=60.0,
         )
         if complete_resp.status_code >= 400:
-            raise LalalUploadFailed(f"Multipart complete failed: HTTP {complete_resp.status_code}")
+            raise LalalUploadError(f"Multipart complete failed: HTTP {complete_resp.status_code}")
 
-        file_info = complete_resp.json()
+        file_info = _json_object(complete_resp)
         if file_info.get("status") != "success":
-            raise LalalUploadFailed(f"Multipart complete failed: {file_info}")
+            raise LalalUploadError(f"Multipart complete failed: {file_info}")
 
         return UploadResult(
             id=str(file_info.get("id", file_id)),
@@ -896,15 +938,15 @@ class LalalWebSessionClient(_BaseLalalClient):
         if response.status_code in {401, 403}:
             raise LalalError("Lalal.ai web session is invalid or expired")
         if response.status_code >= 400:
-            raise LalalProcessingFailed(f"Preview request failed: HTTP {response.status_code}")
+            raise LalalProcessingError(f"Preview request failed: HTTP {response.status_code}")
 
-        data = response.json()
+        data = _json_object(response)
         if data.get("status") != "success":
-            raise LalalProcessingFailed(f"Preview request failed: {data}")
+            raise LalalProcessingError(f"Preview request failed: {data}")
 
         task_id = str(data.get("task_id", "")).strip()
         if not task_id:
-            raise LalalProcessingFailed("Preview request failed: missing task_id")
+            raise LalalProcessingError("Preview request failed: missing task_id")
         return task_id
 
     async def check_progress(self, task_id: str) -> dict[str, Any]:
@@ -915,7 +957,7 @@ class LalalWebSessionClient(_BaseLalalClient):
         if response.status_code >= 400:
             raise LalalError(f"Web session check failed: HTTP {response.status_code}")
 
-        data = response.json()
+        data = _json_object(response)
         if data.get("status") != "success":
             raise LalalError(f"Web session check failed: {data}")
 
@@ -924,6 +966,8 @@ class LalalWebSessionClient(_BaseLalalClient):
             return {}
         task_info = result.get(task_id, {})
         return task_info if isinstance(task_info, dict) else {}
+
+
 def get_lalal_client() -> LalalClient | None:
     """Get Lalal.ai client using stored auth key credentials.
 

@@ -1,0 +1,23 @@
+{
+    "name": "fetchly-frontend",
+    "private": true,
+    "type": "module",
+    "description": "Front-end lint and test toolchain for fetchly. The release version lives in pyproject.toml, not here.",
+    "license": "GPL-3.0-or-later",
+    "scripts": {
+        "test": "node --test \"tests/js/*.test.mjs\"",
+        "lint": "npm run lint:js && npm run lint:css",
+        "lint:js": "eslint --config tools/eslint.config.mjs .",
+        "lint:css": "stylelint --config tools/stylelint.config.mjs --config-basedir . \"app/static/**/*.css\"",
+        "lint:fix": "eslint --config tools/eslint.config.mjs . --fix && stylelint --config tools/stylelint.config.mjs --config-basedir . \"app/static/**/*.css\" --fix",
+        "ui-lint": "npm --prefix tools/ui-lint run audit",
+        "ui-lint:install": "npm --prefix tools/ui-lint install && npm --prefix tools/ui-lint run install:browsers"
+    },
+    "devDependencies": {
+        "@eslint/js": "^10.0.1",
+        "eslint": "^10.9.1",
+        "globals": "^17.12.0",
+        "stylelint": "^17.14.1",
+        "stylelint-config-standard": "^40.0.0"
+    }
+}

@@ -19,8 +19,8 @@ from typing import Any
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
-from .auth import current_user, require_user
 from ..common.rate_limit import limiter
+from .auth import current_user, require_user
 
 logger = logging.getLogger(__name__)
 
@@ -160,19 +160,15 @@ async def _sse_stream(request: Request, subscriber: asyncio.Queue[dict[str, Any]
             # Cleanup pending tasks
             if shutdown_task and not shutdown_task.done():
                 shutdown_task.cancel()
-                try:
+                with suppress(asyncio.CancelledError):
                     await shutdown_task
-                except asyncio.CancelledError:
-                    pass
 
             # Check what completed
             if not done:
                 # Timeout - send keepalive
                 get_task.cancel()
-                try:
+                with suppress(asyncio.CancelledError):
                     await get_task
-                except asyncio.CancelledError:
-                    pass
                 if current_user(request) is None:
                     yield _format_sse({"type": "authentication_required"})
                     return
@@ -182,10 +178,8 @@ async def _sse_stream(request: Request, subscriber: asyncio.Queue[dict[str, Any]
             if shutdown_task in done:
                 # Shutdown signaled
                 get_task.cancel()
-                try:
+                with suppress(asyncio.CancelledError):
                     await get_task
-                except asyncio.CancelledError:
-                    pass
                 yield _format_sse({"type": "shutdown"})
                 return
 

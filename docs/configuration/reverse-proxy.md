@@ -90,6 +90,11 @@ If Caddy runs in Docker on a shared network, use the service name instead:
     locally — no CDN. `media-src blob:` and `worker-src blob:` are what the waveform
     needs.
 
+    fetchly sends its own, stricter policy as well, and a browser enforces both. Its
+    `style-src` names a hash instead of `'unsafe-inline'`: wavesurfer.js builds one
+    stylesheet into the trim view's shadow root, and blocking it breaks the waveform's
+    layout. Keep that in mind before replacing the app's header with your own.
+
 ## nginx
 
 ```nginx

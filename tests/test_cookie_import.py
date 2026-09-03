@@ -66,7 +66,7 @@ class HeaderPasteTests(unittest.TestCase):
 
     def test_values_containing_equals_signs_survive(self) -> None:
         result = convert_to_netscape(YOUTUBE_HEADER, "youtube")
-        pref = [row for row in entries(result.netscape) if row[5] == "PREF"][0]
+        pref = next(row for row in entries(result.netscape) if row[5] == "PREF")
         self.assertEqual(pref[6], "tz=Europe.Berlin")
 
     def test_leading_header_name_is_stripped(self) -> None:
@@ -86,9 +86,8 @@ class HeaderPasteTests(unittest.TestCase):
 
     def test_unreadable_input_is_rejected_with_a_readable_message(self) -> None:
         for text in ("", "   ", "no cookies here", "<html><body>oops</body></html>"):
-            with self.subTest(text=text):
-                with self.assertRaises(CookieImportError):
-                    convert_to_netscape(text, "youtube")
+            with self.subTest(text=text), self.assertRaises(CookieImportError):
+                convert_to_netscape(text, "youtube")
 
     def test_unknown_platform_is_rejected(self) -> None:
         with self.assertRaises(CookieImportError):

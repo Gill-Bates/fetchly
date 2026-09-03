@@ -30,6 +30,7 @@ under it:
 ├── <job-uuid>/           # One directory per job: media, thumbnail, trims, stems
 ├── cookies/              # Imported per-platform cookie jars
 ├── thumb-cache/          # Cached remote thumbnails
+├── watermark-cache/      # Rendered video watermark badges
 ├── update_check.json     # Cached upstream release check (24 h)
 └── .cache/torch/         # beat_this model checkpoint (~81 MB)
 ```

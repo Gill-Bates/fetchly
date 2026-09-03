@@ -14,9 +14,14 @@ via yt-dlp).
 from __future__ import annotations
 
 import re
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Final
 from urllib.parse import parse_qs, urlparse
 
 from .youtube import strip_zwsp, validate_youtube_url
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 PLATFORM_YOUTUBE = "youtube"
 PLATFORM_TIKTOK = "tiktok"
@@ -33,13 +38,16 @@ _PLATFORM_LABELS = {
 
 # Netscape-format cookie file names, keyed by platform. Single source of truth:
 # the worker, the metadata extractor and the API layer all resolve their cookie
-# paths from this map, so a new platform only has to be added here.
-PLATFORM_COOKIE_FILENAMES: dict[str, str] = {
+# paths from this map, so a new platform only has to be added here. Wrapped in a
+# MappingProxyType so "single source of truth" is enforced rather than merely
+# intended - the importers only read, and a stray write would silently change
+# which cookie jar every one of them hands to yt-dlp.
+PLATFORM_COOKIE_FILENAMES: Final[Mapping[str, str]] = MappingProxyType({
     PLATFORM_YOUTUBE: "youtube_cookies.txt",
     PLATFORM_INSTAGRAM: "instagram_cookies.txt",
     PLATFORM_TIKTOK: "tiktok_cookies.txt",
     PLATFORM_FACEBOOK: "facebook_cookies.txt",
-}
+})
 
 _INSTAGRAM_EXACT_HOSTS = frozenset({"instagr.am", "www.instagr.am"})
 _FACEBOOK_EXACT_HOSTS = frozenset({"fb.watch", "www.fb.watch", "fb.gg", "www.fb.gg"})
@@ -78,7 +86,7 @@ def detect_platform(url: str | None) -> str | None:
     if not host:
         return None
 
-    if host == "youtu.be" or host.endswith(".youtu.be") or host == "youtube.com" or host.endswith(".youtube.com"):
+    if host == "youtu.be" or host.endswith((".youtu.be", ".youtube.com")) or host == "youtube.com":
         return PLATFORM_YOUTUBE
     if host == "tiktok.com" or host.endswith(".tiktok.com"):
         return PLATFORM_TIKTOK
@@ -105,16 +113,29 @@ def _validate_tiktok_url(url: str) -> tuple[bool, str]:
         return False, "Invalid TikTok URL. Expected a TikTok video, photo, or share link."
 
     # Long form: /@user/video/<id> and /@user/photo/<id>
-    if len(segments) == 3 and _TIKTOK_USERNAME_RE.fullmatch(segments[0]) and segments[1] in {"video", "photo"}:
-        if _TIKTOK_ID_RE.fullmatch(segments[2]):
-            return True, ""
+    if (
+        len(segments) == 3
+        and _TIKTOK_USERNAME_RE.fullmatch(segments[0])
+        and segments[1] in {"video", "photo"}
+        and _TIKTOK_ID_RE.fullmatch(segments[2])
+    ):
+        return True, ""
 
     # Share hosts: vm.tiktok.com/<code>, vt.tiktok.com/<code>
-    if host in {"vm.tiktok.com", "vt.tiktok.com"} and len(segments) == 1 and _TIKTOK_SHARE_CODE_RE.fullmatch(segments[0]):
+    if (
+        host in {"vm.tiktok.com", "vt.tiktok.com"}
+        and len(segments) == 1
+        and _TIKTOK_SHARE_CODE_RE.fullmatch(segments[0])
+    ):
         return True, ""
 
     # Redirect/share path: /t/<code>
-    if host in {"tiktok.com", "www.tiktok.com"} and len(segments) == 2 and segments[0] == "t" and _TIKTOK_SHARE_CODE_RE.fullmatch(segments[1]):
+    if (
+        host in {"tiktok.com", "www.tiktok.com"}
+        and len(segments) == 2
+        and segments[0] == "t"
+        and _TIKTOK_SHARE_CODE_RE.fullmatch(segments[1])
+    ):
         return True, ""
 
     return False, "Invalid TikTok URL. Expected a TikTok video, photo, or share link."
@@ -171,9 +192,13 @@ def _validate_facebook_url(url: str) -> tuple[bool, str]:
         return False, error
 
     # Page permalinks: /<page>/videos/<id> and /<page>/videos/<slug>/<id>
-    if len(segments) >= 3 and segments[1] == "videos" and _FACEBOOK_PAGE_RE.fullmatch(segments[0]):
-        if _FACEBOOK_CODE_RE.fullmatch(segments[-1]):
-            return True, ""
+    if (
+        len(segments) >= 3
+        and segments[1] == "videos"
+        and _FACEBOOK_PAGE_RE.fullmatch(segments[0])
+        and _FACEBOOK_CODE_RE.fullmatch(segments[-1])
+    ):
+        return True, ""
 
     return False, error
 

@@ -44,6 +44,7 @@ finished downloads without handing your media to another service.
 | **Download everywhere** | Save video or audio from YouTube, TikTok, Instagram, and Facebook in one place. |
 | **Stay in control** | Follow every queued, active, completed, or failed job from a live dashboard. |
 | **Choose your quality** | Pick the format and quality you want, then let fetchly handle the conversion. |
+| **Brand every video** | Burn the fetchly logo — and your hostname, once set — into the corner of every downloaded video, or switch it off. |
 | **Trim with precision** | Cut audio visually with an interactive waveform before you download or process it further. |
 | **Find the tempo** | Analyze BPM and beat confidence, then use the result to guide audio trimming. |
 | **Create clean stems** | Connect Lalal.ai to separate vocals and instrumentals when you need production-ready tracks. |

@@ -30,7 +30,9 @@ if TYPE_CHECKING:
 
 # RFC 1035 wire limit. The label loop below enforces the 63-octet per-label cap.
 _MAX_HOSTNAME_LENGTH = 253
-_HOSTNAME_CHARSET_RE = re.compile(r"^[A-Za-z0-9.-]+$")
+# Unanchored: applied with fullmatch(), which - unlike match() with a trailing
+# "$" - also rejects a trailing newline.
+_HOSTNAME_CHARSET_RE = re.compile(r"[A-Za-z0-9.-]+")
 
 
 def normalize_public_hostname(value: str | None) -> str:
@@ -56,7 +58,7 @@ def normalize_public_hostname(value: str | None) -> str:
         raise ValueError("Enter a hostname or IP only - no scheme, port or path")
     if len(host) > _MAX_HOSTNAME_LENGTH:
         raise ValueError("Hostname is too long")
-    if not _HOSTNAME_CHARSET_RE.match(host):
+    if not _HOSTNAME_CHARSET_RE.fullmatch(host):
         raise ValueError("Hostname may only contain letters, digits, dots and hyphens")
     if ".." in host or host.startswith(".") or host.endswith("."):
         raise ValueError("Hostname has an empty label")
@@ -67,7 +69,7 @@ def normalize_public_hostname(value: str | None) -> str:
     return host
 
 
-def build_public_base_url(request: "Request", public_hostname: str | None) -> str:
+def build_public_base_url(request: Request, public_hostname: str | None) -> str:
     """Return the scheme+host origin that outward-facing links should use.
 
     With a configured hostname: ``https://<host>`` (IPv6 bracketed). Without

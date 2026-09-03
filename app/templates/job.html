@@ -52,6 +52,10 @@
                 <dt>Quality</dt>
                 <dd>{% if job['type'] == 'audio' %}MP3{% else %}{{ job['quality'] | e }}{% endif %}</dd>
 
+                <dt>Duration</dt>
+                <dd class="{% if job['duration_seconds'] is none %}text-muted{% endif %}">{{
+                    job['duration_seconds'] | duration }}</dd>
+
                 <dt>Status</dt>
                 <dd>
                     <span id="status" class="status-pill status-pill-{{ job['status'] | status_class }}">

@@ -102,7 +102,34 @@ function icon(name) {
 }
 
 /**
+ * Find a currently visible (non-dismissing) toast with the same type and
+ * message text.
+ * @param {HTMLDivElement} wrapper
+ * @param {string} resolvedType
+ * @param {string} text
+ * @returns {HTMLDivElement | null}
+ */
+function findActiveToast(wrapper, resolvedType, text) {
+    const candidates = wrapper.querySelectorAll(`.fx-toast--${resolvedType}`);
+    for (const candidate of candidates) {
+        const state = toastState.get(candidate);
+        if (state?.dismissing) continue;
+        const messageEl = candidate.querySelector(".fx-toast__message");
+        if (messageEl?.textContent === text) {
+            return candidate;
+        }
+    }
+    return null;
+}
+
+/**
  * Show a toast notification.
+ *
+ * A repeat call with the same type and message while an identical toast is
+ * still showing does not stack a duplicate - it restarts that toast's
+ * auto-dismiss timer instead. This is what keeps a repeating failure (e.g. an
+ * infinite-scroll page load that keeps failing while the sentinel stays in
+ * view) from flooding the toast container with copies of the same message.
  * @param {string} message - The message to display
  * @param {"success" | "danger" | "warning" | "info" | "error"} [type="info"] - Toast type
  * @param {number} [duration=3000] - Duration in ms before auto-dismiss
@@ -111,6 +138,20 @@ function icon(name) {
 export function showToast(message, type = "info", duration = TOAST_DURATION) {
     const wrapper = getContainer();
     const resolvedType = normalizeToastType(type);
+    const messageText = typeof message === "string" ? message : String(message ?? "");
+
+    const active = findActiveToast(wrapper, resolvedType, messageText);
+    if (active) {
+        const activeState = getToastState(active);
+        if (activeState.autoTimerId !== null) {
+            clearTimeout(activeState.autoTimerId);
+            activeState.autoTimerId = null;
+        }
+        if (duration > 0) {
+            activeState.autoTimerId = window.setTimeout(() => dismissToast(active), duration);
+        }
+        return active;
+    }
 
     const toast = document.createElement("div");
     const state = getToastState(toast);
@@ -123,7 +164,7 @@ export function showToast(message, type = "info", duration = TOAST_DURATION) {
 
     const text = document.createElement("span");
     text.className = "fx-toast__message";
-    text.textContent = typeof message === "string" ? message : String(message ?? "");
+    text.textContent = messageText;
     toast.appendChild(text);
 
     const closeBtn = document.createElement("button");

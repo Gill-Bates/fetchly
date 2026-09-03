@@ -157,6 +157,9 @@ export function confirmModal(options) {
     // If Bootstrap failed to load (script blocked, stale cache), a native
     // prompt still beats swallowing the action or blocking the user outright.
     if (typeof bootstrap === "undefined" || !bootstrap?.Modal) {
+        // The one sanctioned native dialog in the codebase: confirmModal() needs
+        // Bootstrap, and this branch is exactly the path where it is missing.
+        // eslint-disable-next-line no-alert
         return Promise.resolve(window.confirm(message));
     }
 

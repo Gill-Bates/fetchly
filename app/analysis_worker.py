@@ -158,6 +158,29 @@ def _bpm_suffix(stem: str) -> str:
     return re.sub(r"(\s\[\d+ BPM\])+$", "", stem).strip()
 
 
+def _link_and_unlink(source: Path, target: Path) -> Path:
+    """Move *source* to *target* via hardlink + unlink.
+
+    Returns the path the audio can be found under afterwards: *target* once the
+    link exists, *source* when nothing could be created.
+    """
+    try:
+        os.link(source, target)
+    except FileExistsError:
+        logger.warning("Rename target already exists, keeping %s", source.name)
+        return source
+    except OSError as exc:
+        logger.warning("Could not link %s to %s: %s", source.name, target.name, exc)
+        return source
+
+    try:
+        source.unlink()
+        logger.debug("Renamed %s -> %s", source.name, target.name)
+    except OSError as exc:
+        logger.warning("Could not remove original file %s: %s", source.name, exc)
+    return target
+
+
 def _rename_with_bpm(path: Path, bpm: int | None) -> Path:
     """Return a new path with the BPM value embedded in the filename.
 
@@ -171,22 +194,19 @@ def _rename_with_bpm(path: Path, bpm: int | None) -> Path:
     new_path = path.with_name(f"{stem} [{bpm} BPM]{path.suffix}")
     if new_path == path:
         return path
-    try:
-        os.link(path, new_path)
-    except FileExistsError:
-        logger.warning("BPM target already exists, keeping original file: %s", new_path)
-        return path
-    except OSError as exc:
-        logger.warning("Could not create BPM target for %s: %s", path.name, exc)
-        return path
+    return _link_and_unlink(path, new_path)
 
-    try:
-        path.unlink()
-        logger.debug("Renamed %s -> %s", path.name, new_path.name)
-        return new_path
-    except OSError as exc:
-        logger.warning("Could not remove original BPM source %s: %s", path.name, exc)
-        return new_path
+
+def _undo_rename(current: Path, original: Path) -> None:
+    """Restore *original* after a rename whose DB write did not happen.
+
+    Leaving the file under the BPM name while the row still points at the old
+    one would make the download route miss the artifact entirely.
+    """
+    if current == original or not current.is_file() or original.exists():
+        return
+    if _link_and_unlink(current, original) != original:
+        logger.warning("Could not restore %s after a skipped analysis commit", original.name)
 
 
 def submit_analysis(
@@ -233,9 +253,13 @@ def _commit_analysis(
     audio_hash: str,
     bpm: int | None,
     bpm_confidence: float | None,
-) -> None:
-    """Persist analysis results to the database and emit a WebSocket event."""
-    _finalize_job(
+) -> bool:
+    """Persist analysis results to the database and emit a WebSocket event.
+
+    Returns False when the job left the analysis state in the meantime, so the
+    caller can undo anything it already did on disk.
+    """
+    return _finalize_job(
         job_id,
         JobStatus.ANALYSIS_DONE,
         message,
@@ -307,38 +331,47 @@ def _apply_analysis(job: AnalysisJob) -> None:
         bpm = cached["bpm"]
         final_path = _rename_with_bpm(job.file_path, bpm)
         message = f"BPM {bpm}" if bpm is not None else "Audio analysis cached"
-        _commit_analysis(
+        if not _commit_analysis(
             job_id=job.job_id,
             message=message,
             final_path=final_path,
             audio_hash=hash_value,
             bpm=bpm,
             bpm_confidence=cached["bpm_confidence"],
-        )
+        ):
+            _undo_rename(final_path, job.file_path)
+            return
         logger.info("Audio analysis cache hit for %s: bpm=%s", job.job_id, bpm)
         return
 
     with governor.analysis_semaphore_sync:
         result = _extract_analysis_with_timeout(job.file_path)
 
+    # The hash -> BPM mapping is worth keeping regardless of what happens to
+    # this job's row, so it is stored before the state-guarded commit.
+    if result.bpm is not None and not store_cache(
+        hash_value,
+        bpm=result.bpm,
+        bpm_confidence=result.confidence,
+    ):
+        logger.debug("Cache write skipped/failed for %s", job.job_id)
+
     final_path = _rename_with_bpm(job.file_path, result.bpm)
     message = f"BPM {result.bpm or '-'}"
 
-    _commit_analysis(
+    if not _commit_analysis(
         job_id=job.job_id,
         message=message,
         final_path=final_path,
         audio_hash=hash_value,
         bpm=result.bpm,
         bpm_confidence=result.confidence,
-    )
-    if result.bpm is not None:
-        if not store_cache(
-            hash_value,
-            bpm=result.bpm,
-            bpm_confidence=result.confidence,
-        ):
-            logger.debug("Cache write skipped/failed for %s", job.job_id)
+    ):
+        # The row moved on (cancel/delete). Keeping the BPM name would leave the
+        # DB pointing at a filename that no longer exists on disk.
+        _undo_rename(final_path, job.file_path)
+        return
+
     logger.info(
         "Audio analysis complete for %s: bpm=%s, confidence=%s",
         job.job_id,
@@ -354,7 +387,11 @@ def _handle_analysis_job(job: AnalysisJob) -> None:
     has disappeared since the job was enqueued.
     """
     max_duration_seconds, _ = _analysis_runtime_limits()
-    if max_duration_seconds is not None and job.duration_seconds is not None and job.duration_seconds > max_duration_seconds:
+    if (
+        max_duration_seconds is not None
+        and job.duration_seconds is not None
+        and job.duration_seconds > max_duration_seconds
+    ):
         _finalize_job(
             job.job_id,
             JobStatus.DONE,

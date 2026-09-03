@@ -15,32 +15,12 @@
 
 {% block content %}
 
-{% macro stat_card(value, label, icon, stat_key) %}
-<div class="col-6 col-md-3">
-    <div class="ui-card ui-card--stat stat-card" role="group" data-stat-key="{{ stat_key }}">
-        <div class="stat-value">
-            <span class="material-symbols-outlined stat-icon" aria-hidden="true">{{ icon }}</span>
-            <span class="stat-num-line">
-                {%- if value.value is defined and value.unit is defined -%}
-                <span data-stat-value>{{ value.value }}</span><span class="stat-unit" data-stat-unit>{{ value.unit
-                    }}</span>
-                {%- else -%}
-                <span data-stat-value>{{ value }}</span><span class="stat-unit" data-stat-unit hidden></span>
-                {%- endif -%}
-            </span>
-        </div>
-        <div class="stat-label">{{ label }}</div>
-    </div>
-</div>
-{% endmacro %}
+{% from "macros/stats.html" import dashboard_stats_row %}
 
 <div class="dashboard-layout">
-    <div class="row g-3 mb-4 stats-row">
-        {{ stat_card(stats.total_jobs, "Videos processed", "video_library", "total_jobs") }}
-        {{ stat_card(stats.total_minutes, "Minutes processed", "schedule", "total_minutes") }}
-        {{ stat_card(stats.total_bytes | filesize, "Download traffic", "download", "total_bytes") }}
-        {{ stat_card(stats.total_lalal_minutes or 0, "Lalal stems minutes", "graphic_eq", "total_lalal_minutes") }}
-    </div>
+    {# Mobile hides this row -- the same tiles are rendered on
+       Settings -> System instead (see .dashboard-stats in style.css). #}
+    {{ dashboard_stats_row(stats, "dashboard-stats") }}
 
     <div class="ui-card mb-4" id="submitCard">
         <div>
@@ -250,6 +230,7 @@
                         <div class="detail-core-row" aria-label="Download format">
                             <span class="detail-chip detail-chip--muted" id="mType">–</span>
                             <span class="detail-chip detail-chip--muted" id="mQuality">–</span>
+                            <span class="detail-chip detail-chip--muted" id="mDuration">–</span>
                             <span class="detail-chip detail-chip--muted" id="mFileSize">–</span>
                         </div>
                         <div class="detail-status-line">
@@ -351,5 +332,5 @@
 {% endblock %}
 
 {% block page_scripts %}
-<script type="module" src="/static/js/main.js?v=20260901f"></script>
+<script type="module" src="/static/js/main.js?v=20260902a"></script>
 {% endblock %}

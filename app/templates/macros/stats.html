@@ -1,0 +1,32 @@
+{# Dashboard stat tile. Shared by the dashboard row and the mobile-only copy
+   on Settings -> System, so both stay in sync (see .dashboard-stats /
+   .settings-job-stats in style.css for which one is visible when). #}
+{% macro stat_card(value, label, icon, stat_key) %}
+<div class="col-6 col-md-3">
+    <div class="ui-card ui-card--stat stat-card" role="group" data-stat-key="{{ stat_key }}">
+        <div class="stat-value">
+            <span class="material-symbols-outlined stat-icon" aria-hidden="true">{{ icon }}</span>
+            <span class="stat-num-line">
+                {%- if value.value is defined and value.unit is defined -%}
+                <span data-stat-value>{{ value.value }}</span><span class="stat-unit" data-stat-unit>{{ value.unit
+                    }}</span>
+                {%- else -%}
+                <span data-stat-value>{{ value }}</span><span class="stat-unit" data-stat-unit hidden></span>
+                {%- endif -%}
+            </span>
+        </div>
+        <div class="stat-label">{{ label }}</div>
+    </div>
+</div>
+{% endmacro %}
+
+{# The four dashboard tiles in their fixed order. `extra_class` distinguishes
+   the dashboard row from the Settings copy for the responsive rules. #}
+{% macro dashboard_stats_row(stats, extra_class='') %}
+<div class="row g-3 mb-4 stats-row {{ extra_class }}">
+    {{ stat_card(stats.total_jobs, "Videos processed", "video_library", "total_jobs") }}
+    {{ stat_card(stats.total_minutes, "Minutes processed", "schedule", "total_minutes") }}
+    {{ stat_card(stats.total_bytes | filesize, "Download traffic", "download", "total_bytes") }}
+    {{ stat_card(stats.total_lalal_minutes or 0, "Lalal stems minutes", "graphic_eq", "total_lalal_minutes") }}
+</div>
+{% endmacro %}

@@ -4,8 +4,10 @@
 # Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 #
 
+import contextlib
 import json
 import logging
+import os
 import queue
 import re
 import signal
@@ -17,16 +19,16 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final, NamedTuple
-from urllib.parse import parse_qs, urlparse
 
 from .analysis_worker import SubmitResult, submit_analysis
-from .utils.duration import round_seconds
 from .db import get_settings, update_job, update_job_if_status, utc_timestamp
 from .governor import governor
 from .utils.cookie_status import cookie_file_is_usable
 from .utils.cookies import default_cookie_file
-from .utils.platform import PLATFORM_COOKIE_FILENAMES, detect_platform
+from .utils.duration import round_seconds
 from .utils.fs import AUDIO_SOURCE_EXTENSIONS, get_data_dir
+from .utils.platform import PLATFORM_COOKIE_FILENAMES, detect_platform
+from .utils.watermark import VideoWatermark, build_watermark, video_filter_args
 from .utils.youtube import normalize_info_url
 
 logger = logging.getLogger(__name__)
@@ -52,7 +54,7 @@ def _get_base_dir() -> Path:
 def _resolve_cookie_file(platform: str) -> Path:
     filename = PLATFORM_COOKIE_FILENAMES.get(platform, "")
     if not filename:
-        return Path("")
+        return Path()
 
     cookie_path = default_cookie_file(filename)
     try:
@@ -110,6 +112,38 @@ def get_job_queue() -> queue.Queue[Job]:
         return _job_queue
 
 
+# Ids of jobs that currently hold an in-memory queue slot. Persisted rows stay
+# ``queued`` until a worker picks them up, so this set is what tells the backlog
+# refill (app/main.py::_fill_download_queue) which of those rows are already in
+# flight and must not be enqueued a second time.
+_queued_job_ids: set[str] = set()
+_queued_ids_lock = threading.Lock()
+
+
+def submit_download(job: Job) -> bool:
+    """Give *job* an in-memory queue slot.
+
+    Returns True when the job holds a slot (already queued counts as success)
+    and False when the queue is full, leaving the persisted ``queued`` row for
+    a later refill attempt.
+    """
+    job_id = job[0]
+    with _queued_ids_lock:
+        if job_id in _queued_job_ids:
+            return True
+        try:
+            get_job_queue().put_nowait(job)
+        except queue.Full:
+            return False
+        _queued_job_ids.add(job_id)
+    return True
+
+
+def _release_queue_slot(job_id: str) -> None:
+    with _queued_ids_lock:
+        _queued_job_ids.discard(job_id)
+
+
 _status_callback: StatusCallback | None = None
 _workers_started = False
 _worker_lock = threading.Lock()
@@ -139,9 +173,22 @@ _YTDLP_PROGRESS_TEMPLATE: Final = (
 # into the settings table.
 _MIN_CONCURRENT_FRAGMENTS: Final = 1
 _MAX_CONCURRENT_FRAGMENTS: Final = 16
+# 0 means "Automatic": the governor sizes the value from the host's CPU quota
+# and free memory (app/governor.py::recommended_concurrent_fragments).
+_AUTO_CONCURRENT_FRAGMENTS: Final = 0
+# Fallback for an unreadable setting or a failed host probe, not a UI default -
+# the stored default is "Automatic" (see app/db.py).
 _DEFAULT_CONCURRENT_FRAGMENTS: Final = 3
 # Mirrors the "download_mp4_preset" default in app/db.py.
 _DEFAULT_MP4_PRESET: Final = True
+# Mirrors the "video_watermark" default in app/db.py.
+_DEFAULT_VIDEO_WATERMARK: Final = True
+# Encoder settings for the watermark-only pass on "max" quality downloads.
+# Those are otherwise a pure download+remux, so this pass exists solely to burn
+# the badge in: "veryfast" keeps the cost as low as an x264 pass can be, and
+# CRF 20 stays visually transparent on the high-bitrate sources it runs on.
+_WATERMARK_X264_PRESET: Final = "veryfast"
+_WATERMARK_X264_CRF: Final = "20"
 _DEFAULT_DOWNLOAD_TIMEOUT_MINUTES: Final = 60
 _DEFAULT_TRANSCODE_TIMEOUT_MINUTES: Final = 120
 _DEFAULT_DOWNLOAD_MAX_FILESIZE_GIB: Final = 4
@@ -192,7 +239,7 @@ def _user_facing_error(url: str, exc: Exception) -> str:
     if any(p in raw_lower for p in _LOGIN_REQUIRED_PATTERNS):
         platform = detect_platform(url)
         cookie_file = PLATFORM_COOKIE_FILENAMES.get(platform or "", "")
-        cookie_path = _resolve_cookie_file(platform or "") if platform else Path("")
+        cookie_path = _resolve_cookie_file(platform or "") if platform else Path()
         if platform and cookie_file and not cookie_file_is_usable(cookie_path, platform):
             action = "Refresh" if cookie_path.is_file() else "Add"
             return (
@@ -256,6 +303,17 @@ def cancel_job(job_id: str) -> None:
         _terminate_process(proc, grace_seconds=1.0)
 
 
+def clear_cancellation(job_id: str) -> None:
+    """Drop a cancel marker before a job id is put back to work.
+
+    A job cancelled while it was still queued keeps its marker until a worker
+    pops it off the queue. Retrying the same row in place would otherwise be
+    cancelled again by that stale marker.
+    """
+    with _cancel_lock:
+        _cancelled_jobs.discard(job_id)
+
+
 def is_job_cancelled(job_id: str) -> bool:
     """Check if a job has been marked for cancellation."""
     with _cancel_lock:
@@ -272,6 +330,11 @@ def _check_shutdown() -> None:
     """Raise if workers are shutting down."""
     if _shutdown_event.is_set():
         raise ShutdownError("Shutdown requested")
+
+
+# Live-progress fields that only ever go out over SSE; jobs has no columns
+# for them, so update_job_if_status() must never see them.
+_TRANSIENT_STATUS_FIELDS: Final = frozenset({"progress", "eta_seconds"})
 
 
 def _emit(job_id: str, status: str, message: str = "", **extra: Any) -> None:
@@ -315,13 +378,18 @@ def _transition_if_processing(job_id: str, status: str, message: str = "", **ext
 
 
 def _transition_worker_status(job_id: str, status: str, message: str = "", **extra: Any) -> bool:
-    """Persist worker-owned in-flight statuses and emit matching status events."""
+    """Persist worker-owned in-flight statuses and emit matching status events.
+
+    ``progress``/``eta_seconds`` are SSE-only: there is no column for them, so
+    they must reach _emit() but not update_job_if_status().
+    """
+    persisted_extra = {k: v for k, v in extra.items() if k not in _TRANSIENT_STATUS_FIELDS}
     updated = update_job_if_status(
         job_id,
         ("processing", "downloading", "transcoding"),
         status=status,
         message=message,
-        **extra,
+        **persisted_extra,
     )
     if updated:
         _emit(job_id, status, message, **extra)
@@ -406,10 +474,15 @@ def _run_cmd(
 
     started = time.monotonic()
     stdout_value = ""
+    stdout_collected = False
     proc: subprocess.Popen[str] | None = None
     stderr_tmp: tempfile._TemporaryFileWrapper[str] | None = None
     try:
-        stderr_tmp = tempfile.NamedTemporaryFile(mode="w+", encoding="utf-8", errors="replace", delete=True)
+        # Closed in the matching finally: the handle has to outlive the
+        # `with subprocess.Popen(...)` block it is passed into.
+        stderr_tmp = tempfile.NamedTemporaryFile(  # noqa: SIM115
+            mode="w+", encoding="utf-8", errors="replace", delete=True
+        )
         with subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE if capture_stdout else subprocess.DEVNULL,
@@ -442,10 +515,20 @@ def _run_cmd(
                         poll_timeout = min(_COMMAND_POLL_INTERVAL, remaining)
                         if capture_stdout:
                             stdout_value, _ = proc.communicate(timeout=poll_timeout)
+                            stdout_collected = True
                         else:
                             proc.wait(timeout=poll_timeout)
                     except subprocess.TimeoutExpired:
                         continue
+
+                if capture_stdout and not stdout_collected:
+                    # The child can exit in the race window between a
+                    # TimeoutExpired and the next poll(), which ends the loop
+                    # without any completed communicate(). Drain the pipe once
+                    # more so callers (ffprobe) do not see an empty result -
+                    # communicate() resumes from the partially read buffers.
+                    with contextlib.suppress(subprocess.TimeoutExpired):
+                        stdout_value, _ = proc.communicate(timeout=_COMMAND_POLL_INTERVAL)
 
                 if job_id is not None:
                     _check_cancellation(job_id)
@@ -455,7 +538,12 @@ def _run_cmd(
                     executable = cmd[0] if cmd else "command"
                     stderr_tail = _stderr_tail(stderr_tmp)
                     if stderr_tail:
-                        logger.warning("%s failed with exit code %s. stderr tail: %s", executable, proc.returncode, stderr_tail)
+                        logger.warning(
+                            "%s failed with exit code %s. stderr tail: %s",
+                            executable,
+                            proc.returncode,
+                            stderr_tail,
+                        )
                         raise RuntimeError(f"{executable} failed with exit code {proc.returncode}: {stderr_tail}")
 
                     raise RuntimeError(f"{executable} failed with exit code {proc.returncode}")
@@ -468,7 +556,7 @@ def _run_cmd(
     except Exception as exc:
         if _shutdown_event.is_set():
             raise ShutdownError("Shutdown requested") from exc
-        logger.error("Command failed: %s", " ".join(cmd), exc_info=True)
+        logger.exception("Command failed: %s", " ".join(cmd))
         raise RuntimeError("Command execution failed") from exc
     finally:
         if proc is not None and proc.poll() is None:
@@ -542,10 +630,8 @@ def _read_progress_lines(pipe: Any, target_queue: queue.Queue[str | None]) -> No
             except queue.Full:
                 continue
     finally:
-        try:
+        with contextlib.suppress(queue.Full):
             target_queue.put(None, timeout=0.1)
-        except queue.Full:
-            pass
 
 
 def _emit_ffmpeg_progress(
@@ -560,7 +646,7 @@ def _emit_ffmpeg_progress(
     if duration_seconds is None or duration_seconds <= 0:
         return last_progress
 
-    pct = max(0, min(100, int(round((out_seconds / duration_seconds) * 100))))
+    pct = max(0, min(100, round((out_seconds / duration_seconds) * 100)))
     if pct <= last_progress:
         return last_progress
 
@@ -568,7 +654,7 @@ def _emit_ffmpeg_progress(
     if 0 < pct < 100:
         elapsed = max(0.0, time.monotonic() - started_at)
         total_estimate = elapsed / (pct / 100.0)
-        eta_seconds = max(0, int(round(total_estimate - elapsed)))
+        eta_seconds = max(0, round(total_estimate - elapsed))
 
     _emit(job_id, "transcoding", message, progress=pct, eta_seconds=eta_seconds)
     return pct
@@ -588,7 +674,7 @@ class _DownloadProgress:
     the status pill then shows a plain "DOWNLOADING" rather than a fake 0%.
     """
 
-    __slots__ = ("_base_bytes", "_current_bytes", "_last_pct", "_message", "_job_id")
+    __slots__ = ("_base_bytes", "_current_bytes", "_job_id", "_last_pct", "_message")
 
     def __init__(self, job_id: str, message: str) -> None:
         self._job_id = job_id
@@ -716,7 +802,11 @@ def _run_cmd_streaming(
     reader_thread: threading.Thread | None = None
 
     try:
-        stderr_tmp = tempfile.NamedTemporaryFile(mode="w+", encoding="utf-8", errors="replace", delete=True)
+        # Closed in the matching finally: the handle has to outlive the
+        # `with subprocess.Popen(...)` block it is passed into.
+        stderr_tmp = tempfile.NamedTemporaryFile(  # noqa: SIM115
+            mode="w+", encoding="utf-8", errors="replace", delete=True
+        )
         with subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
@@ -799,7 +889,7 @@ def _run_cmd_streaming(
     except Exception as exc:
         if _shutdown_event.is_set():
             raise ShutdownError("Shutdown requested") from exc
-        logger.error("Command failed: %s", " ".join(cmd), exc_info=True)
+        logger.exception("Command failed: %s", " ".join(cmd))
         raise RuntimeError("Command execution failed") from exc
     finally:
         if proc is not None and proc.poll() is None:
@@ -913,6 +1003,38 @@ def _rename_thumbnail(job_dir: Path) -> None:
             break
 
 
+def _resolve_concurrent_fragments(value: object) -> int:
+    """Turn the stored --concurrent-fragments setting into a usable count.
+
+    A positive value is the user's own choice and is only clamped to the range
+    the settings API accepts. ``0`` (and anything below it, which only a direct
+    database write can produce) selects "Automatic": the count is resolved per
+    download from the host's CPU quota and free memory, so a small or currently
+    loaded host backs off on its own.
+    """
+    try:
+        fragments = int(value)
+    except (TypeError, ValueError):
+        logger.warning("Invalid concurrent-fragments setting %r; using %d", value, _DEFAULT_CONCURRENT_FRAGMENTS)
+        return _DEFAULT_CONCURRENT_FRAGMENTS
+
+    if fragments > _AUTO_CONCURRENT_FRAGMENTS:
+        return min(max(fragments, _MIN_CONCURRENT_FRAGMENTS), _MAX_CONCURRENT_FRAGMENTS)
+
+    try:
+        automatic = governor.recommended_concurrent_fragments()
+    except Exception:
+        logger.warning(
+            "Could not size concurrent fragments from the host; using %d",
+            _DEFAULT_CONCURRENT_FRAGMENTS,
+            exc_info=True,
+        )
+        return _DEFAULT_CONCURRENT_FRAGMENTS
+
+    logger.debug("Automatic concurrent fragments: %d", automatic)
+    return automatic
+
+
 def _download_tuning() -> tuple[int, bool]:
     """Read the user-configured yt-dlp download tuning from the settings store.
 
@@ -927,9 +1049,159 @@ def _download_tuning() -> tuple[int, bool]:
         logger.warning("Could not read download settings; falling back to defaults", exc_info=True)
         return _DEFAULT_CONCURRENT_FRAGMENTS, _DEFAULT_MP4_PRESET
 
-    fragments = settings.get("download_concurrent_fragments", _DEFAULT_CONCURRENT_FRAGMENTS)
-    clamped = min(max(int(fragments), _MIN_CONCURRENT_FRAGMENTS), _MAX_CONCURRENT_FRAGMENTS)
-    return clamped, bool(settings.get("download_mp4_preset", _DEFAULT_MP4_PRESET))
+    fragments = _resolve_concurrent_fragments(
+        settings.get("download_concurrent_fragments", _AUTO_CONCURRENT_FRAGMENTS)
+    )
+    return fragments, bool(settings.get("download_mp4_preset", _DEFAULT_MP4_PRESET))
+
+
+def _watermark_config() -> tuple[bool, str]:
+    """Read the watermark switch and the public hostname from settings.
+
+    Returns ``(enabled, hostname)``. A failing settings read falls back to the
+    documented defaults for the same reason ``_download_tuning`` does: it must
+    not abort an otherwise valid download.
+    """
+    try:
+        settings = get_settings()
+    except Exception:
+        logger.warning("Could not read watermark settings; falling back to defaults", exc_info=True)
+        return _DEFAULT_VIDEO_WATERMARK, ""
+
+    enabled = bool(settings.get("video_watermark", _DEFAULT_VIDEO_WATERMARK))
+    return enabled, str(settings.get("public_hostname", "") or "")
+
+
+def _probe_video_size(path: Path, *, job_id: str | None = None) -> tuple[int, int] | None:
+    """Pixel size of the first video stream, or ``None`` when it cannot be read."""
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=width,height",
+        "-of",
+        "json",
+        str(path),
+    ]
+    try:
+        output = _run_cmd(cmd, timeout=20, capture_stdout=True, job_id=job_id)
+        streams = json.loads(output or "{}").get("streams", [])
+        width = int(streams[0]["width"])
+        height = int(streams[0]["height"])
+    except (JobCancelledError, ShutdownError):
+        raise
+    except Exception as exc:
+        logger.warning("Could not read video dimensions of %s: %s", path, exc)
+        return None
+
+    return (width, height) if width > 0 and height > 0 else None
+
+
+def _scaled_size(source: tuple[int, int], target_height: int) -> tuple[int, int]:
+    """Output size produced by ``scale=-2:'min(target_height,ih)'``."""
+    width, height = source
+    out_height = min(target_height, height)
+    # -2 rounds the width to the nearest even number, which is what libx264
+    # needs and what the badge has to be sized against.
+    out_width = max(2, round(width * out_height / height / 2) * 2)
+    return out_width, out_height
+
+
+def _resolve_watermark(
+    source: Path,
+    *,
+    job_id: str,
+    target_height: int | None = None,
+) -> VideoWatermark | None:
+    """Badge for the video ``source`` is about to become, or ``None``.
+
+    ``target_height`` is the cap the transcode applies; leave it out for a file
+    that is written at its source resolution. Returns ``None`` whenever the
+    watermark is switched off or the video size cannot be determined - a
+    download is never failed over a missing badge.
+    """
+    enabled, hostname = _watermark_config()
+    if not enabled:
+        return None
+
+    size = _probe_video_size(source, job_id=job_id)
+    if size is None:
+        return None
+    if target_height is not None:
+        size = _scaled_size(size, target_height)
+
+    return build_watermark(video_width=size[0], video_height=size[1], hostname=hostname)
+
+
+def _watermark_only_pass(job_id: str, video: Path) -> Path:
+    """Burn the watermark into an already-finished video file.
+
+    Only "max" quality reaches this: it downloads and remuxes without an
+    encoder, so unlike the capped qualities - which get the overlay for free
+    inside the transcode they already run - there is no existing pass to hook
+    into. Returns ``video`` unchanged when no watermark applies.
+    """
+    watermark = _resolve_watermark(video, job_id=job_id)
+    if watermark is None:
+        return video
+
+    duration_seconds = _probe_media(video, "video", job_id=job_id)[2]
+    message = "Applying watermark"
+    _transition_worker_status(job_id, "transcoding", "Waiting for transcode slot", progress=0, eta_seconds=None)
+
+    # Same suffix as the input: the audio is stream-copied, so the output
+    # container has to be the one those streams already live in.
+    marked = video.with_name(f"{video.stem}.watermarked{video.suffix}")
+    try:
+        with governor.transcode_semaphore_sync:
+            _check_cancellation(job_id)
+            _check_shutdown()
+            _transition_worker_status(job_id, "transcoding", message, progress=0, eta_seconds=None)
+            _run_ffmpeg_transcode(
+                [
+                    "ffmpeg",
+                    "-y",
+                    "-i",
+                    str(video),
+                    "-i",
+                    str(watermark.path),
+                    *video_filter_args(watermark),
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    _WATERMARK_X264_PRESET,
+                    "-crf",
+                    _WATERMARK_X264_CRF,
+                    "-c:a",
+                    "copy",
+                    "-progress",
+                    "pipe:1",
+                    "-nostats",
+                    str(marked),
+                ],
+                timeout=_download_runtime_limits().transcode_timeout_seconds,
+                job_id=job_id,
+                message=message,
+                duration_seconds=duration_seconds,
+            )
+        _check_cancellation(job_id)
+        marked.replace(video)
+        return video
+    except (JobCancelledError, ShutdownError):
+        raise
+    except Exception:
+        # A watermark is cosmetic; the downloaded video is not. Keep the
+        # unmarked file rather than failing a job that already has its media.
+        logger.warning("Could not watermark %s; keeping the unmarked download", video, exc_info=True)
+        return video
+    finally:
+        try:
+            marked.unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning("Could not remove temp file %s: %s", marked, exc)
 
 
 def _build_ytdlp_cmd(
@@ -1004,7 +1276,7 @@ def _build_ytdlp_cmd(
 
 def _find_audio_source(job_dir: Path, stem: str) -> Path | None:
     """Find the lossless audio source file in the job directory.
-    
+
     yt-dlp outputs audio in various formats (opus, m4a, webm, etc.) depending on source.
     This function finds the actual downloaded file matching the stem pattern.
     """
@@ -1054,12 +1326,12 @@ def _download_media(job_id: str, url: str, *, quality: str, media_type: str) -> 
         _run_ytdlp_download(cmd, job_id=job_id, message=audio_message)
         _check_cancellation(job_id)
         _rename_thumbnail(job_dir)
-        
+
         # Find the actual downloaded file (extension varies by source)
         source_file = _find_audio_source(job_dir, stem)
         if source_file is None:
             raise RuntimeError(f"Audio source file not found in {job_dir}")
-        
+
         return source_file
 
     if quality == "max":
@@ -1078,12 +1350,12 @@ def _download_media(job_id: str, url: str, *, quality: str, media_type: str) -> 
 
         expected_out = job_dir / f"{stem}.mp4"
         if expected_out.is_file():
-            return expected_out
+            return _watermark_only_pass(job_id, expected_out)
 
         found_out = _find_video_source(job_dir, stem)
         if found_out is None:
             raise RuntimeError(f"Downloaded video file not found in {job_dir}")
-        return found_out
+        return _watermark_only_pass(job_id, found_out)
 
     out = job_dir / f"{stem}.mp4"
 
@@ -1113,6 +1385,10 @@ def _download_media(job_id: str, url: str, *, quality: str, media_type: str) -> 
     scale = f"scale=-2:'min({target_height},ih)'"
     transcode_message = f"Transcoding to {quality}"
     _, _, source_duration_seconds = _probe_media(source_video, media_type, job_id=job_id)
+    # Folded into the pass below rather than run as one of its own: the badge is
+    # a still image, so ffmpeg scales it once and the encode does one alpha
+    # blend per frame over a corner of the picture.
+    watermark = _resolve_watermark(source_video, job_id=job_id, target_height=target_height)
     _transition_worker_status(
         job_id,
         "transcoding",
@@ -1120,7 +1396,7 @@ def _download_media(job_id: str, url: str, *, quality: str, media_type: str) -> 
         progress=0,
         eta_seconds=None,
     )
-    
+
     try:
         # Use Governor semaphore to limit concurrent transcoding (CPU/memory protection)
         with governor.transcode_semaphore_sync:
@@ -1133,8 +1409,8 @@ def _download_media(job_id: str, url: str, *, quality: str, media_type: str) -> 
                     "-y",
                     "-i",
                     str(source_video),
-                    "-vf",
-                    scale,
+                    *(["-i", str(watermark.path)] if watermark else []),
+                    *video_filter_args(watermark, scale=scale),
                     "-c:v",
                     "libx264",
                     "-preset",
@@ -1255,6 +1531,12 @@ def process_job(job: Job) -> None:
         filesize_bytes = _get_filesize(out_path)
         codec, bitrate_kbps, duration_seconds = _probe_media(out_path, type_, job_id=job_id)
         video_title = _title_from_output_name(out_path)
+        # ffprobe measures the finished file and wins whenever it has a
+        # reading, but a probe that came back empty must not erase the runtime
+        # the source reported at submit time (see db.py::insert_job).
+        measured: dict[str, Any] = {}
+        if duration_seconds is not None:
+            measured["duration_seconds"] = duration_seconds
 
         status = "done"
         message = "Finished"
@@ -1269,8 +1551,8 @@ def process_job(job: Job) -> None:
                 filesize_bytes=filesize_bytes,
                 codec=codec,
                 bitrate_kbps=bitrate_kbps,
-                duration_seconds=duration_seconds,
                 video_title=video_title,
+                **measured,
             )
             if not transitioned:
                 return
@@ -1297,8 +1579,8 @@ def process_job(job: Job) -> None:
             filesize_bytes=filesize_bytes,
             codec=codec,
             bitrate_kbps=bitrate_kbps,
-            duration_seconds=duration_seconds,
             video_title=video_title,
+            **measured,
         )
 
     except JobCancelledError:
@@ -1333,6 +1615,9 @@ def worker() -> None:
             continue
 
         job_id = job[0]
+        # The slot is free again the moment the job leaves the queue; from here
+        # on its DB status guards against a second pickup.
+        _release_queue_slot(job_id)
         try:
             if _shutdown_event.is_set():
                 return
@@ -1362,17 +1647,17 @@ def worker() -> None:
 
 def start_workers(n: int | None = None) -> None:
     """Start the background worker threads.
-    
+
     Args:
         n: Number of workers. If None, auto-detect via Governor.
     """
     global _workers_started
-    
+
     # Initialize queue and get worker count from Governor
     get_job_queue()
     if n is None:
         n = governor.worker_count
-    
+
     with _worker_lock:
         if _workers_started:
             _worker_threads[:] = [thread for thread in _worker_threads if thread.is_alive()]
@@ -1385,7 +1670,7 @@ def start_workers(n: int | None = None) -> None:
             t = threading.Thread(target=worker, daemon=True)
             t.start()
             _worker_threads.append(t)
-        
+
         logger.info("Started %d worker threads (effective CPUs: %.2f)", n, governor.effective_cpus)
 
         # Log cookie file availability at startup for operational visibility.
@@ -1407,10 +1692,12 @@ def stop_workers(timeout: float = 5.0) -> None:
     with _worker_lock:
         threads = list(_worker_threads)
 
-    # Divide timeout among threads to avoid O(n * timeout) worst case
-    per_thread_timeout = max(0.5, timeout / max(len(threads), 1))
+    # One shared deadline instead of a per-thread slice: all threads observe the
+    # same shutdown event, so waiting on the first one already covers the rest.
+    # This keeps the total stop time at O(timeout) rather than O(n * timeout).
+    deadline = time.monotonic() + max(0.0, timeout)
     for t in threads:
-        t.join(timeout=per_thread_timeout)
+        t.join(timeout=max(0.0, deadline - time.monotonic()))
         if t.is_alive():
             logger.warning("Worker thread %s did not stop cleanly", t.name)
 

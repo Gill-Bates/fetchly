@@ -22,12 +22,12 @@
 ---
 
 <p align="center">
-  <img src=".github/img/screen_1.jpeg" alt="fetchly dashboard: link input, video preview, format picker, and recent downloads" width="800"><br>
+  <img src=".github/img/screen_2.jpeg" alt="fetchly dashboard: link input, video preview, format picker, and recent downloads" width="800"><br>
   <em>Dashboard — paste a link, preview the media, pick a format, and track every job live.</em>
 </p>
 
 <p align="center">
-  <img src=".github/img/screen_2.jpeg" alt="fetchly login screen" width="800"><br>
+  <img src=".github/img/screen_1.jpeg" alt="fetchly login screen" width="800"><br>
   <em>Authenticated login with invisible, server-verified anti-bot protection.</em>
 </p>
 
@@ -44,6 +44,7 @@ finished downloads without handing your media to another service.
 | **Download everywhere** | Save video or audio from YouTube, TikTok, Instagram, and Facebook in one place. |
 | **Stay in control** | Follow every queued, active, completed, or failed job from a live dashboard. |
 | **Choose your quality** | Pick the format and quality you want, then let fetchly handle the conversion. |
+| **Brand every video** | Burn the fetchly logo — and your hostname, once set — into the corner of every downloaded video, or switch it off. |
 | **Trim with precision** | Cut audio visually with an interactive waveform before you download or process it further. |
 | **Find the tempo** | Analyze BPM and beat confidence, then use the result to guide audio trimming. |
 | **Create clean stems** | Connect Lalal.ai to separate vocals and instrumentals when you need production-ready tracks. |

@@ -305,6 +305,12 @@ function createDownloadOptionsMenu(job, downloadHref) {
     if (jobType === "audio") {
         appendAudioDownloadActions(menu, job);
     }
+
+    // Every other action category ends in a Details button (see
+    // renderDesktopAction), so downloadable jobs reach the same dialog from
+    // the menu rather than being the one state without it.
+    menu.appendChild(createDivider());
+    menu.appendChild(createDropdownButton("info", "Details", { action: "open-detail", jobId }));
     return menu;
 }
 

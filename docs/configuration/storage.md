@@ -18,6 +18,7 @@ $DATA_DIR/
 │   └── trim_<...>_vocals.mp3
 ├── cookies/              # Per-platform Netscape jars, mode 0600
 ├── thumb-cache/          # Cached remote thumbnails
+├── watermark-cache/      # Rendered video watermark badges
 ├── update_check.json     # Cached upstream release check
 └── .cache/torch/         # beat_this model checkpoint (~81 MB)
 ```

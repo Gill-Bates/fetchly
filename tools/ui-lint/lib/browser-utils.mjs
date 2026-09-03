@@ -63,7 +63,10 @@ export async function login(page, { baseUrl, username, password, motionResetCss 
     try {
         await loginForm.waitFor({ state: 'visible', timeout: 5000 });
     } catch (error) {
-        throw new Error(`Login form not available at ${baseUrl}/login (landed on ${page.url()}): ${error.message}`);
+        throw new Error(
+            `Login form not available at ${baseUrl}/login (landed on ${page.url()}): ${error.message}`,
+            { cause: error },
+        );
     }
 
     await page.fill('#username', username);

@@ -41,7 +41,7 @@ class CSRFMiddleware:
         app: ASGIApp,
         *,
         csrf_cookie_name: str,
-        protected_paths: tuple[str, ...] = ("/login", "/logout", "/api/submit"),
+        protected_paths: tuple[str, ...],
     ) -> None:
         self.app = app
         self._csrf_cookie_name = csrf_cookie_name
@@ -49,6 +49,12 @@ class CSRFMiddleware:
 
         if _BAD_COOKIE_NAME_CHARS.search(csrf_cookie_name):
             raise ValueError("csrf_cookie_name contains illegal characters")
+
+        # Required rather than defaulted on purpose: a built-in default would
+        # silently drift out of sync with the real prefix list in app/main.py,
+        # and a too-narrow list leaves state-changing routes unprotected.
+        if not protected_paths:
+            raise ValueError("protected_paths must not be empty")
 
         for p in protected_paths:
             if not p.startswith("/"):
@@ -75,7 +81,14 @@ class CSRFMiddleware:
         return receive_with_body
 
     @staticmethod
-    async def _read_body(receive: Callable[[], Awaitable[dict]]) -> bytes:
+    async def _read_body(receive: Callable[[], Awaitable[dict]]) -> tuple[bytes, bool]:
+        """Read the full request body.
+
+        Returns ``(body, disconnected)``. When ``disconnected`` is True the body
+        is truncated and must not be parsed or replayed downstream - a partial
+        form body can still contain a syntactically valid ``csrf_token`` while
+        the remaining fields are missing.
+        """
         chunks: list[bytes] = []
 
         while True:
@@ -83,7 +96,7 @@ class CSRFMiddleware:
             message_type = message.get("type")
 
             if message_type == "http.disconnect":
-                break
+                return b"".join(chunks), True
             if message_type != "http.request":
                 continue
 
@@ -93,32 +106,34 @@ class CSRFMiddleware:
             if not message.get("more_body", False):
                 break
 
-        return b"".join(chunks)
+        return b"".join(chunks), False
 
     async def _extract_form_token(
         self,
         scope: dict,
         receive: Callable[[], Awaitable[dict]],
         content_type: str,
-    ) -> tuple[str | None, bytes]:
-        body = await self._read_body(receive)
+    ) -> tuple[str | None, bytes, bool]:
+        body, disconnected = await self._read_body(receive)
+        if disconnected:
+            return None, body, True
 
         if content_type == "application/x-www-form-urlencoded":
             try:
                 form_data = parse_qs(body.decode("utf-8"), keep_blank_values=True)
             except UnicodeDecodeError:
-                return None, body
-            return form_data.get("csrf_token", [None])[0], body
+                return None, body, False
+            return form_data.get("csrf_token", [None])[0], body, False
 
         if content_type == "multipart/form-data":
             request = Request(scope, receive=self._build_replay_receive(body))
             try:
                 form_data = await request.form()
             except ValueError:
-                return None, body
-            return form_data.get("csrf_token"), body
+                return None, body, False
+            return form_data.get("csrf_token"), body, False
 
-        return None, body
+        return None, body, False
 
     async def _reject(
         self,
@@ -129,9 +144,10 @@ class CSRFMiddleware:
         send: Callable[[dict], Awaitable[None]],
         set_cookie_value: str | None = None,
         secure: bool = False,
+        status_code: int = 403,
     ) -> None:
-        """Return a 403 JSON response, optionally setting the CSRF cookie."""
-        response = JSONResponse(status_code=403, content={"detail": detail})
+        """Return a rejection JSON response, optionally setting the CSRF cookie."""
+        response = JSONResponse(status_code=status_code, content={"detail": detail})
         if set_cookie_value is not None:
             response.set_cookie(
                 key=self._csrf_cookie_name,
@@ -194,8 +210,22 @@ class CSRFMiddleware:
             if not sent_token:
                 content_type = self._normalize_content_type(request.headers.get("content-type", ""))
                 if content_type in {"application/x-www-form-urlencoded", "multipart/form-data"}:
-                    sent_token, body_cache = await self._extract_form_token(scope, receive, content_type)
+                    sent_token, body_cache, disconnected = await self._extract_form_token(
+                        scope, receive, content_type
+                    )
                     body_consumed = True
+                    if disconnected:
+                        # Body is truncated; neither validating the token nor
+                        # replaying it downstream would be meaningful.
+                        await self._reject(
+                            "Incomplete request body",
+                            scope=scope,
+                            receive=receive,
+                            send=send,
+                            secure=secure,
+                            status_code=400,
+                        )
+                        return
 
             if not sent_token:
                 await self._reject(

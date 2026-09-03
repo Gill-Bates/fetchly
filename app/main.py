@@ -9,7 +9,6 @@
 import asyncio
 import logging
 import os
-import queue
 import shutil
 import signal
 from collections.abc import Callable
@@ -17,9 +16,10 @@ from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from types import FrameType
-from typing import Any
+from typing import Any, Final
 
 from fastapi import FastAPI, Request
+from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -29,14 +29,18 @@ from starlette.responses import Response
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
-from .common.rate_limit import get_trusted_proxy_hosts, limiter, validate_trusted_proxy_hosts
+from middleware.csrf import CSRFMiddleware
+
 from .analysis_worker import (
-    set_status_callback as set_analysis_status_callback,
+    SubmitResult,
     start_analysis_workers,
     stop_analysis_workers,
     submit_analysis,
-    SubmitResult,
 )
+from .analysis_worker import (
+    set_status_callback as set_analysis_status_callback,
+)
+from .common.rate_limit import get_trusted_proxy_hosts, limiter, validate_trusted_proxy_hosts
 from .db import (
     cancel_interrupted_jobs,
     close_db,
@@ -45,14 +49,14 @@ from .db import (
     init_db,
     job_exists,
     list_expired_job_ids,
-    list_queued_jobs,
     list_jobs_requiring_audio_analysis,
+    list_queued_jobs,
 )
 from .governor import GovernorConfig, governor
 from .lalal_policy import LALAL_MAX_DURATION_MINUTES, LALAL_MAX_DURATION_SECONDS
 from .routes import (
-    auth_router,
     api_router,
+    auth_router,
     cookies_router,
     events_router,
     lalal_router,
@@ -60,26 +64,25 @@ from .routes import (
     share_router,
     trim_router,
 )
-from .routes.auth import init_auth
 from .routes.api import init_api
-from .routes.lalal import init_lalal
-from .routes.media import init_media, resolve_job_path
-from .routes.share import init_share
-from .routes.trim import init_trim
+from .routes.auth import init_auth, require_html_auth
 from .routes.events import (
     init_sse_shutdown_event,
     publish_payload,
     signal_sse_shutdown,
 )
+from .routes.lalal import init_lalal
+from .routes.media import init_media, resolve_job_path
+from .routes.share import init_share
+from .routes.trim import init_trim
 from .session import SESSION_COOKIE, refresh_session_settings_cache, renew_session, set_session_cookie
-from .utils.housekeeping import cleanup_expired_jobs, cleanup_orphaned_directories, cleanup_thumbnail_cache
 from .utils.cookies import ensure_data_cookies_dir
 from .utils.duration import round_seconds
 from .utils.fs import get_data_dir
+from .utils.housekeeping import cleanup_expired_jobs, cleanup_orphaned_directories, cleanup_thumbnail_cache
 from .utils.template_filters import register_filters
 from .utils.version import BUILD_INFO, VERSION
-from .worker import get_job_queue, set_status_callback, signal_shutdown, start_workers, stop_workers
-from middleware.csrf import CSRFMiddleware
+from .worker import set_status_callback, signal_shutdown, start_workers, stop_workers, submit_download
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +106,9 @@ if not _SECRET_KEY:
 _CSRF_COOKIE = "fetchly_csrf"
 _HOUSEKEEPING_INTERVAL = 3600  # Every hour
 _ANALYSIS_BACKLOG_POLL_INTERVAL = 5.0
+# Only startup replays of a backlog larger than the queue leave jobs persisted
+# but unqueued, so this poll can be lazier than the analysis one.
+_DOWNLOAD_BACKLOG_POLL_INTERVAL = 15.0
 _EVENT_QUEUE_MAXSIZE = 10_000
 _SESSION_SETTINGS_REFRESH_INTERVAL = 60.0
 _SKIP_RENEW_EXACT = frozenset({
@@ -240,29 +246,52 @@ async def _housekeeping_daemon() -> None:
         log.debug("Housekeeping daemon cancelled")
 
 
-async def _requeue_pending_download_jobs() -> None:
-    """Replay persisted queued jobs into the in-memory worker queue on startup."""
+async def _fill_download_queue() -> None:
+    """Feed persisted queued download jobs into free in-memory queue slots.
+
+    ``submit_download`` skips ids that already hold a slot, so this is safe to
+    run repeatedly: rows that did not fit stay ``queued`` and are picked up by
+    the next pass instead of being dropped until the next restart.
+    """
     pending_jobs = await asyncio.to_thread(list_queued_jobs)
     if not pending_jobs:
         return
 
-    job_queue = get_job_queue()
-    for index, row in enumerate(pending_jobs, start=1):
+    queued = 0
+    for index, row in enumerate(pending_jobs):
         job = (
             str(row["id"]),
             str(row["url"]),
             str(row["type"]),
             str(row["quality"]),
         )
-        try:
-            job_queue.put_nowait(job)
-        except queue.Full:
-            logger.warning("Job queue full during startup replay, dropping job %s", row["id"])
+        if not submit_download(job):
+            logger.info(
+                "Download queue is full; %d job(s) remain persisted for retry",
+                len(pending_jobs) - index,
+            )
             break
-        if index % 10 == 0:
+        queued += 1
+        if index % 10 == 9:
             await asyncio.sleep(0)
 
-    logger.info("Re-queued %d persisted download jobs during startup", len(pending_jobs))
+    if queued:
+        logger.debug("Handed %d persisted download job(s) to the worker queue", queued)
+
+
+async def _download_backlog_daemon() -> None:
+    """Continuously feed persisted download jobs into available worker slots."""
+    try:
+        while True:
+            try:
+                await _fill_download_queue()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("Download backlog refill failed")
+            await asyncio.sleep(_DOWNLOAD_BACKLOG_POLL_INTERVAL)
+    except asyncio.CancelledError:
+        logger.debug("Download backlog daemon cancelled")
 
 
 async def _fill_analysis_queue() -> None:
@@ -281,7 +310,10 @@ async def _fill_analysis_queue() -> None:
             block=False,
         )
         if result is SubmitResult.QUEUE_FULL:
-            logger.info("Analysis queue is full; %d jobs remain persisted for retry", len(pending_analysis_jobs) - index)
+            logger.info(
+                "Analysis queue is full; %d jobs remain persisted for retry",
+                len(pending_analysis_jobs) - index,
+            )
             return
         if result is SubmitResult.REJECTED_SHUTDOWN:
             return
@@ -327,11 +359,8 @@ def _check_dependencies() -> None:
     Raises:
         RuntimeError: If yt-dlp or ffmpeg is missing from PATH.
     """
-    missing = []
-    for cmd in ("yt-dlp", "ffmpeg"):
-        if shutil.which(cmd) is None:
-            missing.append(cmd)
-    
+    missing = [cmd for cmd in ("yt-dlp", "ffmpeg") if shutil.which(cmd) is None]
+
     if missing:
         msg = f"Missing required dependencies: {', '.join(missing)}"
         logger.critical("FATAL: %s", msg)
@@ -434,12 +463,12 @@ async def lifespan(app: FastAPI):
     event_queue: EventQueue = asyncio.Queue(maxsize=_EVENT_QUEUE_MAXSIZE)
     loop = asyncio.get_running_loop()
     enqueue_event, thread_status_callback, disable_event_dispatch = _make_event_callbacks(loop, event_queue)
-    
+
     # Download-worker changes apply after restart because the worker pool and
     # queue are both startup-only process-local structures.
     startup_settings = await asyncio.to_thread(get_settings)
     await asyncio.to_thread(governor.configure, _governor_config_from_settings(startup_settings))
-    
+
     # Initialize route modules
     init_api(templates)
     init_media(DATA_DIR, BASE_DIR, templates)
@@ -451,7 +480,7 @@ async def lifespan(app: FastAPI):
     set_analysis_status_callback(thread_status_callback)
     start_workers()
     start_analysis_workers()
-    await _requeue_pending_download_jobs()
+    await _fill_download_queue()
 
     await _fill_analysis_queue()
 
@@ -460,6 +489,7 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(_event_broadcaster(event_queue), name="event_broadcaster"),
         asyncio.create_task(_housekeeping_daemon(), name="housekeeping_daemon"),
         asyncio.create_task(_analysis_backlog_daemon(), name="analysis_backlog_daemon"),
+        asyncio.create_task(_download_backlog_daemon(), name="download_backlog_daemon"),
         asyncio.create_task(_session_settings_refresh_daemon(), name="session_settings_refresh_daemon"),
     ]
     for task in background_tasks:
@@ -489,8 +519,38 @@ async def lifespan(app: FastAPI):
 # FastAPI Application
 # ============================================================================
 
-app = FastAPI(lifespan=lifespan)
+# Swagger UI, ReDoc, and the raw schema are disabled at their default paths and
+# re-registered below behind the same session check as every HTML page (see
+# docs/api/overview.md: "these are not public endpoints"). Once authentication
+# is enabled, /docs, /redoc, and /openapi.json redirect to /login exactly like
+# / and /settings do; with authentication off they remain reachable, matching
+# every other route in that mode.
+app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
+
+
+@app.get("/openapi.json", include_in_schema=False, response_model=None)
+async def _openapi_schema(request: Request) -> Response | JSONResponse:
+    redirect = require_html_auth(request)
+    if redirect:
+        return redirect
+    return JSONResponse(app.openapi())
+
+
+@app.get("/docs", include_in_schema=False)
+async def _swagger_ui(request: Request) -> Response:
+    redirect = require_html_auth(request)
+    if redirect:
+        return redirect
+    return get_swagger_ui_html(openapi_url="/openapi.json", title=f"{app.title} - Swagger UI")
+
+
+@app.get("/redoc", include_in_schema=False)
+async def _redoc_ui(request: Request) -> Response:
+    redirect = require_html_auth(request)
+    if redirect:
+        return redirect
+    return get_redoc_html(openapi_url="/openapi.json", title=f"{app.title} - ReDoc")
 
 
 class SessionRenewalMiddleware:
@@ -546,6 +606,13 @@ class SessionRenewalMiddleware:
         await self.app(scope, receive, send_wrapper)
 
 
+# SHA-256 of the stylesheet WaveSurfer injects into its shadow root, so
+# style-src can allow that one sheet without opening up 'unsafe-inline'.
+# Refresh it (from the browser console's CSP error) whenever the vendored
+# bundle or the trim view's height option changes.
+_WAVESURFER_STYLE_HASH: Final = "sha256-7XP2opZSAzH42qQ4QpsmFbwnOyeFkvJlqZeHR2BRgEA="
+
+
 class SecurityHeadersMiddleware:
     """Attach baseline security headers to all HTTP responses."""
 
@@ -556,7 +623,15 @@ class SecurityHeadersMiddleware:
         # attributes. Progress updates assign element.style.width directly,
         # which is CSSOM and not subject to style-src (unlike setAttribute
         # ("style", ...) or style.cssText, which the code does not use).
-        "style-src 'self'",
+        #
+        # The hash covers the one <style> element the app does not author: the
+        # vendored WaveSurfer builds one into the trim view's shadow root. Its
+        # rules are what position the progress canvas on top of the waveform;
+        # blocked, that canvas drops into normal flow and renders as a second
+        # waveform below the first. The stylesheet interpolates the configured
+        # height (trim.js: height 100), so the hash covers that value too -
+        # tests/test_csp_wavesurfer.py fails if either drifts.
+        f"style-src 'self' '{_WAVESURFER_STYLE_HASH}'",
         "img-src 'self' data: https://img.youtube.com https://i.ytimg.com",
         "font-src 'self'",
         "connect-src 'self'",

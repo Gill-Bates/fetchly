@@ -104,7 +104,7 @@ def _storage_usage(path: Path) -> StorageStats | None:
 def _read_cpu_jiffies() -> tuple[int, int] | None:
     """Return (idle, total) aggregate CPU jiffies from the /proc/stat cpu line."""
     try:
-        with open("/proc/stat", encoding="utf-8") as handle:
+        with Path("/proc/stat").open(encoding="utf-8") as handle:
             first_line = handle.readline()
     except OSError as exc:
         logger.debug("Unable to read /proc/stat: %s", exc)
@@ -122,7 +122,14 @@ def _read_cpu_jiffies() -> tuple[int, int] | None:
 
     # Fields: user nice system idle iowait irq softirq steal guest guest_nice.
     idle = values[3] + (values[4] if len(values) > 4 else 0)
-    return idle, sum(values)
+    # guest is already accounted into user, and guest_nice into nice, by the
+    # kernel (account_guest_time() in kernel/sched/cputime.c) - /proc/stat only
+    # reports them separately on top. Summing every field therefore counts that
+    # time twice, inflating the total and understating busy% on a host running
+    # KVM guests. htop and psutil subtract them for the same reason. The slice
+    # yields nothing on pre-2.6.24/pre-3.2 kernels that omit the fields.
+    guest = sum(values[8:10])
+    return idle, sum(values) - guest
 
 
 def _cpu_percent_between(prev: tuple[int, int], curr: tuple[int, int]) -> float | None:
@@ -178,7 +185,7 @@ def _read_meminfo() -> dict[str, int]:
     """Parse /proc/meminfo into a {label: bytes} mapping."""
     info: dict[str, int] = {}
     try:
-        with open("/proc/meminfo", encoding="utf-8") as handle:
+        with Path("/proc/meminfo").open(encoding="utf-8") as handle:
             for line in handle:
                 label, _, rest = line.partition(":")
                 fields = rest.split()
@@ -221,7 +228,7 @@ def _memory_usage() -> MemoryStats | None:
 
 def _read_uptime_seconds() -> float | None:
     try:
-        with open("/proc/uptime", encoding="utf-8") as handle:
+        with Path("/proc/uptime").open(encoding="utf-8") as handle:
             fields = handle.readline().split()
     except OSError as exc:
         logger.debug("Unable to read /proc/uptime: %s", exc)

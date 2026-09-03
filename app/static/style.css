@@ -61,9 +61,8 @@
    ───────────────────────────────────────────── */
 
 .table-responsive {
-    overflow-x: auto;
+    overflow: auto hidden;
     /* Prevent a vertical ghost scrollbar while retaining horizontal scroll. */
-    overflow-y: hidden;
     scrollbar-width: thin;
     scrollbar-color: rgba(255, 255, 255, 0.2) transparent;
     position: relative;
@@ -210,6 +209,7 @@ textarea:focus-visible {
         radial-gradient(1000px 500px at 90% 0%, rgba(56, 189, 248, 0.12), transparent 60%),
         var(--bg-gradient);
     color: var(--text);
+    /* stylelint-disable-next-line declaration-property-value-disallowed-list */
     min-height: 100vh;
     min-height: 100dvh;
     /* Fixes iOS Safari URL-bar height calculation */
@@ -302,15 +302,13 @@ textarea:focus-visible {
 /* Ensure stable layout + prevent horizontal scroll issues on iOS */
 html {
     min-height: 100%;
-    overflow-x: hidden;
-    overflow-y: auto;
+    overflow: hidden auto;
     overscroll-behavior-x: none;
 }
 
 body {
     min-height: 100%;
-    overflow-x: hidden;
-    overflow-y: auto;
+    overflow: hidden auto;
     overscroll-behavior-x: none;
     position: relative;
 }
@@ -483,7 +481,7 @@ body {
 .hero-main h1 {
     font-size: 2.6rem;
     font-weight: 800;
-    color: #ffffff;
+    color: #fff;
     margin-bottom: 0.5rem;
 }
 
@@ -526,7 +524,7 @@ body {
     font-size: 2.2rem;
     font-weight: 700;
     line-height: 1.1;
-    color: #ffffff;
+    color: #fff;
     letter-spacing: -0.02em;
 }
 
@@ -665,6 +663,7 @@ button .material-symbols-outlined,
 }
 
 .material-symbols-outlined {
+    /* stylelint-disable-next-line font-family-no-missing-generic-family-keyword */
     font-family: "Material Symbols Outlined";
     font-weight: normal;
     font-style: normal;
@@ -787,13 +786,13 @@ button .material-symbols-outlined,
 
 .jobs-quick-filter__btn[aria-pressed="true"] {
     background: transparent;
-    color: #ffffff;
+    color: #fff;
 }
 
 .jobs-quick-filter__btn[aria-pressed="true"]:hover,
 .jobs-quick-filter__btn[aria-pressed="true"]:focus-visible {
     background: transparent;
-    color: #ffffff;
+    color: #fff;
 }
 
 /* ── Input with leading icon ────────────────────────────────────────────── */
@@ -1132,7 +1131,7 @@ html body .text-muted {
 
 .app-root--settings .setting-hint {
     display: block;
-    margin-top: var(--space-2);
+    margin-top: var(--space-1);
     color: var(--text-hint);
     font-size: 0.8rem;
     line-height: 1.4;
@@ -1149,6 +1148,10 @@ html body .text-muted {
     line-height: 1.4;
     flex: 0 0 auto;
     margin-top: 0.05em;
+}
+
+.app-root--settings .setting-hint-icon--warning {
+    color: var(--warning);
 }
 
 .settings-group {
@@ -1465,6 +1468,23 @@ html body .text-muted {
     border-radius: var(--radius-sm);
 }
 
+/* Buttons attached to a settings field (public-hostname detect, password
+   reveal) must match the 40px .ui-card .form-control, not the default 44px
+   control height, or they overhang the field. The mobile layout already
+   pulls both field and button up to 44px, so this stays desktop-only. */
+@media (min-width: 768px) {
+    .settings-grid .input-group>.btn {
+        min-height: var(--control-height-sm);
+    }
+
+    .settings-grid .input-group>.btn-icon {
+        width: var(--control-height-sm);
+        height: var(--control-height-sm);
+        min-width: var(--control-height-sm);
+        min-height: var(--control-height-sm);
+    }
+}
+
 .ui-card .form-label {
     font-size: 0.85rem;
     font-weight: 500;
@@ -1522,8 +1542,10 @@ html body .text-muted {
 .settings-range-tick {
     grid-row: 1;
     justify-self: start;
-    width: clamp(8px, 1.55vw, 10px);
-    height: clamp(8px, 1.55vw, 10px);
+    /* Same diameter as the range thumb (Bootstrap's .form-range thumb is
+       1rem square), so an inactive tick reads as the bubble's empty slot. */
+    width: 1rem;
+    height: 1rem;
     border: 1px solid color-mix(in srgb, var(--text-muted) 38%, var(--surface));
     border-radius: var(--radius-pill);
     background: color-mix(in srgb, var(--text-muted) 24%, var(--surface));
@@ -1716,20 +1738,40 @@ html body .text-muted {
 .lalal-tile-actions {
     display: flex;
     flex-direction: column;
-    align-items: flex-end;
+    align-items: stretch;
     gap: var(--space-2);
     margin-top: 0;
 }
 
-.lalal-tile-actions .setting-hint {
-    margin-top: 0;
-}
-
+/* Same split as .settings-danger-actions: two equal columns, each button
+   filling its half. With Disconnect hidden, Connect takes the whole row. */
 .lalal-tile-action-row {
-    display: flex;
-    flex-wrap: wrap;
-    justify-content: flex-end;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: var(--space-2);
+    width: 100%;
+}
+
+.lalal-tile-action-row>.btn {
+    width: 100%;
+    min-width: 0;
+}
+
+.lalal-tile-action-row:has(#lalalDisconnectBtn.d-none) #lalalAuthBtn {
+    grid-column: 1 / -1;
+}
+
+/* .lalal-tile-col is a flex column with `gap: var(--space-3)`, which already
+   spaces this divider from .lalal-tile-actions above it. It used to also
+   carry Bootstrap's .mt-3 (1rem margin-top) on top of that gap, so the
+   hairline sat 28px from the status line above but only 19px from "Limit
+   long tracks" below - visibly off-center. margin-top is dropped in favor of
+   the flex gap alone, and padding-top matches that same gap so the line
+   falls equidistant from both sides. */
+.lalal-tile-divider {
+    margin-top: 0;
+    padding-top: var(--space-3);
+    border-top: 1px solid var(--border);
 }
 
 /* Two-up body: connection + guard on the left, analysis/stem limits on the right.
@@ -1761,16 +1803,6 @@ html body .text-muted {
 
     .lalal-tile-body>.lalal-tile-col {
         flex: 1 1 0;
-    }
-
-    /* In the split layout the connect/disconnect buttons read better flush
-       left with the rest of the column than floated to its centre. */
-    .lalal-tile-body .lalal-tile-actions {
-        align-items: stretch;
-    }
-
-    .lalal-tile-body .lalal-tile-action-row {
-        justify-content: flex-start;
     }
 
     .lalal-tile-col--analysis {
@@ -1816,20 +1848,15 @@ html body .text-muted {
     flex: 0 0 auto;
 }
 
-.app-root--settings .cookie-tile-detail {
-    /* Overrides the block display from .setting-hint (same element): this
-       row holds badge chips, not wrapped text, so it needs to stay a flex
-       container for vertical centering to apply. */
-    display: flex;
+.cookie-tile-summary {
     margin: 0;
-    min-height: 1.1em;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: var(--space-1);
+    color: var(--text-muted);
+    font-size: 0.8125rem;
+    line-height: 1.35;
 }
 
-.cookie-tile-detail:empty {
-    display: none;
+.cookie-tile-summary--warning {
+    color: var(--warning);
 }
 
 .cookie-tile-actions {
@@ -1838,8 +1865,12 @@ html body .text-muted {
     gap: var(--space-2);
 }
 
+/* Sits under the connect buttons, inside the column .lalal-tile-actions, so it
+   follows their alignment: right on desktop, stretched on narrow screens. */
 #lalalStatusLine {
-    text-align: right;
+    max-width: 100%;
+    /* A long account address wraps instead of widening the column. */
+    overflow-wrap: anywhere;
 }
 
 /* Cookie paste dialog (app/static/js/cookie-paste.js). All four providers use
@@ -1847,7 +1878,7 @@ html body .text-muted {
    controls, layout and interaction remain identical. */
 .cookie-connect-modal {
     --cookie-accent: var(--primary);
-    --cookie-on-accent: #ffffff;
+    --cookie-on-accent: #fff;
 }
 
 .cookie-connect-modal[data-cookie-platform="youtube"] {
@@ -2407,7 +2438,7 @@ html body .text-muted {
     font-size: 1.08rem;
     line-height: 1.3;
     font-weight: 700;
-    color: #ffffff;
+    color: #fff;
 }
 
 .video-meta__summary {
@@ -2442,7 +2473,7 @@ html body .text-muted {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    color: #ffffff;
+    color: #fff;
 }
 
 .meta-value--badges {
@@ -2463,7 +2494,7 @@ html body .text-muted {
     border-radius: var(--radius-pill);
     background: rgba(255, 255, 255, 0.08);
     border: 1px solid rgba(255, 255, 255, 0.12);
-    color: #ffffff;
+    color: #fff;
     line-height: 1;
 }
 
@@ -2491,15 +2522,15 @@ html body .text-muted {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 24px;
+    width: 28px;
     height: 24px;
-    flex: 0 0 24px;
+    flex: 0 0 28px;
     box-sizing: border-box;
     margin-right: 0.5rem;
     padding: 0;
     border-radius: var(--radius-pill, 999px);
     vertical-align: middle;
-    color: #ffffff;
+    color: #fff;
     background: rgba(255, 255, 255, 0.14);
     border: 1px solid rgba(255, 255, 255, 0.18);
 }
@@ -2512,8 +2543,8 @@ html body .text-muted {
    canvas and must stay >= the largest mask-size, otherwise the mask clips. */
 .platform-pill__icon {
     display: block;
-    width: 18px;
-    height: 18px;
+    width: 16px;
+    height: 16px;
     flex: 0 0 auto;
     background-color: currentColor;
     -webkit-mask-position: center;
@@ -2563,7 +2594,7 @@ html body .text-muted {
 }
 
 .platform-pill--tiktok {
-    background: #000000;
+    background: #000;
     border-color: #25f4ee;
     color: #25f4ee;
 }
@@ -2821,14 +2852,6 @@ td[data-label="Title"] {
     max-width: 320px;
 }
 
-.table tbody tr.row-done {
-    background: var(--surface-success-row);
-}
-
-.table tbody tr.row-error {
-    background: var(--surface-danger-row);
-}
-
 .table tbody tr.row-done>td:first-child {
     box-shadow: inset 3px 0 0 var(--success);
 }
@@ -2842,11 +2865,6 @@ td[data-label="Title"] {
 .jobs-table.table-hover>tbody>tr:hover>* {
     --bs-table-bg-state: transparent;
     background-color: transparent;
-}
-
-.table tbody tr.row-done:hover,
-.table tbody tr.row-error:hover {
-    background: var(--surface-hover);
 }
 
 /* ── Jobs Card Bounds ───────────────────────────────────────────────────── */
@@ -2890,8 +2908,7 @@ td[data-label="Title"] {
     #jobsCard .jobs-list-shell {
         flex: 1 1 auto;
         min-height: 0;
-        overflow-y: auto;
-        overflow-x: hidden;
+        overflow: hidden auto;
         overscroll-behavior: contain;
         -webkit-overflow-scrolling: touch;
     }
@@ -2900,8 +2917,7 @@ td[data-label="Title"] {
 .jobs-list-shell {
     flex: 1 1 auto;
     min-height: 0;
-    overflow-y: auto;
-    overflow-x: hidden;
+    overflow: hidden auto;
 }
 
 .jobs-desktop-view {
@@ -2928,10 +2944,17 @@ td[data-label="Title"] {
 }
 
 .job-media-value {
-    display: block;
+    display: flex;
+    align-items: center;
+    gap: 0.3rem;
     font-size: 0.82rem;
     font-weight: 640;
     letter-spacing: 0.02em;
+}
+
+.job-media-icon {
+    font-size: 16px;
+    color: var(--text-muted);
 }
 
 /* Sub-label for codec under format */
@@ -3005,6 +3028,10 @@ td[data-label="Title"] {
     box-shadow: 0 2px 0 var(--border);
 }
 
+#jobsCard {
+    overflow: visible;
+}
+
 #jobsSentinel {
     display: block;
     width: 100%;
@@ -3071,6 +3098,14 @@ td[data-label="Title"] {
         0 9px 20px rgba(49, 46, 129, 0.38);
 }
 
+.jobs-mobile-action[href^="/download/"] {
+    box-shadow:
+        inset 0 1px 0 rgba(255, 255, 255, 0.13),
+        inset 0 -1px 0 rgba(49, 46, 129, 0.38),
+        0 2px 4px rgba(2, 6, 23, 0.38),
+        0 9px 20px rgba(49, 46, 129, 0.38);
+}
+
 .jobs-mobile-action-group {
     border-radius: 10px;
     box-shadow:
@@ -3091,6 +3126,10 @@ td[data-label="Title"] {
 
 .jobs-mobile-action-group .jobs-mobile-action--menu {
     border-radius: 0 10px 10px 0;
+}
+
+.job-item__primary-action .jobs-mobile-action-group .jobs-mobile-action--menu {
+    width: 32px;
 }
 
 .jobs-mobile-action-group .jobs-mobile-action--retry {
@@ -3343,18 +3382,14 @@ td[data-label="Title"] {
 }
 
 .job-item.row-done {
-    background:
-        linear-gradient(90deg, color-mix(in srgb, var(--success) 8%, var(--surface-elevated)), var(--surface-elevated) 52%),
-        var(--surface-elevated);
+    background: var(--surface-elevated);
     box-shadow:
         inset 3px 0 0 var(--success),
         0 14px 34px rgba(2, 6, 23, 0.16);
 }
 
 .job-item.row-error {
-    background:
-        linear-gradient(90deg, color-mix(in srgb, var(--danger) 8%, var(--surface-elevated)), var(--surface-elevated) 52%),
-        var(--surface-elevated);
+    background: var(--surface-elevated);
     box-shadow:
         inset 3px 0 0 var(--danger),
         0 14px 34px rgba(2, 6, 23, 0.16);
@@ -3713,8 +3748,7 @@ td[data-label="Title"] {
 .status-grid {
     display: grid;
     grid-template-columns: 140px minmax(0, 1fr);
-    row-gap: 0.75rem;
-    column-gap: 1rem;
+    gap: 0.75rem 1rem;
     align-items: center;
 }
 
@@ -4001,7 +4035,7 @@ td:last-child {
     display: flex;
     flex-direction: column;
     gap: 0.35rem;
-    padding: 1.25rem 1.25rem;
+    padding: 1.25rem;
     border-radius: var(--radius-md);
     border: 1px solid var(--border);
     background: var(--surface-elevated);
@@ -4094,10 +4128,18 @@ td:last-child {
     margin-bottom: 0;
 }
 
+/* The stage is taller than the waveform WaveSurfer renders (its `height`
+   option), and WaveSurfer appends its shadow host as a normal in-flow block,
+   so the waveform would sit flush against the top border with all of the
+   leftover space below it. Flex centring puts that space on both sides. The
+   overlays, selection and beat grid are absolutely positioned, so they keep
+   spanning the full stage height and are unaffected by the flex context. */
 #trimWave {
     width: 100%;
     height: 120px;
     min-height: 120px;
+    display: flex;
+    align-items: center;
     position: relative;
     isolation: isolate;
     background: var(--surface-elevated);
@@ -4114,8 +4156,7 @@ td:last-child {
 }
 
 #trimWave ::part(scroll) {
-    overflow-x: auto !important;
-    overflow-y: hidden !important;
+    overflow: auto hidden !important;
     scrollbar-width: none;
 }
 
@@ -4226,7 +4267,7 @@ td:last-child {
 }
 
 .trim-selection-handle:focus-visible {
-    outline: 2px solid #ffffff;
+    outline: 2px solid #fff;
     outline-offset: -3px;
 }
 
@@ -4239,6 +4280,43 @@ td:last-child {
 @media (pointer: coarse) {
     .trim-selection-handle {
         width: 44px;
+    }
+
+    /* iOS and iPadOS zoom the page in when a focused control renders below
+       16px, and never zoom back out. The (max-width: 767.98px) block further
+       down set this for phones only, so every iPad - touch, but 768px and
+       wider - fell through and hit the zoom trap on Settings and on the jobs
+       search field. Keying it on the pointer covers both, and changes nothing
+       on the phone, where the controls already render at 1rem.
+
+       The `.ui-card` variants are not redundant: `.ui-card .form-control`
+       above sets 0.9rem at specificity 0,2,0, which a bare `.form-control`
+       here could never outrank no matter where it sits in the file. */
+    .form-control,
+    .form-select,
+    .ui-card .form-control,
+    .ui-card .form-select,
+    .ui-card textarea,
+    textarea,
+    input[type="text"],
+    input[type="search"],
+    input[type="number"],
+    input[type="password"],
+    input[type="email"],
+    input[type="url"] {
+        font-size: max(16px, 1rem);
+    }
+
+    /* Same story for the hit areas: 44px is Apple's minimum on every touch
+       screen, not only on the ones narrower than 768px. */
+    .settings-grid .form-control,
+    .settings-grid .form-select {
+        min-height: 44px;
+    }
+
+    .settings-grid .input-group .btn {
+        min-width: 44px;
+        min-height: 44px;
     }
 }
 
@@ -4405,6 +4483,8 @@ td:last-child {
         padding: 0;
         margin: -1px;
         overflow: hidden;
+        clip-path: inset(50%);
+        /* stylelint-disable-next-line property-no-deprecated -- legacy fallback */
         clip: rect(0, 0, 0, 0);
         white-space: nowrap;
         border: 0;
@@ -4493,25 +4573,9 @@ td:last-child {
         min-height: 44px;
     }
 
-    .lalal-tile-actions {
-        align-items: stretch;
-    }
-
-    .lalal-tile-action-row {
-        display: grid;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-        width: 100%;
-        gap: var(--space-2);
-    }
-
+    /* Tighter padding so both labels still fit side by side. */
     .lalal-tile-action-row>.btn {
-        width: 100%;
-        min-width: 0;
         padding-inline: var(--space-2);
-    }
-
-    .lalal-tile-action-row:has(#lalalDisconnectBtn.d-none) #lalalAuthBtn {
-        grid-column: 1 / -1;
     }
 
     .settings-grid .form-control,
@@ -4697,7 +4761,7 @@ td:last-child {
     }
 
     #jobsCard .jobs-list-shell {
-        padding: 0 var(--space-3) var(--space-2);
+        padding: 0 var(--space-4) var(--space-2);
     }
 
     .jobs-mobile-meta {
@@ -5342,7 +5406,6 @@ td:last-child {
     position: relative;
     width: min(230px, 46vw);
     filter: drop-shadow(0 26px 44px rgba(0, 0, 0, 0.55));
-    will-change: transform;
 }
 
 .lost-astronaut svg {
@@ -5656,6 +5719,34 @@ td:last-child {
 .settings-host-stats {
     margin-top: 0;
     --bs-gutter-y: 0;
+}
+
+/* The four dashboard stat tiles live in two places and exactly one of them is
+   visible at a time: the dashboard shows them above the submit card on
+   desktop, mobile drops them there and shows the same row as the first line of
+   Settings -> System instead. Both sides are stated inside a media query so
+   neither depends on winning against the `.stats-row { display: grid }` rule
+   in the mobile block above. */
+@media (min-width: 768px) {
+    .stats-row.settings-job-stats {
+        display: none;
+    }
+}
+
+@media (max-width: 767.98px) {
+    .app-root--settings .app-main {
+        padding-bottom: var(--space-6);
+    }
+
+    .stats-row.dashboard-stats {
+        display: none;
+    }
+
+    /* .stats-row zeroes every margin on mobile, so the gap to the host tiles
+       below has to come back explicitly. */
+    .stats-row.settings-job-stats {
+        margin-bottom: var(--space-3);
+    }
 }
 
 /* Removed: previously forced margin-bottom: var(--space-3) (12px) on the

@@ -93,8 +93,9 @@ From a finished job you can:
 | Setting | Default | Effect |
 |---|---|---|
 | Retention | `0` (unlimited) | Days before job files are swept; `0` keeps them forever |
-| MP4 preset | On | Prefer H.264/AAC in MP4 for universal in-browser playback |
-| Concurrent fragments | `3` | Parallel fragment downloads for DASH/HLS sources |
+| Prefer H.264/AAC for max quality | On | Prefer H.264/AAC in MP4 for universal in-browser playback |
+| Show fetchly watermark | On | Burns the fetchly logo, plus the public hostname when set, into the bottom-right corner of every video |
+| Parallel fragments per download | `Automatic` | Parallel fragment downloads for DASH/HLS sources, sized from the host's CPU quota and free memory |
 | Share link max uses | `0` (unlimited) | How often a newly created share link may be redeemed |
 | Public hostname | empty | Hostname share links are built from behind a reverse proxy |
 

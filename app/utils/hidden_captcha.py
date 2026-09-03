@@ -55,7 +55,7 @@ HONEYPOT_FIELD_NAME = "website"
 
 # Token format version, so a future format change can be told apart from a
 # tampered value.
-_TOKEN_VERSION = "v1"
+_TOKEN_VERSION = "v1"  # noqa: S105  # a format marker, not a credential
 
 # A form older than this is rejected as stale. Tokens remain valid until
 # expiry and are not single-use.
@@ -85,7 +85,7 @@ class CaptchaOutcome(StrEnum):
 
 def _sign(secret_key: str, payload: str) -> str:
     return hmac.new(
-        f"{secret_key}:{_SALT}".encode("utf-8"), payload.encode("utf-8"), sha256
+        f"{secret_key}:{_SALT}".encode(), payload.encode("utf-8"), sha256
     ).hexdigest()
 
 
@@ -97,7 +97,7 @@ def issue_captcha_token(secret_key: str) -> str:
     """
     payload = f"{_TOKEN_VERSION}:{int(time())}"
     signature = _sign(secret_key, payload)
-    raw = f"{payload}:{signature}".encode("utf-8")
+    raw = f"{payload}:{signature}".encode()
     return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
 
 

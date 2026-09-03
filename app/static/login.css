@@ -80,7 +80,9 @@
 
 body {
     margin: 0;
+    /* stylelint-disable-next-line declaration-property-value-disallowed-list */
     min-height: 100vh;
+    min-height: 100dvh;
     font-family: "Roboto Flex", "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
     background:
         radial-gradient(1200px 600px at 10% -10%, rgba(99, 102, 241, 0.15), transparent 60%),
@@ -120,15 +122,13 @@ body::after {
 
 .login-shell {
     --login-safe-area: max(env(safe-area-inset-top, 0px), env(safe-area-inset-bottom, 0px));
+    /* stylelint-disable-next-line declaration-property-value-disallowed-list */
     min-height: 100vh;
     min-height: 100dvh;
     display: flex;
     align-items: center;
     justify-content: center;
-    padding-top: calc(1.5rem + var(--login-safe-area));
-    padding-right: calc(1.5rem + env(safe-area-inset-right, 0px));
-    padding-bottom: calc(1.5rem + var(--login-safe-area));
-    padding-left: calc(1.5rem + env(safe-area-inset-left, 0px));
+    padding: calc(1.5rem + var(--login-safe-area)) calc(1.5rem + env(safe-area-inset-right, 0px)) calc(1.5rem + var(--login-safe-area)) calc(1.5rem + env(safe-area-inset-left, 0px));
     overflow-y: auto;
     -webkit-overflow-scrolling: touch;
 }
@@ -160,7 +160,7 @@ body::after {
 }
 
 .login-card h1 {
-    margin: 0 0 0.35rem 0;
+    margin: 0 0 0.35rem;
     color: var(--login-text);
     font-size: 1.85rem;
     font-weight: 700;
@@ -168,7 +168,7 @@ body::after {
 }
 
 .login-card .subtitle {
-    margin: 0.3rem 0 1.75rem 0;
+    margin: 0.3rem 0 1.75rem;
     color: var(--login-muted);
     font-size: 0.9rem;
     line-height: 1.5;
@@ -299,10 +299,7 @@ body::after {
 
 @media (max-width: 480px) {
     .login-shell {
-        padding-top: calc(1rem + var(--login-safe-area));
-        padding-right: calc(1rem + env(safe-area-inset-right, 0px));
-        padding-bottom: calc(1rem + var(--login-safe-area));
-        padding-left: calc(1rem + env(safe-area-inset-left, 0px));
+        padding: calc(1rem + var(--login-safe-area)) calc(1rem + env(safe-area-inset-right, 0px)) calc(1rem + var(--login-safe-area)) calc(1rem + env(safe-area-inset-left, 0px));
     }
 
     .login-card {

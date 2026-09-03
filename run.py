@@ -10,12 +10,12 @@ import re
 import sys
 from copy import copy
 from pathlib import Path
-from typing import TextIO
+from typing import ClassVar, TextIO
 
 import uvicorn
 
-from app.utils.banner import print_banner_once
 from app.common.rate_limit import validate_trusted_proxy_hosts
+from app.utils.banner import print_banner_once
 from app.utils.fs import get_data_dir
 
 _VALID_LOG_LEVELS = frozenset(logging.getLevelNamesMapping())
@@ -109,10 +109,7 @@ def _should_use_colors(stream: TextIO) -> bool:
         return False
 
     term = str(os.environ.get("TERM", "")).strip().lower()
-    if term in {"", "dumb"}:
-        return False
-
-    return True
+    return term not in {"", "dumb"}
 
 
 class ColoredRedactingFormatter(RedactingFormatter):
@@ -120,7 +117,7 @@ class ColoredRedactingFormatter(RedactingFormatter):
 
     RESET = "\x1b[0m"
     TIMESTAMP_COLOR = "\x1b[90m"  # dark gray
-    LEVEL_COLORS = {
+    LEVEL_COLORS: ClassVar[dict[int, str]] = {
         logging.DEBUG: "\x1b[36m",     # cyan
         logging.INFO: "\x1b[32m",      # green
         logging.WARNING: "\x1b[33m",   # yellow

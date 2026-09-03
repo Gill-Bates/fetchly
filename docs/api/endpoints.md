@@ -51,6 +51,11 @@ Form-encoded, CSRF-protected. 10/minute.
 Returns the created job. `409` with `{"detail": "duplicate_job", "existing_job": {...}}`
 when an active or completed job already matches. `503` when the queue is full.
 
+The metadata probe runs with an 8 s budget and fills `video_title` and
+`duration_seconds` on the new row, so the job carries a title and a length before the
+download starts. A probe that fails or times out leaves both `null` and the job is
+still created.
+
 ### `GET /api/jobs`
 
 60/minute. Query: `offset` (≥ 0, default 0), `limit` (1–100, default 50).
@@ -135,7 +140,7 @@ Audio jobs only, downloadable status, 1 second to 10 minutes. `trim_id` is
 
 | Route | Limit | Description |
 |---|---|---|
-| `GET /api/lalal/status` | 30/min | Auth and validation state; `force_refresh=true` re-checks |
+| `GET /api/lalal/status` | 30/min | Auth and validation state plus `remaining_minutes` (`null` when unknown); `force_refresh=true` re-checks |
 | `POST /api/lalal/auth/activation-key` | 5/min | Store and validate an activation key |
 | `POST /api/lalal/auth/logout` | 10/min | Clear key, email, and cached validation |
 | `POST /api/lalal/{job_id}` | 5/min | Query: `stem` (`vocals`/`instrumental`), `trimmed`, `trim_id` |
@@ -179,11 +184,12 @@ Every redeem failure returns the same `404` page. See
 
 Writable keys: `retention_days`, `enable_authentication`, `admin_username`,
 `admin_password`, `session_idle_minutes`, `download_concurrent_fragments`,
-`download_mp4_preset`, `lalalaai_duration_guard`, `share_link_max_uses`,
-`public_hostname`.
+`download_mp4_preset`, `video_watermark`, `lalalaai_duration_guard`,
+`share_link_max_uses`, `public_hostname`.
 
 - Unknown keys are rejected
 - Values are parsed and range-checked server-side
+- `download_concurrent_fragments` accepts `0` for automatic host-based sizing
 - `admin_username` and `admin_password` must be sent as a **pair** — the salt is
   username-derived, so a rename re-hashes and needs the plaintext
 - Enabling authentication without stored credentials returns `400`

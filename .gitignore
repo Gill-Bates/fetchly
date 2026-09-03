@@ -4,6 +4,7 @@ data/
 
 # Build / packaging
 *.egg-info/
+.eggs/
 build/
 dist/
 
@@ -19,7 +20,8 @@ __pycache__/
 coverage.xml
 htmlcov/
 
-# Editor
+# Editor / OS
+.DS_Store
 .idea/
 .vscode/
 
@@ -28,6 +30,7 @@ htmlcov/
 .env.*
 !.env.example
 .venv/
+venv/
 
 # Logs / traces
 *.backup
@@ -37,12 +40,20 @@ htmlcov/
 # Local tooling / runtime artifacts
 .claude/settings.local.json
 .codex
+.eslintcache
 .omx/
+.stylelintcache
 app/static/vendor/wavesurfer/
 cookies.txt
+node_modules/
 tools/ui-lint/.cache/
-tools/ui-lint/node_modules/
 tools/ui-lint/output/
+
+# Generated from pyproject.toml by tools/pyproject-deps.py (CI and Docker only)
+requirements.txt
+requirements-docs.txt
+requirements-ci.txt
+requirements-dev.txt
 
 # Project-generated metadata
 BUILD_INFO

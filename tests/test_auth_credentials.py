@@ -20,9 +20,9 @@ from unittest.mock import patch
 
 os.environ.setdefault("FETCHLY_SECRET_KEY", "test-auth-credentials-secret")
 
-from app import db
-from app import session
+from app import db, session
 from app.routes import auth
+from app.session import refresh_session_settings_cache
 from app.utils.credentials import normalize_admin_username, validate_admin_password
 
 
@@ -42,6 +42,12 @@ class _IsolatedSettingsDb(unittest.TestCase):
         db.init_db()
 
         auth.init_auth(object(), "test-auth-credentials-secret")
+        # auth.is_authentication_enabled() reads the session-settings cache
+        # rather than sqlite directly (see app/session.py); pick up this
+        # test's fresh database instead of whatever a previous test left
+        # cached.
+        refresh_session_settings_cache()
+        self.addCleanup(refresh_session_settings_cache)
 
     def _store_account(self, username: str, password: str) -> None:
         db.set_settings(
@@ -51,6 +57,11 @@ class _IsolatedSettingsDb(unittest.TestCase):
             },
             allow_internal=True,
         )
+
+    def _set_authentication_enabled(self, enabled: bool) -> None:
+        """Update the setting and the cache auth.is_authentication_enabled() reads."""
+        db.set_settings({"enable_authentication": enabled})
+        refresh_session_settings_cache()
 
 
 class FreshInstallTests(_IsolatedSettingsDb):
@@ -64,7 +75,7 @@ class FreshInstallTests(_IsolatedSettingsDb):
 
     def test_login_fails_closed_without_an_account(self):
         # Even with the flag forced on, an empty account must not authenticate.
-        db.set_settings({"enable_authentication": True})
+        self._set_authentication_enabled(True)
         with self.assertLogs(auth.logger, level="ERROR"):
             self.assertFalse(auth.verify_login("admin", "whatever"))
 
@@ -73,7 +84,7 @@ class VerifyLoginTests(_IsolatedSettingsDb):
     def setUp(self):
         super().setUp()
         self._store_account("alice", "correct-horse")
-        db.set_settings({"enable_authentication": True})
+        self._set_authentication_enabled(True)
 
     def test_correct_credentials_accepted(self):
         self.assertTrue(auth.verify_login("alice", "correct-horse"))
@@ -112,7 +123,7 @@ class LocalUserTests(_IsolatedSettingsDb):
 
     def test_no_session_means_no_user_once_enabled(self):
         self._store_account("alice", "correct-horse")
-        db.set_settings({"enable_authentication": True})
+        self._set_authentication_enabled(True)
         request = type("R", (), {"cookies": {}})()
         self.assertIsNone(auth.current_user(request))
 

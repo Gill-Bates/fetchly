@@ -1,0 +1,156 @@
+#
+# .github/workflows/ci.yml
+# Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
+#
+# The PR gate. docker-build.yml only runs on release tags, so this is the only
+# workflow standing between a broken commit and main. Gates on linting, pytest,
+# npm test, and the single-manifest invariant.
+#
+
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - 'feature/**'
+      - 'fix/**'
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: Ruff
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          # Matches ARG PYTHON_BASE=python:3.13-slim in docker/Dockerfile and
+          # requires-python in pyproject.toml.
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      # The tests import the app, so the web stack has to be present - but
+      # torch, beat-this and essentia are gigabytes of audio toolchain the
+      # suite never touches. Both lists come out of pyproject.toml so the
+      # pins stay in one place.
+      - name: Install dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python tools/pyproject-deps.py dev > requirements-ci.txt
+          python tools/pyproject-deps.py \
+            --exclude torch --exclude beat-this --exclude essentia \
+            >> requirements-ci.txt
+          cat requirements-ci.txt
+          pip install -r requirements-ci.txt
+
+      - name: Ruff lint
+        run: ruff check --output-format=github .
+
+      # `ruff format` is configured in pyproject.toml and available locally, but
+      # is deliberately not a gate: adopting it would reformat 43 existing files
+      # in one commit and bury the next real diff. Run it per file when touching
+      # one, and turn this into a check once the tree has caught up.
+
+      # No FETCHLY_SECRET_KEY here on purpose: each test module sets its own
+      # via os.environ.setdefault(), and an ambient value would silently win.
+      - name: pytest
+        run: pytest -q
+
+  frontend:
+    name: ESLint + Stylelint + node --test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          # Both manifests: tools/ui-lint is a separate npm project and its
+          # lockfile has to take part in the cache key too, or the install
+          # below is never restored.
+          cache-dependency-path: |
+            package-lock.json
+            tools/ui-lint/package-lock.json
+
+      - name: Install toolchain
+        run: npm ci --no-audit --no-fund
+
+      # tests/js/ui-lint-devices.test.mjs imports tools/ui-lint/run-ui-lint.mjs,
+      # which imports playwright - a dependency of that sub-project, not of the
+      # root one, so the root `npm ci` above does not provide it. The test reads
+      # playwright's own `devices` descriptor table (DEVICE_PROFILES stores only
+      # names like 'iPad Mini landscape'; the viewports come from playwright),
+      # which is exactly what makes the assertion worth having and why the
+      # constants cannot be split into a playwright-free module.
+      #
+      # Only the package is needed, never a browser: the test resolves viewports
+      # and never launches one. Skipping the browser download keeps this to a few
+      # MB instead of the ~400MB chromium+webkit pair that `npm run
+      # ui-lint:install` fetches for the actual visual audit.
+      - name: Install ui-lint toolchain
+        env:
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+        run: npm ci --prefix tools/ui-lint --no-audit --no-fund
+
+      - name: ESLint
+        run: npm run lint:js
+
+      - name: Stylelint
+        run: npm run lint:css
+
+      - name: node --test
+        run: npm test
+
+  manifest:
+    name: pyproject.toml is the only manifest
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      # VERSION, requirements.txt and docs/requirements-docs.txt were folded
+      # into pyproject.toml. Reintroducing any of them would give the release
+      # workflow and the running container two versions to disagree about.
+      - name: Reject reintroduced manifests
+        run: |
+          set -euo pipefail
+          failed=0
+          for stale in VERSION requirements.txt docs/requirements-docs.txt; do
+            if [ -e "$stale" ]; then
+              echo "ERROR: $stale is back - pyproject.toml is the single manifest"
+              failed=1
+            fi
+          done
+          [ "$failed" -eq 0 ]
+
+      - name: Version is release-shaped
+        run: |
+          set -euo pipefail
+          VERSION="$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
+          echo "pyproject.toml version: ${VERSION}"
+          echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+(\.[0-9]+)?(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'

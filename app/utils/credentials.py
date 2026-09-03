@@ -22,8 +22,10 @@ import re
 # Session tokens are colon-delimited (see app/session.py), so a colon in the
 # username would corrupt the payload. Whitespace is rejected outright because a
 # trailing space in a login name is invisible and unloggable-in. Restricted to
-# letters, hyphens and underscores only (case insensitive).
-_USERNAME_RE = re.compile(r"^[A-Za-z_-]+$")
+# letters, hyphens and underscores only (case insensitive). Unanchored because
+# it is applied with fullmatch(), which - unlike match() with a trailing "$" -
+# also rejects a trailing newline.
+_USERNAME_RE = re.compile(r"[A-Za-z_-]+")
 
 USERNAME_MAX_LENGTH = 64
 PASSWORD_MIN_LENGTH = 8
@@ -42,7 +44,7 @@ def normalize_admin_username(value: str | None) -> str:
 
     if len(username) > USERNAME_MAX_LENGTH:
         raise ValueError(f"Username must be at most {USERNAME_MAX_LENGTH} characters")
-    if not _USERNAME_RE.match(username):
+    if not _USERNAME_RE.fullmatch(username):
         raise ValueError(
             "Username may only contain letters, hyphens and underscores"
         )

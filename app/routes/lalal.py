@@ -15,11 +15,11 @@ import os
 import re
 import stat as stat_module
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from time import time
-from typing import Annotated, Any, Callable, Literal
+from typing import Annotated, Any, Literal
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -73,7 +73,7 @@ async def _run_ffmpeg(cmd: list[str], *, description: str) -> None:
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.PIPE,
     )
-    assert proc.stderr is not None
+    assert proc.stderr is not None  # noqa: S101  # stderr=PIPE above guarantees it; narrows the type
     stderr_tail = bytearray()
     stderr_reader = asyncio.create_task(_read_stderr_tail(proc.stderr, stderr_tail))
     try:
@@ -363,12 +363,18 @@ async def _latest_trim_result(output_dir: Path, stem: str, trim_id: str | None) 
         base_name = f"trim_{trim_id}"
         stem_path = output_dir / f"{base_name}_{stem}.mp3"
         if not await path_is_file(stem_path):
-            raise HTTPException(status_code=404, detail=f"{stem.capitalize()} file not found. Please process with Lalal.ai first.")
+            raise HTTPException(
+                status_code=404,
+                detail=f"{stem.capitalize()} file not found. Please process with Lalal.ai first.",
+            )
         return stem_path, base_name
 
     stem_files = await asyncio.to_thread(_newest_first, output_dir, f"trim_*_{stem}.mp3")
     if not stem_files:
-        raise HTTPException(status_code=404, detail=f"{stem.capitalize()} file not found. Please process with Lalal.ai first.")
+        raise HTTPException(
+            status_code=404,
+            detail=f"{stem.capitalize()} file not found. Please process with Lalal.ai first.",
+        )
     if len(stem_files) > 1:
         raise HTTPException(status_code=400, detail="trim_id required when multiple trims exist")
 
@@ -445,6 +451,9 @@ class AuthStatusResponse(BaseModel):
     token_valid: bool
     validation_error: str
     validated_at: int
+    # Processing minutes the account can still spend, as of validated_at.
+    # None when the balance is unknown - never confuse that with "0 left".
+    remaining_minutes: float | None = None
 
 
 class OperationResponse(BaseModel):
@@ -478,6 +487,19 @@ async def _commit_auth_settings(
         return True
 
 
+async def _invalidate_auth_validation_cache() -> None:
+    """Drop the cached validation stamp so the next status call revalidates."""
+    try:
+        await _commit_auth_settings(
+            {"lalalaai_auth_checked_at": 0},
+            expected_generation=None,
+            bump=False,
+        )
+    except Exception:
+        # A stale balance in the settings tile must never fail a finished split.
+        logger.warning("Could not expire the Lalal.ai validation cache", exc_info=True)
+
+
 # ============================================================================
 # Routes
 # ============================================================================
@@ -502,12 +524,16 @@ async def api_lalal_status(
             token_valid=False,
             validation_error="",
             validated_at=0,
+            remaining_minutes=None,
         )
 
     now_ts = int(time())
     checked_at = int(settings.get("lalalaai_auth_checked_at", 0) or 0)
     token_valid = bool(settings.get("lalalaai_auth_is_valid", False))
     validation_error = str(settings.get("lalalaai_auth_last_error", "") or "").strip()
+    # -1 is the stored "not known yet"; the response carries None instead.
+    cached_minutes = float(settings.get("lalalaai_minutes_left", -1) or -1)
+    minutes_left: float | None = cached_minutes if cached_minutes >= 0 else None
 
     should_validate = (
         force_refresh
@@ -516,14 +542,19 @@ async def api_lalal_status(
     )
 
     if should_validate:
-        from ..lalal import LalalClient
+        from ..lalal import LalalClient, parse_minutes_left
 
         token_valid = False
         validation_error = ""
+        # The validation call is /limits/minutes_left/, so the account balance
+        # comes back with it - keep it rather than paying for the round trip
+        # and throwing the answer away.
+        minutes_left = None
         client = LalalClient(auth_key)
         try:
             async with client:
-                await asyncio.wait_for(client.check_quota(), timeout=20.0)
+                quota = await asyncio.wait_for(client.check_quota(), timeout=20.0)
+            minutes_left = parse_minutes_left(quota)
             token_valid = True
         except Exception:
             logger.exception("Lalal status validation failed")
@@ -539,6 +570,7 @@ async def api_lalal_status(
                 "lalalaai_auth_checked_at": checked_at,
                 "lalalaai_auth_is_valid": token_valid,
                 "lalalaai_auth_last_error": validation_error,
+                "lalalaai_minutes_left": -1 if minutes_left is None else minutes_left,
             },
             expected_generation=generation,
             bump=False,
@@ -550,6 +582,7 @@ async def api_lalal_status(
         token_valid=token_valid,
         validation_error=validation_error,
         validated_at=checked_at,
+        remaining_minutes=minutes_left,
     )
 
 
@@ -633,7 +666,7 @@ async def api_lalal_auth_logout(
 @router.post("/{job_id}")
 @limiter.limit("5/minute")
 async def lalal_split(
-    request: Request,
+    request: Request,  # noqa: ARG001  # @limiter.limit reads it by name
     job_id: uuid.UUID,
     stem: str = _STEM_VOCALS,
     trimmed: bool = False,
@@ -739,43 +772,42 @@ async def lalal_split(
             if cached_response is not None:
                 return cached_response
 
-            async with _processing_capacity_slot():
-                async with client:
-                    async with asyncio.timeout(_LALAL_PROCESS_TIMEOUT_SECONDS):
-                        upload_path, temp_upload = await _decode_for_upload(
-                            file_path, output_dir, base_name
+            async with _processing_capacity_slot(), client:
+                async with asyncio.timeout(_LALAL_PROCESS_TIMEOUT_SECONDS):
+                    upload_path, temp_upload = await _decode_for_upload(
+                        file_path, output_dir, base_name
+                    )
+                    try:
+                        results = await client.process_file(
+                            upload_path,
+                            output_dir,
+                            stem=stem_type,
+                            download_stem=download_stem,
+                            download_backing=download_backing,
+                            progress_callback=sync_progress_callback,
                         )
-                        try:
-                            results = await client.process_file(
-                                upload_path,
-                                output_dir,
-                                stem=stem_type,
-                                download_stem=download_stem,
-                                download_backing=download_backing,
-                                progress_callback=sync_progress_callback,
-                            )
-                        finally:
-                            if temp_upload is not None:
-                                await asyncio.to_thread(temp_upload.unlink, True)
+                    finally:
+                        if temp_upload is not None:
+                            await asyncio.to_thread(temp_upload.unlink, True)
 
-                        # Stems come back in the uploaded (WAV) format; convert them
-                        # to the MP3 paths the cache lookup and downloads expect.
-                        if "stem" in results:
-                            await _finalize_stem(results["stem"], vocals_path)
-                            results["stem"] = vocals_path
-                        if "backing" in results:
-                            await _finalize_stem(results["backing"], instrumental_path)
-                            results["backing"] = instrumental_path
+                    # Stems come back in the uploaded (WAV) format; convert them
+                    # to the MP3 paths the cache lookup and downloads expect.
+                    if "stem" in results:
+                        await _finalize_stem(results["stem"], vocals_path)
+                        results["stem"] = vocals_path
+                    if "backing" in results:
+                        await _finalize_stem(results["backing"], instrumental_path)
+                        results["backing"] = instrumental_path
 
-                        # Both stems are always requested, and both the cache
-                        # lookup and lalal_split_done need both. Raise inside the
-                        # lock so a half-finished pair is cleaned up rather than
-                        # reported as a success nothing can reuse.
-                        if "stem" not in results or "backing" not in results:
-                            raise HTTPException(
-                                status_code=500,
-                                detail="Processing completed but no output file",
-                            )
+                    # Both stems are always requested, and both the cache
+                    # lookup and lalal_split_done need both. Raise inside the
+                    # lock so a half-finished pair is cleaned up rather than
+                    # reported as a success nothing can reuse.
+                    if "stem" not in results or "backing" not in results:
+                        raise HTTPException(
+                            status_code=500,
+                            detail="Processing completed but no output file",
+                        )
 
         await _mark_lalal_split_done_if_ready(
             job_id_str,
@@ -783,6 +815,10 @@ async def lalal_split(
             instrumental_path,
             trimmed=trimmed,
         )
+        # This separation just spent minutes, so the cached balance is stale.
+        # Expiring the validation stamp makes the next status call re-read it
+        # instead of showing the pre-split number for up to five more minutes.
+        await _invalidate_auth_validation_cache()
 
         return _make_split_response(
             job_id_str,
@@ -847,7 +883,10 @@ async def lalal_download(
         base_name = source_path.stem
         stem_path = output_dir / f"{base_name}_{stem}.mp3"
         if not await path_is_file(stem_path):
-            raise HTTPException(status_code=404, detail=f"{stem.capitalize()} file not found. Please process with Lalal.ai first.")
+            raise HTTPException(
+                status_code=404,
+                detail=f"{stem.capitalize()} file not found. Please process with Lalal.ai first.",
+            )
 
     return FileResponse(
         path=stem_path,

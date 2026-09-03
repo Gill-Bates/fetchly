@@ -9,7 +9,6 @@
 #
 
 import logging
-from statistics import fmean, median
 import subprocess
 import tempfile
 import threading
@@ -22,13 +21,6 @@ logger = logging.getLogger(__name__)
 
 # Only analyze first 2 minutes for long files (performance optimization)
 _MAX_ANALYSIS_DURATION: Final[int] = 120
-type WindowStarts = tuple[int, ...]
-
-_DEFAULT_WINDOW_STARTS: Final[WindowStarts] = (0, 60, 120)
-_WAV_HEADER_BYTES: Final[int] = 44
-_MONO_16BIT_44K_BYTES_PER_SECOND: Final[int] = 44_100 * 2
-# Require roughly one second of mono 16-bit 44.1kHz WAV audio plus the header.
-_MIN_SEGMENT_BYTES: Final[int] = _MONO_16BIT_44K_BYTES_PER_SECOND + _WAV_HEADER_BYTES
 _FFMPEG_ERROR_TAIL_BYTES: Final[int] = 500
 _FFMPEG_TIMEOUT_SECONDS: Final[int] = 120
 
@@ -66,24 +58,19 @@ def _run_ffmpeg(
     *,
     filters: str | None = None,
     duration: int | None = None,
-    start_offset: int | None = None,
 ) -> None:
-    """Run ffmpeg with optional audio filters, seek offset, and duration cap.
+    """Run ffmpeg with optional audio filters and a duration cap.
 
     Args:
         input_path: Source audio file in any ffmpeg-supported format.
         output_path: Destination file; format is inferred from its extension.
         filters: Optional ffmpeg audio filter graph passed via ``-af``.
         duration: Optional maximum output duration in seconds passed via ``-t``.
-        start_offset: Optional seek offset in seconds passed via ``-ss``.
 
     Raises:
         RuntimeError: If ffmpeg exits with a non-zero status or exceeds the timeout.
     """
     cmd = ["ffmpeg", "-y"]
-
-    if start_offset is not None:
-        cmd.extend(["-ss", str(start_offset)])
 
     cmd.extend([
         "-i", str(input_path),
@@ -128,10 +115,10 @@ def _run_ffmpeg(
 def _extract_bpm_essentia(audio_path: Path) -> BPMResult:
     """
     Extract BPM using Essentia's RhythmExtractor2013.
-    
+
     Args:
         audio_path: Path to mono WAV file
-        
+
     Returns:
         BPMResult with detected BPM and confidence score
     """
@@ -223,85 +210,6 @@ def extract_bpm(
     return result
 
 
-def extract_bpm_multi_window(
-    file_path: Path,
-    *,
-    window_starts: WindowStarts = _DEFAULT_WINDOW_STARTS,
-    window_duration: int = 30,
-) -> BPMResult:
-    """Extract BPM from multiple time windows for improved stability.
-
-    Each requested window is analyzed independently and successful detections are
-    merged using the median BPM plus mean confidence. If every window fails or
-    produces only low-confidence results, this falls back to ``extract_bpm()``.
-
-    Args:
-        file_path: Path to audio file.
-        window_starts: Start times in seconds for each analysis window.
-        window_duration: Duration of each window in seconds.
-
-    Returns:
-        BPMResult with the median BPM and mean confidence across successful
-        windows, or the fallback result from ``extract_bpm()`` when no window
-        succeeds.
-    """
-
-    _ensure_file_exists(file_path)
-
-    bpms: list[float] = []
-    confidences: list[float] = []
-
-    with tempfile.TemporaryDirectory(prefix="bpm_") as tmp:
-        tmp_dir = Path(tmp)
-
-        for i, start in enumerate(window_starts):
-            segment_wav = tmp_dir / f"segment_{i}.wav"
-
-            try:
-                _run_ffmpeg(
-                    file_path,
-                    segment_wav,
-                    filters="highpass=f=40",
-                    duration=window_duration,
-                    start_offset=start,
-                )
-
-                if not segment_wav.is_file() or segment_wav.stat().st_size < _MIN_SEGMENT_BYTES:
-                    logger.debug("Segment %d too short for BPM analysis, skipping", i)
-                    continue
-
-                result = _extract_bpm_essentia(segment_wav)
-
-                # Reject implausible BPM values
-                if result.bpm < 60 or result.bpm > 200:
-                    continue
-
-                if result.confidence >= _MIN_CONFIDENCE and result.bpm > 0:
-                    bpms.append(result.bpm)
-                    confidences.append(result.confidence)
-
-            except (RuntimeError, OSError, ValueError) as exc:
-                logger.warning("Segment %d analysis failed: %s", i, exc)
-            finally:
-                segment_wav.unlink(missing_ok=True)
-
-    if not bpms:
-        # Fall back to single-window analysis
-        return extract_bpm(file_path)
-
-    median_bpm = float(median(bpms))
-    avg_confidence = float(fmean(confidences))
-
-    logger.debug(
-        "Multi-window BPM: %.1f (windows=%d, confidence=%.2f)",
-        median_bpm,
-        len(bpms),
-        avg_confidence,
-    )
-
-    return BPMResult(bpm=median_bpm, confidence=avg_confidence)
-
-
 def extract_bpm_cascade(
     file_path: Path,
     *,
@@ -347,6 +255,11 @@ def extract_bpm_cascade(
 
         with tempfile.TemporaryDirectory(prefix="beat_this_") as tmp:
             bounded_audio = Path(tmp) / "input.wav"
+            # No highpass here, unlike step 1: beat_this is a trained model with
+            # its own front end and expects the untouched spectrum, while the
+            # rumble filter exists for Essentia's onset detection. Both results
+            # end up comparable because each detector normalizes its tempo into
+            # the same range (see bpm_normalization.normalize_bpm).
             _run_ffmpeg(file_path, bounded_audio, duration=max_duration)
             beat_this_result = extract_bpm_beat_this(bounded_audio)
     except MemoryError:

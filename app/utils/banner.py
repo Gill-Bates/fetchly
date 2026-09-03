@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import fcntl
 import logging
 import os
@@ -15,12 +16,13 @@ import stat
 import sys
 import tempfile
 import time
+from pathlib import Path
 
 from .version import BUILD_INFO, VERSION
 
 logger = logging.getLogger(__name__)
 
-_BANNER_LOCK_FILE = os.path.join(tempfile.gettempdir(), "fetchly_banner.lock")
+_BANNER_LOCK_FILE = Path(tempfile.gettempdir()) / "fetchly_banner.lock"
 
 def _block_width(text: str) -> int:
     return max((len(line) for line in text.splitlines()), default=0)
@@ -46,7 +48,7 @@ def print_banner() -> None:
     ]
 
     ascii_lines = ascii_art.splitlines()
-    ascii_width = max((len(l) for l in ascii_lines), default=0)
+    ascii_width = max((len(line) for line in ascii_lines), default=0)
     text_width = max((len(t) for t in text_lines), default=0)
 
     master_width = max(ascii_width, text_width)
@@ -67,7 +69,7 @@ def print_banner() -> None:
         sys.stdout.write(banner + "\n")
 
     sys.stdout.flush()
-    
+
 
 def _open_lock_file() -> int:
     """Open the banner lock file, refusing anything but our own regular file.
@@ -113,10 +115,8 @@ def print_banner_once() -> None:
             if ":" in content:
                 parts = content.split(":")
                 stored_ppid = parts[0]
-                try:
+                with contextlib.suppress(ValueError, IndexError):
                     stored_ts = float(parts[1])
-                except (ValueError, IndexError):
-                    pass
 
             now = time.time()
 

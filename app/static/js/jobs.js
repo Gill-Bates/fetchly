@@ -20,7 +20,7 @@ import {
     createPrimaryActionButton,
     resolveJobAction,
 } from "./ui.js?v=20260831c";
-import { detectPlatform, humanSize, platformPillLabel } from "./utils.js";
+import { detectPlatform, formatDuration, humanSize, platformPillLabel } from "./utils.js";
 
 const MOBILE_BREAKPOINT = "(max-width: 1024px)";
 const FALLBACK_JOBS_TABLE_COLUMN_COUNT = 5;
@@ -123,7 +123,10 @@ function getTitleText(job) {
 
 function getQualityLabel(job) {
     if (job?.type === JOB_TYPE.AUDIO) {
-        return String(job?.quality || job?.codec || "MP3").toUpperCase();
+        // Audio downloads always pull the best available quality, so unlike
+        // video there is no tier worth naming here - it would just repeat
+        // "Max" on every row. The codec (once known) is shown separately.
+        return EMPTY_VALUE;
     }
 
     const quality = String(job?.quality || EMPTY_VALUE);
@@ -135,6 +138,15 @@ function getTypeLabel(job) {
     if (type === "audio") return "Audio";
     if (type === "video") return "Video";
     return type ? type.charAt(0).toUpperCase() + type.slice(1) : EMPTY_VALUE;
+}
+
+// Material Symbols glyph shown in place of the "Video"/"Audio" text in the
+// media column, mirroring the 🎬/🎵 emoji already used in the format select.
+function getTypeIcon(job) {
+    const type = String(job?.type || "").toLowerCase();
+    if (type === "audio") return "music_note";
+    if (type === "video") return "movie";
+    return "";
 }
 
 function formatBpmValue(value) {
@@ -166,6 +178,7 @@ function formatMobileMediaLine(jobLike) {
     const parts = [
         getTypeLabel(jobLike),
         getQualityLabel(jobLike),
+        formatDuration(jobLike?.duration_seconds),
         humanSize(jobLike?.filesize_bytes),
     ].filter((part) => part && part !== EMPTY_VALUE);
     return parts.join(" · ") || EMPTY_VALUE;
@@ -226,9 +239,6 @@ export function getJobById(jobId) {
     return getStoredJob(String(jobId || ""));
 }
 
-function getRenderedNodesMap({ mobile = false } = {}) {
-    return mobile ? state.mobileNodes : state.desktopNodes;
-}
 
 function clearContainerEmptyState(container) {
     container?.querySelectorAll(EMPTY_STATE_SELECTOR).forEach((node) => node.remove());
@@ -354,15 +364,6 @@ function applyJobDataset(element, job) {
     element.dataset.bpm = String(job?.bpm ?? "");
 }
 
-function createCell(label, text, className = "") {
-    const td = document.createElement("td");
-    td.dataset.label = label;
-    if (className) {
-        td.className = className;
-    }
-    td.textContent = text;
-    return td;
-}
 
 function createPlatformPill(job) {
     const platform = job?.platform || detectPlatform(job?.url || "");
@@ -411,13 +412,54 @@ function renderDesktopTitle(job) {
     return td;
 }
 
-function formatDesktopMediaPrimary(job) {
-    const parts = [getTypeLabel(job), getQualityLabel(job)].filter((part) => part && part !== EMPTY_VALUE);
-    return parts.join(" · ") || EMPTY_VALUE;
+// Builds the "[icon] Quality" content for the media column, swapping the
+// former "Video"/"Audio" word for its Material Symbols pictogram. The type
+// is still available to assistive tech via a visually-hidden label.
+function buildTypeIconFragment(job) {
+    const fragment = document.createDocumentFragment();
+    const icon = getTypeIcon(job);
+    const typeLabel = getTypeLabel(job);
+
+    if (icon) {
+        const iconEl = document.createElement("span");
+        iconEl.className = "material-symbols-outlined icon-inline job-media-icon";
+        iconEl.setAttribute("aria-hidden", "true");
+        iconEl.title = typeLabel;
+        iconEl.textContent = icon;
+        fragment.append(iconEl);
+    }
+
+    if (typeLabel && typeLabel !== EMPTY_VALUE) {
+        const srLabel = document.createElement("span");
+        srLabel.className = icon ? "visually-hidden" : "";
+        srLabel.textContent = typeLabel;
+        fragment.append(srLabel);
+    }
+
+    return fragment;
+}
+
+function buildDesktopMediaPrimaryFragment(job) {
+    const fragment = document.createDocumentFragment();
+    fragment.append(buildTypeIconFragment(job));
+
+    const quality = getQualityLabel(job);
+    if (quality && quality !== EMPTY_VALUE) {
+        fragment.append(document.createTextNode(` ${quality}`));
+    }
+
+    if (!fragment.childNodes.length) {
+        fragment.append(document.createTextNode(EMPTY_VALUE));
+    }
+
+    return fragment;
 }
 
 function formatDesktopMediaSecondary(job) {
     const parts = [
+        // Known from the source metadata while the job is still queued, so it
+        // is the one detail here that does not wait for the download.
+        formatDuration(job?.duration_seconds),
         job?.codec || "",
         formatBpmCompact(job?.bpm),
         formatBitrateText(job?.bitrate_kbps),
@@ -434,7 +476,7 @@ function renderDesktopMeta(job) {
 
     const mediaValue = document.createElement("span");
     mediaValue.className = "job-media-value";
-    mediaValue.textContent = formatDesktopMediaPrimary(job);
+    mediaValue.append(buildDesktopMediaPrimaryFragment(job));
 
     const mediaDetail = document.createElement("div");
     mediaDetail.className = "meta-sub job-media-detail";
@@ -485,6 +527,7 @@ function renderMobileDetails(job) {
     details.dataset.role = "job-details";
 
     details.append(
+        createMobileDetailItem("Duration", formatDuration(job?.duration_seconds)),
         createMobileDetailItem("Codec", job?.codec || EMPTY_VALUE),
         createMobileDetailItem("Bitrate", formatBitrateText(job?.bitrate_kbps)),
         createMobileDetailItem("Added", formatCreatedText(job?.created_at) || EMPTY_VALUE),
@@ -699,7 +742,7 @@ function patchDesktopJobNode(row, job) {
     if (mediaCell instanceof HTMLElement) {
         const mediaValue = mediaCell.querySelector(".job-media-value");
         if (mediaValue instanceof HTMLElement) {
-            mediaValue.textContent = formatDesktopMediaPrimary(job);
+            mediaValue.replaceChildren(buildDesktopMediaPrimaryFragment(job));
         }
 
         const mediaDetail = mediaCell.querySelector(".job-media-detail");

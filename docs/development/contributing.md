@@ -47,7 +47,17 @@ running the test suite.
 | Kind | Location | Run with |
 |---|---|---|
 | Python | `tests/test_*.py` | `pytest` |
-| Front-end contracts | `tests/js/*.test.mjs` | Node, no browser |
+| Front-end contracts | `tests/js/*.test.mjs` | `npm test` — Node, no browser<br>needs `npm ci --prefix tools/ui-lint` once |
+| Python lint | — | `ruff check .` |
+| JS lint | `app/static/js/`, `tests/js/`, `tools/` | `npm run lint:js` |
+| CSS lint | `app/static/*.css` | `npm run lint:css` |
+| Browser audit | `tools/ui-lint` | `npm run ui-lint` — needs a running app |
+
+The linters, `pytest`, and `npm test` all run on every pull request
+(`.github/workflows/ci.yml`). Only the browser audit stays a local command — it
+needs a live server. Run it before opening a pull request. See
+[Development Setup](setup.md) for the device profiles it covers, iPhone and iPad
+included.
 
 A change to shared policy modules — `bpm_normalization.py`, `bpm_naming.py`,
 `lalal_policy.py`, `public_url.py`, the settings parsers in `db.py` — should come with
@@ -85,9 +95,12 @@ changed default, a new environment variable — update the relevant page in the 
 request.
 
 ```bash
-pip install -r docs/requirements-docs.txt
+pip install -e ".[docs]"
 mkdocs serve -f docs/mkdocs.yml
 ```
+
+The docs toolchain lives in the `docs` extra of `pyproject.toml`, which replaced
+`docs/requirements-docs.txt`.
 
 Then open `http://127.0.0.1:8000`. Pages rebuild on save.
 

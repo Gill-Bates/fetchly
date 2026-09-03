@@ -5,6 +5,7 @@
 #
 
 import logging
+import math
 import secrets
 import sqlite3
 from collections.abc import Callable, Generator
@@ -13,44 +14,45 @@ from datetime import UTC, datetime
 from typing import Any, Final
 
 from .utils.credentials import normalize_admin_username
+from .utils.duration import round_seconds
 from .utils.fs import get_data_dir
 from .utils.public_url import normalize_public_hostname
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
-    "DB_PATH",
-    "get_db",
-    "close_db",
-    "init_db",
-    "insert_job",
-    "update_job",
-    "update_job_if_status",
-    "get_audio_analysis_cache",
-    "upsert_audio_analysis_cache",
-    "list_completed_bpms",
-    "list_jobs_requiring_audio_analysis",
-    "list_queued_jobs",
-    "claim_next_queued_job",
-    "cancel_interrupted_jobs",
-    "get_job",
-    "find_active_job_for_submission",
-    "job_exists",
-    "list_jobs",
-    "paginate_jobs",
-    "get_stats",
-    "list_expired_job_ids",
-    "get_settings",
-    "set_settings",
-    "create_share_link",
-    "get_share_link",
-    "consume_share_link",
-    "delete_share_links_for_jobs",
-    "list_job_ids",
-    "delete_jobs_and_share_links",
     "COMPLETED_STATUSES",
+    "DB_PATH",
     "DOWNLOADABLE_STATUSES",
     "TERMINAL_JOB_STATUSES",
+    "cancel_interrupted_jobs",
+    "claim_next_queued_job",
+    "close_db",
+    "consume_share_link",
+    "create_share_link",
+    "delete_jobs_and_share_links",
+    "delete_share_links_for_jobs",
+    "find_active_job_for_submission",
+    "get_audio_analysis_cache",
+    "get_db",
+    "get_job",
+    "get_settings",
+    "get_share_link",
+    "get_stats",
+    "init_db",
+    "insert_job",
+    "job_exists",
+    "list_completed_bpms",
+    "list_expired_job_ids",
+    "list_job_ids",
+    "list_jobs",
+    "list_jobs_requiring_audio_analysis",
+    "list_queued_jobs",
+    "paginate_jobs",
+    "set_settings",
+    "update_job",
+    "update_job_if_status",
+    "upsert_audio_analysis_cache",
     "utc_timestamp",
 ]
 
@@ -122,7 +124,9 @@ _SETTINGS_DEFAULTS: Final[dict[str, str]] = {
     "enable_authentication": "false",
     "admin_username": "",
     "session_idle_minutes": "60",
-    "download_concurrent_fragments": "3",
+    # 0 means "Automatic": sized per download from the host's CPU quota and
+    # free memory (app/governor.py::recommended_concurrent_fragments).
+    "download_concurrent_fragments": "0",
     # Startup-only worker-pool size for the next application boot. 0 means
     # "auto-detect from CPU quota".
     "download_worker_count": "0",
@@ -134,6 +138,12 @@ _SETTINGS_DEFAULTS: Final[dict[str, str]] = {
     # VP9/AV1 renditions do not in Safari/iOS. Users who want the highest
     # resolution over compatibility can turn it off on the settings page.
     "download_mp4_preset": "true",
+    # Burns the fetchly logo into the bottom-right corner of every downloaded
+    # video, with the public hostname underneath when one is configured. On by
+    # default; costs nothing on the capped qualities (the overlay rides along
+    # in the transcode that already runs) but adds an encoder pass to "max".
+    # See app/utils/watermark.py.
+    "video_watermark": "true",
     # 0 disables the duration gate so any track length is analyzed.
     "audio_analysis_max_minutes": "15",
     "audio_analysis_timeout_minutes": "5",
@@ -142,6 +152,10 @@ _SETTINGS_DEFAULTS: Final[dict[str, str]] = {
     "lalalaai_auth_checked_at": "0",
     "lalalaai_auth_is_valid": "false",
     "lalalaai_auth_last_error": "",
+    # Processing minutes the Lalal.ai account had left at the last validation,
+    # cached alongside it so the settings tile can name a balance without a
+    # request per page view. -1 means "not known yet".
+    "lalalaai_minutes_left": "-1",
     "lalalaai_duration_guard": "true",
     "lalal_max_download_gib": "4",
     # How often a generated share link may be used. 0 means unlimited; the
@@ -176,6 +190,16 @@ def _parse_bounded_int(value: object, *, minimum: int, maximum: int) -> int:
 
 def _parse_nonnegative_int(value: object) -> int:
     return _parse_bounded_int(value, minimum=0, maximum=2**63 - 1)
+
+
+def _parse_minutes_left(value: object) -> float:
+    """Parse a cached Lalal.ai balance, normalizing anything unusable to -1."""
+    if isinstance(value, bool):
+        raise ValueError("Boolean is not a minutes value")
+    parsed = float(str(value).strip())
+    if not math.isfinite(parsed) or parsed < 0:
+        return -1.0
+    return parsed
 
 
 def _validate_limit(limit: int) -> int:
@@ -226,18 +250,20 @@ _SETTINGS_TYPES: Final[dict[str, Callable[[object], Any]]] = {
     "admin_username": lambda value: normalize_admin_username(value if isinstance(value, str) else ""),
     "session_idle_minutes": lambda value: _parse_bounded_int(value, minimum=1, maximum=24 * 60),
     "session_version": _parse_nonnegative_int,
-    "download_concurrent_fragments": lambda value: _parse_bounded_int(value, minimum=1, maximum=16),
+    "download_concurrent_fragments": lambda value: _parse_bounded_int(value, minimum=0, maximum=16),
     "download_worker_count": lambda value: _parse_bounded_int(value, minimum=0, maximum=8),
     "download_timeout_minutes": lambda value: _parse_bounded_int(value, minimum=1, maximum=240),
     "transcode_timeout_minutes": lambda value: _parse_bounded_int(value, minimum=1, maximum=480),
     "download_max_filesize_gib": lambda value: _parse_bounded_int(value, minimum=1, maximum=100),
     "download_mp4_preset": _parse_bool,
+    "video_watermark": _parse_bool,
     "audio_analysis_max_minutes": lambda value: _parse_bounded_int(value, minimum=0, maximum=240),
     "audio_analysis_timeout_minutes": lambda value: _parse_bounded_int(value, minimum=1, maximum=60),
     "lalalaai_email": str,
     "lalalaai_auth_key": str,
     "lalalaai_auth_checked_at": _parse_nonnegative_int,
     "lalalaai_auth_is_valid": _parse_bool,
+    "lalalaai_minutes_left": _parse_minutes_left,
     "lalalaai_auth_last_error": str,
     "lalalaai_duration_guard": _parse_bool,
     "lalal_max_download_gib": lambda value: _parse_bounded_int(value, minimum=1, maximum=100),
@@ -256,7 +282,7 @@ def _configure_connection(con: sqlite3.Connection) -> None:
     # on every connection before any statement runs.
     con.execute("PRAGMA foreign_keys=ON")
     con.execute("PRAGMA synchronous=NORMAL")
-    con.execute("PRAGMA busy_timeout=5000")
+    con.execute("PRAGMA busy_timeout=30000")
 
 
 def _configure_database(con: sqlite3.Connection) -> None:
@@ -292,7 +318,7 @@ def _prepare_database_path() -> None:
 
 
 @contextmanager
-def get_db() -> Generator[sqlite3.Connection, None, None]:
+def get_db() -> Generator[sqlite3.Connection]:
     """Yield a configured SQLite connection.
 
     This function performs synchronous I/O. Callers running inside an
@@ -429,7 +455,10 @@ def init_db() -> None:
         con.execute("CREATE INDEX IF NOT EXISTS idx_jobs_created_at_id ON jobs(created_at DESC, id DESC)")
         con.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status_finished_at ON jobs(status, finished_at)")
         con.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status_created_at ON jobs(status, created_at DESC)")
-        con.execute("CREATE INDEX IF NOT EXISTS idx_jobs_audio_analysis ON jobs(type, status, created_at) WHERE filename IS NOT NULL")
+        con.execute(
+            "CREATE INDEX IF NOT EXISTS idx_jobs_audio_analysis "
+            "ON jobs(type, status, created_at) WHERE filename IS NOT NULL"
+        )
         con.execute("CREATE INDEX IF NOT EXISTS idx_jobs_url_type_quality ON jobs(url, type, quality, created_at DESC)")
         con.execute("CREATE INDEX IF NOT EXISTS idx_share_links_job_id ON share_links(job_id, created_at DESC)")
         # Redundant with the composite indexes above: every query that filters
@@ -458,15 +487,27 @@ def insert_job(
     status: str,
     video_title: str | None = None,
     video_meta_hover: str | None = None,
+    duration_seconds: float | None = None,
 ) -> None:
+    """Insert a queued job row.
+
+    ``duration_seconds`` is the runtime the source reported at submit time, so
+    the job list can show a length while the download is still running. The
+    worker overwrites it with the ffprobe reading of the finished file.
+    """
     _validate_status(status)
+    # The column's CHECK constraint rejects negatives, and an unusable reading
+    # is stored as "unknown" rather than aborting the submission.
+    duration = round_seconds(duration_seconds)
+    if duration is None or duration <= 0:
+        duration = None
     with get_db() as con:
         con.execute(
             """
-            INSERT INTO jobs (id, url, type, quality, status, video_title, video_meta_hover)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO jobs (id, url, type, quality, status, video_title, video_meta_hover, duration_seconds)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (job_id, url, job_type, quality, status, video_title, video_meta_hover),
+            (job_id, url, job_type, quality, status, video_title, video_meta_hover, duration),
         )
         con.commit()
 
@@ -489,7 +530,7 @@ def update_job(job_id: str, **fields: Any) -> bool:
     values = [*fields.values(), job_id]
 
     with get_db() as con:
-        cursor = con.execute(f"UPDATE jobs SET {keys} WHERE id=?", values)
+        cursor = con.execute(f"UPDATE jobs SET {keys} WHERE id=?", values)  # noqa: S608  # identifiers are allow-listed above; values stay bound
         con.commit()
         return cursor.rowcount == 1
 
@@ -515,7 +556,7 @@ def update_job_if_status(job_id: str, expected_statuses: tuple[str, ...], **fiel
 
     with get_db() as con:
         cursor = con.execute(
-            f"UPDATE jobs SET {keys} WHERE id=? AND status IN ({placeholders})",
+            f"UPDATE jobs SET {keys} WHERE id=? AND status IN ({placeholders})",  # noqa: S608  # identifiers are allow-listed above; values stay bound
             values,
         )
         con.commit()
@@ -567,7 +608,7 @@ def list_completed_bpms(limit: int = 1000) -> list[int]:
               AND status IN ({placeholders})
             ORDER BY created_at DESC
             LIMIT ?
-            """,
+            """,  # noqa: S608  # identifiers are allow-listed above; values stay bound
             (*COMPLETED_STATUSES, limit),
         ).fetchall()
     return [int(row["bpm"]) for row in rows if row["bpm"] is not None]
@@ -644,7 +685,7 @@ def cancel_interrupted_jobs() -> int:
                 message=?,
                 finished_at=?
             WHERE status IN ({placeholders})
-            """,
+            """,  # noqa: S608  # identifiers are allow-listed above; values stay bound
             ("cancelled", message, finished_at, *_RECOVERABLE_IN_FLIGHT_STATUSES),
         )
         con.commit()
@@ -766,7 +807,7 @@ def delete_share_links_for_jobs(job_ids: list[str]) -> int:
             batch = job_ids[start:start + _DELETE_BATCH_SIZE]
             placeholders = ",".join("?" * len(batch))
             cursor = con.execute(
-                f"DELETE FROM share_links WHERE job_id IN ({placeholders})",
+                f"DELETE FROM share_links WHERE job_id IN ({placeholders})",  # noqa: S608  # identifiers are allow-listed above; values stay bound
                 tuple(batch),
             )
             deleted += max(cursor.rowcount, 0)
@@ -800,11 +841,11 @@ def delete_jobs_and_share_links(job_ids: list[str]) -> tuple[int, int]:
             batch = job_ids[start:start + _DELETE_BATCH_SIZE]
             placeholders = ",".join("?" * len(batch))
             links_cursor = con.execute(
-                f"DELETE FROM share_links WHERE job_id IN ({placeholders})",
+                f"DELETE FROM share_links WHERE job_id IN ({placeholders})",  # noqa: S608  # identifiers are allow-listed above; values stay bound
                 tuple(batch),
             )
             jobs_cursor = con.execute(
-                f"DELETE FROM jobs WHERE id IN ({placeholders})",
+                f"DELETE FROM jobs WHERE id IN ({placeholders})",  # noqa: S608  # identifiers are allow-listed above; values stay bound
                 tuple(batch),
             )
             links_deleted += max(links_cursor.rowcount, 0)
@@ -877,7 +918,7 @@ def get_stats() -> dict[str, int | float]:
             FROM jobs
             WHERE status IN ({placeholders})
               {reset_clause}
-        """, query_params).fetchone()
+        """, query_params).fetchone()  # noqa: S608  # identifiers are allow-listed above; values stay bound
 
     return {
         "total_jobs": row["total_jobs"] or 0,
@@ -911,7 +952,7 @@ def list_expired_job_ids(keep_days: int) -> list[str]:
             WHERE status IN ({placeholders})
               AND finished_at IS NOT NULL
               AND finished_at < datetime('now', '-' || ? || ' days')
-            """,
+            """,  # noqa: S608  # identifiers are allow-listed above; values stay bound
             (*statuses, keep_days),
         ).fetchall()
     return [row["id"] for row in rows]
@@ -951,7 +992,7 @@ def purge_old_jobs(keep_days: int, *, batch_size: int = _MAX_QUERY_LIMIT) -> lis
                     LIMIT ?
                 )
                 RETURNING id
-                """,
+                """,  # noqa: S608  # identifiers are allow-listed above; values stay bound
                 (*statuses, keep_days, batch_size),
             ).fetchall()
             con.commit()

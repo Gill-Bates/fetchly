@@ -1,0 +1,271 @@
+#
+# pyproject.toml
+# Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
+#
+# Single source of truth for the project version, its dependencies and the
+# lint/test tooling. Replaces the former VERSION, requirements.txt and
+# docs/requirements-docs.txt files.
+#
+
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fetchly"
+# The one place the release version lives. app/utils/version.py reads it back
+# at runtime, the release workflow validates the git tag against it, and
+# docker/Dockerfile copies this file into the image so the Settings page and
+# /api/updates report the same number the tag was cut from.
+version = "1.2.0"
+description = "Self-hosted media downloader with BPM analysis and stem separation"
+readme = "README.md"
+requires-python = ">=3.13"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE"]
+authors = [{ name = "Gill-Bates", email = "tn.steiner@gmail.com" }]
+keywords = ["yt-dlp", "downloader", "fastapi", "bpm", "stem-separation"]
+classifiers = [
+    "Environment :: Web Environment",
+    "Framework :: FastAPI",
+    "Intended Audience :: End Users/Desktop",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia :: Sound/Audio",
+]
+
+# Everything the app imports directly. yt-dlp and yt-dlp-ejs are deliberately
+# absent: they update on their own cadence as platforms change and are
+# installed unpinned (see docker/Dockerfile and docs/development/setup.md).
+#
+# beat-this pulls in torch. Install with the CPU wheel index to avoid dragging
+# in the CUDA build:
+#   pip install --extra-index-url https://download.pytorch.org/whl/cpu -e .
+dependencies = [
+    "beat-this>=1.1.0",
+    "essentia==2.1b6.dev1438",
+    "fastapi==0.141.1",
+    "gunicorn==26.2.0",
+    "httpx==0.28.1",
+    "jinja2==3.1.6",
+    "markdown==3.10.3",
+    "markupsafe==3.0.3",
+    "nh3==0.3.7",
+    "numpy==2.5.2",
+    "pydantic==2.13.5",
+    "python-multipart==0.0.32",
+    "slowapi==0.1.10",
+    "starlette==1.6.0",
+    "torch==2.14.0",
+    "uvicorn[standard]==0.52.4",
+    "uvicorn-worker==0.4.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest==9.1.1",
+    "pytest-asyncio==1.4.0",
+    "pytest-cov==7.1.0",
+    "ruff==0.16.5",
+]
+docs = [
+    "markdown==3.10.3",
+    "mkdocs==1.6.1",
+    "mkdocs-git-revision-date-localized-plugin==1.5.4",
+    "mkdocs-material==9.7.7",
+    "mkdocs-minify-plugin==0.8.0",
+    "mkdocs-redirects==1.2.3",
+    "pymdown-extensions==11.0.2",
+]
+
+[project.urls]
+Homepage = "https://github.com/Gill-Bates/fetchly"
+Documentation = "https://gill-bates.github.io/fetchly/"
+Source = "https://github.com/Gill-Bates/fetchly"
+Changelog = "https://github.com/Gill-Bates/fetchly/blob/main/CHANGELOG.md"
+
+# The repo is a flat-layout application, not a library: `pip install -e .` is a
+# convenience for local dev (it makes the deps and the console entry point
+# available), so only the two importable packages are declared. The Docker
+# image installs the dependencies alone and runs the copied source tree.
+[tool.setuptools]
+packages = ["app", "middleware"]
+include-package-data = false
+
+# uv honours this automatically; plain pip needs the flag spelled out above.
+[tool.uv]
+extra-index-url = ["https://download.pytorch.org/whl/cpu"]
+
+# --------------------------------------------------------------------------- #
+# Ruff - lint + format for every Python file in the repo
+# --------------------------------------------------------------------------- #
+[tool.ruff]
+line-length = 120
+target-version = "py313"
+# node_modules, .venv, build/ and dist/ are already in ruff's default
+# excludes; these are the trees specific to this repo.
+extend-exclude = ["data", "site", ".mkdocs-cache", "app/static/vendor"]
+
+[tool.ruff.lint]
+select = [
+    "A",     # flake8-builtins - shadowing open/id/type hides real bugs
+    "ARG",   # unused arguments
+    "ASYNC", # blocking calls inside async def - this app is ASGI end to end
+    "B",     # bugbear
+    "C4",    # comprehensions
+    "DTZ",   # naive datetimes; job timestamps are UTC-aware on purpose
+    "E",     # pycodestyle errors
+    "EM",    # exception messages assigned to a name first
+    "F",     # pyflakes
+    "G",     # logging-format: %s args, never f-strings (lazy formatting)
+    "I",     # import sorting
+    "ICN",   # import conventions
+    "ISC",   # implicit string concat
+    "LOG",   # logging misuse
+    "N",     # pep8-naming
+    "PERF",  # obvious performance traps
+    "PIE",   # misc lints
+    "PL",    # pylint subset
+    "PTH",   # prefer pathlib
+    "RET",   # return simplifications
+    "RSE",   # raise cleanups
+    "RUF",   # ruff-specific
+    "S",     # bandit - this app parses untrusted URLs and shells out to ffmpeg
+    "SIM",   # simplifications
+    "SLF",   # private member access across modules
+    "T20",   # stray print()
+    "TRY",   # exception antipatterns
+    "UP",    # pyupgrade
+    "W",     # pycodestyle warnings
+]
+ignore = [
+    # Formatter-owned; keeping this on fights `ruff format`.
+    "ISC001",
+    # The codebase documents *why* in prose comments above the code rather than
+    # forcing every message into a named variable first.
+    "EM101",
+    "EM102",
+    "TRY003",
+    # `except: logger.error(...)` is used where the traceback is noise and the
+    # message already carries the cause.
+    "TRY400",
+    # try/except around a raise is how the download pipeline turns yt-dlp
+    # failures into job statuses; hoisting each into its own function would
+    # scatter logic that reads better in one place.
+    "TRY301",
+    # `return` inside `try` is idiomatic here and reads better than a
+    # trailing `else:` block.
+    "TRY300",
+    # Package-internal singletons (the governor, the worker queues, the DB
+    # handle) are rebound by lifespan hooks on purpose.
+    "PLW0603",
+    # Deliberate lazy imports: torch/essentia cost seconds at import time and
+    # must not be paid by a request that never analyses audio.
+    "PLC0415",
+    # Thresholds and HTTP status codes read fine inline; naming every 200/404
+    # would add indirection without adding meaning.
+    "PLR2004",
+    # The download/transcode pipeline is genuinely branchy. Splitting it to
+    # satisfy a counter would hide the sequence it documents.
+    "PLR0911",
+    "PLR0912",
+    "PLR0913",
+    "PLR0915",
+    # ffmpeg/ffprobe/yt-dlp are resolved from PATH on purpose - the image pins
+    # them, and hardcoding /usr/bin would break local dev. No shell is used.
+    "S603",
+    "S607",
+    # Docstrings and comments use en dashes and typographic quotes.
+    "RUF001",
+    "RUF002",
+    "RUF003",
+    # `timeout` as a keyword-only arg on async helpers mirrors httpx's own API.
+    "ASYNC109",
+    # These validators raise ValueError for both wrong type and wrong value on
+    # purpose: callers handle one exception, and the message says which it was.
+    "TRY004",
+    # Same reasoning as PLR0913 - the positional/keyword split is caller
+    # ergonomics, not a complexity signal.
+    "PLR0917",
+    # `Depends(...)` / `File(...)` in defaults *is* the FastAPI DI contract.
+    "B008",
+    # A ternary is not automatically clearer; several of these branches carry
+    # an explanatory comment that only fits in an if/else.
+    "SIM108",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests assert on internals, use fixed credentials and fixed temp paths, print
+# diagnostics, and drive async code with plain pathlib.
+"tests/*" = [
+    "ARG001",
+    "ARG002",
+    "ASYNC240",
+    "PLR2004",
+    "PTH101",
+    "RUF012",
+    "S101",
+    "S105",
+    "S106",
+    "S107",
+    "S108",
+    "SIM117",
+    "SLF001",
+    "T20",
+]
+# run.py is a CLI entry point: printing to stdout is its job, and 0.0.0.0 is
+# the documented default for a containerised server.
+"run.py" = ["T20", "S104"]
+# The startup banner writes to stdout, and its ASCII art is padded with
+# trailing spaces that keep the box aligned.
+"app/utils/banner.py" = ["T20", "W291"]
+# Repo tooling: writing to stdout is the whole point of these scripts.
+"tools/*.py" = ["T20"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "pep257"
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"
+
+# --------------------------------------------------------------------------- #
+# pytest
+# --------------------------------------------------------------------------- #
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+# The repo root, so `from app import ...` resolves. Neither pytest's rootdir nor
+# the CWD is on sys.path by default: `python -m pytest` happens to add the CWD,
+# the bare `pytest` console script does not, and tests/ carries no __init__.py,
+# so prepend-import mode inserts tests/ rather than the root. Without this the
+# suite passes locally via `python -m pytest` and fails in CI (which runs
+# `pytest -q`) with ModuleNotFoundError on every one of the 25 modules. Setting
+# it here rather than in the workflow keeps both invocations identical for
+# everyone. The app is deliberately not pip-installed for tests - the Docker
+# image runs the copied source tree, so that is what the suite should import.
+pythonpath = ["."]
+python_files = ["test_*.py"]
+addopts = "-q --strict-markers --strict-config"
+filterwarnings = [
+    "error::DeprecationWarning:app.*",
+    "error::DeprecationWarning:middleware.*",
+]
+markers = [
+    "slow: exercises real subprocesses (ffmpeg, essentia) and is not fast",
+]
+
+[tool.coverage.run]
+source = ["app", "middleware"]
+branch = true
+omit = ["*/__pycache__/*"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]

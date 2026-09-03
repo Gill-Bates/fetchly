@@ -10,7 +10,7 @@ Setting up fetchly for local development, outside the container.
 | Python 3.13 | `python3.13-venv`, `python3.13-dev` |
 | `ffmpeg` | On `PATH` |
 | `git` | For version metadata |
-| `yt-dlp` + `yt-dlp-ejs` | Installed via pip, not pinned in `requirements.txt` |
+| `yt-dlp` + `yt-dlp-ejs` | Installed via pip, deliberately not pinned in `pyproject.toml` |
 | `deno` | On `PATH` — solves YouTube JS challenges |
 
 Essentia and `beat_this` (for [BPM analysis](../features/bpm.md)) are optional in a
@@ -26,14 +26,29 @@ python3.13 -m venv .venv
 source .venv/bin/activate
 
 pip install --upgrade pip
-pip install -r requirements.txt
+pip install --extra-index-url https://download.pytorch.org/whl/cpu -e ".[dev]"
 pip install yt-dlp yt-dlp-ejs
 ```
 
-`requirements.txt` pins everything the app imports directly, plus a
-`--extra-index-url` for the CPU build of PyTorch (`beat_this`'s dependency). yt-dlp and
-`yt-dlp-ejs` are intentionally installed separately, outside `requirements.txt`, since
-yt-dlp updates on its own cadence as platforms change.
+`pyproject.toml` is the single manifest: it holds the release version, the runtime
+dependencies, and the `dev` and `docs` extras. It replaced `VERSION`,
+`requirements.txt` and `docs/requirements-docs.txt` — a change to any of those three
+now happens in one file, and `app/utils/version.py` reads `[project] version` straight
+back out at runtime.
+
+`--extra-index-url` picks the CPU build of PyTorch (`beat_this`'s dependency); without
+it pip resolves the CUDA wheels and pulls in gigabytes of GPU code the app never runs.
+yt-dlp and `yt-dlp-ejs` stay outside the manifest on purpose, since yt-dlp updates on
+its own cadence as platforms change.
+
+Need a flat requirements file — for a tool that only speaks `-r`, or for a scan?
+Generate it instead of keeping a second copy:
+
+```bash
+python tools/pyproject-deps.py > requirements.txt          # runtime
+python tools/pyproject-deps.py docs > requirements-docs.txt
+python tools/pyproject-deps.py dev                          # pytest + ruff
+```
 
 ## Run it
 
@@ -56,17 +71,19 @@ otherwise.
 ## Running the tests
 
 ```bash
-pip install pytest pytest-asyncio pytest-cov
 pytest
 ```
 
-Tests live in `tests/` — one file per module under test, largely mirroring `app/`.
-Some exercise real subprocess calls (ffmpeg) and are naturally slower.
+`pytest` picks up its configuration from `[tool.pytest.ini_options]` in
+`pyproject.toml`. Tests live in `tests/` — one file per module under test, largely
+mirroring `app/`. Some exercise real subprocess calls (ffmpeg) and are naturally
+slower.
 
 ### JavaScript tests
 
+From the repository root:
+
 ```bash
-cd tools/ui-lint   # or wherever the JS toolchain is configured
 npm install
 npm test
 ```
@@ -74,6 +91,67 @@ npm test
 `tests/js/*.test.mjs` covers front-end contracts — the CSRF token helper, the
 confirmation modal, the cookie-paste dialog, safe-redirect handling — as plain Node
 tests, no browser required.
+
+Note the glob: `node --test tests/js/` (the directory form) needs Node 24, so the
+`npm test` script spells out `node --test "tests/js/*.test.mjs"` instead.
+
+## Linting
+
+Three linters:
+
+| Target | Config | Run with |
+|---|---|---|
+| Python | `[tool.ruff]` in `pyproject.toml` | `ruff check .` |
+| Front-end JS | `tools/eslint.config.mjs` | `npm run lint:js` |
+| CSS | `tools/stylelint.config.mjs` | `npm run lint:css` |
+
+`npm run lint` runs both front-end linters; `npm run lint:fix` applies what is safely
+fixable. All three run on every push and pull request via
+`.github/workflows/ci.yml`.
+
+A few rules encode project decisions rather than style:
+
+- **No native browser dialogs.** ESLint's `no-alert` and `no-restricted-globals` fail
+  the build on `confirm()`/`alert()`/`prompt()`. Use `confirmModal()` from
+  `app/static/js/confirm.js`. The single sanctioned exception is inside `confirm.js`
+  itself, on the branch where Bootstrap failed to load.
+- **No `100vh` without a `100dvh` companion.** Stylelint warns, because Safari's
+  collapsing toolbar makes `100vh` overflow on iPhone and in iPad Split View.
+- **`-webkit-*` prefixes are kept.** `property-no-vendor-prefix` is off: those
+  prefixes are load-bearing on iOS and iPadOS, not legacy.
+
+## Browser audit (ui-lint)
+
+`tools/ui-lint` drives the running app through Playwright and reports layout,
+accessibility, contrast and iOS/iPadOS problems. It needs a live server, so it is a
+local pre-release check rather than part of the PR gate:
+
+```bash
+npm run ui-lint:install   # once: installs Playwright + Chromium and WebKit
+python run.py &           # the app must be reachable
+npm run ui-lint
+```
+
+It audits five device profiles, chosen around the breakpoint in
+`app/static/style.css` where the desktop jobs table gives way to the mobile feed
+(`@media (max-width: 1024px)`):
+
+| Profile | Device | Width | Engine | Layout |
+|---|---|---|---|---|
+| `desktop` | — | 1440px | Chromium | desktop table |
+| `mobile` | iPhone 13 | 390px | WebKit | feed |
+| `tablet` | iPad Mini | 768px | WebKit | feed |
+| `tablet-landscape` | iPad Mini landscape | 1024px | WebKit | feed (breakpoint edge) |
+| `tablet-wide` | iPad Pro 11 landscape | 1194px | WebKit | desktop table, touch input |
+
+Form factor and touch are separate axes in the runner, which is what `tablet-wide`
+exists to prove: it renders the desktop table *and* needs 44px hit areas. Audits are
+gated on the axis they actually depend on — `isMobile` for which DOM renders, `isTouch`
+for hit areas and Safari's viewport quirks, `isPhone` for the pixel contracts written
+against 390px.
+
+Results land in `results.json` under the output directory the run prints, and the
+process exits non-zero when any hard failure is found.
 
 ## Code style
 

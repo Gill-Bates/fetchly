@@ -56,17 +56,24 @@ jobs:
             exit 1
           fi
 
-          if [ ! -f VERSION ]; then
-            echo "ERROR: VERSION file not found"
+          if [ ! -f pyproject.toml ]; then
+            echo "ERROR: pyproject.toml not found"
             exit 1
           fi
 
-          VERSION="$(tr -d '[:space:]' < VERSION)"
+          # pyproject.toml [project] version is the single source of truth -
+          # app/utils/version.py reads the same key at runtime.
+          VERSION="$(python3 -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])' | tr -d '[:space:]')"
+          if [ -z "$VERSION" ]; then
+            echo "ERROR: pyproject.toml has no [project] version"
+            exit 1
+          fi
 
-          # fetchly versions its releases MAJOR.MINOR (VERSION currently reads
-          # "1.5", tags run v0.1 .. v1.4), so the patch component is optional
-          # here rather than required as in a strict semver check. A prerelease
-          # suffix (1.6-rc.1) stays supported and still suppresses 'latest'.
+          # fetchly versions its releases MAJOR.MINOR (pyproject.toml currently
+          # reads "1.5", tags run v0.1 .. v1.4), so the patch component is
+          # optional here rather than required as in a strict semver check. A
+          # prerelease suffix (1.6-rc.1) stays supported and still suppresses
+          # 'latest'.
           if ! echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+(\.[0-9]+)?(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'; then
             echo "ERROR: Invalid version format: '$VERSION' (expected: X.Y, X.Y.Z or either with -suffix)"
             exit 1
@@ -85,7 +92,7 @@ jobs:
 
           TAG_VERSION="${GITHUB_REF_NAME#v}"
           if [[ "$TAG_VERSION" != "$VERSION" ]]; then
-            echo "ERROR: Git tag (${GITHUB_REF_NAME}) does not match VERSION file (${VERSION})"
+            echo "ERROR: Git tag (${GITHUB_REF_NAME}) does not match pyproject.toml version (${VERSION})"
             exit 1
           fi
 
@@ -98,7 +105,7 @@ jobs:
 
       # A release must not travel backwards. Re-running this workflow on an
       # older tag - v1.3 while 1.5 is published - passes every check above,
-      # because the VERSION file at that commit really does read 1.3. It would
+      # because pyproject.toml at that commit really does read 1.3. It would
       # then move 'latest' onto the older image and let the cleanup job delete
       # the newer 1.5 tag. Both are irreversible on Docker Hub.
       #
@@ -266,7 +273,7 @@ jobs:
           echo "After:"
           df -h /
 
-      # docker/Dockerfile copies "VERSION BUILD_INFO*" into the image and
+      # docker/Dockerfile copies "pyproject.toml BUILD_INFO*" into the image and
       # app/utils/version.py reads BUILD_INFO for the commit shown on the
       # Settings page, falling back to "dev" when the file is absent. The file
       # is gitignored (setup.conf writes it by hand for local builds), so the
@@ -292,7 +299,7 @@ jobs:
 
       # Version information travels as OCI labels rather than build args: the
       # Dockerfile deliberately declares no APP_VERSION/VCS_REF/BUILD_DATE args
-      # (the app reads VERSION and BUILD_INFO from disk), and passing undeclared
+      # (the app reads pyproject.toml and BUILD_INFO from disk), and passing undeclared
       # build args would only produce warnings.
       #
       # The toolchain the Dockerfile intentionally keeps rolling - the ffmpeg
@@ -418,7 +425,7 @@ jobs:
 
           version = get_version()
           build_info = get_build_info()
-          print(f"VERSION: {version}")
+          print(f"VERSION (from pyproject.toml): {version}")
           print(f"BUILD_INFO: {build_info}")
 
           expected_version = os.environ["EXPECTED_VERSION"]
@@ -1149,7 +1156,7 @@ jobs:
 
             // CHANGELOG.md is optional - without it the release body falls
             // back to the placeholder below. The heading is matched against the
-            // VERSION file verbatim, not by semver, so a release of VERSION 1.5
+            // pyproject.toml version verbatim, not by semver, so a release of 1.5
             // needs a "## [1.5] - <date>" heading; "## [1.5.0]" does not match
             // and silently yields the placeholder.
             let changelogSection = null;

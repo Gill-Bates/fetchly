@@ -79,6 +79,6 @@ def get_changelog_html() -> str:
     """Best-effort changelog HTML for templates - never raises."""
     try:
         return render_changelog_html()
-    except Exception:  # noqa: BLE001 - a broken changelog must not 500 the page
+    except Exception:
         logger.warning("Failed to render changelog", exc_info=True)
         return _ERROR_HTML

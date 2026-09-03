@@ -47,9 +47,9 @@ from __future__ import annotations
 
 import json
 import re
-from urllib.parse import urlparse
 from dataclasses import dataclass
 from typing import Any, Final
+from urllib.parse import urlparse
 
 from .cookie_status import (
     PLATFORM_COOKIE_DOMAINS,

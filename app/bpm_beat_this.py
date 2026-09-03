@@ -4,13 +4,13 @@
 # Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 #
 
-from __future__ import annotations
-
 """BPM detection using beat_this.
 
 beat_this is a state-of-the-art beat tracker from CPJKU/beat_this. BPM is
 derived from the median inter-beat interval.
 """
+
+from __future__ import annotations
 
 import logging
 import threading
@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 # Cache the model to avoid reloading on every call
 _model_lock = threading.RLock()
-_model_instance: "File2Beats | None" = None
+_model_instance: File2Beats | None = None
 
 # Minimum number of beats required for reliable BPM calculation
 _MIN_BEATS_FOR_BPM: Final[int] = 4
@@ -42,7 +42,7 @@ class BeatThisResult(NamedTuple):
     num_beats: int
 
 
-def _get_model() -> "File2Beats":
+def _get_model() -> File2Beats:
     """Return the cached File2Beats model instance (thread-safe)."""
     global _model_instance
 
@@ -168,7 +168,7 @@ def extract_bpm_beat_this(audio_path: Path) -> BeatThisResult:
 def is_beat_this_available() -> bool:
     """Check if beat_this is installed and usable."""
     try:
-        from beat_this.inference import File2Beats
+        from beat_this.inference import File2Beats  # noqa: F401  # import *is* the probe
 
         return True
     except ImportError:

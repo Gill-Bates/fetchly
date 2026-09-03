@@ -13,12 +13,13 @@ import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi.templating import Jinja2Templates
 from markupsafe import Markup, escape
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from ..db import COMPLETED_STATUSES
+from .duration import format_clock
 from .platform import detect_platform, platform_label
 
 __all__ = [
@@ -110,6 +111,7 @@ _PUBLIC_SETTING_KEYS: frozenset[str] = frozenset({
     "transcode_timeout_minutes",
     "download_max_filesize_gib",
     "download_mp4_preset",
+    "video_watermark",
     "audio_analysis_max_minutes",
     "audio_analysis_timeout_minutes",
     "share_link_max_uses",
@@ -139,8 +141,7 @@ def _format_filesize(value: int | None) -> FileSize:
         return FileSize(value="0", unit="B", display="0 B")
     for unit, divisor in _FILESIZE_UNITS:
         if value >= divisor:
-            precision = 2 if unit in {"TiB", "GiB"} else 1
-            formatted = f"{value / divisor:.{precision}f}"
+            formatted = f"{value / divisor:.1f}"
             return FileSize(value=formatted, unit=unit, display=f"{formatted} {unit}")
     return FileSize(value=str(value), unit="B", display=f"{value} B")
 
@@ -156,7 +157,9 @@ def localtime(value: str | None) -> Markup:
         local_dt = dt.astimezone(LOCAL_TZ)
         date_str = escape(f"{local_dt:%d.%m.%Y}")
         time_str = escape(f"{local_dt:%H:%M}")
-        return Markup(
+        # Both halves went through escape() above, so the only markup here is
+        # the span wrapper this filter exists to add.
+        return Markup(  # noqa: S704
             f'<span class="date-part">{date_str}</span> '
             f'<span class="time-part">{time_str}</span>'
         )
@@ -167,6 +170,11 @@ def localtime(value: str | None) -> Markup:
 def filesize(value: int | None) -> FileSize:
     """Convert bytes to a structured human-readable filesize."""
     return _format_filesize(value)
+
+
+def duration(value: Any) -> str:
+    """Render a stored duration as a clock time for a template."""
+    return format_clock(value)
 
 
 def status_class(status: str | None) -> str:
@@ -191,12 +199,12 @@ def status_icon(status: str | None) -> str:
 
 
 def platform_pill(url: str | None) -> str:
-    """Return the short platform pill label (YT / TikTok / Insta) for a URL."""
+    """Return the short platform pill label (YT / TikTok / Insta / FB) for a URL."""
     return platform_label(detect_platform(url))
 
 
 def platform_id(url: str | None) -> str:
-    """Return the platform identifier (youtube / tiktok / instagram) for a URL."""
+    """Return the platform id (youtube / tiktok / instagram / facebook) for a URL."""
     return detect_platform(url) or ""
 
 
@@ -228,6 +236,7 @@ def register_filters(templates: Jinja2Templates) -> None:
     """Register all template filters with a Jinja2Templates instance."""
     templates.env.filters["localtime"] = localtime
     templates.env.filters["filesize"] = filesize
+    templates.env.filters["duration"] = duration
     templates.env.filters["status_class"] = status_class
     templates.env.filters["status_label"] = status_label
     templates.env.filters["status_icon"] = status_icon

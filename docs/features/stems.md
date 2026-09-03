@@ -31,6 +31,23 @@ No environment variable is involved. The key lives in the database on your data 
 Disconnecting (`POST /api/lalal/auth/logout`) clears the key, the cached validation
 state, and the stored email in one write.
 
+## Remaining minutes
+
+The tile shows the processing balance of the connected account under the connect
+buttons, next to the account it belongs to: `Logged in as you@example.com - 261m 30s`,
+formatted the way Lalal.ai itself reports it.
+
+The number is a by-product of the validation call: `GET /api/lalal/status` validates the
+key against `/api/v1/limits/minutes_left/`, which answers with the balance, so no extra
+request is made for it. It is cached with the validation state (`lalalaai_minutes_left`,
+5 minutes) and refreshed on:
+
+- a finished separation, which is what spends minutes
+- `GET /api/lalal/status?force_refresh=1`, which the tile calls after you connect
+
+An account whose balance cannot be determined shows no number at all rather than `0` —
+"unknown" and "nothing left" are different answers.
+
 ## Splitting a track
 
 From a finished **audio** job, choose the stem action. Under the hood:

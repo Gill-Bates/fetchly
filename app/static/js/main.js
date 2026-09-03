@@ -6,13 +6,13 @@
 import { AUDIO_TYPE, CONFIG, DOWNLOADABLE_STATUSES, RETRYABLE_STATUSES, TERMINAL_STATUSES } from "./config.js?v=20260831b";
 import { fetchJobs, fetchResolvedThumbnail, fetchStats, submitJob, fetchVideoInfo, toErrorMessage } from "./api.js";
 import { reportWarning } from "./errors.js";
-import { createTimeoutSignal, getCsrfToken, humanSize, isValidMediaUrl, detectPlatform, platformPillLabel, PLATFORM, extractYouTubeVideoId, formatDuration, isSafeRedirect, subscribeToLalalProgress, triggerDownload } from "./utils.js";
+import { createTimeoutSignal, EMPTY_VALUE, getCsrfToken, humanSize, isValidMediaUrl, detectPlatform, platformPillLabel, PLATFORM, extractYouTubeVideoId, formatDuration, isSafeRedirect, subscribeToLalalProgress, triggerDownload } from "./utils.js";
 import { prependJob, loadMore, applyJobUpdate, getJobById, applyStoredJobTitleFilter, formatCreatedText, isMobileJobsView, buildDesktopEmptyState, buildMobileEmptyState } from "./jobs.js?v=20260901b";
 import { EVENT_NAMES, dispatchJobUpdate, setEventStreamEnabled } from "./events.js?v=20260831a";
 import { normalizeStatus } from "./ui.js?v=20260831c";
-import { showToast } from "./toast.js?v=20260901a";
+import { showToast } from "./toast.js";
 import { confirmModal } from "./confirm.js";
-import { initTrim } from "./trim.js?v=20260901c";
+import { initTrim } from "./trim.js?v=20260902a";
 
 const submitForm = document.getElementById("submitForm");
 const urlInput = document.getElementById("urlInput");
@@ -686,7 +686,9 @@ function renderPreviewSummary(info) {
         getPreviewCreator(info?.channel, info?.uploader),
         formatDuration(info?.duration),
         formatPreviewViewCount(info?.view_count),
-    ].filter(Boolean);
+        // A live stream has no length to report: drop the placeholder instead
+        // of putting a bare dash between creator and view count.
+    ].filter((part) => part && part !== EMPTY_VALUE);
     setText(metaSummary, parts.join(" • ") || "Unknown source");
 }
 
@@ -1154,6 +1156,9 @@ function populateDetailFromJob(job) {
     const qualityLabel = String(job.quality || "");
     setDetailChip("mType", typeLabel ? typeLabel.charAt(0).toUpperCase() + typeLabel.slice(1) : "");
     setDetailChip("mQuality", qualityLabel === "max" ? "Max" : qualityLabel);
+    // Stored on the job, so it is there right away - unlike the meta line
+    // below, which waits for hydrateDetailMedia() to reach the source.
+    setDetailChip("mDuration", formatDuration(job.duration_seconds));
     setDetailChip("mFileSize", humanSize(job.filesize_bytes));
     setDetailChip("mCodec", job.codec || "");
     setDetailChip("mBitrate", formatDetailBitrate(job.bitrate_kbps));
@@ -1189,7 +1194,7 @@ async function hydrateDetailMedia(job) {
         setDetailMetaLine({
             channel: info.channel,
             uploader: info.uploader,
-            duration: info.duration,
+            duration: info.duration || job.duration_seconds,
             viewCount: info.view_count,
         });
         renderDetailFormats(info.formats);
@@ -1197,7 +1202,8 @@ async function hydrateDetailMedia(job) {
         if (controller.signal.aborted) {
             return;
         }
-        setDetailMetaLine({ channel: "Metadata unavailable" });
+        // The source is unreachable, but the runtime stored on the job still is.
+        setDetailMetaLine({ channel: "Metadata unavailable", duration: job.duration_seconds });
     } finally {
         if (detailInfoAbortController === controller) {
             detailInfoAbortController = null;

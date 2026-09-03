@@ -22,6 +22,8 @@ from numbers import Real
 from typing import Any, Final
 
 SECONDS_DECIMALS: Final[int] = 1
+# EN DASH, the same placeholder EMPTY_VALUE stands for in the browser code.
+UNKNOWN_VALUE: Final[str] = "–"
 
 
 def round_seconds(value: Any) -> float | None:
@@ -38,6 +40,25 @@ def round_seconds(value: Any) -> float | None:
         return None
 
     return round(numeric_value, SECONDS_DECIMALS)
+
+
+def format_clock(value: Any) -> str:
+    """Render a seconds value as a clock time: ``4:21:30`` or ``21:30``.
+
+    Mirrors ``formatDuration()`` in app/static/js/utils.js so a duration reads
+    the same whether the server rendered it or the browser did. Returns the
+    en dash both surfaces use for "unknown".
+    """
+    rounded = round_seconds(value)
+    if rounded is None or rounded < 0:
+        return UNKNOWN_VALUE
+
+    total_seconds = int(rounded)
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes}:{seconds:02d}"
 
 
 def format_seconds(value: Any) -> str:

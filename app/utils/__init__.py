@@ -8,4 +8,4 @@
 
 from __future__ import annotations
 
-__all__ = ["banner", "version", "template_filters", "youtube"]
+__all__ = ["banner", "template_filters", "version", "youtube"]

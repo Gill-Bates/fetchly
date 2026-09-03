@@ -5,6 +5,7 @@
 
 import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 import { chromium, devices, webkit } from 'playwright';
 
@@ -128,6 +129,14 @@ async function getSettingsSourceContractMetrics() {
                 && /\.app-root--settings\s+\.setting-hint\s*\{[\s\S]*?color:\s*var\(--text-hint\)/.test(settingsStyleSource)
                 && /\.app-root--settings\s+\.setting-hint--with-icon\s*\{[\s\S]*?display:\s*inline-flex/.test(settingsStyleSource)
             );
+            const settingsStyleRules = settingsStyleSource.replace(/\/\*[\s\S]*?\*\//g, '');
+            const hintMarginRules = [...settingsStyleRules.matchAll(/([^{}]+)\{([^{}]*)\}/g)].filter(
+                ([, selector, declarations]) => /(^|[\s>+~,])\.setting-hint(?![-\w])/.test(selector)
+                    && /margin-top\s*:/.test(declarations),
+            );
+            const settingsHintSpacingContractBroken = hintMarginRules.length !== 1
+                || !/\.app-root--settings\s+\.setting-hint\s*$/.test(hintMarginRules[0]?.[1] || '')
+                || !/margin-top\s*:\s*var\(--space-1\)/.test(hintMarginRules[0]?.[2] || '');
 
             return {
                 settingsSaveToastContractBroken: !validationUsesToast
@@ -135,6 +144,7 @@ async function getSettingsSourceContractMetrics() {
                     || jsUsesInlineSaveStatus
                     || templateHasInlineSaveStatus,
                 settingsHintContractBroken: hintContractBroken || hintStyleContractBroken,
+                settingsHintSpacingContractBroken,
             };
         })();
     }
@@ -187,17 +197,13 @@ const MOTION_RESET_CSS = `
 // Media stays visible during screenshots. Hiding it changes the DOM under test
 // and makes the invisible-media check report the linter's own injected CSS.
 const VISUAL_STABILITY_CSS = '';
-const MOBILE_VISUAL_STABILITY_CSS = `
-    html {
-        -webkit-text-size-adjust: 100% !important;
-        text-size-adjust: 100% !important;
-        scrollbar-gutter: stable !important;
-    }
-
-    body {
-        overscroll-behavior: none !important;
-    }
-`;
+// Deliberately empty. The previous sheet forced -webkit-text-size-adjust,
+// overscroll-behavior and scrollbar-gutter on every mobile view, which are the
+// exact behaviours an iOS audit exists to observe: the gutter reserves width
+// that iOS (overlay scrollbars) never reserves, so every mobile measurement was
+// taken against a layout the device does not produce. Screenshot stability is
+// already handled by MOTION_RESET_CSS plus the layout-settle wait.
+const MOBILE_VISUAL_STABILITY_CSS = '';
 
 const VIEW_DEFS = [
     {
@@ -214,7 +220,7 @@ const VIEW_DEFS = [
         readySelector: '#submitForm',
         auth: true,
         device: 'desktop',
-        requiredSelectors: ['.stats-row', '#submitForm', '#jobsRenderRoot', '#jobsTable', '#wsIndicator'],
+        requiredSelectors: ['.stats-row', '#submitForm', '#jobsRenderRoot', '#jobsTable'],
     },
     {
         name: 'settings',
@@ -225,12 +231,20 @@ const VIEW_DEFS = [
         requiredSelectors: ['#settingsForm', '#lalalAuthBtn'],
     },
     {
+        name: 'mobile-login',
+        url: '/login',
+        readySelector: '#login-form',
+        auth: false,
+        device: 'mobile',
+        requiredSelectors: ['#username', '#password', '#submit-btn'],
+    },
+    {
         name: 'mobile-dashboard',
         url: '/',
         readySelector: '#submitForm',
         auth: true,
         device: 'mobile',
-        requiredSelectors: ['.stats-row', '#submitForm', '#jobsRenderRoot', '#jobsMobileList', '#showJobHistoryToggle', '#wsIndicator'],
+        requiredSelectors: ['.stats-row', '#submitForm', '#jobsRenderRoot', '#jobsMobileList', '#showJobHistoryToggle'],
     },
     {
         name: 'mobile-settings',
@@ -238,14 +252,127 @@ const VIEW_DEFS = [
         readySelector: '#settingsForm',
         auth: true,
         device: 'mobile',
-        requiredSelectors: ['#settingsForm'],
+        requiredSelectors: ['#settingsForm', '#lalalAuthBtn'],
+    },
+    // iPad portrait (768px): the narrow edge of the tablet band. The desktop
+    // table renders here, so the phone-only selectors are deliberately absent
+    // from requiredSelectors.
+    {
+        name: 'tablet-login',
+        url: '/login',
+        readySelector: '#login-form',
+        auth: false,
+        device: 'tablet',
+        requiredSelectors: ['#username', '#password', '#submit-btn'],
+    },
+    {
+        name: 'tablet-dashboard',
+        url: '/',
+        readySelector: '#submitForm',
+        auth: true,
+        device: 'tablet',
+        // 768px is inside `@media (max-width: 1024px)`, so the feed renders
+        // here exactly as it does on the phone.
+        requiredSelectors: [
+            '.stats-row',
+            '#submitForm',
+            '#jobsRenderRoot',
+            '#jobsMobileList',
+            '#showJobHistoryToggle',
+        ],
+    },
+    {
+        name: 'tablet-settings',
+        url: '/settings',
+        readySelector: '#settingsForm',
+        auth: true,
+        device: 'tablet',
+        requiredSelectors: ['#settingsForm', '#lalalAuthBtn'],
+    },
+    // iPad landscape (1024px): the wide edge, still inside (max-width: 1024px).
+    {
+        name: 'tablet-landscape-dashboard',
+        url: '/',
+        readySelector: '#submitForm',
+        auth: true,
+        device: 'tablet-landscape',
+        requiredSelectors: [
+            '.stats-row',
+            '#submitForm',
+            '#jobsRenderRoot',
+            '#jobsMobileList',
+            '#showJobHistoryToggle',
+        ],
+    },
+    {
+        name: 'tablet-landscape-settings',
+        url: '/settings',
+        readySelector: '#settingsForm',
+        auth: true,
+        device: 'tablet-landscape',
+        requiredSelectors: ['#settingsForm', '#lalalAuthBtn'],
+    },
+    // iPad Pro 11 landscape (1194px): past the compact breakpoint, so the
+    // desktop table renders - on a touch screen.
+    {
+        name: 'tablet-wide-dashboard',
+        url: '/',
+        readySelector: '#submitForm',
+        auth: true,
+        device: 'tablet-wide',
+        requiredSelectors: ['.stats-row', '#submitForm', '#jobsRenderRoot', '#jobsTable'],
+    },
+    {
+        name: 'tablet-wide-settings',
+        url: '/settings',
+        readySelector: '#settingsForm',
+        auth: true,
+        device: 'tablet-wide',
+        requiredSelectors: ['#settingsForm', '#lalalAuthBtn'],
     },
 ];
 
-const LOGIN_VIEW = VIEW_DEFS.find((view) => view.name === 'login');
-if (!LOGIN_VIEW) {
-    throw new Error("VIEW_DEFS must contain a view named 'login'");
+// Every device the invalid-login check runs on needs its own /login view;
+// falling back to the desktop one would audit the wrong viewport in silence.
+for (const required of ['desktop', 'mobile', 'tablet']) {
+    if (!VIEW_DEFS.some((view) => view.url === '/login' && view.device === required)) {
+        throw new Error(`VIEW_DEFS must contain a /login view for device '${required}'`);
+    }
 }
+
+/**
+ * Returns the login view definition for a device, so the invalid-login check
+ * runs at that device's viewport instead of silently reusing the desktop one.
+ * @param {string} device
+ * @returns {object}
+ */
+function loginViewFor(device) {
+    const view = VIEW_DEFS.find((candidate) => candidate.url === '/login' && candidate.device === device);
+    if (!view) {
+        throw new Error(`VIEW_DEFS has no /login view for device '${device}'`);
+    }
+    return view;
+}
+
+// Views whose name is the desktop variant plus a mobile counterpart. Audits
+// gated on a single view name must accept both, otherwise the WebKit run
+// silently loses coverage the desktop run has.
+const LOGIN_VIEW_NAMES = ['login', 'mobile-login', 'tablet-login'];
+const DASHBOARD_VIEW_NAMES = [
+    'dashboard',
+    'mobile-dashboard',
+    'tablet-dashboard',
+    'tablet-landscape-dashboard',
+    'tablet-wide-dashboard',
+];
+const SETTINGS_VIEW_NAMES = [
+    'settings',
+    'mobile-settings',
+    'tablet-settings',
+    'tablet-landscape-settings',
+    'tablet-wide-settings',
+];
+const JOB_DETAIL_VIEW_NAMES = ['job-detail', 'mobile-job-detail', 'tablet-job-detail'];
 
 /**
  * Returns true when urlStr belongs to the same origin as BASE_URL.
@@ -261,29 +388,119 @@ const isSameOrigin = (urlStr) => {
     }
 };
 
+/**
+ * Device profiles the audit runs against.
+ *
+ * Form factor and touch are deliberately separate axes. A tablet is touch but
+ * renders the desktop table, so a single isMobile flag cannot describe it:
+ * gating touch-target size on "is this the phone layout" would hand the iPad
+ * the 32px desktop minimum, and gating the phone DOM contracts on "does this
+ * have touch" would demand `#jobsMobileList` on a viewport that never renders
+ * it. `formFactor` answers the layout question, `hasTouch` the input one.
+ *
+ * The viewport widths matter: app/static/style.css carries a tablet band -
+ * `(min-width: 768px) and (max-width: 1024px)`, `(max-width: 1024px)`,
+ * `(min-width: 576.02px) and (max-width: 1024px)` - that neither the 390px
+ * phone nor the 1440px desktop context ever renders.
+ */
+const DEVICE_PROFILES = {
+    desktop: {
+        engine: 'chromium',
+        formFactor: 'desktop',
+        playwrightDevice: null,
+        viewport: { width: 1440, height: 1200 },
+    },
+    mobile: {
+        engine: 'webkit',
+        formFactor: 'phone',
+        playwrightDevice: 'iPhone 13',
+    },
+    tablet: {
+        engine: 'webkit',
+        formFactor: 'tablet',
+        // 768x1024: inside the compact band, so the jobs feed renders.
+        playwrightDevice: 'iPad Mini',
+    },
+    'tablet-landscape': {
+        engine: 'webkit',
+        formFactor: 'tablet',
+        // 1024x768: the exact boundary of `(max-width: 1024px)`. Off-by-one
+        // breakpoint mistakes surface here and nowhere else.
+        playwrightDevice: 'iPad Mini landscape',
+    },
+    'tablet-wide': {
+        engine: 'webkit',
+        formFactor: 'tablet',
+        // 1194x834: past the breakpoint, so the desktop table renders on a
+        // touch screen. This is the case a single isMobile flag cannot express
+        // - desktop layout, finger-sized hit areas.
+        playwrightDevice: 'iPad Pro 11 landscape',
+    },
+};
+
+// The breakpoint app/static/style.css uses to swap the desktop jobs table for
+// the mobile feed: `@media (max-width: 1024px)`. The audit derives "compact
+// layout" from the viewport rather than from the device name, so a new profile
+// lands on the right side of the contract automatically.
+const COMPACT_LAYOUT_MAX_WIDTH = 1024;
+
+/**
+ * True when the profile's viewport renders the compact (feed) layout.
+ * @param {string} device
+ * @returns {boolean}
+ */
+function profileIsCompactLayout(device) {
+    const { viewport } = createContextOptions(device);
+    return Number(viewport?.width) <= COMPACT_LAYOUT_MAX_WIDTH;
+}
+
+/**
+ * Returns the profile for a view's device, failing loudly on a typo rather
+ * than silently auditing the desktop layout.
+ * @param {string} device
+ * @returns {object}
+ */
+function deviceProfile(device) {
+    const profile = DEVICE_PROFILES[device];
+    if (!profile) {
+        throw new Error(`Unknown device '${device}'. Known: ${Object.keys(DEVICE_PROFILES).join(', ')}`);
+    }
+    return profile;
+}
+
+/** True when the profile emulates a touch screen (phone or tablet). */
+function profileHasTouch(device) {
+    return deviceProfile(device).formFactor !== 'desktop';
+}
+
 function createContextOptions(device) {
-    if (device === 'mobile') {
-        const iphone13 = devices['iPhone 13'];
+    const profile = deviceProfile(device);
+
+    // The application CSP correctly blocks inline styles. The lint runner
+    // injects its own stability stylesheet, so bypass CSP only in this
+    // isolated test context.
+    const shared = { colorScheme: 'dark', locale: 'en-US', bypassCSP: true };
+
+    if (!profile.playwrightDevice) {
         return {
-            ...iphone13,
-            viewport: { ...iphone13.viewport },
-            screen: { ...iphone13.screen },
-            colorScheme: 'dark',
-            locale: 'en-US',
-            // The application CSP correctly blocks inline styles. The lint
-            // runner injects its own stability stylesheet, so bypass CSP only
-            // in this isolated test context.
-            bypassCSP: true,
+            ...shared,
+            viewport: { ...profile.viewport },
+            screen: { ...profile.viewport },
+            deviceScaleFactor: 1,
+            hasTouch: false,
         };
     }
 
+    const descriptor = devices[profile.playwrightDevice];
+    if (!descriptor) {
+        throw new Error(`Playwright has no device descriptor named '${profile.playwrightDevice}'`);
+    }
+
     return {
-        viewport: { width: 1440, height: 1200 },
-        screen: { width: 1440, height: 1200 },
-        deviceScaleFactor: 1,
-        hasTouch: false,
-        colorScheme: 'dark',
-        bypassCSP: true,
+        ...descriptor,
+        viewport: { ...descriptor.viewport },
+        screen: { ...(descriptor.screen || descriptor.viewport) },
+        ...shared,
     };
 }
 
@@ -347,6 +564,7 @@ function formatResultSummary(result) {
     if (metrics.localOverflowIssues) parts.push(`localOverflow=${metrics.localOverflowIssues}`);
     if (metrics.brokenTitleTruncation) parts.push(`brokenEllipsis=${metrics.brokenTitleTruncation}`);
     if (metrics.mobileJobsFeedIssues) parts.push(`mobileJobsFeed=${metrics.mobileJobsFeedIssues}`);
+    if (metrics.tabletLayoutIssues) parts.push(`tabletLayout=${metrics.tabletLayoutIssues}`);
     if (metrics.mixedLayoutIssues) parts.push(`mixedLayout=${metrics.mixedLayoutIssues}`);
     if (metrics.statCardCenteringIssues) parts.push(`statCardCentering=${metrics.statCardCenteringIssues}`);
     if (metrics.containerWidthIssue) parts.push('containerWidth=bad');
@@ -395,6 +613,7 @@ function formatResultSummary(result) {
     if (metrics.settingsFieldStackContractBroken) parts.push('settingsFieldStackContractBroken=true');
     if (metrics.settingsSaveToastContractBroken) parts.push('settingsSaveToastContractBroken=true');
     if (metrics.settingsHintContractBroken) parts.push('settingsHintContractBroken=true');
+    if (metrics.settingsHintSpacingContractBroken) parts.push('settingsHintSpacingContractBroken=true');
     if (metrics.lalalMobileActionLayoutBroken) parts.push('lalalMobileActionLayoutBroken=true');
     if (metrics.trimDefaultSelectionInvalid) parts.push('trimDefaultSelection=invalid');
     if (metrics.uiCardChildExpands) parts.push(`uiCardChildExpands=${metrics.uiCardChildExpands}`);
@@ -412,6 +631,13 @@ function formatResultSummary(result) {
         parts.push(`flexMinHeightOverflowHidden=${metrics.flexMinHeightOverflowHidden.length}`);
     }
     if (metrics.settingsTabTitleGapInconsistent) parts.push('settingsTabTitleGap=inconsistent');
+    // iOS viewport hardening (2026-09-03)
+    if (metrics.iosInputZoomTargets?.length) parts.push(`iosInputZoom=${metrics.iosInputZoomTargets.length}`);
+    if (metrics.viewportUnitTraps?.length) parts.push(`vhWithoutDvh=${metrics.viewportUnitTraps.length}`);
+    if (metrics.safeAreaInsetsDisabled) parts.push('safeAreaInsetsDisabled=true');
+    if (metrics.bottomPinnedWithoutSafeArea?.length) {
+        parts.push(`bottomPinnedNoSafeArea=${metrics.bottomPinnedWithoutSafeArea.length}`);
+    }
     return parts.join(' ');
 }
 
@@ -477,6 +703,7 @@ const BASE_METRICS = Object.freeze({
     localOverflowIssues: 0,
     brokenTitleTruncation: 0,
     mobileJobsFeedIssues: 0,
+    tabletLayoutIssues: 0,
     mixedLayoutIssues: 0,
     containerWidthIssue: 0,
     statTileMobileLayoutIssues: 0,
@@ -521,6 +748,7 @@ const BASE_METRICS = Object.freeze({
     settingsFieldStackContractBroken: false,
     settingsSaveToastContractBroken: false,
     settingsHintContractBroken: false,
+    settingsHintSpacingContractBroken: false,
     lalalMobileActionLayoutBroken: false,
     trimDefaultSelectionInvalid: false,
     uiCardChildExpands: 0,
@@ -537,6 +765,11 @@ const BASE_METRICS = Object.freeze({
     emptyStateHoverHighlight: false,
     settingsTabTitleGapInconsistent: false,
     settingsTabTitleGaps: {},
+    // iOS viewport hardening (2026-09-03)
+    iosInputZoomTargets: 0,
+    viewportUnitTraps: 0,
+    safeAreaInsetsDisabled: false,
+    bottomPinnedWithoutSafeArea: 0,
 });
 
 /**
@@ -643,6 +876,27 @@ function applyMetricRules(metrics, failures, warnings) {
     if (metrics.platformBadgeGeometryIssues?.length) {
         failures.push(`platform badge geometry is not pixel-stable: ${metrics.platformBadgeGeometryIssues.length}`);
     }
+    // iOS viewport hardening (2026-09-03)
+    if (metrics.iosInputZoomTargets?.length) {
+        const worst = metrics.iosInputZoomTargets
+            .map((entry) => `${entry.id || entry.tag}@${entry.fontSize}px`)
+            .slice(0, 5)
+            .join(', ');
+        failures.push(`controls below 16px font-size zoom the page on iOS focus: ${worst}`);
+    }
+    if (metrics.safeAreaInsetsDisabled) {
+        failures.push('env(safe-area-inset-*) is used without viewport-fit=cover, so every safe-area value resolves to 0');
+    }
+    if (metrics.viewportUnitTraps?.length) {
+        const worst = metrics.viewportUnitTraps
+            .map((entry) => `${entry.selector} { ${entry.property}: ${entry.value} }`)
+            .slice(0, 3)
+            .join('; ');
+        warnings.push(`vh height without dvh/svh fallback (iOS URL-bar): ${metrics.viewportUnitTraps.length} - ${worst}`);
+    }
+    if (metrics.bottomPinnedWithoutSafeArea?.length) {
+        warnings.push(`elements pinned to the bottom edge without safe-area-inset-bottom: ${metrics.bottomPinnedWithoutSafeArea.length}`);
+    }
 }
 
 /**
@@ -742,8 +996,8 @@ async function waitForLayoutStability(page, view) {
 
         return previous;
     }, {
-        stableFrames: view.device === 'mobile' ? MOBILE_LAYOUT_STABLE_FRAMES : DESKTOP_LAYOUT_STABLE_FRAMES,
-        maxFrames: view.device === 'mobile' ? MOBILE_LAYOUT_MAX_FRAMES : DESKTOP_LAYOUT_MAX_FRAMES,
+        stableFrames: profileHasTouch(view.device) ? MOBILE_LAYOUT_STABLE_FRAMES : DESKTOP_LAYOUT_STABLE_FRAMES,
+        maxFrames: profileHasTouch(view.device) ? MOBILE_LAYOUT_MAX_FRAMES : DESKTOP_LAYOUT_MAX_FRAMES,
         epsilon: LAYOUT_STABLE_EPSILON_PX,
     });
 }
@@ -783,6 +1037,9 @@ async function collectMetrics(page, view) {
         mobileTouchTargetMin,
         desktopTouchTargetMin,
         isMobile,
+        isPhone,
+        isTouch,
+        formFactor,
         auditPlatformBadges,
         platformBadgeWidth,
         platformBadgeHeight,
@@ -865,10 +1122,10 @@ async function collectMetrics(page, view) {
         const overflowAmount = Math.max(0, document.documentElement.scrollWidth - window.innerWidth);
         const horizontalOverflow = overflowAmount > 1;
 
-        const touchTargetMin = isMobile ? mobileTouchTargetMin : desktopTouchTargetMin;
+        const touchTargetMin = isTouch ? mobileTouchTargetMin : desktopTouchTargetMin;
         const smallTouchTargets = Array.from(document.querySelectorAll(interactiveSelector))
             .filter((el) => isVisible(el) && !el.disabled)
-            .filter((el) => !isMobile || el.matches('button, .btn, [role="button"], input, select, textarea'))
+            .filter((el) => !isTouch || el.matches('button, .btn, [role="button"], input, select, textarea'))
             // Plain text links are not button-sized touch controls. Switch
             // inputs are intentionally compact; their form-check wrapper is
             // the accessible touch target.
@@ -1679,6 +1936,69 @@ async function collectMetrics(page, view) {
         // - rows render as article.job-item nodes, not table rows
         // - each job exposes exactly one visible primary action
         // - no per-row dropdown/action cluster is visible in the feed
+        // Tablet contract. app/static/style.css swaps the desktop table for
+        // the feed at `@media (max-width: 1024px)`, so an iPad sits on either
+        // side of that line depending on model and orientation - and neither
+        // the 390px phone context nor the 1440px desktop one ever renders the
+        // band in between.
+        //
+        // Below the breakpoint the feed must render (as on the phone); above
+        // it the desktop table must render and fit. Either way the shell has
+        // to use the width the device actually has.
+        const tabletLayoutIssues = formFactor === 'tablet'
+            && document.body.classList.contains('app-root--dashboard')
+            ? (() => {
+                const issues = [];
+                const compact = window.innerWidth <= 1024;
+                const mobileList = document.querySelector('#jobsMobileList');
+                const desktopView = document.querySelector('.jobs-desktop-view');
+                const displayed = (el) => Boolean(el) && window.getComputedStyle(el).display !== 'none';
+
+                if (compact) {
+                    if (!displayed(mobileList)) {
+                        issues.push({ type: 'feed-not-rendered-below-breakpoint', width: window.innerWidth });
+                    }
+                    if (displayed(desktopView)) {
+                        issues.push({ type: 'desktop-table-still-rendered-below-breakpoint', width: window.innerWidth });
+                    }
+                } else {
+                    if (!displayed(desktopView)) {
+                        issues.push({ type: 'desktop-table-not-rendered-above-breakpoint', width: window.innerWidth });
+                    }
+                    if (displayed(mobileList)) {
+                        issues.push({ type: 'feed-still-rendered-above-breakpoint', width: window.innerWidth });
+                    }
+
+                    const table = document.querySelector('#jobsTable');
+                    if (table instanceof HTMLElement) {
+                        const scroller = table.closest('.jobs-list-shell') || table.parentElement;
+                        if (scroller instanceof HTMLElement && table.scrollWidth - scroller.clientWidth > 1) {
+                            issues.push({
+                                type: 'jobs-table-overflows',
+                                overflowPx: Math.round(table.scrollWidth - scroller.clientWidth),
+                            });
+                        }
+                    }
+                }
+
+                // A max-width tuned for a 1440px desktop leaves an iPad with
+                // dead margins instead of the screen it actually has.
+                const shell = document.querySelector('.app-main') || document.querySelector('main');
+                if (shell instanceof HTMLElement) {
+                    const used = shell.getBoundingClientRect().width;
+                    if (used > 0 && used < window.innerWidth * 0.85) {
+                        issues.push({
+                            type: 'shell-underuses-tablet-width',
+                            usedPx: Math.round(used),
+                            viewportPx: window.innerWidth,
+                        });
+                    }
+                }
+
+                return issues;
+            })()
+            : [];
+
         const mobileJobsFeedIssues = isMobile && document.body.classList.contains('app-root--dashboard')
             ? (() => {
                 const issues = [];
@@ -1830,7 +2150,7 @@ async function collectMetrics(page, view) {
                 }))
             : [];
 
-        const containerWidthIssue = isMobile
+        const containerWidthIssue = isPhone
             ? (() => {
                 const container = document.querySelector('.app-shell-container');
                 if (!container || !isLayoutVisible(container)) return false;
@@ -1846,14 +2166,23 @@ async function collectMetrics(page, view) {
         // unit (e.g. "20.1 MiB") does not visually shift its icon off to
         // one side. The row also keeps the same visual gap to the navbar and
         // the submit card so it does not float low in the mobile viewport.
-        const statTileMobileLayoutIssues = isMobile
+        const statTileMobileLayoutIssues = isPhone
             ? (() => {
                 const issues = [];
-                const cards = Array.from(document.querySelectorAll('.stats-row .stat-card'))
+                // Per row, not page-wide: Settings -> System stacks the job
+                // tiles above the host tiles, and two rows of four are two
+                // correct single rows -- not one wrapped row of eight.
+                const rows = Array.from(document.querySelectorAll('.stats-row'))
+                    .filter((row) => isLayoutVisible(row));
+                const cards = rows
+                    .flatMap((row) => Array.from(row.querySelectorAll('.stat-card')))
                     .filter((card) => isLayoutVisible(card));
 
-                if (cards.length > 1) {
-                    const tops = new Set(cards.map((card) => Math.round(card.getBoundingClientRect().top)));
+                for (const row of rows) {
+                    const rowCards = Array.from(row.querySelectorAll('.stat-card'))
+                        .filter((card) => isLayoutVisible(card));
+                    if (rowCards.length < 2) continue;
+                    const tops = new Set(rowCards.map((card) => Math.round(card.getBoundingClientRect().top)));
                     if (tops.size > 1) {
                         issues.push({ type: 'stat-tiles-not-single-row', rows: tops.size });
                     }
@@ -2449,6 +2778,102 @@ async function collectMetrics(page, view) {
             };
         })();
 
+        // iOS viewport and input hardening (2026-09-03). These are the
+        // Safari-on-device behaviours that headless WebKit cannot reproduce
+        // on its own, so they are checked against the CSS source instead.
+        const iosViewportLint = (() => {
+            // iPadOS runs the same WebKit: the collapsing toolbar, the 16px
+            // input-zoom threshold and the safe-area insets all apply there too.
+            if (!isTouch) {
+                return {
+                    iosInputZoomTargets: [],
+                    viewportUnitTraps: [],
+                    safeAreaInsetsDisabled: false,
+                    bottomPinnedWithoutSafeArea: [],
+                };
+            }
+
+            // Flatten to plain style rules so @media/@supports blocks are
+            // inspected per selector instead of as one concatenated blob.
+            const styleRules = [];
+            const walk = (rules) => {
+                for (const rule of rules) {
+                    if (rule.cssRules && rule.cssRules.length) walk(rule.cssRules);
+                    else if (rule.selectorText && rule.style) {
+                        styleRules.push({ selector: rule.selectorText, cssText: rule.cssText });
+                    }
+                }
+            };
+            for (const sheet of document.styleSheets) {
+                try {
+                    const href = sheet.href ? new URL(sheet.href).pathname : '';
+                    if (href.includes('/vendor/') || href.includes('bootstrap') || isLintInjectedSheet(sheet)) continue;
+                    walk(sheet.cssRules);
+                } catch { /* cross-origin */ }
+            }
+            const allCss = styleRules.map((rule) => rule.cssText).join('\n');
+
+            // env(safe-area-inset-*) stays 0 unless the viewport meta opts into
+            // the full screen, so without viewport-fit=cover every safe-area
+            // declaration is dead code rather than notch protection.
+            const viewportMeta = document.querySelector('meta[name="viewport"]')?.getAttribute('content') || '';
+            const safeAreaInsetsDisabled = /env\(\s*safe-area-inset-/.test(allCss)
+                && !/viewport-fit\s*=\s*cover/.test(viewportMeta);
+
+            // Anything flush with the bottom edge sits under the home indicator
+            // unless the stylesheet reserves safe-area-inset-bottom somewhere.
+            const declaresSafeAreaBottom = /env\(\s*safe-area-inset-bottom/.test(allCss);
+            const bottomPinnedWithoutSafeArea = declaresSafeAreaBottom
+                ? []
+                : Array.from(document.querySelectorAll('*'))
+                    .filter((el) => isLayoutVisible(el))
+                    .filter((el) => {
+                        const style = window.getComputedStyle(el);
+                        if (style.position !== 'fixed' && style.position !== 'sticky') return false;
+                        const rect = el.getBoundingClientRect();
+                        return rect.height > 0 && Math.abs(rect.bottom - window.innerHeight) <= 2;
+                    })
+                    .map((el) => ({ tag: el.tagName.toLowerCase(), id: el.id || null }));
+
+            // vh resolves against the largest viewport on iOS Safari, so a 100vh
+            // box is taller than the visible area while the URL bar is showing.
+            // CSSOM keeps only the last declaration per property, so a rule that
+            // still reports vh has no dvh/svh fallback behind it.
+            const viewportUnitTraps = [];
+            for (const { selector, cssText } of styleRules) {
+                const body = cssText.slice(cssText.indexOf('{') + 1);
+                for (const property of ['height', 'min-height', 'max-height']) {
+                    const pattern = new RegExp(`(?:^|[;{\\s])${property}\\s*:\\s*([^;}]+)`, 'g');
+                    let match;
+                    while ((match = pattern.exec(body)) !== null) {
+                        const value = match[1].trim();
+                        if (!/\d(?:\.\d+)?vh\b/.test(value)) continue;
+                        viewportUnitTraps.push({ selector: selector.slice(0, 80), property, value });
+                    }
+                }
+            }
+
+            // Focusing a control below 16px makes iOS Safari zoom the page in
+            // and never zoom back out. Desktop-only browsers show nothing.
+            const zoomableControls = 'input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="hidden"]):not([type="submit"]):not([type="button"]), select, textarea';
+            const iosInputZoomTargets = Array.from(document.querySelectorAll(zoomableControls))
+                .filter((el) => isLayoutVisible(el))
+                .map((el) => ({
+                    tag: el.tagName.toLowerCase(),
+                    id: el.id || null,
+                    type: el.getAttribute('type') || null,
+                    fontSize: Math.round(Number.parseFloat(window.getComputedStyle(el).fontSize) * 100) / 100,
+                }))
+                .filter((entry) => Number.isFinite(entry.fontSize) && entry.fontSize < 16);
+
+            return {
+                iosInputZoomTargets,
+                viewportUnitTraps,
+                safeAreaInsetsDisabled,
+                bottomPinnedWithoutSafeArea,
+            };
+        })();
+
         const mobileTitleCellFlexRegression = (() => {
             if (!isMobile) return false;
 
@@ -2630,7 +3055,7 @@ async function collectMetrics(page, view) {
         const supportsMomentumScroll = Boolean(
             window.CSS?.supports?.('-webkit-overflow-scrolling: touch')
         );
-        const missingMomentumScroll = isMobile && supportsMomentumScroll
+        const missingMomentumScroll = isTouch && supportsMomentumScroll
             ? Array.from(document.querySelectorAll('*'))
                 .filter(el => isLayoutVisible(el))
                 .filter(el => {
@@ -3118,8 +3543,8 @@ async function collectMetrics(page, view) {
         let trimLoopDriftMs = 0;
         let trimZoomInstability = 0;
         let trimHandleTooSmall = 0;
-        let trimKeyboardMissing = [];
-        let trimKeyboardConflicts = [];
+        const trimKeyboardMissing = [];
+        const trimKeyboardConflicts = [];
         let trimInstanceLeaks = 0;
         let trimUiAudioMismatchMs = 0;
 
@@ -3242,6 +3667,7 @@ async function collectMetrics(page, view) {
             overlapIssues,
             brokenTitleTruncation,
             mobileJobsFeedIssues,
+            tabletLayoutIssues,
             mixedLayoutIssues,
             containerWidthIssue,
             statTileMobileLayoutIssues,
@@ -3293,13 +3719,28 @@ async function collectMetrics(page, view) {
             mobileTitleCellFlexRegression,
             mobileActionSurfaceContractBroken,
             mobileJobsPageScrollTrap,
+            // iOS viewport hardening (2026-09-03)
+            iosInputZoomTargets: iosViewportLint.iosInputZoomTargets,
+            viewportUnitTraps: iosViewportLint.viewportUnitTraps,
+            safeAreaInsetsDisabled: iosViewportLint.safeAreaInsetsDisabled,
+            bottomPinnedWithoutSafeArea: iosViewportLint.bottomPinnedWithoutSafeArea,
         };
     }, {
         requiredSelectors: view.requiredSelectors,
         mobileTouchTargetMin: MOBILE_TOUCH_TARGET_MIN,
         desktopTouchTargetMin: DESKTOP_TOUCH_TARGET_MIN,
-        isMobile: view.device === 'mobile',
-        auditPlatformBadges: ['dashboard', 'mobile-dashboard', 'job-detail'].includes(view.name),
+        // isMobile means "compact layout" - the viewport is inside
+        // `@media (max-width: 1024px)`, so the jobs feed renders instead of the
+        // desktop table. isTouch means "finger input". An iPad Pro in landscape
+        // is the second without being the first, which is why they are separate.
+        isMobile: profileIsCompactLayout(view.device),
+        // Phone-viewport pixel contracts (edge-to-edge shell, the four stat
+        // tiles in one row) are written against 390px and do not describe an
+        // iPad, which has its own rules in the 576-1024px band.
+        isPhone: deviceProfile(view.device).formFactor === 'phone',
+        isTouch: profileHasTouch(view.device),
+        formFactor: deviceProfile(view.device).formFactor,
+        auditPlatformBadges: [...DASHBOARD_VIEW_NAMES, ...JOB_DETAIL_VIEW_NAMES].includes(view.name),
         platformBadgeWidth: PLATFORM_BADGE_WIDTH_PX,
         platformBadgeHeight: PLATFORM_BADGE_HEIGHT_PX,
         platformBadgeIconSize: PLATFORM_BADGE_ICON_SIZE_PX,
@@ -3344,7 +3785,7 @@ async function openView(page, view, replacements = {}) {
             element.dataset.uiLintInjected = 'true';
         }).catch(() => { });
     }
-    if (view.device === 'mobile') {
+    if (profileHasTouch(view.device) && MOBILE_VISUAL_STABILITY_CSS) {
         const style = await page.addStyleTag({ content: MOBILE_VISUAL_STABILITY_CSS });
         await style.evaluate((element) => {
             element.dataset.uiLintInjected = 'true';
@@ -3364,7 +3805,7 @@ async function openView(page, view, replacements = {}) {
  * @returns {Promise<{footerHistoryTransitionBroken: boolean, footerHistoryTransitionStates: object[]}>}
  */
 async function auditFooterHistoryToggle(page, view) {
-    if (!['dashboard', 'mobile-dashboard'].includes(view.name)) {
+    if (!DASHBOARD_VIEW_NAMES.includes(view.name)) {
         return {
             footerHistoryTransitionBroken: false,
             footerHistoryTransitionStates: [],
@@ -3493,7 +3934,7 @@ async function auditEmptyStateHover(page, view) {
  * @returns {Promise<{settingsTabTitleGapInconsistent: boolean, settingsTabTitleGaps: object}>}
  */
 async function auditSettingsTabTitleGap(page, view) {
-    if (view.name !== 'settings') {
+    if (!SETTINGS_VIEW_NAMES.includes(view.name)) {
         return { settingsTabTitleGapInconsistent: false, settingsTabTitleGaps: {} };
     }
 
@@ -3511,14 +3952,18 @@ async function auditSettingsTabTitleGap(page, view) {
         await tabButton.click();
         await page.waitForTimeout(350);
 
-        // eslint-disable-next-line no-await-in-loop
+         
         const gap = await page.evaluate((id) => {
             const panel = document.getElementById(id);
             if (!panel) return null;
             const title = panel.querySelector('h2, .settings-panel-title');
             if (!title) return null;
             const titleRect = title.getBoundingClientRect();
-            const next = title.nextElementSibling;
+            // Skip siblings that render nothing -- the System tab's job-stat
+            // row is display:none above 768px, and measuring its zeroed rect
+            // would report a nonsense gap instead of the visible one.
+            let next = title.nextElementSibling;
+            while (next && next.getClientRects().length === 0) next = next.nextElementSibling;
             if (!next) return null;
             const nextRect = next.getBoundingClientRect();
             return Math.round((nextRect.top - titleRect.bottom) * 100) / 100;
@@ -3543,11 +3988,12 @@ async function auditSettingsTabTitleGap(page, view) {
  * @returns {Promise<{failures: string[], warnings: string[], metrics: object}>}
  */
 async function auditTrimModal(page, view) {
-    if (view.name !== 'dashboard') {
+    if (!DASHBOARD_VIEW_NAMES.includes(view.name)) {
         return { failures: [], warnings: [], metrics: {} };
     }
 
-    const trigger = page.locator('[data-action="open-trim"]').first();
+    const actionSurface = profileIsCompactLayout(view.device) ? '#jobsMobileList' : '#jobsTable';
+    const trigger = page.locator(`${actionSurface} [data-action="open-trim"]`).first();
     try {
         await trigger.waitFor({ state: 'attached', timeout: 3000 });
     } catch {
@@ -3557,6 +4003,33 @@ async function auditTrimModal(page, view) {
             metrics: {},
         };
     }
+
+    // Finished audio jobs live in the Job History section, which is collapsed
+    // by default on mobile. The trigger is then attached but zero-sized, so the
+    // dropdown click would time out. Expand history first and restore it after,
+    // otherwise the screenshot pair no longer matches the view's normal state.
+    const historyToggle = page.locator('#showJobHistoryToggle');
+    let historyExpandedByAudit = false;
+    if (!await trigger.isVisible().catch(() => false) && await historyToggle.count() > 0) {
+        historyExpandedByAudit = await page.evaluate(() => {
+            const input = document.querySelector('#showJobHistoryToggle');
+            if (!(input instanceof HTMLInputElement) || input.checked) return false;
+            input.click();
+            return true;
+        }).catch(() => false);
+        if (historyExpandedByAudit) {
+            await page.waitForTimeout(400);
+        }
+    }
+
+    const restoreHistory = async () => {
+        if (!historyExpandedByAudit) return;
+        await page.evaluate(() => {
+            const input = document.querySelector('#showJobHistoryToggle');
+            if (input instanceof HTMLInputElement && input.checked) input.click();
+        }).catch(() => { });
+        await page.waitForTimeout(400);
+    };
 
     let trimKeyboardMissing = [];
     let trimProbeInstalled = false;
@@ -3638,6 +4111,7 @@ async function auditTrimModal(page, view) {
 
         await page.locator('#trimModal .btn-close').click().catch(() => { });
         await page.locator('#trimModal.show').waitFor({ state: 'hidden', timeout: 5000 }).catch(() => { });
+        await restoreHistory();
         return {
             failures: [],
             warnings: [],
@@ -3658,6 +4132,7 @@ async function auditTrimModal(page, view) {
             }).catch(() => { });
         }
         await page.locator('#trimModal .btn-close').click().catch(() => { });
+        await restoreHistory();
         return {
             failures: [`trim modal interaction failed: ${error instanceof Error ? error.message : String(error)}`],
             warnings: [],
@@ -3757,23 +4232,26 @@ async function discoverJobId(browser, storageState) {
  * message. Skipped automatically when authentication is disabled.
  * @param {import('playwright').Browser} browser
  * @param {boolean} loginRequired
+ * @param {'desktop'|'mobile'} [device]
  * @returns {Promise<object>}
  */
-async function runInvalidLoginCheck(browser, loginRequired) {
+async function runInvalidLoginCheck(browser, loginRequired, device = 'desktop') {
+    const resultName = device === 'desktop' ? 'login-error' : `${device}-login-error`;
+
     if (!loginRequired) {
         return buildSkippedResult(
-            'login-error',
+            resultName,
             `${BASE_URL}/login`,
             'login is disabled; skipped invalid-login check',
         );
     }
 
-    const context = await browser.newContext(createContextOptions('desktop'));
+    const context = await browser.newContext(createContextOptions(device));
     const page = await context.newPage();
     const stopCollecting = collectConsoleAndNetwork(page);
 
     try {
-        await openView(page, LOGIN_VIEW);
+        await openView(page, loginViewFor(device));
         await page.fill('#username', USERNAME);
         await page.fill('#password', `${PASSWORD}__ui_lint_invalid`);
         await page.click('#submit-btn');
@@ -3816,7 +4294,7 @@ async function runInvalidLoginCheck(browser, loginRequired) {
         warnings.push(...externalWarnings);
 
         return {
-            name: 'login-error',
+            name: resultName,
             url: `${BASE_URL}/login`,
             failures,
             warnings,
@@ -3864,7 +4342,11 @@ async function runView(browser, storageState, view, replacements = {}) {
             };
         const settingsSourceContracts = viewAuditsSettings(view)
             ? await getSettingsSourceContractMetrics()
-            : { settingsSaveToastContractBroken: false, settingsHintContractBroken: false };
+            : {
+                settingsSaveToastContractBroken: false,
+                settingsHintContractBroken: false,
+                settingsHintSpacingContractBroken: false,
+            };
         const metrics = {
             ...runtimeMetrics,
             ...footerHistoryAudit,
@@ -3983,6 +4465,10 @@ async function runView(browser, storageState, view, replacements = {}) {
         if (metrics.brokenTitleTruncation?.length) {
             failures.push(`broken title truncation: ${metrics.brokenTitleTruncation.length}`);
         }
+        if (metrics.tabletLayoutIssues?.length) {
+            const kinds = metrics.tabletLayoutIssues.map((issue) => issue.type).join(', ');
+            failures.push(`tablet layout issues (768-1024px band): ${kinds}`);
+        }
         if (metrics.mobileJobsFeedIssues?.length) {
             failures.push(`mobile jobs feed layout issues: ${metrics.mobileJobsFeedIssues.length}`);
         }
@@ -4094,6 +4580,9 @@ async function runView(browser, storageState, view, replacements = {}) {
         if (metrics.settingsHintContractBroken) {
             failures.push('settings explanation hints must use the info-icon hint style');
         }
+        if (metrics.settingsHintSpacingContractBroken) {
+            failures.push('settings explanation hints must share the global 4px spacing rule');
+        }
         if (metrics.lalalMobileActionLayoutBroken) {
             failures.push('Lalal mobile actions must use one equal two-column row');
         }
@@ -4177,6 +4666,7 @@ async function runView(browser, storageState, view, replacements = {}) {
                 localOverflowIssues: metrics.localOverflowIssues?.length || 0,
                 brokenTitleTruncation: metrics.brokenTitleTruncation?.length || 0,
                 mobileJobsFeedIssues: metrics.mobileJobsFeedIssues?.length || 0,
+                tabletLayoutIssues: metrics.tabletLayoutIssues?.length || 0,
                 statCardCenteringIssues: metrics.statCardCenteringIssues?.length || 0,
                 mixedLayoutIssues: metrics.mixedLayoutIssues?.length || 0,
                 containerWidthIssue: metrics.containerWidthIssue ? 1 : 0,
@@ -4227,6 +4717,7 @@ async function runView(browser, storageState, view, replacements = {}) {
                 settingsFieldStackContractBroken: metrics.settingsFieldStackContractBroken || false,
                 settingsSaveToastContractBroken: metrics.settingsSaveToastContractBroken || false,
                 settingsHintContractBroken: metrics.settingsHintContractBroken || false,
+                settingsHintSpacingContractBroken: metrics.settingsHintSpacingContractBroken || false,
                 settingsTabTitleGapInconsistent: metrics.settingsTabTitleGapInconsistent || false,
                 settingsTabTitleGaps: metrics.settingsTabTitleGaps || {},
                 lalalMobileActionLayoutBroken: metrics.lalalMobileActionLayoutBroken || false,
@@ -4249,6 +4740,10 @@ async function runView(browser, storageState, view, replacements = {}) {
                 mobileTitleCellFlexRegression: metrics.mobileTitleCellFlexRegression || false,
                 mobileActionSurfaceContractBroken: metrics.mobileActionSurfaceContractBroken || false,
                 emptyStateHoverHighlight: metrics.emptyStateHoverHighlight || false,
+                iosInputZoomTargets: metrics.iosInputZoomTargets?.length || 0,
+                viewportUnitTraps: metrics.viewportUnitTraps?.length || 0,
+                safeAreaInsetsDisabled: metrics.safeAreaInsetsDisabled || false,
+                bottomPinnedWithoutSafeArea: metrics.bottomPinnedWithoutSafeArea?.length || 0,
             },
             // Keep actionable element-level details in the JSON report while
             // retaining the compact counters above for console output.
@@ -4264,8 +4759,12 @@ async function runView(browser, storageState, view, replacements = {}) {
                 importantViolations: metrics.importantAbuse?.violations,
                 unguardedAnimations: metrics.unguardedAnimations,
                 mobileJobsFeedIssues: metrics.mobileJobsFeedIssues,
+                tabletLayoutIssues: metrics.tabletLayoutIssues,
                 statTileMobileLayoutIssues: metrics.statTileMobileLayoutIssues,
                 platformBadgeGeometryIssues: metrics.platformBadgeGeometryIssues,
+                iosInputZoomTargets: metrics.iosInputZoomTargets,
+                viewportUnitTraps: metrics.viewportUnitTraps,
+                bottomPinnedWithoutSafeArea: metrics.bottomPinnedWithoutSafeArea,
             },
             screenshots: {
                 first: shots.shotA,
@@ -4287,7 +4786,13 @@ async function main() {
     ensureDir(SCREENSHOT_DIR);
 
     const browser = await chromium.launch({ headless: true });
-    let mobileBrowser;
+    let webkitBrowser;
+
+    // Engine follows the device profile: Chromium for the desktop context,
+    // WebKit for every touch profile, since that is what iOS and iPadOS run.
+    const browserFor = (device) => (
+        deviceProfile(device).engine === 'webkit' ? webkitBrowser : browser
+    );
 
     try {
         const loginRequired = await detectLoginRequired();
@@ -4296,14 +4801,15 @@ async function main() {
                 'UI_LINT_USERNAME and UI_LINT_PASSWORD are required when login is enabled',
             );
         }
-        mobileBrowser = await webkit.launch({ headless: true });
+        webkitBrowser = await webkit.launch({ headless: true });
         const authState = loginRequired ? await createAuthState(browser) : {};
-        const firstJobId = loginRequired
-            ? process.env.UI_LINT_JOB_ID || await discoverJobId(browser, authState)
-            : null;
+        const firstJobId = process.env.UI_LINT_JOB_ID
+            || await discoverJobId(browser, authState);
         const results = [];
 
-        results.push(await runInvalidLoginCheck(browser, loginRequired));
+        results.push(await runInvalidLoginCheck(browser, loginRequired, 'desktop'));
+        results.push(await runInvalidLoginCheck(webkitBrowser, loginRequired, 'mobile'));
+        results.push(await runInvalidLoginCheck(webkitBrowser, loginRequired, 'tablet'));
 
         const concurrency = Math.max(1, envInt('UI_LINT_CONCURRENCY', 2));
         const queue = VIEW_DEFS.map((view, index) => ({ view, index }));
@@ -4312,7 +4818,7 @@ async function main() {
             while (queue.length) {
                 const item = queue.shift();
                 if (!item) break;
-                if (item.view.name === 'login' && !loginRequired) {
+                if (LOGIN_VIEW_NAMES.includes(item.view.name) && !loginRequired) {
                     parallelResults[item.index] = buildSkippedResult(
                         item.view.name,
                         `${BASE_URL}${item.view.url}`,
@@ -4320,7 +4826,7 @@ async function main() {
                     );
                     continue;
                 }
-                const browserForView = item.view.device === 'mobile' ? mobileBrowser : browser;
+                const browserForView = browserFor(item.view.device);
                 parallelResults[item.index] = await runViewSafely(browserForView, authState, item.view);
             }
         });
@@ -4328,14 +4834,23 @@ async function main() {
         results.push(...parallelResults.filter(Boolean));
 
         if (firstJobId) {
-            results.push(await runViewSafely(browser, authState, {
-                name: 'job-detail',
+            const jobDetailView = {
                 url: '/job/:jobId',
                 readySelector: '#status',
                 auth: true,
-                device: 'desktop',
                 requiredSelectors: ['#status', '#message'],
-            }, { jobId: firstJobId }));
+            };
+            for (const [name, device] of [
+                ['job-detail', 'desktop'],
+                ['mobile-job-detail', 'mobile'],
+                ['tablet-job-detail', 'tablet'],
+            ]) {
+                results.push(await runViewSafely(browserFor(device), authState, {
+                    ...jobDetailView,
+                    name,
+                    device,
+                }, { jobId: firstJobId }));
+            }
         }
 
         const totals = results.reduce((acc, result) => {
@@ -4378,14 +4893,24 @@ async function main() {
             console.error('Browser cleanup failed:', closeErr);
         }
         try {
-            await mobileBrowser?.close();
+            await webkitBrowser?.close();
         } catch (closeErr) {
             console.error('WebKit cleanup failed:', closeErr);
         }
     }
 }
 
-main().catch((error) => {
-    console.error(error instanceof Error ? error.stack || error.message : String(error));
-    process.exit(1);
-});
+// Exported so tests/js can assert the device model without launching browsers.
+export { DEVICE_PROFILES, VIEW_DEFS, COMPACT_LAYOUT_MAX_WIDTH, createContextOptions, deviceProfile, profileHasTouch, profileIsCompactLayout };
+
+// Only audit when run as a program. Importing the module (from a test, or to
+// reuse the registry) must not start Playwright.
+const invokedDirectly = process.argv[1]
+    && import.meta.url === pathToFileURL(process.argv[1]).href;
+
+if (invokedDirectly) {
+    main().catch((error) => {
+        console.error(error instanceof Error ? error.stack || error.message : String(error));
+        process.exit(1);
+    });
+}

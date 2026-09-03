@@ -98,7 +98,7 @@ cd fetchly
 python3.13 -m venv .venv
 source .venv/bin/activate
 
-pip install -r requirements.txt
+pip install --extra-index-url https://download.pytorch.org/whl/cpu -e .
 pip install yt-dlp yt-dlp-ejs
 
 export FETCHLY_SECRET_KEY="$(openssl rand -base64 32)"

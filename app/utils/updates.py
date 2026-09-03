@@ -141,8 +141,9 @@ def _is_newer(latest: str | None, current: str | None) -> bool:
 
 # Hard cap on pages walked per component so one release-happy repo cannot
 # blow out the total request budget in _get_latest_versions (see the
-# asyncio.timeout there). 3 pages * 50 = 150 releases, comfortably more than
-# any of the configured repos has ever published.
+# asyncio.timeout there). Shared by both walkers, which use different page
+# sizes: 3 x 50 = 150 releases (_fetch_latest_release) and 3 x 100 = 300 tags
+# (_fetch_latest_tag) - comfortably more than any configured repo has published.
 _MAX_RELEASE_PAGES = 3
 # GitHub's release and tag lists are normally only a few KiB. The limit leaves
 # generous room for valid metadata while keeping an upstream response from
@@ -460,10 +461,10 @@ def _write_cache_file(entry: dict[str, Any]) -> None:
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 json.dump(entry, handle)
-            os.replace(temp_name, path)
+            Path(temp_name).replace(path)
         except BaseException:
             with contextlib.suppress(OSError):
-                os.unlink(temp_name)
+                Path(temp_name).unlink()
             raise
     except OSError as exc:
         logger.debug("Unable to persist update cache to %s: %s", path, exc)

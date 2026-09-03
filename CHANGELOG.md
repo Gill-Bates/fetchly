@@ -1,3 +1,30 @@
+## [1.2.0] - 2026-09-03
+
+- ``New`` Optional fetchly watermark on downloaded videos (Settings → General → Downloads), on by default; free for capped qualities, adds an encoding pass on `max`.
+- ``New`` Parallel download fragments now have an `Automatic` mode that picks 2-8 from host CPU and memory; 1-16 fixed still available.
+- ``New`` Track length shown in the job list, detail dialog, and job page, updating while the download runs.
+- ``New`` Remaining Lalal.ai processing balance shown in Settings → Integrations.
+- ``New`` Configurable session idle timeout in Settings → Security (1-1440 min).
+- ``New`` Details button added to the download options menu.
+- ``New`` On phones the four stat tiles moved from above the download form to the top of Settings → System.
+- ``New`` The job list marks the media type with a movie or music icon instead of the words "Video"/"Audio".
+- ``Fix`` Audio rows no longer show a redundant quality label; audio always downloads the best available quality.
+- ``Fix`` Repeating the same notification no longer stacks copies in the corner; the visible one's dismiss timer just restarts.
+- ``Fix`` Fewer "database is locked" errors under heavy concurrent use.
+- ``Fix`` The video watermark renders reliably when the bundled font check would previously have raced and skipped it.
+- ``Fix`` Unknown track lengths show clearly instead of `0:00` or a blank field.
+- ``Fix`` Trim view no longer draws a second, cut-off waveform, and the playback cursor and progress highlight are back.
+- ``Fix`` Changing the public hostname now confirms the save.
+- ``Fix`` Settings and Lalal.ai errors always show a readable message.
+- ``Fix`` Cookie tiles state plainly whether signed-in downloads will work ("Ready", "Needs update", "Not set up").
+- ``Fix`` On iPad, tapping a Settings field or the job search box no longer zooms the page in with no way back out, and the Settings controls are touch-sized there as they already were on phones.
+- ``Security`` Admin username and public-hostname fields reject values with a hidden trailing newline.
+- ``Security`` Form submissions on a dropped connection are rejected outright instead of being processed with only part of their data.
+
+
+<details markdown="1">
+<summary>Previous versions...</summary>
+
 ## [1.1.1] - 2026-09-02
 
 - ``New`` Tune the download engine from the app instead of environment variables: download workers, download and transcode timeouts, and maximum input size under Settings → General → Runtime limits. A changed worker count applies after the next restart, the other limits apply to new jobs right away.
@@ -7,9 +34,6 @@
 - ``Fix`` Cookie tiles list their details as separate chips (cookie count and domain, expiry, last update), and badges that carry information rather than a status now share one consistent style.
 - ``Security`` Session cookies stay marked secure when fetchly runs behind an HTTPS reverse proxy that forwards plain HTTP.
 - ``Security`` The stored cookie folder `data/cookies/` is owner-only, and an existing folder left readable by others is tightened on startup.
-
-<details markdown="1">
-<summary>Previous versions...</summary>
 
 ## [1.1.0] - 2026-09-01
 

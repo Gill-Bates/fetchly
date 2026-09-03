@@ -18,14 +18,15 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..db import get_settings
 from ..common.rate_limit import limiter
+from ..db import get_settings
 from ..session import (
     SESSION_COOKIE,
     create_session,
-    validate_session,
-    set_session_cookie,
     delete_session_cookie,
+    get_cached_authentication_enabled,
+    set_session_cookie,
+    validate_session,
 )
 from ..utils.hidden_captcha import (
     HONEYPOT_FIELD_NAME,
@@ -57,7 +58,7 @@ _CAPTCHA_REJECTED_MESSAGE = (
 LOCAL_USER: Final = "local"
 
 # Module-level state (set during init)
-_templates: "Jinja2Templates | None" = None
+_templates: Jinja2Templates | None = None
 _SECRET_KEY: str = ""
 
 
@@ -68,7 +69,7 @@ def _login_template_context(request: Request, **extra: object) -> dict[str, obje
     return context
 
 
-def init_auth(templates: "Jinja2Templates", secret_key: str) -> None:
+def init_auth(templates: Jinja2Templates, secret_key: str) -> None:
     """Initialize the auth module with required dependencies.
 
     Must be called before routes are used. There is deliberately no bootstrap
@@ -82,17 +83,17 @@ def init_auth(templates: "Jinja2Templates", secret_key: str) -> None:
 
 def _derive_salt(username: str) -> bytes:
     """Derive a salt from the secret key and username."""
-    return sha256(f"{_SECRET_KEY}:{username}:salt".encode("utf-8")).digest()
+    return sha256(f"{_SECRET_KEY}:{username}:salt".encode()).digest()
 
 
 def _derive_pepper() -> str:
     """Derive a pepper from the secret key."""
-    return sha256(f"{_SECRET_KEY}:pepper".encode("utf-8")).hexdigest()
+    return sha256(f"{_SECRET_KEY}:pepper".encode()).hexdigest()
 
 
 def hash_password(username: str, password: str) -> str:
     """Hash a password using PBKDF2-HMAC-SHA256."""
-    peppered = f"{password}:{_derive_pepper()}".encode("utf-8")
+    peppered = f"{password}:{_derive_pepper()}".encode()
     return pbkdf2_hmac("sha256", peppered, _derive_salt(username), 200_000).hex()
 
 
@@ -157,15 +158,16 @@ def current_user(request: Request) -> str | None:
 def is_authentication_enabled() -> bool:
     """Return whether the application requires a login.
 
-    Fail closed when the setting cannot be read: authentication remains
-    required if a database/storage problem prevents loading the setting.
+    Reads the in-memory session-settings cache rather than sqlite directly:
+    this is called from ``current_user()``, which async route handlers invoke
+    inline (not through ``Depends``) on every HTML page and SSE tick, so a
+    blocking database read here would run on the event loop. The cache is
+    refreshed synchronously at startup and on every settings write (see
+    app/session.py::refresh_session_settings_cache), and periodically in the
+    background, so it fails closed by default and never lags a local change
+    by more than app/main.py's refresh interval.
     """
-    try:
-        settings = get_settings()
-    except Exception:
-        logger.exception("Unable to load authentication mode")
-        return True
-    return bool(settings.get("enable_authentication", False))
+    return get_cached_authentication_enabled()
 
 
 def require_user(request: Request) -> str:
@@ -199,7 +201,7 @@ def require_html_auth(request: Request) -> RedirectResponse | None:
     return RedirectResponse(url="/login", status_code=303)
 
 
-def _require_templates() -> "Jinja2Templates":
+def _require_templates() -> Jinja2Templates:
     if _templates is None:
         raise RuntimeError("Auth module not initialized. Call init_auth() before using routes.")
     return _templates
@@ -271,7 +273,7 @@ async def login(request: Request, body: LoginRequest):
             status_code=401,
             content={"ok": False, "detail": "Invalid credentials"},
         )
-    
+
     token = create_session(body.username)
     response = JSONResponse(content={"ok": True, "redirect": "/"})
     set_session_cookie(response, token, request)

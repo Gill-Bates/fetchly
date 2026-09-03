@@ -6,7 +6,10 @@
 import { CONFIG } from "./config.js?v=20260831b";
 import { fetchJob, fetchJobs } from "./api.js";
 import { reportError, reportWarning } from "./errors.js";
-import { applyJobUpdate, upsertJobSnapshot } from "./jobs.js?v=20260831a";
+// Must stay byte-identical to the specifier main.js uses: a different query
+// string is a different module URL, and the job store would be loaded twice
+// with two separate states.
+import { applyJobUpdate, upsertJobSnapshot } from "./jobs.js?v=20260901b";
 
 export const EVENT_NAMES = Object.freeze({
     JOB_UPDATE: "fetchly:job-update",

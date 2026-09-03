@@ -11,12 +11,19 @@
 
 {% block content %}
 
+{% from "macros/stats.html" import dashboard_stats_row %}
+
 <div>
     <ul class="nav settings-tabs mb-4" id="settingsTabs" role="tablist">
         <li class="nav-item" role="presentation">
             <button class="nav-link active" id="settingsGeneralTab" data-bs-toggle="tab"
                 data-bs-target="#settingsGeneralPanel" type="button" role="tab" aria-controls="settingsGeneralPanel"
                 aria-selected="true">General</button>
+        </li>
+        <li class="nav-item" role="presentation">
+            <button class="nav-link" id="settingsProcessingTab" data-bs-toggle="tab"
+                data-bs-target="#settingsProcessingPanel" type="button" role="tab"
+                aria-controls="settingsProcessingPanel" aria-selected="false">Processing</button>
         </li>
         <li class="nav-item" role="presentation">
             <button class="nav-link" id="settingsIntegrationsTab" data-bs-toggle="tab"
@@ -107,45 +114,6 @@
                     </div>
                     <div class="settings-grid-item settings-grid-item--titled">
                         <h2 class="settings-panel-title fw-semibold mb-3 d-flex align-items-center gap-1">
-                            <span class="material-symbols-outlined icon-inline" aria-hidden="true">download</span>
-                            Downloads
-                        </h2>
-                        <div class="ui-card h-100">
-                            <div>
-                                <div class="settings-section">
-                                    <div class="mb-3">
-                                        <label for="concurrentFragments" class="form-label">Parallel fragments per
-                                            download</label>
-                                        <input type="number" class="form-control ui-input" id="concurrentFragments"
-                                            name="download_concurrent_fragments" min="1" max="16"
-                                            value="{{ settings.download_concurrent_fragments | default(3) }}">
-                                        <small class="setting-hint setting-hint--with-icon">
-                                            <span class="material-symbols-outlined setting-hint-icon"
-                                                aria-hidden="true">info</span>
-                                            <span>Speeds up DASH/HLS downloads; uses more CPU and bandwidth.</span>
-                                        </small>
-                                    </div>
-                                    <div class="mt-3 pt-3 border-top">
-                                        <div class="form-check form-switch">
-                                            <input class="form-check-input" type="checkbox" role="switch" id="mp4Preset"
-                                                name="download_mp4_preset" {{ 'checked' if settings.download_mp4_preset
-                                                | default(true) else '' }}>
-                                            <label class="form-check-label" for="mp4Preset">
-                                                Prefer H.264/AAC for max quality
-                                            </label>
-                                        </div>
-                                        <small class="setting-hint setting-hint--with-icon">
-                                            <span class="material-symbols-outlined setting-hint-icon"
-                                                aria-hidden="true">info</span>
-                                            <span>Improves compatibility by skipping VP9/AV1.</span>
-                                        </small>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                    <div class="settings-grid-item settings-grid-item--titled">
-                        <h2 class="settings-panel-title fw-semibold mb-3 d-flex align-items-center gap-1">
                             <span class="material-symbols-outlined icon-inline" aria-hidden="true">share</span>
                             Sharing
                         </h2>
@@ -211,7 +179,7 @@
                                         <small class="setting-hint setting-hint--with-icon" id="shareLinkMaxUsesHint">
                                             <span class="material-symbols-outlined setting-hint-icon"
                                                 aria-hidden="true">info</span>
-                                            <span>0 is unlimited. Limits apply only to new links.</span>
+                                            <span>Limits apply only to new links.</span>
                                         </small>
                                     </div>
                                 </div>
@@ -231,9 +199,12 @@
                                             <label for="downloadWorkerCount" class="form-label">Download workers</label>
                                             <select class="form-select ui-input" id="downloadWorkerCount"
                                                 name="download_worker_count">
-                                                <option value="0" {{ 'selected' if settings.download_worker_count | default(0) == 0 else '' }}>Automatic</option>
+                                                <option value="0" {{ 'selected' if settings.download_worker_count |
+                                                    default(0)==0 else '' }}>Automatic</option>
                                                 {% for count in range(1, 9) %}
-                                                <option value="{{ count }}" {{ 'selected' if settings.download_worker_count | default(0) == count else '' }}>{{ count }}</option>
+                                                <option value="{{ count }}" {{ 'selected' if
+                                                    settings.download_worker_count | default(0)==count else '' }}>{{
+                                                    count }}</option>
                                                 {% endfor %}
                                             </select>
                                             <small class="setting-hint setting-hint--with-icon">
@@ -253,22 +224,112 @@
                                                     value="{{ settings.download_timeout_minutes | default(60) }}">
                                             </div>
                                             <div class="col-sm-6">
-                                                <label for="transcodeTimeoutMinutes" class="form-label">Transcode timeout
+                                                <label for="transcodeTimeoutMinutes" class="form-label">Transcode
+                                                    timeout
                                                     (min)</label>
                                                 <input type="number" class="form-control ui-input"
-                                                    id="transcodeTimeoutMinutes" name="transcode_timeout_minutes" min="1"
-                                                    max="480"
+                                                    id="transcodeTimeoutMinutes" name="transcode_timeout_minutes"
+                                                    min="1" max="480"
                                                     value="{{ settings.transcode_timeout_minutes | default(120) }}">
                                             </div>
                                         </div>
                                         <div>
                                             <label for="downloadMaxFilesizeGiB" class="form-label">Maximum input size
                                                 (GiB)</label>
-                                            <input type="number" class="form-control ui-input" id="downloadMaxFilesizeGiB"
-                                                name="download_max_filesize_gib" min="1" max="100"
-                                                value="{{ settings.download_max_filesize_gib | default(4) }}">
+                                            <input type="number" class="form-control ui-input"
+                                                id="downloadMaxFilesizeGiB" name="download_max_filesize_gib" min="1"
+                                                max="100" value="{{ settings.download_max_filesize_gib | default(4) }}">
                                         </div>
                                     </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <section class="settings-group tab-pane fade" id="settingsProcessingPanel" role="tabpanel"
+                aria-labelledby="settingsProcessingTab" tabindex="0">
+                <div class="settings-grid settings-grid--cols-2">
+                    <div class="settings-grid-item settings-grid-item--titled">
+                        <h2 class="settings-panel-title fw-semibold mb-3 d-flex align-items-center gap-1">
+                            <span class="material-symbols-outlined icon-inline" aria-hidden="true">download</span>
+                            Downloads
+                        </h2>
+                        <div class="ui-card h-100">
+                            <div>
+                                <div class="settings-section">
+                                    <div class="mb-3">
+                                        <label for="concurrentFragments" class="form-label">Parallel fragments per
+                                            download</label>
+                                        <select class="form-select ui-input" id="concurrentFragments"
+                                            name="download_concurrent_fragments">
+                                            {# The number is what "Automatic" resolves to on this host right
+                                            now (governor.recommended_concurrent_fragments()), not a fixed
+                                            default. #}
+                                            <option value="0" {{ 'selected' if settings.download_concurrent_fragments |
+                                                default(0)==0 else '' }}>Automatic ({{ auto_concurrent_fragments
+                                                }})</option>
+                                            {% for count in range(1, 17) %}
+                                            <option value="{{ count }}" {{ 'selected' if
+                                                settings.download_concurrent_fragments | default(0)==count else '' }}>{{
+                                                count }}</option>
+                                            {% endfor %}
+                                        </select>
+                                        <small class="setting-hint setting-hint--with-icon">
+                                            <span class="material-symbols-outlined setting-hint-icon"
+                                                aria-hidden="true">info</span>
+                                            <span>Higher values use more CPU.</span>
+                                        </small>
+                                    </div>
+                                    <div class="mt-3 pt-3 border-top">
+                                        <div class="form-check form-switch">
+                                            <input class="form-check-input" type="checkbox" role="switch" id="mp4Preset"
+                                                name="download_mp4_preset" {{ 'checked' if settings.download_mp4_preset
+                                                | default(true) else '' }}>
+                                            <label class="form-check-label" for="mp4Preset">
+                                                Prefer H.264/AAC for max quality
+                                            </label>
+                                        </div>
+                                        <small class="setting-hint setting-hint--with-icon">
+                                            <span class="material-symbols-outlined setting-hint-icon"
+                                                aria-hidden="true">info</span>
+                                            <span>Improves compatibility by skipping VP9/AV1.</span>
+                                        </small>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="settings-grid-item settings-grid-item--titled">
+                        <h2 class="settings-panel-title fw-semibold mb-3 d-flex align-items-center gap-1">
+                            <span class="material-symbols-outlined icon-inline"
+                                aria-hidden="true">branding_watermark</span>
+                            Watermark
+                        </h2>
+                        <div class="ui-card h-100">
+                            <div>
+                                <div class="settings-section">
+                                    <div class="form-check form-switch">
+                                        <input class="form-check-input" type="checkbox" role="switch"
+                                            id="videoWatermark" name="video_watermark" {{ 'checked' if
+                                            settings.video_watermark | default(true) else '' }}>
+                                        <label class="form-check-label" for="videoWatermark">
+                                            Show fetchly watermark
+                                        </label>
+                                    </div>
+                                    <small class="setting-hint setting-hint--with-icon">
+                                        <span class="material-symbols-outlined setting-hint-icon"
+                                            aria-hidden="true">info</span>
+                                        <span>Burns the logo into the bottom-right corner, with the public
+                                            hostname underneath once set.</span>
+                                    </small>
+                                    <small class="setting-hint setting-hint--with-icon">
+                                        <span
+                                            class="material-symbols-outlined setting-hint-icon setting-hint-icon--warning"
+                                            aria-hidden="true">warning</span>
+                                        <span>Max quality needs an extra encoding pass, increasing CPU usage.</span>
+                                    </small>
                                 </div>
                             </div>
                         </div>
@@ -290,7 +351,7 @@
                                     <div class="lalal-tile-header mb-3">
                                         <img src="/static/img/lalal_ai.svg" alt="Lalal.ai" class="lalal-tile-logo">
                                         {# "Not configured" is an empty state, not a status, so it gets .ui-badge
-                                           rather than Bootstrap's .badge - see the .ui-badge rule in style.css. #}
+                                        rather than Bootstrap's .badge - see the .ui-badge rule in style.css. #}
                                         <span id="lalalStatusBadge"
                                             class="{{ 'badge bg-success' if lalal_configured else 'ui-badge' }}">{{
                                             lalal_status or 'Not configured' }}</span>
@@ -317,14 +378,18 @@
                                                         Disconnect
                                                     </button>
                                                 </div>
+                                                {# Filled by applyInitialLalalState() / loadLalalStatus() in
+                                                app/static/js/settings.js: the account line plus the remaining
+                                                processing minutes, and the reason when a status check fails. #}
+                                                <p class="text-muted small mb-0" id="lalalStatusLine"></p>
                                             </div>
 
-                                            <div class="mt-3 pt-3 border-top">
+                                            <div class="lalal-tile-divider">
                                                 <div class="form-check form-switch">
                                                     <input class="form-check-input" type="checkbox" role="switch"
-                                                        id="lalalDurationGuard" name="lalalaai_duration_guard" {{
-                                                        'checked' if settings.lalalaai_duration_guard | default(true) else
-                                                        '' }}>
+                                                        id="lalalDurationGuard" name="lalalaai_duration_guard"
+                                                        {{ 'checked' if settings.lalalaai_duration_guard | default(true)
+                                                        else '' }}>
                                                     <label class="form-check-label" for="lalalDurationGuard">
                                                         Limit long tracks
                                                     </label>
@@ -338,7 +403,12 @@
                                             </div>
                                         </div>
 
-                                        <div class="lalal-tile-col lalal-tile-col--analysis">
+                                        {# Hidden until a Lalal.ai session exists: these limits only apply to
+                                        Lalal-backed analysis/stem jobs. Toggled by setAnalysisLimitsVisible()
+                                        in app/static/js/settings.js. The inputs stay in the form while
+                                        hidden, so saving keeps their stored values. #}
+                                        <div class="lalal-tile-col lalal-tile-col--analysis {{ '' if lalal_configured else 'd-none' }}"
+                                            id="lalalAnalysisLimits">
                                             <h3 class="settings-section-title">Analysis &amp; stem limits</h3>
                                             <div class="settings-field-stack">
                                                 <div>
@@ -404,25 +474,34 @@
                                         </span>
                                         <span class="cookie-tile-name">{{ platform.label }}</span>
                                         {% set status_value = cookie_status.status if cookie_status else 'missing' %}
-                                        {# "missing" is an empty state, not a failure, so it gets .ui-badge like the
-                                           detail chips below instead of Bootstrap's .badge - see style.css. #}
-                                        {% set badge_class = {"valid": "badge bg-success", "expired": "badge bg-danger",
-                                        "invalid": "badge bg-danger", "missing": "ui-badge"}[status_value] %}
-                                        <span class="{{ badge_class }} cookie-status-badge"
-                                            data-cookie-status-badge data-status="{{ status_value }}">
-                                            {{ {"valid": "Valid", "expired": "Expired", "invalid": "Invalid", "missing":
-                                            "None stored"}[status_value] }}
+                                        {% set is_authenticated = cookie_status.authenticated if cookie_status else
+                                        false %}
+                                        {% set needs_update = status_value in ["expired", "invalid"] or (status_value ==
+                                        "valid" and not is_authenticated) %}
+                                        {% set badge_class = "badge bg-warning text-dark" if needs_update else {"valid":
+                                        "badge bg-success", "missing": "ui-badge"}[status_value] %}
+                                        <span class="{{ badge_class }} cookie-status-badge" data-cookie-status-badge
+                                            data-status="{{ status_value }}"
+                                            data-cookie-authenticated="{{ 'true' if is_authenticated else 'false' }}">
+                                            {{ "Needs update" if needs_update else {"valid": "Ready", "missing": "Not
+                                            set up"}[status_value] }}
                                         </span>
                                     </div>
-                                    <p class="cookie-tile-detail setting-hint" data-cookie-detail>
-                                        {{ cookie_status.detail if cookie_status and cookie_status.detail else '' }}
+                                    <p class="cookie-tile-summary {{ 'cookie-tile-summary--warning' if needs_update else '' }}"
+                                        data-cookie-summary>
+                                        {% if status_value == "missing" %}Add cookies only when this site requires you
+                                        to sign in.
+                                        {% elif needs_update %}Replace these cookies while signed in to enable
+                                        account-only downloads.
+                                        {% else %}Signed-in downloads are enabled.{% endif %}
                                     </p>
                                     <div class="cookie-tile-actions">
                                         <button type="button" class="btn btn-outline-secondary btn-sm"
                                             data-cookie-paste-btn data-platform="{{ platform.id }}">
                                             <span class="material-symbols-outlined icon-inline"
                                                 aria-hidden="true">content_paste</span>
-                                            Paste cookies
+                                            <span data-cookie-paste-label>{{ "Replace cookies" if cookie_status and
+                                                cookie_status.present else "Add cookies" }}</span>
                                         </button>
                                         <button type="button"
                                             class="btn btn-outline-danger btn-sm {{ '' if (cookie_status and cookie_status.present) else 'd-none' }}"
@@ -530,6 +609,21 @@
                                         </div>
                                     </div>
                                 </div>
+                                <div class="settings-section">
+                                    <h3 class="settings-section-title">Session</h3>
+                                    <div>
+                                        <label for="sessionIdleMinutes" class="form-label">Session idle timeout
+                                            (min)</label>
+                                        <input type="number" class="form-control ui-input" id="sessionIdleMinutes"
+                                            name="session_idle_minutes" min="1" max="1440"
+                                            value="{{ settings.session_idle_minutes | default(60) }}">
+                                        <small class="setting-hint setting-hint--with-icon">
+                                            <span class="material-symbols-outlined setting-hint-icon"
+                                                aria-hidden="true">info</span>
+                                            <span>Signs an idle session out after this many minutes of inactivity.</span>
+                                        </small>
+                                    </div>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -542,6 +636,10 @@
                     <span class="material-symbols-outlined icon-inline" aria-hidden="true">monitoring</span>
                     System information
                 </h2>
+                {# Mobile only: the dashboard tiles move here because the
+                   dashboard hides them below 768px (see .settings-job-stats). #}
+                {{ dashboard_stats_row(stats, "settings-job-stats") }}
+
                 <div class="row g-3 mb-4 stats-row settings-host-stats" data-host-stats>
                     <div class="col-6 col-md-3">
                         <div class="ui-card ui-card--stat stat-card" role="group" aria-label="Free video storage"
@@ -608,7 +706,8 @@
                                                         aria-hidden="true">upgrade</span>
                                                     <span>Update available</span>
                                                 </a>
-                                                <span class="ui-badge settings-version-badge font-monospace">{{ ytdlp_version |
+                                                <span class="ui-badge settings-version-badge font-monospace">{{
+                                                    ytdlp_version |
                                                     default('unavailable') }}</span>
                                             </dd>
                                         </div>
@@ -621,7 +720,8 @@
                                                         aria-hidden="true">upgrade</span>
                                                     <span>Update available</span>
                                                 </a>
-                                                <span class="ui-badge settings-version-badge font-monospace">{{ ytdlp_ejs_version
+                                                <span class="ui-badge settings-version-badge font-monospace">{{
+                                                    ytdlp_ejs_version
                                                     | default('unavailable') }}</span>
                                             </dd>
                                         </div>
@@ -647,7 +747,8 @@
                                                         aria-hidden="true">upgrade</span>
                                                     <span>Update available</span>
                                                 </a>
-                                                <span class="ui-badge settings-version-badge font-monospace">{{ ffmpeg_version |
+                                                <span class="ui-badge settings-version-badge font-monospace">{{
+                                                    ffmpeg_version |
                                                     default('unavailable') }}</span>
                                             </dd>
                                         </div>
@@ -813,7 +914,8 @@
     "lalal_configured": lalal_configured,
     "lalal_status": (lalal_status or "Not configured"),
     "lalal_email": (lalal_email or ""),
+    "lalal_minutes_left": lalal_minutes_left,
     "has_admin_credentials": (has_admin_credentials | default(false))
 } | tojson }}</script>
-<script type="module" src="/static/js/settings.js?v=20260901n"></script>
+<script type="module" src="/static/js/settings.js?v=20260903a"></script>
 {% endblock %}

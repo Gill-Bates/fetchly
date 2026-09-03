@@ -12,9 +12,7 @@ import logging
 import re
 import subprocess
 import tempfile
-from queue import Full
 import uuid
-from datetime import UTC, datetime
 from pathlib import Path
 from time import time
 from typing import TYPE_CHECKING, Any, Protocol
@@ -22,12 +20,11 @@ from urllib.parse import quote
 from weakref import WeakKeyDictionary
 
 import httpx
-
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
-from ..common.rate_limit import limiter
 from ..bpm_cluster import cluster_bpms
+from ..common.rate_limit import limiter
 from ..db import (
     TERMINAL_JOB_STATUSES,
     delete_jobs_and_share_links,
@@ -44,18 +41,18 @@ from ..db import (
     update_job_if_status,
     utc_timestamp,
 )
+from ..governor import governor
+from ..session import delete_session_cookie, refresh_session_settings_cache
+from ..utils.changelog import get_changelog_html
+from ..utils.cookie_status import cookie_file_is_usable
+from ..utils.cookies import default_cookie_file
+from ..utils.credentials import normalize_admin_username, validate_admin_password
 from ..utils.fs import get_data_dir, get_json_body
 from ..utils.host_stats import get_host_stats
 from ..utils.housekeeping import cleanup_job_directory
-from ..utils.cookie_status import cookie_file_is_usable
-from ..utils.cookies import default_cookie_file
-from .cookies import list_cookie_statuses
-from ..utils.public_url import normalize_public_hostname
-from ..utils.changelog import get_changelog_html
-from ..utils.credentials import normalize_admin_username, validate_admin_password
-from ..session import delete_session_cookie, refresh_session_settings_cache
-from ..utils.template_filters import is_lalala_configured, public_settings
 from ..utils.platform import PLATFORM_COOKIE_FILENAMES, detect_platform, validate_media_url
+from ..utils.public_url import normalize_public_hostname
+from ..utils.template_filters import is_lalala_configured, public_settings
 from ..utils.updates import get_update_status
 from ..utils.version import (
     get_ffmpeg_version,
@@ -71,7 +68,8 @@ from ..utils.youtube import (
     load_video_info_async,
     normalize_info_url,
 )
-from ..worker import cancel_job as cancel_worker_job, get_job_queue
+from ..worker import cancel_job as cancel_worker_job
+from ..worker import clear_cancellation, get_job_queue, submit_download
 from .auth import (
     has_admin_credentials,
     hash_password,
@@ -80,6 +78,7 @@ from .auth import (
     require_user,
     require_user_json,
 )
+from .cookies import list_cookie_statuses
 
 if TYPE_CHECKING:
     from fastapi.templating import Jinja2Templates
@@ -108,6 +107,7 @@ _RUNTIME_LIMIT_BOUNDS: dict[str, tuple[int, int]] = {
     "audio_analysis_max_minutes": (0, 240),
     "audio_analysis_timeout_minutes": (1, 60),
     "lalal_max_download_gib": (1, 100),
+    "session_idle_minutes": (1, 1440),
 }
 
 # Module-level state
@@ -322,6 +322,12 @@ async def index(request: Request) -> Response:
     })
 
 
+def _cached_lalal_minutes(settings: dict[str, Any]) -> float | None:
+    """Return the last known Lalal.ai balance, or None when it is unknown."""
+    minutes = float(settings.get("lalalaai_minutes_left", -1) or -1)
+    return minutes if minutes >= 0 else None
+
+
 @router.get("/settings", response_class=HTMLResponse)
 async def settings_page(request: Request) -> Response:
     """Settings page."""
@@ -343,14 +349,25 @@ async def settings_page(request: Request) -> Response:
     # excludes admin_password_hash.
     credentials_present = await asyncio.to_thread(has_admin_credentials)
     cookie_statuses = [status.model_dump() for status in await list_cookie_statuses()]
+    # What "Automatic" resolves to right now, so the hint names a real number
+    # instead of leaving the user to guess (see governor.py).
+    auto_fragments = await asyncio.to_thread(governor.recommended_concurrent_fragments)
+    # Mobile moves the dashboard's stat tiles onto the System tab, so the page
+    # needs the same numbers the dashboard renders (see macros/stats.html).
+    stats = await get_cached_stats()
     return templates.TemplateResponse(
         request=request,
         name="settings.html",
         context={
             "settings": public_settings(settings),
+            "stats": stats,
+            "auto_concurrent_fragments": auto_fragments,
             "lalal_configured": lalal_configured,
             "lalal_status": "Connected" if lalal_configured else "Not configured",
             "lalal_email": str(settings.get("lalalaai_email", "") or ""),
+            # -1 is the stored "not known yet"; the page renders no balance for
+            # it and fills one in once /api/lalal/status answers.
+            "lalal_minutes_left": _cached_lalal_minutes(settings),
             "ytdlp_version": ytdlp_version,
             "ytdlp_ejs_version": ytdlp_ejs_version,
             "js_runtime_version": js_runtime_version,
@@ -553,7 +570,7 @@ async def api_info(request: Request, url: str, _user: str = Depends(require_user
             "unavailable": False,
         }
 
-    except asyncio.TimeoutError:
+    except TimeoutError:
         logger.warning("Video info extraction timed out for URL %s", url)
         return empty_info_payload()
     except OSError as exc:
@@ -712,8 +729,10 @@ async def _fetch_thumbnail_payload(url: str) -> tuple[bytes, str]:
         raise HTTPException(status_code=400, detail="Thumbnail URL not allowed")
 
     try:
-        async with httpx.AsyncClient(timeout=8.0, follow_redirects=False) as client:
-            async with client.stream("GET", url, headers={"User-Agent": "fetchly"}) as resp:
+        async with (
+            httpx.AsyncClient(timeout=8.0, follow_redirects=False) as client,
+            client.stream("GET", url, headers={"User-Agent": "fetchly"}) as resp,
+        ):
                 if 300 <= resp.status_code < 400:
                     raise HTTPException(status_code=502, detail="Thumbnail redirects are not accepted")
                 if resp.status_code != 200:
@@ -731,8 +750,8 @@ async def _fetch_thumbnail_payload(url: str) -> tuple[bytes, str]:
                             raise HTTPException(status_code=502, detail="Invalid thumbnail size")
                         if declared_length > _THUMBNAIL_MAX_BYTES:
                             raise HTTPException(status_code=502, detail="Thumbnail too large")
-                    except ValueError:
-                        raise HTTPException(status_code=502, detail="Invalid thumbnail size")
+                    except ValueError as exc:
+                        raise HTTPException(status_code=502, detail="Invalid thumbnail size") from exc
 
                 data = bytearray()
                 async for chunk in resp.aiter_bytes():
@@ -969,7 +988,7 @@ async def api_set_settings(
 
     if "download_concurrent_fragments" in payload:
         settings_to_update["download_concurrent_fragments"] = _clamp_int(
-            payload["download_concurrent_fragments"], 1, 16, "download_concurrent_fragments"
+            payload["download_concurrent_fragments"], 0, 16, "download_concurrent_fragments"
         )
 
     if "share_link_max_uses" in payload:
@@ -992,6 +1011,10 @@ async def api_set_settings(
     if "download_mp4_preset" in payload:
         enabled = _parse_bool(payload["download_mp4_preset"], "download_mp4_preset")
         settings_to_update["download_mp4_preset"] = "true" if enabled else "false"
+
+    if "video_watermark" in payload:
+        enabled = _parse_bool(payload["video_watermark"], "video_watermark")
+        settings_to_update["video_watermark"] = "true" if enabled else "false"
 
     if "lalalaai_duration_guard" in payload:
         enabled = _parse_bool(payload["lalalaai_duration_guard"], "lalalaai_duration_guard")
@@ -1065,9 +1088,9 @@ async def api_set_settings(
         return {"ok": True, "message": "Settings updated"}
     except HTTPException:
         raise
-    except Exception:
+    except Exception as exc:
         logger.exception("Settings update failed")
-        raise HTTPException(status_code=500, detail="Internal server error")
+        raise HTTPException(status_code=500, detail="Internal server error") from exc
 
 
 # response_model=None: see api_set_settings - the 409 duplicate-job branch
@@ -1090,7 +1113,10 @@ async def api_submit(
     if media_type not in _ALLOWED_MEDIA_TYPES:
         raise HTTPException(status_code=400, detail=f"Invalid type. Allowed: {', '.join(sorted(_ALLOWED_MEDIA_TYPES))}")
     if quality_value not in _ALLOWED_QUALITIES:
-        raise HTTPException(status_code=400, detail=f"Invalid quality. Allowed: {', '.join(sorted(_ALLOWED_QUALITIES))}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid quality. Allowed: {', '.join(sorted(_ALLOWED_QUALITIES))}",
+        )
 
     # Validate media URL (platform detected from URL: YouTube / TikTok / Instagram)
     is_valid, error_msg = validate_media_url(url)
@@ -1115,7 +1141,7 @@ async def api_submit(
             )
 
     # Try to extract metadata with short timeout - don't block job creation if it fails
-    meta: dict[str, object] = {"video_title": None, "video_meta_hover": None}
+    meta: dict[str, object] = {"video_title": None, "video_meta_hover": None, "duration_seconds": None}
     try:
         meta = await asyncio.wait_for(extract_video_meta_async(clean_url), timeout=8.0)
     except Exception as exc:
@@ -1135,10 +1161,11 @@ async def api_submit(
         "queued",
         video_title=meta["video_title"],
         video_meta_hover=meta["video_meta_hover"],
+        # The source's own runtime, so the job shows a length while it is still
+        # queued; the worker replaces it with the ffprobe value when done.
+        duration_seconds=meta.get("duration_seconds"),
     )
-    try:
-        job_queue.put_nowait((job_id, clean_url, media_type, quality_value))
-    except Full as exc:
+    if not submit_download((job_id, clean_url, media_type, quality_value)):
         try:
             await asyncio.to_thread(
                 update_job,
@@ -1149,7 +1176,7 @@ async def api_submit(
             )
         except Exception:
             logger.exception("Failed to mark job %s as errored after queue overflow", job_id)
-        raise HTTPException(status_code=503, detail="Job queue is full, please try again later") from exc
+        raise HTTPException(status_code=503, detail="Job queue is full, please try again later")
     job = await asyncio.to_thread(get_job, job_id)
     if not job:
         # Row vanished between insert and read (concurrent retention sweep or
@@ -1251,9 +1278,11 @@ async def retry_job(
     if not requeued:
         raise HTTPException(status_code=409, detail="Job state changed before retry")
 
-    try:
-        job_queue.put_nowait((job_id_str, job["url"], job["type"], job["quality"]))
-    except Full as exc:
+    # A job cancelled while it was queued still carries its in-memory cancel
+    # marker (and possibly its queue entry). Both would cancel the retry again.
+    clear_cancellation(job_id_str)
+
+    if not submit_download((job_id_str, str(job["url"]), str(job["type"]), str(job["quality"]))):
         try:
             await asyncio.to_thread(
                 update_job,
@@ -1264,7 +1293,7 @@ async def retry_job(
             )
         except Exception:
             logger.exception("Failed to mark job %s as errored after retry queue overflow", job_id_str)
-        raise HTTPException(status_code=503, detail="Job queue is full, please try again later") from exc
+        raise HTTPException(status_code=503, detail="Job queue is full, please try again later")
 
     logger.info("Retry requested for job %s (was: %s)", job_id_str, status)
 

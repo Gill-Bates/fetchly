@@ -19,12 +19,12 @@ filtering here before that stays true.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
 import logging
 import mimetypes
 import threading
 import uuid
 from contextlib import suppress
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -34,8 +34,8 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Redirect
 from ..bpm_naming import tagged_download_name
 from ..common.rate_limit import limiter
 from ..db import DOWNLOADABLE_STATUSES, get_job, get_settings
-from ..utils.fs import AUDIO_SOURCE_EXTENSIONS, path_is_file
 from ..governor import governor
+from ..utils.fs import AUDIO_SOURCE_EXTENSIONS, path_is_file
 from .api import job_to_dict
 from .auth import current_user, require_html_auth
 
@@ -78,7 +78,7 @@ _NOSNIFF_HEADER = {"X-Content-Type-Options": "nosniff"}
 class MediaContext:
     data_dir: Path
     base_dir: Path
-    templates: "Jinja2Templates"
+    templates: Jinja2Templates
 
 # Module-level state
 _MEDIA_CONTEXT: MediaContext | None = None
@@ -90,12 +90,12 @@ _transcode_locks_guard = threading.Lock()
 def init_media(
     data_dir: Path,
     base_dir: Path,
-    templates: "Jinja2Templates",
+    templates: Jinja2Templates,
 ) -> None:
     """Initialize the media module with required dependencies."""
     global _MEDIA_CONTEXT
     context = MediaContext(data_dir=data_dir, base_dir=base_dir, templates=templates)
-    if _MEDIA_CONTEXT is not None and _MEDIA_CONTEXT != context:
+    if _MEDIA_CONTEXT is not None and context != _MEDIA_CONTEXT:
         raise RuntimeError("Media module already initialized with a different context")
     _MEDIA_CONTEXT = context
 
@@ -114,7 +114,7 @@ def _require_base_dir() -> Path:
     return _require_media_context().base_dir
 
 
-def _require_templates() -> "Jinja2Templates":
+def _require_templates() -> Jinja2Templates:
     return _require_media_context().templates
 
 
@@ -333,7 +333,7 @@ async def transcode_to_mp3(source_path: Path, output_path: Path) -> Path:
                 logger.info("Transcoded audio to MP3: %s", output_path.name)
                 return output_path
 
-            except asyncio.TimeoutError as exc:
+            except TimeoutError as exc:
                 raise RuntimeError("Audio transcoding timed out") from exc
             finally:
                 if await path_is_file(temp_path):

@@ -152,8 +152,8 @@ export function buildTrimId(start, end) {
 export const YOUTUBE_URL_REGEX = /^https:\/\/(?:www\.|m\.|music\.)?(?:youtube\.com\/(?:watch\?(?:[^#]*&)?v=|embed\/|v\/|shorts\/)|youtu\.be\/)[A-Za-z0-9_-]{11}(?:[?#&][^\s]*)?$/i;
 
 const SIZE_UNITS = Object.freeze([
-    { unit: "TiB", divisor: 1_099_511_627_776, precision: 2 },
-    { unit: "GiB", divisor: 1_073_741_824, precision: 2 },
+    { unit: "TiB", divisor: 1_099_511_627_776, precision: 1 },
+    { unit: "GiB", divisor: 1_073_741_824, precision: 1 },
     { unit: "MiB", divisor: 1_048_576, precision: 1 },
     { unit: "KiB", divisor: 1_024, precision: 1 },
     { unit: "B", divisor: 1, precision: 0 },
@@ -203,6 +203,11 @@ export function humanSize(bytes) {
  * @returns {string}
  */
 export function formatDuration(sec) {
+    // Number(null) and Number("") are 0, so an unknown duration would render
+    // as a confident "0:00" without this guard - jobs carry null until the
+    // source metadata or ffprobe has supplied a length.
+    if (sec === null || sec === undefined || sec === "") return EMPTY_VALUE;
+
     const value = Number(sec);
     if (!Number.isFinite(value) || value < 0) return EMPTY_VALUE;
 
@@ -217,6 +222,24 @@ export function formatDuration(sec) {
     return hours > 0
         ? `${hours}:${mm}:${ss}`
         : `${mm}:${ss}`;
+}
+
+/**
+ * Format a Lalal.ai balance the way Lalal.ai itself does: `261m 30s`.
+ * Minutes are fractional (261.5 is 261 minutes and 30 seconds).
+ * @param {number | string | null | undefined} minutes - Processing minutes left.
+ * @returns {string} The formatted balance, or "" when the balance is unknown.
+ */
+export function formatLalalMinutes(minutes) {
+    if (minutes === null || minutes === undefined || minutes === "") return "";
+
+    const value = Number(minutes);
+    if (!Number.isFinite(value) || value < 0) return "";
+
+    const totalSeconds = Math.round(value * 60);
+    const wholeMinutes = Math.floor(totalSeconds / 60);
+    const seconds = String(totalSeconds % 60).padStart(2, "0");
+    return `${wholeMinutes}m ${seconds}s`;
 }
 
 /**

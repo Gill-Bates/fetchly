@@ -33,6 +33,7 @@ With every variable left at its default:
 | Analysis semaphore | `min(2, ceil(cpus))` | ≥ 1 |
 | I/O semaphore | `ceil(cpus × 4)` | ≥ 2 |
 | Transcode semaphore | `min(2, ceil(cpus))` | ≥ 1 |
+| Parallel fragments | `ceil(cpus × 1.5)`, capped by `free MB ÷ 64` | 2–8 |
 
 The shapes reflect the workloads: downloads are I/O-bound and get a generous limit,
 while transcoding and BPM analysis are CPU- and memory-hungry and are held to at most
@@ -48,10 +49,16 @@ two at a time.
 | 4 | 8 | 16 | 4 | 2 | 16 | 2 |
 | 8 | 8 | 16 | 8 | 2 | 32 | 2 |
 
+Parallel fragments are the one limit re-evaluated per download rather than at startup:
+with **Parallel fragments per download** on `Automatic`, a host that is currently short
+on free memory gets fewer fragments than the CPU quota alone would allow (2 on 128 MB
+free, 4 on 256 MB, 8 from 512 MB up). A fixed value of `1`–`16` skips the probe.
+
 ## Runtime settings and operator overrides
 
-**Settings → General → Runtime limits** controls download worker count, download and
-transcode timeouts, and input size. A worker count of `0` means automatic sizing and
+**Settings → General → Downloads** controls the parallel fragments per download, where
+`Automatic` is the default. **Settings → General → Runtime limits** controls download
+worker count, download and transcode timeouts, and input size. A worker count of `0` means automatic sizing and
 applies after the next restart. The BPM-analysis limits and the Lalal result limit
 live in the Lalal.ai tile under **Settings → Integrations**.
 

@@ -7,8 +7,8 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 import math
+from dataclasses import dataclass
 from numbers import Real
 from pathlib import Path
 
@@ -31,7 +31,7 @@ def _to_int_bpm(value: Real | object) -> int | None:
     if not math.isfinite(numeric_value) or numeric_value <= 0:
         return None
 
-    return int(round(numeric_value))
+    return round(numeric_value)
 
 
 def _to_confidence(value: Real | object) -> float | None:

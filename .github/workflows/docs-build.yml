@@ -64,12 +64,19 @@ jobs:
         with:
           python-version: '3.12'
           cache: pip
-          cache-dependency-path: docs/requirements-docs.txt
+          cache-dependency-path: pyproject.toml
 
+      # pyproject.toml is the single dependency manifest; the docs toolchain
+      # lives in its [project.optional-dependencies] docs extra. Installing
+      # `.[docs]` would drag in the runtime dependencies (torch included), so
+      # only the extra is materialised here.
       - name: Install dependencies
         run: |
+          set -euo pipefail
+          python3 tools/pyproject-deps.py docs > requirements-docs.txt
+          cat requirements-docs.txt
           pip install --upgrade pip
-          pip install -r docs/requirements-docs.txt
+          pip install -r requirements-docs.txt
 
       - name: Copy root files to docs
         run: |
@@ -139,13 +146,18 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v5
 
+      # Trivy scans a flat requirements file, so regenerate it from the
+      # manifest rather than keeping a second copy in the repo.
+      - name: Materialise docs dependencies for scanning
+        run: python3 tools/pyproject-deps.py docs > requirements-docs.txt
+
       - name: Trivy scan docs dependencies
         # Pinned to an immutable commit SHA — see GHSA-69fq-xp46-6x23.
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           cache: 'false'
           scan-type: 'fs'
-          scan-ref: 'docs/requirements-docs.txt'
+          scan-ref: 'requirements-docs.txt'
           format: 'table'
           exit-code: '1'
           ignore-unfixed: true

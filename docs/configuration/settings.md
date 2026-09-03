@@ -8,23 +8,44 @@ The Settings page has four tabs: **General**, **Security**, **Integrations**, an
 
 ## General
 
-| Setting | Key | Range | Default |
-|---|---|---|---|
-| Retention | `retention_days` | `0`–`365` | `0` (unlimited) |
-| MP4 preset | `download_mp4_preset` | on/off | on |
-| Concurrent fragments | `download_concurrent_fragments` | `1`–`16` | `3` |
-| Share link max uses | `share_link_max_uses` | `0`–`10000` | `0` (unlimited) |
-| Public hostname | `public_hostname` | hostname or IP | empty |
+The **General** tab is split into panels: **Retention**, **Sharing**, **Runtime
+limits**, **Downloads**, and **Watermark**.
+
+| Setting | Panel | Key | Range | Default |
+|---|---|---|---|---|
+| Retention | Retention | `retention_days` | `0`–`365` | `0` (unlimited) |
+| Public hostname | Sharing | `public_hostname` | hostname or IP | empty |
+| Share link max uses | Sharing | `share_link_max_uses` | `0`–`10000` | `0` (unlimited) |
+| Parallel fragments per download | Downloads | `download_concurrent_fragments` | `Automatic` or `1`–`16` | `Automatic` (`0`) |
+| Prefer H.264/AAC for max quality (MP4 preset) | Downloads | `download_mp4_preset` | on/off | on |
+| Show fetchly watermark | Watermark | `video_watermark` | on/off | on |
 
 **Retention** — days after which a job's files are swept. `0` keeps everything until
 you remove it explicitly. See [Storage & Retention](storage.md).
 
-**MP4 preset** — prefer H.264/AAC in MP4 so the result plays in every browser. Off
-gives the highest available resolution at the cost of universal playback (VP9/AV1 do
-not play in Safari/iOS, which breaks the player, waveform, and trim view).
+**Prefer H.264/AAC for max quality (MP4 preset)** — prefer H.264/AAC in MP4 so the
+result plays in every browser. Off gives the highest available resolution at the cost
+of universal playback (VP9/AV1 do not play in Safari/iOS, which breaks the player,
+waveform, and trim view).
 
-**Concurrent fragments** — parallel fragment downloads for DASH/HLS sources; ignored
-for progressive single-file downloads.
+**Show fetchly watermark** — burns the fetchly logo into the bottom-right corner of
+every downloaded video, with the public hostname on a second line once one is set.
+Audio-only jobs are unaffected. The badge (logo, drop shadow, hostname) is composited
+once per hostname and output size and cached under `data/watermark-cache/`, so the
+encode only alpha-blends a still image into the corner. On `medium`/`small` quality
+that rides along in the transcode fetchly already runs and costs nothing measurable;
+`max` quality is otherwise a pure download and remux, so it gains an x264 pass
+(`-preset veryfast -crf 20`, audio stream-copied) that a 4K download will feel. Turn
+the switch off to leave `max` downloads untouched. The hostname line is set in the
+same Roboto Flex already shipped for the app UI (`app/static/fonts/`), so no system
+font package is required; if that file is ever missing, the logo is drawn alone and a
+warning is logged.
+
+**Parallel fragments per download** — parallel fragment downloads for DASH/HLS sources;
+ignored for progressive single-file downloads. `Automatic` (`0`) sizes the value per download
+from the host's CPU quota and free memory, between 2 and 8 fragments, so a small or
+currently loaded host backs off on its own. The settings page names the value
+Automatic resolves to at that moment. See [Resources](resources.md).
 
 **Share link max uses** — snapshotted onto each link at creation. Changing it never
 retroactively re-opens or closes links already handed out. See

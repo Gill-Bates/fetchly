@@ -19,7 +19,6 @@ import asyncio
 import logging
 import re
 import uuid
-
 from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -38,10 +37,10 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["share"])
 
-_templates: "Jinja2Templates | None" = None
+_templates: Jinja2Templates | None = None
 
 
-def init_share(templates: "Jinja2Templates") -> None:
+def init_share(templates: Jinja2Templates) -> None:
     """Initialize the share module with the shared template environment."""
     global _templates
     _templates = templates

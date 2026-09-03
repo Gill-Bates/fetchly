@@ -60,6 +60,17 @@ running.
 | Share | Completed jobs — [Share Links](sharing.md) |
 | Delete | Any job; removes the row and its artifacts |
 
+## Track length
+
+`duration_seconds` is filled twice. At submit time it comes from the source's own
+metadata, so a job shows its length while it is still queued or downloading. When the
+download finishes, ffprobe measures the actual file and replaces the value — a probe
+that comes back empty leaves the source value in place rather than blanking it.
+
+It is rendered as `M:SS`, or `H:MM:SS` from an hour up, in the job list (desktop media
+column and mobile card), the detail dialog, and on the job page. Jobs whose length is
+unknown show an en dash.
+
 ## The job page
 
 `GET /job/{job_id}` renders a detail view with:

@@ -192,30 +192,34 @@ def _prune_info(info: dict[str, Any] | None) -> InfoPayload | None:
 def validate_youtube_url(url: str) -> tuple[bool, str]:
     """
     Validate that a URL is a valid YouTube video URL.
-    
+
     Args:
         url: The URL to validate
-        
+
     Returns:
         Tuple of (is_valid, error_message)
     """
     if not url or not isinstance(url, str):
         return False, "URL is required"
-    
+
     url = url.strip()
-    
+
     # Normalize common copy/paste issues from mobile apps / HTML sources
     url = strip_zwsp(url.replace("&amp;", "&"))
-    
+
     if not url:
         return False, "URL is required"
-    
+
     # Check URL length (prevent DoS with extremely long URLs)
     if len(url) > 2048:
         return False, "URL is too long"
-    
-    # Metadata requests must use encrypted transport.
-    if not url.startswith("https://"):
+
+    # Metadata requests must use encrypted transport. Matched case-insensitively
+    # to agree with platform.validate_media_url(), the gate this sits behind: a
+    # case-sensitive check would let "HTTPS://youtu.be/..." clear the platform
+    # gate and then be rejected here with a scheme error that reads as wrong.
+    # urlparse() lowercases scheme and hostname, so the rest is unaffected.
+    if not url.lower().startswith("https://"):
         return False, "URL must start with https://"
 
     try:
@@ -228,7 +232,7 @@ def validate_youtube_url(url: str) -> tuple[bool, str]:
 
     # Check if it's a YouTube video URL. Allow extra query parameters such as
     # playlist context (list/start_radio), but require a real video ID.
-    if host == "youtu.be" or host == "www.youtu.be":
+    if host in {"youtu.be", "www.youtu.be"}:
         segment = path.strip("/").split("/")[0]
         if len(path.strip("/").split("/")) == 1 and _is_video_id(segment):
             return True, ""
@@ -244,7 +248,10 @@ def validate_youtube_url(url: str) -> tuple[bool, str]:
             if len(segments) == 2 and _is_video_id(segment):
                 return True, ""
 
-    return False, "Invalid YouTube URL. Supported formats: youtube.com/watch?v=..., youtu.be/..., youtube.com/shorts/..."
+    return False, (
+        "Invalid YouTube URL. Supported formats: "
+        "youtube.com/watch?v=..., youtu.be/..., youtube.com/shorts/..."
+    )
 
 
 def normalize_info_url(url: str) -> str:
@@ -271,7 +278,7 @@ def normalize_info_url(url: str) -> str:
             return f"https://www.youtube.com/watch?v={video_id}"
         return value
 
-    if host == "youtu.be" or host == "www.youtu.be":
+    if host in {"youtu.be", "www.youtu.be"}:
         segment = path.strip("/").split("/")[0].strip()
         if segment:
             return f"https://www.youtube.com/watch?v={segment}"
@@ -396,16 +403,19 @@ async def load_video_info_async(url: str) -> InfoPayload | None:
 
 def extract_video_meta(url: str) -> dict[str, object]:
     """Best-effort metadata extraction for title + hover details.
-    
+
     Args:
         url: YouTube video URL
-        
+
     Returns:
-        Dict with video_title and video_meta_hover keys
+        Dict with video_title, video_meta_hover and duration_seconds keys.
+        ``duration_seconds`` is the source's own runtime, stored on the job so
+        the list can show a length before ffprobe has measured the finished
+        file (app/routes/api.py::submit_job).
     """
     info = load_video_info(url)
     if info is None:
-        return {"video_title": None, "video_meta_hover": None}
+        return {"video_title": None, "video_meta_hover": None, "duration_seconds": None}
 
     title = str(info.get("title") or "").strip()
     channel = str(info.get("channel") or "").strip()
@@ -431,6 +441,8 @@ def extract_video_meta(url: str) -> dict[str, object]:
     return {
         "video_title": title or None,
         "video_meta_hover": " | ".join(lines) if lines else None,
+        # load_video_info() normalizes this to a non-negative int or None.
+        "duration_seconds": duration if isinstance(duration, int) and duration > 0 else None,
     }
 
 

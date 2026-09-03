@@ -218,9 +218,10 @@ async function parseApiResponse(res, fallbackMessage) {
 
 function destroyWaveSurfer() {
     selectionDragState = null;
-    if (!trimWs) return;
-    trimWs.destroy();
-    trimWs = null;
+    if (trimWs) {
+        trimWs.destroy();
+        trimWs = null;
+    }
     trimWaveEl?.replaceChildren();
     trimOverlayLeft = null;
     trimOverlayRight = null;
@@ -1340,6 +1341,13 @@ export async function openTrimModal(jobId, options = {}) {
             plugins: [regionPlugin]
         });
 
+        // A modal close can invalidate this session while WaveSurfer is being
+        // created. Dispose it before it has a chance to render stale canvases.
+        if (session !== trimSession) {
+            destroyWaveSurfer();
+            return;
+        }
+
         // Setup ready handler
         trimWs.on("ready", () => {
             if (session !== trimSession) return;
@@ -1657,9 +1665,17 @@ async function runLalal(stem) {
         if (session !== trimSession) return;
 
         // Download the result
-        if (data.download_url && isSafeRedirect(data.download_url)) {
-            triggerDownload(data.download_url);
+        if (!data.download_url) {
+            showToast("No download URL returned", "warning");
+            setButtonState(btn, { text: originalText, disabled: false });
+            return;
         }
+        if (!isSafeRedirect(data.download_url)) {
+            showToast("Download URL rejected as unsafe", "danger");
+            setButtonState(btn, { text: originalText, disabled: false });
+            return;
+        }
+        triggerDownload(data.download_url);
 
         // Show cached indicator (no API credits used). The button stays
         // disabled on purpose: the result belongs to this exact selection, so

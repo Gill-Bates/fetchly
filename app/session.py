@@ -42,6 +42,11 @@ _COOKIE_SECURE_ENV: Final = "FETCHLY_BEHIND_HTTPS"
 _SESSION_SETTINGS_DEFAULTS: Final[dict[str, Any]] = {
     "session_version": 0,
     "session_idle_minutes": _DEFAULT_IDLE_MINUTES,
+    # Fail closed until the first cache refresh actually runs: a login gate
+    # that briefly reads as "on" is safe, a fresh install briefly reading as
+    # "off" is not. app/main.py:init_auth() refreshes this synchronously
+    # during the lifespan startup, before any request is served.
+    "enable_authentication": True,
 }
 _SESSION_SETTINGS_CACHE: dict[str, Any] = dict(_SESSION_SETTINGS_DEFAULTS)
 _SESSION_SETTINGS_LOCK = threading.Lock()
@@ -76,7 +81,7 @@ def _encode_token(payload: str, signature: str) -> str:
     The payload itself is colon-delimited and currently stores the username,
     issued-at timestamp, last-activity timestamp, nonce, and session version.
     """
-    raw = f"{payload}:{signature}".encode("utf-8")
+    raw = f"{payload}:{signature}".encode()
     return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
 
 
@@ -98,6 +103,7 @@ def refresh_session_settings_cache() -> None:
     refreshed = {
         "session_version": settings.get("session_version", 0),
         "session_idle_minutes": settings.get("session_idle_minutes", _DEFAULT_IDLE_MINUTES),
+        "enable_authentication": bool(settings.get("enable_authentication", True)),
     }
     with _SESSION_SETTINGS_LOCK:
         _SESSION_SETTINGS_CACHE.clear()
@@ -122,10 +128,23 @@ def _get_session_version() -> int:
     """Return the cached session version used for global session invalidation."""
     try:
         version = int(_get_cached_session_setting("session_version", 0) or 0)
-    except Exception as exc:
+    except (TypeError, ValueError) as exc:
         logger.warning("Failed to parse cached session_version: %s", exc)
         return 0
     return max(0, version)
+
+
+def get_cached_authentication_enabled() -> bool:
+    """Return the cached ``enable_authentication`` flag without touching sqlite.
+
+    Backs ``app.routes.auth.current_user()``, which async route handlers call
+    directly (not through ``Depends``) on every HTML/SSE request. Reading
+    through the cache here, rather than ``db.get_settings()``, is what keeps
+    those call sites off the event loop. Refreshed by
+    ``refresh_session_settings_cache()`` at startup, on every settings write,
+    and by a periodic background task (see app/main.py).
+    """
+    return bool(_get_cached_session_setting("enable_authentication", True))
 
 
 def _sign_payload(payload: str) -> str:
@@ -142,7 +161,7 @@ def _validate_live_session(session: SessionData, now: int) -> bool:
 
 def create_session(username: str) -> str:
     """Create a new session token for a user.
-    
+
     Token format: username:issued_at:last_activity:nonce:session_version:signature
     - issued_at: Login time (for 24h hard limit)
     - last_activity: Last request time (for sliding idle timeout)
@@ -158,7 +177,7 @@ def create_session(username: str) -> str:
 
 def parse_session(token: str | None) -> SessionData | None:
     """Parse and validate a session token.
-    
+
     Returns SessionData when the unpadded base64 token has the expected
     six-part structure and its signature matches. This does not check expiry;
     use validate_session() for full validation.
@@ -176,19 +195,18 @@ def parse_session(token: str | None) -> SessionData | None:
         username, issued_at_str, last_activity_str, nonce, session_version_str, sig = parts
         payload = f"{username}:{issued_at_str}:{last_activity_str}:{nonce}:{session_version_str}"
 
-        last_activity = int(last_activity_str)
-        session_version = max(0, int(session_version_str))
-        
+        # Authenticity first: nothing from the token is interpreted before the
+        # signature over the whole payload has been verified.
         expected = _sign_payload(payload)
         if not hmac.compare_digest(sig, expected):
             return None
-        
+
         return SessionData(
             username=username,
             issued_at=int(issued_at_str),
-            last_activity=last_activity,
+            last_activity=int(last_activity_str),
             nonce=nonce,
-            session_version=session_version,
+            session_version=max(0, int(session_version_str)),
         )
     except (ValueError, TypeError, binascii.Error, UnicodeDecodeError):
         logger.debug("Session parsing failed", exc_info=True)
@@ -197,12 +215,12 @@ def parse_session(token: str | None) -> SessionData | None:
 
 def validate_session(token: str | None) -> str | None:
     """Validate session and return username if valid.
-    
+
     Session is valid if:
     1. Token signature is valid
     2. issued_at is within 24 hours (hard limit)
     3. last_activity is within idle timeout (sliding window)
-    
+
     Returns username if valid, None otherwise.
     """
     session = parse_session(token)
@@ -218,7 +236,7 @@ def validate_session(token: str | None) -> str | None:
 
 def renew_session(token: str | None) -> str | None:
     """Renew session by updating last_activity timestamp.
-    
+
     Returns new token if session is still valid, None if expired.
     This extends the sliding window while preserving the original issued_at.
     """

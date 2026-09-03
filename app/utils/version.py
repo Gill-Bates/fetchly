@@ -12,6 +12,7 @@ import logging
 import os
 import re
 import subprocess
+import tomllib
 from functools import lru_cache
 from importlib import metadata
 from pathlib import Path
@@ -21,6 +22,10 @@ logger = logging.getLogger(__name__)
 
 # Pure path arithmetic – no I/O occurs here.
 _PROJECT_ROOT = Path(__file__).absolute().parent.parent.parent
+
+# The distribution name declared in pyproject.toml, used for the installed-
+# package fallback below.
+_DIST_NAME = "fetchly"
 
 
 def _read_file(name: str) -> str | None:
@@ -32,10 +37,50 @@ def _read_file(name: str) -> str | None:
         return None
 
 
+def _version_from_pyproject() -> str | None:
+    """Return ``[project] version`` from pyproject.toml, or None.
+
+    pyproject.toml is the single source of truth for the release number: the
+    release workflow validates the git tag against it and docker/Dockerfile
+    copies it into the image next to the source tree, so the running container
+    reports exactly the version its tag was cut from.
+    """
+    path = _PROJECT_ROOT / "pyproject.toml"
+    try:
+        with path.open("rb") as handle:
+            data = tomllib.load(handle)
+    except OSError as exc:
+        logger.debug("Unable to read %s: %s", path, exc)
+        return None
+    except tomllib.TOMLDecodeError as exc:
+        logger.warning("pyproject.toml is not valid TOML (%s); version falls back", exc)
+        return None
+
+    version = data.get("project", {}).get("version")
+    if isinstance(version, str) and version.strip():
+        return version.strip()
+
+    logger.warning("pyproject.toml has no [project] version entry")
+    return None
+
+
 @lru_cache(maxsize=1)
 def get_version() -> str:
-    """Return application version from the VERSION file, or 'dev'."""
-    return _read_file("VERSION") or "dev"
+    """Return the application version from pyproject.toml, or 'dev'.
+
+    Falls back to the installed distribution metadata so that an install
+    without the source tree (``pip install fetchly``) still reports a real
+    number rather than 'dev'.
+    """
+    version = _version_from_pyproject()
+    if version:
+        return version
+
+    try:
+        return metadata.version(_DIST_NAME)
+    except metadata.PackageNotFoundError:
+        logger.debug("%s is not installed as a distribution; version is 'dev'", _DIST_NAME)
+        return "dev"
 
 
 @lru_cache(maxsize=1)
@@ -44,9 +89,17 @@ def get_build_info() -> str:
     return _read_file("BUILD_INFO") or "dev"
 
 
+# --------------------------------------------------------------------------- #
+# Tool versions. These shell out and block for up to their timeout on the first
+# call (lru_cache makes every later call free), so async callers must offload
+# them - see app/routes/api.py, which wraps each one in asyncio.to_thread().
+# --------------------------------------------------------------------------- #
 @lru_cache(maxsize=1)
 def get_ytdlp_version() -> str:
-    """Return installed yt-dlp version, or 'unavailable' on failure."""
+    """Return installed yt-dlp version, or 'unavailable' on failure.
+
+    Blocking: shells out with a 3s timeout on first call. Offload from async code.
+    """
     try:
         result = subprocess.run(
             ["yt-dlp", "--version"],
@@ -65,7 +118,10 @@ def get_ytdlp_version() -> str:
 
 @lru_cache(maxsize=1)
 def get_ffmpeg_version() -> str:
-    """Return installed ffmpeg version, or 'unavailable' on failure."""
+    """Return installed ffmpeg version, or 'unavailable' on failure.
+
+    Blocking: shells out with a 3s timeout on first call. Offload from async code.
+    """
     try:
         result = subprocess.run(
             ["ffmpeg", "-version"],
@@ -104,6 +160,8 @@ def get_js_runtime_version() -> str:
 
     deno is the only JavaScript runtime yt-dlp enables by default, so having
     the binary on PATH is all that is required - no yt-dlp flag is involved.
+
+    Blocking: shells out with a 5s timeout on first call. Offload from async code.
     """
     try:
         result = subprocess.run(

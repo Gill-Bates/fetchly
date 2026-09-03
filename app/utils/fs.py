@@ -34,9 +34,10 @@ AUDIO_SOURCE_EXTENSIONS: Final[frozenset[str]] = frozenset({
 
 # ASCII digits only - trim IDs are always generated as f"{int(...)}_{int(...)}"
 # (see app/routes/trim.py), so a Unicode digit here could only be an input the
-# app itself never produced. fullmatch() already requires the entire string to
-# match, so no anchor change is needed for a trailing newline.
-TRIM_ID_RE: Final[re.Pattern[str]] = re.compile(r"^[0-9]+_[0-9]+$")
+# app itself never produced. Deliberately unanchored: every call site uses
+# fullmatch(), which already requires the whole string to match and - unlike
+# match() with a trailing "$" - rejects a trailing newline.
+TRIM_ID_RE: Final[re.Pattern[str]] = re.compile(r"[0-9]+_[0-9]+")
 
 
 def get_data_dir() -> Path:
@@ -54,7 +55,6 @@ def get_data_dir() -> Path:
 async def path_is_file(path: Path) -> bool:
     """Async wrapper around Path.is_file() for use in async route handlers."""
     return await asyncio.to_thread(path.is_file)
-
 
 
 # Every current caller sends a small settings/auth payload; Caddy's own
