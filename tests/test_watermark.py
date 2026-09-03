@@ -88,6 +88,17 @@ class BadgeGeometryTests(unittest.TestCase):
         self.assertGreaterEqual(geometry.text_shadow_offset, 1)
         self.assertLessEqual(geometry.text_shadow_offset, geometry.shadow_offset)
 
+    def test_text_row_leaves_no_oversized_bottom_pad(self):
+        # canvas_height must not carry the logo's own shadow_offset as extra
+        # bottom padding once a hostname row is the last thing drawn - that
+        # padding belongs to the no-text canvas above, where the logo's shadow
+        # really is the last ink. Regression test for the two padding terms
+        # having been added together across both branches.
+        geometry = badge_geometry(1280, 720, "fetchly.example.com")
+        gap = max(2, round(geometry.logo_height * 0.15))
+        text_height = round(geometry.font_size * watermark._TEXT_INK_FACTOR)
+        self.assertEqual(geometry.canvas_height, geometry.logo_height + gap + text_height)
+
 
 class ScaledSizeTests(unittest.TestCase):
     def test_caps_the_height_and_keeps_the_aspect(self):
@@ -167,6 +178,34 @@ class BuildWatermarkTests(unittest.TestCase):
         width, height = out.stdout.strip().split(",")[:2]
         return int(width), int(height)
 
+    def _rgba_pixels(self, path: Path) -> tuple[int, int, bytes]:
+        """Decode a PNG to raw RGBA bytes via ffmpeg, no imaging library needed."""
+        width, height = self._probe(path)
+        out = subprocess.run(
+            [
+                "ffmpeg", "-v", "error", "-i", str(path),
+                "-f", "rawvideo", "-pix_fmt", "rgba", "-",
+            ],
+            capture_output=True,
+            check=True,
+        )
+        return width, height, out.stdout
+
+    def _alpha_bbox(self, width: int, height: int, data: bytes) -> tuple[int, int, int, int] | None:
+        """(min_x, min_y, max_x_exclusive, max_y_exclusive) of any non-zero alpha."""
+        min_x, min_y, max_x, max_y = width, height, -1, -1
+        for y in range(height):
+            row_offset = y * width * 4
+            for x in range(width):
+                if data[row_offset + x * 4 + 3] != 0:
+                    min_x = min(min_x, x)
+                    max_x = max(max_x, x)
+                    min_y = min(min_y, y)
+                    max_y = max(max_y, y)
+        if max_x < 0:
+            return None
+        return min_x, min_y, max_x + 1, max_y + 1
+
     def test_badge_is_rendered_at_the_geometry_size(self):
         result = build_watermark(
             video_width=1280, video_height=720, hostname="fetchly.example.com", cache_dir=self.cache
@@ -235,6 +274,61 @@ class BuildWatermarkTests(unittest.TestCase):
         )
         self.assertIn("gblur=sigma=", graph)
         self.assertIn(str(watermark._FONT_TTF), graph)
+
+    def test_badge_ink_sits_flush_with_equal_slack_on_right_and_bottom(self):
+        # The overlay is positioned at W-w-margin:H-h-margin, so the canvas's
+        # own right and bottom padding around the drawn ink must be close, or
+        # the badge reads as sitting further from one edge than the other.
+        for video_width, video_height, hostname in [
+            (1280, 720, "fetchly.example.com"),
+            (854, 480, "fetchly.example.com"),
+            (3840, 2160, "media.my-instance.example.org"),
+            (1280, 720, ""),
+        ]:
+            with self.subTest(video_width=video_width, video_height=video_height, hostname=hostname):
+                result = build_watermark(
+                    video_width=video_width,
+                    video_height=video_height,
+                    hostname=hostname,
+                    cache_dir=self.cache,
+                )
+                assert result is not None
+                width, height, data = self._rgba_pixels(result.path)
+                bbox = self._alpha_bbox(width, height, data)
+                assert bbox is not None
+                right_gap = width - bbox[2]
+                bottom_gap = height - bbox[3]
+                self.assertLessEqual(abs(right_gap - bottom_gap), 10)
+
+    def test_logo_is_translucent_but_the_hostname_stays_fully_opaque(self):
+        result = build_watermark(
+            video_width=1280, video_height=720, hostname="fetchly.example.com", cache_dir=self.cache
+        )
+        assert result is not None
+        width, _height, data = self._rgba_pixels(result.path)
+        geometry = badge_geometry(1280, 720, "fetchly.example.com")
+
+        def alpha_at(x: int, y: int) -> int:
+            return data[(y * width + x) * 4 + 3]
+
+        # A patch deep inside the logo glyph area: below full opacity, like a
+        # broadcaster's translucent on-screen bug.
+        logo_sample_x = geometry.logo_x + geometry.logo_width // 2
+        logo_sample_y = geometry.logo_height // 2
+        logo_alpha_values = [
+            alpha_at(x, y)
+            for x in range(logo_sample_x - 5, logo_sample_x + 5)
+            for y in range(logo_sample_y - 5, logo_sample_y + 5)
+        ]
+        self.assertGreater(max(logo_alpha_values), 0)
+        self.assertLess(max(logo_alpha_values), 255)
+
+        # The hostname row must reach full opacity somewhere: it is
+        # information, not a brand mark, and stays legible over any footage.
+        text_row = [
+            alpha_at(x, geometry.text_y + geometry.font_size // 2) for x in range(width)
+        ]
+        self.assertEqual(max(text_row), 255)
 
     def test_without_a_font_the_hostname_is_dropped(self):
         with patch.object(watermark, "_font_file", return_value=""):

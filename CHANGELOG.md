@@ -12,6 +12,7 @@
 - ``Fix`` Repeating the same notification no longer stacks copies in the corner; the visible one's dismiss timer just restarts.
 - ``Fix`` Fewer "database is locked" errors under heavy concurrent use.
 - ``Fix`` The video watermark renders reliably when the bundled font check would previously have raced and skipped it.
+- ``Fix`` The video watermark's bottom margin now matches its right margin, its drop shadow is lighter, and the logo itself is translucent like a broadcaster's on-screen bug; the hostname line stays fully opaque and legible.
 - ``Fix`` Unknown track lengths show clearly instead of `0:00` or a blank field.
 - ``Fix`` Trim view no longer draws a second, cut-off waveform, and the playback cursor and progress highlight are back.
 - ``Fix`` Changing the public hostname now confirms the save.
