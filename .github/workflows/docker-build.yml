@@ -28,6 +28,12 @@ jobs:
       tag: ${{ steps.meta.outputs.tag }}
       version: ${{ steps.meta.outputs.version }}
       is_newest: ${{ steps.newest.outputs.is_newest }}
+      python_base: ${{ steps.rolling.outputs.python_base }}
+      essentia_ref: ${{ steps.rolling.outputs.essentia_ref }}
+      ffmpeg_series: ${{ steps.rolling.outputs.ffmpeg_series }}
+      ytdlp_version: ${{ steps.rolling.outputs.ytdlp_version }}
+      ytdlp_ejs_version: ${{ steps.rolling.outputs.ytdlp_ejs_version }}
+      deno_version: ${{ steps.rolling.outputs.deno_version }}
 
     steps:
       - name: Checkout repository
@@ -102,6 +108,95 @@ jobs:
           echo "build_date=${BUILD_DATE}" >> "$GITHUB_OUTPUT"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      # Everything the Dockerfile deliberately leaves rolling is resolved here,
+      # once, and handed to every architecture as a build arg.
+      #
+      # The Dockerfile's defaults each mean "whatever is newest at the moment
+      # this layer runs": the python base tag, essentia's master branch, BtbN's
+      # 'latest' ffmpeg release, yt-dlp and yt-dlp-ejs unpinned, and deno's
+      # release-latest.txt. That is the intent for a release - but the amd64
+      # and arm64 jobs are separate runners that reach those layers minutes
+      # apart, so each would resolve "newest" on its own. A yt-dlp release, an
+      # essentia commit or a nightly ffmpeg rebuild landing in that window
+      # would put different toolchains in the two halves of one manifest.
+      #
+      # Resolving once and pinning only for the duration of the build keeps
+      # both properties: the release still picks up the current stable of
+      # everything, and both images contain identical versions of it.
+      - name: Resolve rolling toolchain versions
+        id: rolling
+        run: |
+          set -euo pipefail
+
+          # The base image by digest, so both architectures build on the same
+          # multi-arch index even if a new python:3.13-slim is pushed mid-run.
+          python_base="python:3.13-slim"
+          digest="$(docker buildx imagetools inspect "$python_base" \
+            --format '{{.Manifest.Digest}}')"
+          case "$digest" in
+            sha256:*) ;;
+            *) echo "ERROR: could not resolve a digest for ${python_base}"; exit 1 ;;
+          esac
+          python_base="python:3.13-slim@${digest}"
+
+          # essentia master -> one commit SHA. docker/Dockerfile compiles it on
+          # both architectures, so this is the single value that decides which
+          # essentia the release ships.
+          essentia_ref="$(git ls-remote https://github.com/MTG/essentia.git refs/heads/master | cut -f1)"
+          if [[ ! "$essentia_ref" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "ERROR: could not resolve MTG/essentia master (got '${essentia_ref}')"
+            exit 1
+          fi
+
+          # The newest stable ffmpeg series in BtbN's 'latest' release, chosen
+          # with the same rule docker/Dockerfile applies when FFMPEG_SERIES is
+          # empty - here just once rather than per architecture.
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 5 --retry-delay 2 \
+            -o checksums.sha256 \
+            "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/checksums.sha256"
+          ffmpeg_series="$(awk '{print $2}' checksums.sha256 \
+            | sed -n 's/^ffmpeg-n\([0-9][0-9.]*\)-latest-linux64-gpl-\1\.tar\.xz$/\1/p' \
+            | sort -V | tail -n 1)"
+          if [[ -z "$ffmpeg_series" ]]; then
+            echo "ERROR: no stable ffmpeg series found in BtbN's latest release"
+            exit 1
+          fi
+
+          # yt-dlp and yt-dlp-ejs are installed unpinned by the Dockerfile.
+          # Resolve the current release of each and hand it over as the exact
+          # '==<version>' specifier the YTDLP_* args expect.
+          ytdlp_version="$(curl -fsSL https://pypi.org/pypi/yt-dlp/json | jq -r '.info.version')"
+          ytdlp_ejs_version="$(curl -fsSL https://pypi.org/pypi/yt-dlp-ejs/json | jq -r '.info.version')"
+          for v in "$ytdlp_version" "$ytdlp_ejs_version"; do
+            if [[ -z "$v" || "$v" == "null" ]]; then
+              echo "ERROR: could not resolve a yt-dlp / yt-dlp-ejs version from PyPI"
+              exit 1
+            fi
+          done
+
+          deno_version="$(curl -fsSL https://dl.deno.land/release-latest.txt | tr -d ' \t\r\n')"
+          if [[ -z "$deno_version" ]]; then
+            echo "ERROR: could not resolve the latest deno release"
+            exit 1
+          fi
+
+          {
+            echo "python_base=${python_base}"
+            echo "essentia_ref=${essentia_ref}"
+            echo "ffmpeg_series=${ffmpeg_series}"
+            echo "ytdlp_version===${ytdlp_version}"
+            echo "ytdlp_ejs_version===${ytdlp_ejs_version}"
+            echo "deno_version=${deno_version}"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Resolved once for every architecture:"
+          echo "  python base : ${python_base}"
+          echo "  essentia    : ${essentia_ref}"
+          echo "  ffmpeg      : n${ffmpeg_series}"
+          echo "  yt-dlp      : ${ytdlp_version}"
+          echo "  yt-dlp-ejs  : ${ytdlp_ejs_version}"
+          echo "  deno        : ${deno_version}"
 
       # A release must not travel backwards. Re-running this workflow on an
       # older tag - v1.3 while 1.5 is published - passes every check above,
@@ -302,11 +397,12 @@ jobs:
       # (the app reads pyproject.toml and BUILD_INFO from disk), and passing undeclared
       # build args would only produce warnings.
       #
-      # The toolchain the Dockerfile intentionally keeps rolling - the ffmpeg
-      # series, yt-dlp, yt-dlp-ejs, deno, the python base - is left at its
-      # defaults so a release picks up the current stable of each. To cut a
-      # release against a known-good set instead, add the matching pins here,
-      # e.g. --build-arg "YTDLP_VERSION===2026.8.19".
+      # The toolchain the Dockerfile keeps rolling - the python base, essentia,
+      # the ffmpeg series, yt-dlp, yt-dlp-ejs, deno - comes in as build args
+      # resolved once by the meta job. Those are still "whatever is newest",
+      # just newest as of one moment rather than as of whenever each runner
+      # happened to reach the layer, which is what keeps the amd64 and arm64
+      # images carrying identical versions. The verify step below proves it.
       - name: Build image for smoke tests
         run: |
           set -euo pipefail
@@ -315,6 +411,12 @@ jobs:
             --platform "${{ matrix.platform }}" \
             --target runtime \
             --load \
+            --build-arg "PYTHON_BASE=${{ needs.meta.outputs.python_base }}" \
+            --build-arg "ESSENTIA_REF=${{ needs.meta.outputs.essentia_ref }}" \
+            --build-arg "FFMPEG_SERIES=${{ needs.meta.outputs.ffmpeg_series }}" \
+            --build-arg "YTDLP_VERSION=${{ needs.meta.outputs.ytdlp_version }}" \
+            --build-arg "YTDLP_EJS_VERSION=${{ needs.meta.outputs.ytdlp_ejs_version }}" \
+            --build-arg "DENO_VERSION=${{ needs.meta.outputs.deno_version }}" \
             --cache-from type=gha,scope=${{ matrix.cache_scope }} \
             --cache-to type=gha,mode=max,scope=${{ matrix.cache_scope }} \
             --label "org.opencontainers.image.title=fetchly" \
@@ -524,6 +626,63 @@ jobs:
           print("✓ essentia BPM analysis OK")
           PY
 
+      # What actually proves the two images agree. Each architecture writes the
+      # resolved version of everything that rolls into an artifact; the
+      # manifest job compares those files and refuses to publish an index whose
+      # halves differ. Resolving once in the meta job makes drift unlikely, but
+      # only this makes it impossible to publish silently - a cache hit on a
+      # stale layer or a build arg that failed to reach the Dockerfile would
+      # both land here.
+      - name: Record toolchain versions (${{ matrix.arch }})
+        run: |
+          set -euo pipefail
+          mkdir -p toolchain
+          docker exec -i "${{ matrix.container_name }}" python - \
+            > "toolchain/${{ matrix.image_suffix }}.txt" <<'PY'
+          import platform
+          from importlib import metadata
+
+          from app.utils.version import (
+              get_ffmpeg_version,
+              get_js_runtime_version,
+              get_version,
+              get_wavesurfer_version,
+              get_ytdlp_ejs_version,
+              get_ytdlp_version,
+          )
+
+          # Only architecture-independent identities belong here. A value that
+          # legitimately differs per architecture - a wheel's platform tag, the
+          # machine name - would turn this gate into a permanent failure, so it
+          # records versions and nothing else.
+          versions = {
+              "python": platform.python_version(),
+              "fetchly": get_version(),
+              "essentia": metadata.version("essentia"),
+              "torch": metadata.version("torch"),
+              "numpy": metadata.version("numpy"),
+              "beat-this": metadata.version("beat-this"),
+              "ffmpeg": get_ffmpeg_version(),
+              "yt-dlp": get_ytdlp_version(),
+              "yt-dlp-ejs": get_ytdlp_ejs_version(),
+              "deno": get_js_runtime_version(),
+              "wavesurfer": get_wavesurfer_version(),
+          }
+          for name, value in sorted(versions.items()):
+              print(f"{name}={value}")
+          PY
+
+          echo "=== ${{ matrix.arch }} toolchain ==="
+          cat "toolchain/${{ matrix.image_suffix }}.txt"
+
+      - name: Upload toolchain versions (${{ matrix.arch }})
+        uses: actions/upload-artifact@v7
+        with:
+          name: toolchain-${{ matrix.image_suffix }}
+          path: toolchain/${{ matrix.image_suffix }}.txt
+          retention-days: 1
+          if-no-files-found: error
+
       - name: Remove smoke-test container
         if: always()
         run: docker rm -f "${{ matrix.container_name }}" 2>/dev/null || true
@@ -677,6 +836,70 @@ jobs:
           pattern: image-digest-*
           path: digests/
           merge-multiple: true
+
+      - name: Download toolchain versions
+        uses: actions/download-artifact@v7
+        with:
+          pattern: toolchain-*
+          path: toolchain/
+          merge-multiple: true
+
+      # The release gate for "both images contain the same versions". Runs
+      # before the manifest is created, so a mismatch stops the publish rather
+      # than being discovered in an already-tagged image.
+      - name: Verify architectures carry identical versions
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import pathlib
+          import sys
+
+          files = sorted(pathlib.Path("toolchain").glob("*.txt"))
+          if not files:
+              sys.exit("FAIL: no toolchain manifests were published by the build jobs")
+
+          def read(path):
+              out = {}
+              for line in path.read_text(encoding="utf-8").splitlines():
+                  line = line.strip()
+                  if not line:
+                      continue
+                  name, _, value = line.partition("=")
+                  out[name] = value
+              return out
+
+          recorded = {path.stem: read(path) for path in files}
+          for arch, versions in recorded.items():
+              print(f"--- {arch} ---")
+              for name, value in sorted(versions.items()):
+                  print(f"  {name}={value}")
+
+          if len(recorded) == 1:
+              print("\nOnly one architecture was built; nothing to compare.")
+              sys.exit(0)
+
+          names = sorted({name for versions in recorded.values() for name in versions})
+          mismatches = []
+          for name in names:
+              seen = {arch: versions.get(name, "<missing>") for arch, versions in recorded.items()}
+              if len(set(seen.values())) > 1:
+                  detail = ", ".join(f"{arch}={value}" for arch, value in sorted(seen.items()))
+                  mismatches.append(f"{name}: {detail}")
+
+          if mismatches:
+              print("\nFAIL: the architectures do not carry the same versions:", file=sys.stderr)
+              for mismatch in mismatches:
+                  print(f"  {mismatch}", file=sys.stderr)
+              print(
+                  "\nEvery rolling component is resolved once in the meta job and passed "
+                  "to both builds, so this means a build arg did not reach the Dockerfile, "
+                  "or a stale cached layer was reused.",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+
+          print(f"\nOK: {', '.join(sorted(recorded))} carry identical versions of all {len(names)} components")
+          PY
 
       - name: Create and push manifest
         run: |

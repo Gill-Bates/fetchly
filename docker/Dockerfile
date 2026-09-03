@@ -63,20 +63,24 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 ARG TARGETARCH
 ARG ESSENTIA_REPO=https://github.com/MTG/essentia.git
-# Pinned to the commit MTG/essentia published to PyPI as 2.1b6.dev1389
-# (git describe: v2.1_beta5-1389-g36ec3d92, uploaded 2025-07-24). Every
-# architecture compiles from this one commit. A branch name could not give the
-# two architectures the same essentia: setup.py derives the version from `git
-# describe` - the VERSION file plus the commit count since the last tag - and
-# the amd64 and arm64 jobs run on separate runners minutes apart, so 'master'
-# would silently hand them two different versions the moment upstream lands a
-# commit between them. ESSENTIA_REF and ESSENTIA_VERSION move together, stay
-# equal to the pyproject.toml pin, and the built wheel is checked against
-# ESSENTIA_VERSION below.
-ARG ESSENTIA_REF=36ec3d929402d491cbbb1120c54631e8c205b0ff
-ARG ESSENTIA_VERSION=2.1b6.dev1389
+# Upstream's current master, not a frozen commit. Which is also what makes this
+# stage work at all on amd64: essentia only bumped its bundled ffmpeg from
+# 2.8.12 (2017) to 7.1.1 in December 2025, and the 2017 tree's x86 inline
+# assembly no longer assembles under a current gcc - `operand type mismatch for
+# 'shr'` out of libavcodec/x86/mathops.h. Anything older than that bump cannot
+# be compiled here on x86 at all, whatever its version number says.
+#
+# The release workflow resolves this ref to one commit SHA and passes that same
+# SHA to both architecture builds, so 'latest' is picked once per release
+# rather than twice - see .github/workflows/docker-build.yml. A plain
+# `docker build` just takes master's HEAD.
+ARG ESSENTIA_REF=master
 
 COPY docker/apt-no-distro-media.pref /etc/apt/preferences.d/no-distro-media
+
+# Cache buster: ESSENTIA_REF is a moving ref by default, so nothing in the
+# build context changes when upstream lands a commit. This feed does.
+ADD https://github.com/MTG/essentia/commits/${ESSENTIA_REF}.atom /tmp/essentia-ref.atom
 
 # Both architectures compile essentia here; neither installs it from PyPI.
 # Upstream's wheels cannot produce one essentia across a multi-arch release -
@@ -105,6 +109,7 @@ RUN set -euo pipefail; \
         ca-certificates \
         cmake \
         curl \
+        file \
         git \
         nasm \
         pkg-config; \
@@ -122,17 +127,13 @@ RUN set -euo pipefail; \
     fi; \
     export MAKEFLAGS="-j$(nproc)"; \
     pip wheel --no-cache-dir --no-deps -w /wheels .; \
+    rm -f /tmp/essentia-ref.atom; \
     ls -l /wheels; \
     shopt -s nullglob; \
     built=(/wheels/essentia-*.whl); \
     (( ${#built[@]} == 1 )) || \
         { echo "expected exactly one essentia wheel, got: ${built[*]:-none}" >&2; exit 1; }; \
-    case "$(basename "${built[0]}")" in \
-        essentia-"${ESSENTIA_VERSION}"-*) \
-            echo "built essentia ${ESSENTIA_VERSION} from ${ESSENTIA_REF}" ;; \
-        *) echo "wheel $(basename "${built[0]}") is not essentia ${ESSENTIA_VERSION} - ESSENTIA_REF no longer matches ESSENTIA_VERSION / the pyproject.toml pin" >&2; \
-            exit 1 ;; \
-    esac
+    echo "built $(basename "${built[0]}") from ${ESSENTIA_REF}"
 
 FROM ${PYTHON_BASE} AS builder
 
@@ -198,39 +199,6 @@ RUN set -euo pipefail; \
     pip install --no-cache-dir --extra-index-url "$TORCH_CPU_INDEX" -r /tmp/requirements.txt; \
     rm -f /tmp/requirements.txt; \
     rm -rf /tmp/essentia-wheels
-
-# essentia parity gate. Both architectures install a source build governed by
-# ESSENTIA_REF, and pyproject.toml names the version that ref is expected to
-# produce. This asserts the three agree, so a bumped ref, a stale pin, or a
-# `git describe` that resolved differently than expected fails the build here
-# rather than in a user's first BPM job. Runs on both architectures, which is
-# what makes it a parity check: the same assertion against the same manifest
-# value on each, so two images cannot pass with different essentias.
-RUN python - <<'PYCHECK'
-import re
-import sys
-import tomllib
-from importlib import metadata
-
-deps = tomllib.load(open("pyproject.toml", "rb"))["project"]["dependencies"]
-pin = next((d for d in deps if re.match(r"\s*essentia\s*==", d)), None)
-if pin is None:
-    sys.exit("pyproject.toml [project.dependencies] has no 'essentia==' pin")
-want = pin.split("==", 1)[1].strip()
-have = metadata.version("essentia")
-try:
-    from packaging.version import Version
-
-    ok = Version(have) == Version(want)
-except ModuleNotFoundError:
-    ok = have == want
-if not ok:
-    sys.exit(
-        f"essentia {have} is installed but pyproject.toml pins {want}; "
-        "sync ESSENTIA_REF / ESSENTIA_VERSION in docker/Dockerfile with the pin"
-    )
-print(f"essentia {have} matches the pyproject.toml pin")
-PYCHECK
 
 ARG YTDLP_VERSION=""
 ARG YTDLP_EJS_VERSION=""

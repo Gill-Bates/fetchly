@@ -43,17 +43,16 @@ classifiers = [
 #   pip install --extra-index-url https://download.pytorch.org/whl/cpu -e .
 dependencies = [
     "beat-this>=1.1.0",
-    # The newest essentia release that still ships cp313 manylinux wheels - the
-    # upstream dev1438+ builds are cp314-only, which would strand the image
-    # build on ARG PYTHON_BASE=python:3.13-slim. This pin governs local dev
-    # installs; the Docker image never resolves it, because no set of upstream
-    # wheels can put the same essentia on both architectures (there has never
-    # been a linux/aarch64 one). docker/Dockerfile compiles essentia from
-    # source on amd64 and arm64 alike and drops this line before pip runs. Its
-    # ESSENTIA_REF / ESSENTIA_VERSION args are pinned to the commit that builds
-    # to exactly this version, and the builder stage fails the build if the
-    # installed version and this pin disagree. Bump all three together.
-    "essentia==2.1b6.dev1389",
+    # Deliberately unpinned, unlike the rest of this list. No single version is
+    # even installable everywhere: upstream ships no linux/aarch64 wheel at
+    # all, and its newest x86_64 wheels are cp314-only while this project
+    # builds on 3.13. Left open, pip picks the newest release with a wheel for
+    # the running interpreter, which is what a local dev install wants. The
+    # Docker image never resolves this line - it compiles essentia from source
+    # on both architectures and drops the line before pip runs, so the two
+    # published images share one build. See the essentia stage in
+    # docker/Dockerfile.
+    "essentia",
     "fastapi==0.141.1",
     "gunicorn==26.2.0",
     "httpx==0.28.1",
