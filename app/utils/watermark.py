@@ -69,7 +69,7 @@ _CACHE_DIRNAME: Final[str] = "watermark-cache"
 
 # Bumped whenever the badge layout changes, so upgraded installs re-render
 # instead of serving a stale cache entry.
-_BADGE_REVISION: Final[str] = "3"
+_BADGE_REVISION: Final[str] = "4"
 
 # Logo aspect ratio, straight from the SVG viewBox.
 _LOGO_ASPECT: Final[float] = 203.56738 / 58.475399
@@ -97,7 +97,15 @@ _SHADOW_OFFSET_FACTOR: Final[float] = 0.09
 _MIN_SHADOW_OFFSET: Final[int] = 2
 _SHADOW_BLUR_FACTOR: Final[float] = 0.055
 _MIN_SHADOW_BLUR: Final[float] = 1.0
-_SHADOW_ALPHA: Final[float] = 0.55
+# Faint on purpose: this is a soft cue that the badge sits above the frame,
+# not a second, darker outline competing with the logo itself.
+_SHADOW_ALPHA: Final[float] = 0.35
+
+# The logo mark itself is drawn translucent, like a broadcaster's on-screen
+# bug, so it reads as a brand mark rather than an opaque sticker over the
+# video. The hostname line is unaffected - it is information, not branding,
+# and stays fully legible (see fontcolor below).
+_LOGO_ALPHA: Final[float] = 0.55
 
 # Mean glyph advance of Roboto Flex (default instance: wght 400, wdth 100,
 # opsz 14) in em, used to pick a font size that keeps the hostname from

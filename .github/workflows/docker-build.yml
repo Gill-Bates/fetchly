@@ -306,7 +306,12 @@ jobs:
 
           mv constraints-x86_64-manylinux_2_28.txt constraints.txt
           rm -f constraints-aarch64-manylinux_2_28.txt runtime-requirements.txt
-          echo "Both platforms resolve to the same $(grep -cE '^[^#[:space:]]' constraints.txt) versions:"
+          resolved_count="$(grep -cE '^[^#[:space:]]' constraints.txt || true)"
+          if (( resolved_count == 0 )); then
+            echo "ERROR: the resolution produced no versions at all"
+            exit 1
+          fi
+          echo "Both platforms resolve to the same ${resolved_count} versions:"
           cat constraints.txt
 
       - name: Upload resolved constraints
@@ -526,11 +531,13 @@ jobs:
       # build args would only produce warnings.
       #
       # The toolchain the Dockerfile keeps rolling - the python base, essentia,
-      # the ffmpeg series, yt-dlp, yt-dlp-ejs, deno - comes in as build args
-      # resolved once by the meta job. Those are still "whatever is newest",
-      # just newest as of one moment rather than as of whenever each runner
-      # happened to reach the layer, which is what keeps the amd64 and arm64
-      # images carrying identical versions. The verify step below proves it.
+      # the ffmpeg release, yt-dlp, yt-dlp-ejs, deno - comes in as build args
+      # resolved once by the meta job, and the Python dependencies as the
+      # constraints.txt downloaded into the context above. Those are still
+      # "whatever is newest", just newest as of one moment rather than as of
+      # whenever each runner happened to reach the layer, which is what keeps
+      # the amd64 and arm64 images carrying identical versions. The verify step
+      # below proves it.
       - name: Build image for smoke tests
         run: |
           set -euo pipefail
