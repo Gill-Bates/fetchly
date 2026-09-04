@@ -17,7 +17,7 @@ name = "fetchly"
 # at runtime, the release workflow validates the git tag against it, and
 # docker/Dockerfile copies this file into the image so the Settings page and
 # /api/updates report the same number the tag was cut from.
-version = "1.2.1"
+version = "1.2.2"
 description = "Self-hosted media downloader with BPM analysis and stem separation"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -50,10 +50,6 @@ classifiers = [
 # in the CUDA build:
 #   pip install --extra-index-url https://download.pytorch.org/whl/cpu -e .
 dependencies = [
-    
-    
-    
-    
     "beat-this>=1.1.0",
     "essentia", # pinned
     "fastapi==0.141.1",

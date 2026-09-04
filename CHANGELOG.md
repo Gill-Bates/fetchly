@@ -1,3 +1,9 @@
+## [1.2.2] - 2026-09-xx
+
+
+
+<details markdown="1">
+<summary>Previous versions...</summary>
 
 ## [1.2.1] - 2026-09-04
 
@@ -10,10 +16,6 @@
 - ``Fix`` Fetching a video's title now fails fast instead of tying up a worker slot when the source is blocked or unreachable.
 - ``Fix`` A worker thread that fails to stop in time on restart is no longer left behind, which could otherwise run a second, overlapping set of download workers.
 - ``Security`` Error messages and logs from failed downloads no longer contain signed access tokens from CDN URLs.
-
-
-<details markdown="1">
-<summary>Previous versions...</summary>
 
 ## [1.2.0] - 2026-09-03
 
