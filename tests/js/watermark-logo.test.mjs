@@ -53,10 +53,17 @@ test("a wide logo is rendered at twice the widest badge", () => {
 });
 
 test("a tall logo is bounded by the server's pixel limit instead", () => {
-    const { width, height } = rasterSize(1 / 4);
-    assert.ok(height <= 4096, `height ${height} exceeds the server limit`);
-    assert.ok(width >= 1, "width must stay positive");
-    assert.equal(Math.round(width / height * 100) / 100, 0.25);
+    assert.deepEqual(rasterSize(1 / 4), { width: 1024, height: 4096 });
+});
+
+test("the pixel and aspect bounds are inclusive on both edges", () => {
+    // Matches MIN/MAX_LOGO_PIXELS and MIN/MAX_LOGO_ASPECT in
+    // app/utils/watermark_logo.py, which use <= on every side.
+    assert.equal(pixelSizeProblem(32, 32), "");
+    assert.equal(pixelSizeProblem(4096, 4096), "");
+    assert.equal(pixelSizeProblem(4000, 200), "");               // aspect exactly 20
+    assert.equal(pixelSizeProblem(400, 4000), "");               // aspect exactly 0.1
+    assert.match(pixelSizeProblem(200, 4000), /too elongated/);  // aspect 0.05
 });
 
 function pixels(alphas) {

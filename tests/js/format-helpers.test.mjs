@@ -4,7 +4,6 @@
 //
 
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 globalThis.document = {
@@ -15,15 +14,12 @@ globalThis.document = {
     },
 };
 
-const utilsSource = await readFile(
-    new URL("../../app/static/js/utils.js", import.meta.url),
-    "utf8",
-);
-const utilsModuleUrl = `data:text/javascript;base64,${Buffer.from(utilsSource).toString("base64")}`;
-const { formatDuration, formatLalalMinutes, EMPTY_VALUE } = await import(utilsModuleUrl);
+const { formatDuration, formatLalalMinutes, EMPTY_VALUE } = await import("../../app/static/js/utils.js");
 
-// Kept in step with format_clock() in app/utils/duration.py, which renders the
-// same job durations server-side on the job page.
+// Kept in step with format_clock() in app/utils/duration.py
+// (tests/test_job_duration.py::FormatClockTests holds the matching table).
+// Booleans are excluded here: the server rejects them before storage and no
+// API field ever carries one, so JS coercing True to 1 is not a real gap.
 test("renders hours only when the duration has any", () => {
     assert.equal(formatDuration(15690), "4:21:30");
     assert.equal(formatDuration(213.4), "3:33");
@@ -35,7 +31,7 @@ test("pads the minutes once an hour is shown", () => {
 });
 
 test("unknown durations render as the shared placeholder", () => {
-    for (const value of [null, undefined, -1, Number.NaN, Number.POSITIVE_INFINITY, "abc"]) {
+    for (const value of ["", null, undefined, -1, Number.NaN, Number.POSITIVE_INFINITY, "abc"]) {
         assert.equal(formatDuration(value), EMPTY_VALUE);
     }
 });

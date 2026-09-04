@@ -70,16 +70,21 @@ test("a violation with no impact is kept, not dropped", () => {
     assert.equal(summary.minor.length, 1);
 });
 
-test("a failed run reports available:false with a reason, not an empty pass", () => {
-    // Passing a page object whose evaluate throws stands in for any runtime
-    // failure inside axe.
+test("a runtime failure inside axe reports available:false, not an empty pass", async () => {
+    // An empty page object stands in for any runtime failure AxeBuilder can
+    // hit against a real page (navigation gone, context closed, ...): it has
+    // none of the methods AxeBuilder needs and analyze() rejects.
+    //
+    // This exercises the second catch in runAxeAudit, not the "package not
+    // installed" branch: @axe-core/playwright is a devDependency of
+    // tools/ui-lint and resolves from there in this repo, so a test cannot
+    // force the import itself to fail without mocking module resolution.
     const brokenPage = {};
 
-    return runAxeAudit(brokenPage).then((result) => {
-        assert.equal(result.available, false);
-        assert.ok(result.error, "no reason given for the skipped audit");
-        assert.equal(result.violations, 0);
-        // The caller distinguishes these two cases solely by `available`.
-        assert.notEqual(result.available, true);
-    });
+    const result = await runAxeAudit(brokenPage);
+    assert.equal(result.available, false);
+    assert.match(result.error, /axe audit failed/, `unexpected error: ${result.error}`);
+    assert.equal(result.violations, 0);
+    // The caller distinguishes the two failure modes solely by `available`.
+    assert.notEqual(result.available, true);
 });

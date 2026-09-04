@@ -4,122 +4,29 @@
 //
 
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-// Minimal DOM + Bootstrap stand-ins: enough for confirm.js to build its one
-// reusable modal node and drive it through show / accept / dismiss.
-class FakeElement {
-    constructor(tag) {
-        this.tagName = String(tag).toUpperCase();
-        this.className = "";
-        this.id = "";
-        this.tabIndex = 0;
-        this.type = "";
-        this.textContent = "";
-        this.children = [];
-        this.parentNode = null;
-        this.attributes = new Map();
-        this.focusCount = 0;
-        this._listeners = new Map();
-    }
+import { findByClass, installFakeDom } from "./helpers/fake-dom.mjs";
 
-    setAttribute(name, value) {
-        this.attributes.set(name, String(value));
-    }
+// confirm.js builds its modal node once and reuses it for every call, so the
+// body must not be reset between tests here - that would strand the node
+// nothing in confirm.js would ever recreate.
+const { body, activeElement, modalCalls } = installFakeDom();
 
-    getAttribute(name) {
-        return this.attributes.has(name) ? this.attributes.get(name) : null;
-    }
-
-    append(...nodes) {
-        for (const node of nodes) {
-            this.children.push(node);
-            node.parentNode = this;
-        }
-    }
-
-    appendChild(node) {
-        this.children.push(node);
-        node.parentNode = this;
-        return node;
-    }
-
-    contains(node) {
-        return node === this || this.children.some((child) => child.contains?.(node));
-    }
-
-    addEventListener(type, handler, options = {}) {
-        const bucket = this._listeners.get(type) ?? [];
-        bucket.push({ handler, once: Boolean(options.once) });
-        this._listeners.set(type, bucket);
-    }
-
-    dispatchEvent(type, event = {}) {
-        const bucket = this._listeners.get(type) ?? [];
-        this._listeners.set(type, bucket.filter((entry) => !entry.once));
-        for (const entry of bucket) {
-            entry.handler({ type, ...event });
-        }
-    }
-
-    click() {
-        this.dispatchEvent("click");
-    }
-
-    focus() {
-        this.focusCount += 1;
-        activeElement.current = this;
-    }
-}
-
-const body = new FakeElement("body");
-const activeElement = { current: body };
-const modalCalls = { show: 0, hide: 0 };
-
-globalThis.HTMLElement = FakeElement;
-globalThis.window = { confirm: () => true };
-globalThis.document = {
-    body,
-    createElement: (tag) => new FakeElement(tag),
-    get activeElement() {
-        return activeElement.current;
-    },
-};
-globalThis.bootstrap = {
-    Modal: {
-        getOrCreateInstance(root) {
-            return {
-                show() {
-                    modalCalls.show += 1;
-                    root.dispatchEvent("shown.bs.modal");
-                },
-                hide() {
-                    modalCalls.hide += 1;
-                    root.dispatchEvent("hidden.bs.modal");
-                },
-            };
-        },
-    },
-};
-
-const source = await readFile(
-    new URL("../../app/static/js/confirm.js", import.meta.url),
-    "utf8",
-);
-const { confirmModal } = await import(
-    `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`
-);
+const { confirmModal } = await import("../../app/static/js/confirm.js");
 
 function modalParts() {
     const root = body.children.find((child) => child.id === "confirmModal");
-    const content = root.children[0].children[0];
-    const [header, bodyEl, footer] = content.children;
+    const footer = findByClass(root, "modal-footer");
     return {
         root,
-        title: header.children[0],
-        message: bodyEl.children[0],
-        cancelBtn: footer.children[0],
+        title: findByClass(root, "modal-title"),
+        message: findByClass(root, "mb-0"),
+        closeBtn: findByClass(root, "btn-close"),
+        cancelBtn: findByClass(root, "btn-outline-secondary"),
+        // confirm.js appends [cancelBtn, acceptBtn] to the footer in that
+        // order; acceptBtn's own class changes with the variant, so its
+        // stable identity is "the footer's second control".
         acceptBtn: footer.children[1],
     };
 }
@@ -166,8 +73,28 @@ test("a destructive variant opens with the cancel button focused", async () => {
     assert.equal(await pending, false);
 });
 
+test("every accepted variant renders its own button class", async () => {
+    for (const variant of ["primary", "success", "warning", "danger"]) {
+        const pending = confirmModal({ message: "Go?", variant });
+        assert.equal(modalParts().acceptBtn.className, `btn btn-${variant}`);
+        modalParts().root.dispatchEvent("hidden.bs.modal");
+        assert.equal(await pending, false);
+    }
+});
+
+test("an unknown variant falls back to primary, focused as a safe action", async () => {
+    const pending = confirmModal({ message: "Go?", variant: "chartreuse" });
+    const { root, acceptBtn } = modalParts();
+
+    assert.equal(acceptBtn.className, "btn btn-primary");
+    assert.equal(activeElement.current, acceptBtn);
+
+    root.dispatchEvent("hidden.bs.modal");
+    assert.equal(await pending, false);
+});
+
 test("restores focus to the triggering element after closing", async () => {
-    const trigger = new FakeElement("button");
+    const trigger = new (Object.getPrototypeOf(body).constructor)("button");
     body.appendChild(trigger);
     trigger.focus();
 
@@ -176,6 +103,33 @@ test("restores focus to the triggering element after closing", async () => {
     await pending;
 
     assert.equal(activeElement.current, trigger);
+});
+
+test("opening a second dialog resolves the first one as cancelled", async () => {
+    // The modal node and its pending promise are shared module state: a
+    // second confirmModal() call while the first is still open must not
+    // leave the first caller's promise dangling forever.
+    const first = confirmModal({ message: "First?", variant: "danger" });
+    const second = confirmModal({ message: "Second?", variant: "primary" });
+
+    assert.equal(await first, false);
+    assert.equal(modalParts().message.textContent, "Second?");
+
+    modalParts().acceptBtn.click();
+    assert.equal(await second, true);
+});
+
+test("the dialog is wired for assistive tech", async () => {
+    const pending = confirmModal({ message: "Go?" });
+    const { root, title, closeBtn } = modalParts();
+
+    assert.equal(root.getAttribute("aria-labelledby"), "confirmModalLabel");
+    assert.equal(title.id, "confirmModalLabel");
+    assert.equal(root.tabIndex, -1);
+    assert.equal(closeBtn.getAttribute("aria-label"), "Close dialog");
+
+    root.dispatchEvent("hidden.bs.modal");
+    assert.equal(await pending, false);
 });
 
 test("falls back to a native prompt when Bootstrap is unavailable", async () => {
