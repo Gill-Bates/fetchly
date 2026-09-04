@@ -1,0 +1,232 @@
+#
+# .github/workflows/ui-audit.yml
+# Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
+#
+# The browser half of the UI audit: visual drift, layout stability, touch
+# targets, axe. Deliberately separate from ci.yml and deliberately not a gate.
+#
+# The source-level contracts already run in ci.yml as a plain lint step, because
+# they are regexes over app/static/js and app/templates - deterministic and
+# free. Everything in here is not: screenshot pairs, layout-settle frames and
+# CLS depend on how much CPU the runner happens to give us, and an
+# intermittently red check on someone else's PR is the fastest way to get a
+# check ignored or deleted. So the job carries continue-on-error until we have
+# a flake rate to look at, and the evidence (results.json, screenshots, the
+# audit log) is uploaded either way.
+#
+# Login stays disabled, so the four login views report SKIP. Enabling it is not
+# an env var: admin_username and admin_password_hash have to be written into the
+# settings table, and hash_password() peppers with FETCHLY_SECRET_KEY
+# (app/routes/auth.py:_derive_pepper), which this workflow generates per run -
+# so a pre-baked hash would never verify. The seeding would have to run between
+# key generation and startup, using the app's own hasher. Worth doing once the
+# flake rate is known; not worth it for the first rollout.
+#
+
+name: UI Audit
+
+on:
+  workflow_dispatch:
+    inputs:
+      browsers:
+        description: 'Playwright engines to audit'
+        type: choice
+        default: 'chromium,webkit'
+        options:
+          - 'chromium,webkit'
+          - 'chromium'
+          - 'chromium,webkit,firefox'
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ui-audit-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    name: Playwright UI audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Reports, never blocks. Job-level, so a red audit leaves the run green and
+    # the PR mergeable while the finding is still visible and downloadable.
+    continue-on-error: true
+
+    env:
+      # Every mobile and tablet profile in run-ui-lint.mjs is bound to webkit,
+      # so chromium alone would audit three desktop views out of twenty-two and
+      # none of the compact-layout contracts. firefox is the one profile that
+      # only varies the engine, so it is available on dispatch but not default.
+      UI_LINT_BROWSERS: ${{ inputs.browsers || 'chromium,webkit' }}
+      # A shared runner is slower and less predictable than a workstation. Two
+      # engines x two devices was the local default; halving the device fan-out
+      # keeps at most two pages rendering at once, which is what the
+      # layout-settle and screenshot-pair checks need to stay meaningful.
+      UI_LINT_BROWSER_CONCURRENCY: '2'
+      UI_LINT_DEVICE_CONCURRENCY: '1'
+      AUDIT_OUTPUT_DIR: ${{ github.workspace }}/ui-audit-out
+      AUDIT_LOG: ${{ github.workspace }}/ui-audit-out/audit.log
+      SERVER_LOG: ${{ github.workspace }}/ui-audit-out/server.log
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          # Matches ARG PYTHON_BASE=python:3.13-slim in docker/Dockerfile and
+          # requires-python in pyproject.toml.
+          python-version: '3.13'
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Set up Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: tools/ui-lint/package-lock.json
+
+      # Same exclusions as the pytest job in ci.yml: torch, beat-this and
+      # essentia are gigabytes of audio toolchain, and no page the audit opens
+      # touches them.
+      - name: Install Python dependencies
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python tools/pyproject-deps.py \
+            --exclude torch --exclude beat-this --exclude essentia \
+            > requirements-audit.txt
+          cat requirements-audit.txt
+          pip install -r requirements-audit.txt
+
+      # app/main.py:_check_dependencies() aborts the lifespan when yt-dlp or
+      # ffmpeg is missing from PATH, so the server would never come up without
+      # these - even though the audit only ever renders pages. Unpinned on
+      # purpose: pyproject.toml deliberately leaves yt-dlp out and the image
+      # installs it the same way.
+      - name: Install runtime binaries
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg
+          pip install yt-dlp
+          ffmpeg -version | head -1
+          yt-dlp --version
+
+      - name: Install ui-lint toolchain
+        env:
+          # The engines are installed in the dedicated step below, cached.
+          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+        run: npm ci --prefix tools/ui-lint --no-audit --no-fund
+
+      - name: Cache Playwright engines
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          # The playwright version pins the engine revisions, so the lockfile
+          # hash is the right key. The engine list is part of it because a
+          # chromium-only restore must not satisfy a chromium+webkit run.
+          key: ms-playwright-${{ runner.os }}-${{ hashFiles('tools/ui-lint/package-lock.json') }}-${{ env.UI_LINT_BROWSERS }}
+
+      # --with-deps installs the shared libraries the engines need. Those are
+      # apt packages, not part of the cache above, so this step runs either way
+      # and only the download is skipped on a cache hit.
+      - name: Install Playwright engines
+        run: |
+          set -euo pipefail
+          engines="$(printf '%s' "$UI_LINT_BROWSERS" | tr ',' ' ')"
+          echo "installing engines: ${engines}"
+          # shellcheck disable=SC2086
+          npm --prefix tools/ui-lint exec -- playwright install --with-deps $engines
+
+      # Bound to 127.0.0.1: the audit runs on the same runner and nothing else
+      # should reach this instance. The secret key is generated per run and
+      # never leaves the step - a committed or repeated key would let one run's
+      # session cookie be replayed against another.
+      #
+      # Fresh data/: the DB starts empty, so the jobs feed renders its empty
+      # state, and the job-detail and trim views report SKIP because there is
+      # no job to open. Those are exactly the views a CI run cannot cover.
+      - name: Start application
+        run: |
+          set -euo pipefail
+          mkdir -p "$AUDIT_OUTPUT_DIR"
+          export FETCHLY_SECRET_KEY="$(python -c 'import base64, secrets; print(base64.b64encode(secrets.token_bytes(32)).decode())')"
+          export HOST=127.0.0.1
+          export PORT=8000
+          export LOG_LEVEL=INFO
+          export TZ=UTC
+          export NO_COLOR=1
+          nohup python run.py > "$SERVER_LOG" 2>&1 &
+          echo "server pid: $!"
+
+          for _ in $(seq 1 60); do
+            status="$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 http://127.0.0.1:8000/login || true)"
+            # 200 = login page, 303 = redirect to the dashboard because
+            # authentication is not configured. Both mean the app is serving.
+            if [ "$status" = '200' ] || [ "$status" = '303' ]; then
+              echo "application is up (HTTP ${status})"
+              exit 0
+            fi
+            sleep 1
+          done
+
+          echo 'ERROR: application did not become reachable within 60s' >&2
+          cat "$SERVER_LOG" >&2
+          exit 1
+
+      - name: Run UI audit
+        env:
+          UI_LINT_BASE_URL: http://127.0.0.1:8000
+          UI_LINT_OUTPUT_DIR: ${{ env.AUDIT_OUTPUT_DIR }}
+        run: |
+          set -euo pipefail
+          npm run ui-lint 2>&1 | tee "$AUDIT_LOG"
+
+      # Runs even when the audit failed - that is the case where the numbers
+      # matter. The greps setup.conf documents for a local run, plus the
+      # hard-gate line: a view can PASS and still be listed there, because a
+      # critical UX finding only fails the run under UI_LINT_HEALTH_GATE=1.
+      - name: Summarise findings
+        if: always()
+        run: |
+          set -uo pipefail
+          if [ ! -s "$AUDIT_LOG" ]; then
+            echo 'No audit log - the run did not get as far as opening a page.' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          {
+            echo "## UI audit (${UI_LINT_BROWSERS})"
+            echo ''
+            echo 'SKIP is not a pass: the view never ran - a missing engine, a'
+            echo 'disabled login, or an empty database with no job to open.'
+            echo ''
+            echo '```'
+            grep -E '^(PASS|FAIL|SKIP|Totals|UI health|Hard-blocked)' "$AUDIT_LOG" || echo 'no per-view lines in the log'
+            echo '```'
+            if grep -q 'hard:' "$AUDIT_LOG"; then
+              echo '### Failures'
+              echo ''
+              echo '```'
+              grep 'hard:' "$AUDIT_LOG"
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload audit results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-audit-${{ github.run_id }}
+          # results.json carries the element-level detail behind every finding,
+          # the screenshot pairs and their diffs show visual drift, and
+          # server.log is the only place a 500 behind a failed view is visible.
+          path: ${{ env.AUDIT_OUTPUT_DIR }}
+          retention-days: 7
+          if-no-files-found: warn

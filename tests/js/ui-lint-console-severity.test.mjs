@@ -42,6 +42,27 @@ test("never allowlists a CSP violation", () => {
     }
 });
 
+test("every allowlist pattern still matches a real browser message", () => {
+    // The counterpart to the test below: a pattern that stopped matching
+    // anything (a browser wording change, a typo introduced while editing
+    // the list) would silently narrow the allowlist without failing here -
+    // only a positive check catches that.
+    const knownBrowserNoise = [
+        "ResizeObserver loop completed with undelivered notifications.",
+        "ResizeObserver loop limit exceeded",
+        "Failed to load resource: the server responded with a status of 404 (Not Found) favicon.ico",
+        "DevTools failed to load source map: could not load content",
+        "DevTools failed to load SourceMap for chart.min.js",
+    ];
+
+    for (const pattern of CONSOLE_ALLOWLIST) {
+        assert.ok(
+            knownBrowserNoise.some((text) => pattern.test(text)),
+            `${pattern} matches none of the known browser messages - is it still needed?`,
+        );
+    }
+});
+
 test("every allowlist pattern names a browser or harness message", () => {
     // A pattern that matches a bare application string would silence real
     // findings, so each one has to be anchored to text only the browser emits.
