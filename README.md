@@ -43,6 +43,8 @@
   </p>
 </details>
 
+<br>
+
 ## Download, shape, share
 
 fetchly turns `yt-dlp` into a self-hosted media workspace. Pick formats in a web UI,
