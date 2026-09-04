@@ -142,23 +142,25 @@ npm run ui-lint
 ```
 
 It audits six device profiles, chosen around the breakpoint in
-`app/static/style.css` where the desktop jobs table gives way to the mobile feed
-(`@media (max-width: 1024px)`):
+`app/static/style.css` where the desktop jobs table gives way to the mobile feed —
+`@media (max-width: 1024px)` for any pointer, plus
+`(max-width: 1366px) and (pointer: coarse)` so every touch iPad up to a 12.9" Pro
+in landscape gets the feed:
 
 | Profile | Device | Width | Engine | Layout |
 |---|---|---|---|---|
 | `desktop` | — | 1440px | Chromium | desktop table |
 | `mobile` | iPhone 13 | 390px | WebKit | feed |
 | `tablet` | iPad Mini | 768px | WebKit | feed |
-| `tablet-landscape` | iPad Mini landscape | 1024px | WebKit | feed (breakpoint edge) |
-| `tablet-wide` | iPad Pro 11 landscape | 1194px | WebKit | desktop table, touch input |
+| `tablet-landscape` | iPad Mini landscape | 1024px | WebKit | feed (width breakpoint edge) |
+| `tablet-wide` | iPad Pro 11 landscape | 1194px | WebKit | feed via coarse-pointer rule |
 | `desktop-firefox` | — | 1440px | Firefox | desktop table |
 
-Form factor and touch are separate axes in the runner, which is what `tablet-wide`
-exists to prove: it renders the desktop table *and* needs 44px hit areas. Audits are
-gated on the axis they actually depend on — `isMobile` for which DOM renders, `isTouch`
-for hit areas and Safari's viewport quirks, `isPhone` for the pixel contracts written
-against 390px.
+Form factor and touch stay separate axes in the runner. `isMobile` (which DOM
+renders) keys off width *and* touch — a touch iPad past 1024px still gets the feed,
+a hypothetical non-touch window that wide would not. `isTouch` (44px hit areas,
+Safari's viewport quirks) keys off touch alone, and `isPhone` gates the pixel
+contracts written against 390px.
 
 `desktop-firefox` holds the viewport identical to `desktop` and varies only the
 engine, so anything it finds is a Gecko difference rather than a layout one. An

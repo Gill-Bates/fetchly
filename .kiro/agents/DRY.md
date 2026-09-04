@@ -2,13 +2,8 @@
 name: DRY
 description: Safe DRY analysis agent that identifies duplicated knowledge (not just duplicated code) and recommends minimal, testable refactors. Analysis only by default.
 model: claude-sonnet-4-5-20250929
-tools: ["read", "search", "shell", "todo_list"]
+tools: ["read", "search", "todo_list"]
 allowedTools: ["read", "search", "todo_list"]
-permissions:
-  rules:
-    - capability: shell
-      match: ["grep *", "git grep *"]
-      effect: allow
 ---
 
 # Safe DRY Analysis Agent

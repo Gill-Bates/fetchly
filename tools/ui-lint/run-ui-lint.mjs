@@ -1725,9 +1725,26 @@ async function collectMetrics(page, view) {
             }
         }
 
+        // An element reaching past the viewport is only a defect when nothing
+        // clips it. Inside a horizontally scrolling container - the settings
+        // tab strip is one, `overflow-x: auto; flex-wrap: nowrap` - the tabs
+        // beyond the fold are the feature, and the container itself is what
+        // has to stay inside the viewport. Checking that instead of the child
+        // keeps the finding pointed at real page-level overflow.
+        const isClippedByScroller = (el) => {
+            for (let node = el.parentElement; node && node !== document.body; node = node.parentElement) {
+                const overflowX = window.getComputedStyle(node).overflowX;
+                if (overflowX !== 'auto' && overflowX !== 'scroll') continue;
+                const rect = node.getBoundingClientRect();
+                return rect.right <= window.innerWidth + 1 && rect.left >= -1;
+            }
+            return false;
+        };
+
         const localOverflowIssues = isMobile
             ? Array.from(document.querySelectorAll('body *'))
                 .filter((el) => isLayoutVisible(el))
+                .filter((el) => !isClippedByScroller(el))
                 .map((el) => {
                     const rect = el.getBoundingClientRect();
                     return {
@@ -3627,7 +3644,14 @@ async function collectMetrics(page, view) {
             const usesPreviewHeightLimit = (value) => value === 'var(--video-preview-max-height)';
             const computedMaxHeight = Number.parseFloat(window.getComputedStyle(thumb).maxHeight);
             const viewportHeightRatio = computedMaxHeight / window.innerHeight;
-            const viewportHeightLimit = isMobile ? 0.38 : 0.42;
+            // Keyed on the width breakpoint the preview's own CSS uses
+            // (`@media (max-width: 767.98px)` tightens it to 38vh), not on
+            // isMobile. Those two used to coincide; once the compact band grew
+            // to cover touch devices up to 1366px they stopped, and this check
+            // started demanding the phone limit from an iPad that renders the
+            // 42vh rule. The bound being asserted is that the preview cannot
+            // outgrow the viewport - the exact ratio is per-breakpoint design.
+            const viewportHeightLimit = window.innerWidth < 768 ? 0.38 : 0.42;
             const hasViewportBound = Number.isFinite(viewportHeightRatio)
                 && viewportHeightRatio <= viewportHeightLimit + 0.001;
 
