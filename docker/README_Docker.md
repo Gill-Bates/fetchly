@@ -26,20 +26,22 @@
   <em>Dashboard — paste a link, preview the media, pick a format, and track every job live.</em>
 </p>
 
-<p align="center">
-  <img src="https://raw.githubusercontent.com/Gill-Bates/fetchly/main/.github/img/screen_1.jpeg" alt="fetchly login screen" width="800"><br>
-  <em>Authenticated login with invisible, server-verified anti-bot protection.</em>
-</p>
-
-<p align="center">
-  <img src="https://raw.githubusercontent.com/Gill-Bates/fetchly/main/.github/img/screen_3.jpeg" alt="fetchly settings: Lalal.ai integration and per-platform cookie tiles" width="800"><br>
-  <em>Integrations — connect Lalal.ai for stem separation and paste browser cookies for sign-in-only downloads.</em>
-</p>
-
-<p align="center">
-  <img src="https://raw.githubusercontent.com/Gill-Bates/fetchly/main/.github/img/screen_4.jpeg" alt="fetchly settings: host resources, component versions, update check, and changelog" width="800"><br>
-  <em>System — host resources, component versions, one-click update checks, and the in-app changelog.</em>
-</p>
+<details>
+  <summary align="center"><b>More screenshots</b></summary>
+  <br>
+  <p align="center">
+    <img src="https://raw.githubusercontent.com/Gill-Bates/fetchly/main/.github/img/screen_1.jpeg" alt="fetchly login screen" width="800"><br>
+    <em>Authenticated login with invisible, server-verified anti-bot protection.</em>
+  </p>
+  <p align="center">
+    <img src="https://raw.githubusercontent.com/Gill-Bates/fetchly/main/.github/img/screen_3.jpeg" alt="fetchly settings: Lalal.ai integration and per-platform cookie tiles" width="800"><br>
+    <em>Integrations — connect Lalal.ai for stem separation and paste browser cookies for sign-in-only downloads.</em>
+  </p>
+  <p align="center">
+    <img src="https://raw.githubusercontent.com/Gill-Bates/fetchly/main/.github/img/screen_4.jpeg" alt="fetchly settings: host resources, component versions, update check, and changelog" width="800"><br>
+    <em>System — host resources, component versions, one-click update checks, and the in-app changelog.</em>
+  </p>
+</details>
 
 ## Download, shape, share
 
