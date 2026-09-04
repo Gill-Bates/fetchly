@@ -20,7 +20,10 @@ import {
 } from "./ui.js?v=20260831c";
 import { detectPlatform, formatDuration, humanSize, platformPillLabel } from "./utils.js";
 
-const MOBILE_BREAKPOINT = "(max-width: 1024px)";
+// Mirrors the compact jobs-surface media query in style.css: narrow viewports,
+// plus any touch tablet up to an iPad Pro 12.9" landscape (1366px). Keep the
+// two in lockstep - the CSS swaps the DOM, this decides which surface renders.
+const MOBILE_BREAKPOINT = "(max-width: 1024px), (max-width: 1366px) and (pointer: coarse)";
 const FALLBACK_JOBS_TABLE_COLUMN_COUNT = 5;
 
 // Every placeholder that can sit inside a jobs surface without being a real

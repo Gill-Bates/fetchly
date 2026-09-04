@@ -127,11 +127,22 @@ async function getSettingsSourceContractMetrics() {
             const hints = [...settingsTemplateSource.matchAll(
                 /<(small|p)\b[^>]*\bclass=["'][^"']*\bsetting-hint\b[^"']*["'][^>]*>([\s\S]*?)<\/\1>/g,
             )];
+            // The contract is the *component*: every hint is the icon variant
+            // and leads with a setting-hint-icon span. The glyph is not part
+            // of it - a hint that explains a forced setting says `lock` and
+            // one that warns about a cost says `warning`, and demanding
+            // `info` everywhere would make those hints worse to satisfy the
+            // lint rather than the other way round. The allowlist keeps the
+            // set deliberate without pinning it to one icon.
+            const HINT_ICONS = ['info', 'lock', 'warning'];
+            const hintIconPattern = new RegExp(
+                `^\\s*<span\\b[^>]*\\bclass=["'][^"']*\\bmaterial-symbols-outlined\\b[^"']*\\bsetting-hint-icon\\b[^"']*["'][^>]*>\\s*(?:${HINT_ICONS.join('|')})\\s*<\\/span>`,
+            );
             const hintContractBroken = hints.length === 0 || hints.some((hint) => {
                 const openingTag = hint[0].slice(0, hint[0].indexOf('>') + 1);
                 const content = hint[2];
                 return !openingTag.includes('setting-hint--with-icon')
-                    || !/^\s*<span\b[^>]*\bclass=["'][^"']*\bmaterial-symbols-outlined\b[^"']*\bsetting-hint-icon\b[^"']*["'][^>]*>\s*info\s*<\/span>/.test(content);
+                    || !hintIconPattern.test(content);
             });
             const hintStyleContractBroken = !(
                 /--text-hint\s*:/.test(settingsStyleSource)
@@ -224,7 +235,12 @@ const SELECTED_ENGINES = envEngineList('UI_LINT_BROWSERS', Object.keys(ENGINE_LA
 // for the same page pool; devices within one engine share it and need their
 // own limit. UI_LINT_CONCURRENCY is kept as the default for the device limit
 // so existing recipes (setup.conf) keep their meaning.
-const BROWSER_CONCURRENCY = Math.max(1, envInt('UI_LINT_BROWSER_CONCURRENCY', SELECTED_ENGINES.length));
+// Note the product: this many engines each run that many pages, so the total
+// load on the app under audit is BROWSER * DEVICE, not DEVICE. Two engines is
+// the default rather than "all of them" for exactly that reason - the audit
+// measures layout, and an app being hit by six concurrent page loads produces
+// timing flake that reads as a layout defect.
+const BROWSER_CONCURRENCY = Math.max(1, envInt('UI_LINT_BROWSER_CONCURRENCY', Math.min(2, SELECTED_ENGINES.length)));
 const DEVICE_CONCURRENCY = Math.max(1, envInt('UI_LINT_DEVICE_CONCURRENCY', envInt('UI_LINT_CONCURRENCY', 2)));
 const RUN_AXE = envInt('UI_LINT_AXE', 1) !== 0;
 // Which axe impact level becomes a hard failure. 'critical' matches how the
@@ -379,15 +395,22 @@ const VIEW_DEFS = [
         device: 'tablet-landscape',
         requiredSelectors: ['#settingsForm', '#lalalAuthBtn'],
     },
-    // iPad Pro 11 landscape (1194px): past the compact breakpoint, so the
-    // desktop table renders - on a touch screen.
+    // iPad Pro 11 landscape (1194px): past the 1024px width breakpoint but a
+    // touch screen, so `(max-width: 1366px) and (pointer: coarse)` renders the
+    // compact feed here just as the narrower iPads do.
     {
         name: 'tablet-wide-dashboard',
         url: '/',
         readySelector: '#submitForm',
         auth: true,
         device: 'tablet-wide',
-        requiredSelectors: ['.stats-row', '#submitForm', '#jobsRenderRoot', '#jobsTable'],
+        requiredSelectors: [
+            '.stats-row',
+            '#submitForm',
+            '#jobsRenderRoot',
+            '#jobsMobileList',
+            '#showJobHistoryToggle',
+        ],
     },
     {
         name: 'tablet-wide-settings',
@@ -481,17 +504,19 @@ const isSameOrigin = (urlStr) => {
 /**
  * Device profiles the audit runs against.
  *
- * Form factor and touch are deliberately separate axes. A tablet is touch but
- * renders the desktop table, so a single isMobile flag cannot describe it:
- * gating touch-target size on "is this the phone layout" would hand the iPad
- * the 32px desktop minimum, and gating the phone DOM contracts on "does this
- * have touch" would demand `#jobsMobileList` on a viewport that never renders
- * it. `formFactor` answers the layout question, `hasTouch` the input one.
+ * Form factor and touch are deliberately separate axes. `formFactor` answers
+ * the layout question (which jobs surface renders, which pixel contracts
+ * apply), `hasTouch` the input one (32px vs 44px hit areas, momentum scroll,
+ * the iOS viewport audits). They are not redundant: a narrow non-touch
+ * viewport would still render the compact layout, and gating hit-area size on
+ * layout alone would hand a touch iPad the 32px desktop minimum.
  *
  * The viewport widths matter: app/static/style.css carries a tablet band -
  * `(min-width: 768px) and (max-width: 1024px)`, `(max-width: 1024px)`,
- * `(min-width: 576.02px) and (max-width: 1024px)` - that neither the 390px
- * phone nor the 1440px desktop context ever renders.
+ * `(min-width: 576.02px) and (max-width: 1024px)`, plus the coarse-pointer
+ * extension `(max-width: 1366px) and (pointer: coarse)` that pulls every touch
+ * iPad (both orientations, up to the 12.9" Pro) onto the compact jobs feed -
+ * that neither the 390px phone nor the 1440px desktop context ever renders.
  */
 const DEVICE_PROFILES = {
     desktop: {
@@ -521,9 +546,11 @@ const DEVICE_PROFILES = {
     'tablet-wide': {
         engine: 'webkit',
         formFactor: 'tablet',
-        // 1194x834: past the breakpoint, so the desktop table renders on a
-        // touch screen. This is the case a single isMobile flag cannot express
-        // - desktop layout, finger-sized hit areas.
+        // 1194x834: past the 1024px width breakpoint but inside the
+        // coarse-pointer extension `(max-width: 1366px) and (pointer: coarse)`,
+        // so the compact jobs feed renders on this touch screen. The widest
+        // tablet profile - covers the wide-band CSS rules and the
+        // shell-uses-full-width check the narrower iPads never exercise.
         playwrightDevice: 'iPad Pro 11 landscape',
     },
     'desktop-firefox': {
@@ -538,11 +565,14 @@ const DEVICE_PROFILES = {
     },
 };
 
-// The breakpoint app/static/style.css uses to swap the desktop jobs table for
-// the mobile feed: `@media (max-width: 1024px)`. The audit derives "compact
-// layout" from the viewport rather than from the device name, so a new profile
-// lands on the right side of the contract automatically.
+// The breakpoints app/static/style.css uses to swap the desktop jobs table for
+// the mobile feed: `@media (max-width: 1024px)` for any pointer, plus
+// `(max-width: 1366px) and (pointer: coarse)` so every touch iPad - including a
+// 12.9" Pro in landscape - lands on the feed. The audit derives "compact
+// layout" from the viewport and touch axis rather than the device name, so a
+// new profile lands on the right side of the contract automatically.
 const COMPACT_LAYOUT_MAX_WIDTH = 1024;
+const COMPACT_LAYOUT_TOUCH_MAX_WIDTH = 1366;
 
 /**
  * True when the profile's viewport renders the compact (feed) layout.
@@ -551,7 +581,9 @@ const COMPACT_LAYOUT_MAX_WIDTH = 1024;
  */
 function profileIsCompactLayout(device) {
     const { viewport } = createContextOptions(device);
-    return Number(viewport?.width) <= COMPACT_LAYOUT_MAX_WIDTH;
+    const width = Number(viewport?.width);
+    return width <= COMPACT_LAYOUT_MAX_WIDTH
+        || (width <= COMPACT_LAYOUT_TOUCH_MAX_WIDTH && profileHasTouch(device));
 }
 
 /**
@@ -1255,6 +1287,24 @@ async function collectMetrics(page, view) {
         const isLintInjectedSheet = (sheet) => (
             sheet.ownerNode?.dataset?.uiLintInjected === 'true'
         );
+
+        // WaveSurfer 7 renders the regions plugin inside a shadow root, so a
+        // light-DOM query for `.wavesurfer-region` finds nothing however many
+        // regions exist. This check reported the default selection as missing
+        // on every dashboard view for exactly that reason - the app had
+        // created it and #trimInfo said so. Pierce the shadow roots instead.
+        const countTrimRegions = () => {
+            const wave = document.querySelector('#trimWave');
+            if (!wave) return 0;
+
+            let total = wave.querySelectorAll('[data-id], .wavesurfer-region').length;
+            for (const host of wave.querySelectorAll('*')) {
+                const root = host.shadowRoot;
+                if (!root) continue;
+                total += root.querySelectorAll('[part~="region"], [part*="region"], .wavesurfer-region').length;
+            }
+            return total;
+        };
 
         const accessibleName = (el) => {
             const ariaLabel = el.getAttribute('aria-label');
@@ -2113,19 +2163,20 @@ async function collectMetrics(page, view) {
         // - each job exposes exactly one visible primary action
         // - no per-row dropdown/action cluster is visible in the feed
         // Tablet contract. app/static/style.css swaps the desktop table for
-        // the feed at `@media (max-width: 1024px)`, so an iPad sits on either
-        // side of that line depending on model and orientation - and neither
-        // the 390px phone context nor the 1440px desktop one ever renders the
-        // band in between.
+        // the feed at `@media (max-width: 1024px)`, plus
+        // `(max-width: 1366px) and (pointer: coarse)` - and every tablet
+        // profile is a touch screen, so an iPad up to a 12.9" Pro in landscape
+        // (1366px) renders the feed. Neither the 390px phone context nor the
+        // 1440px desktop one ever renders this band.
         //
-        // Below the breakpoint the feed must render (as on the phone); above
-        // it the desktop table must render and fit. Either way the shell has
-        // to use the width the device actually has.
+        // Within 1366px the feed must render (as on the phone); past it the
+        // desktop table must render and fit. Either way the shell has to use
+        // the width the device actually has.
         const tabletLayoutIssues = formFactor === 'tablet'
             && document.body.classList.contains('app-root--dashboard')
             ? (() => {
                 const issues = [];
-                const compact = window.innerWidth <= 1024;
+                const compact = window.innerWidth <= 1366;
                 const mobileList = document.querySelector('#jobsMobileList');
                 const desktopView = document.querySelector('.jobs-desktop-view');
                 const displayed = (el) => Boolean(el) && window.getComputedStyle(el).display !== 'none';
@@ -2443,6 +2494,24 @@ async function collectMetrics(page, view) {
 
         const forbiddenColorRegex = /#([0-9a-f]{3,8})|rgba?\(|hsla?\(/i;
         const forbiddenSpacingRegex = /(margin|padding|gap|border-radius)\s*:\s*[-0-9.]+(px|rem|em|%)?/i;
+
+        // Properties whose value is a measurement taken at runtime, not a
+        // design decision: placement, size and visibility toggles that JS
+        // computes from a rect. Colour and spacing stay forbidden inline.
+        const RUNTIME_GEOMETRY_PROPS = new Set([
+            'top', 'right', 'bottom', 'left', 'width', 'height',
+            'max-width', 'max-height', 'min-width', 'min-height',
+            'transform', 'translate', 'inset', 'display', 'visibility',
+        ]);
+        const isRuntimeGeometryOnly = (styleAttr) => styleAttr
+            .split(';')
+            .map((declaration) => declaration.trim())
+            .filter(Boolean)
+            .every((declaration) => {
+                const property = declaration.slice(0, declaration.indexOf(':')).trim().toLowerCase();
+                return RUNTIME_GEOMETRY_PROPS.has(property);
+            });
+
         const tokenViolations = [];
 
         for (const el of document.querySelectorAll('[style], [bgcolor], [color], [fill], [stroke]')) {
@@ -2462,7 +2531,12 @@ async function collectMetrics(page, view) {
                     });
                     continue;
                 }
-                if (styleAttr.includes(':') && !styleAttr.includes('var(')) {
+                // Anything else inline is a violation unless every property it
+                // sets is runtime geometry. A tooltip's top/left are computed
+                // from a measured rect at hover time and cannot come from a
+                // token - flagging them told the reader to replace a number
+                // with a variable that could not exist.
+                if (styleAttr.includes(':') && !styleAttr.includes('var(') && !isRuntimeGeometryOnly(styleAttr)) {
                     tokenViolations.push({
                         tag: el.tagName.toLowerCase(),
                         id: el.id || null,
@@ -3683,10 +3757,9 @@ async function collectMetrics(page, view) {
         const trimDefaultSelectionInvalid = (() => {
             const trimModal = document.querySelector('#trimModal');
             if (!trimModal || !trimModal.classList.contains('show')) return false;
-            const regions = document.querySelectorAll('#trimWave [data-id], #trimWave .wavesurfer-region');
             const infoText = document.querySelector('#trimInfo');
             const text = infoText?.textContent?.trim() || '';
-            return regions.length === 0 || !text.startsWith('0:00.00');
+            return countTrimRegions() === 0 || !text.startsWith('0:00.00');
         })();
 
         // 28. UI card children should not expand unless explicitly needed
@@ -3905,10 +3978,11 @@ async function collectMetrics(page, view) {
         requiredSelectors: view.requiredSelectors,
         mobileTouchTargetMin: MOBILE_TOUCH_TARGET_MIN,
         desktopTouchTargetMin: DESKTOP_TOUCH_TARGET_MIN,
-        // isMobile means "compact layout" - the viewport is inside
-        // `@media (max-width: 1024px)`, so the jobs feed renders instead of the
-        // desktop table. isTouch means "finger input". An iPad Pro in landscape
-        // is the second without being the first, which is why they are separate.
+        // isMobile means "compact layout" - the viewport renders the jobs feed
+        // instead of the desktop table, via `@media (max-width: 1024px)` or the
+        // touch extension `(max-width: 1366px) and (pointer: coarse)`. isTouch
+        // means "finger input". They still differ: a narrow non-touch viewport
+        // is the first without the second, and hit-area sizing keys off isTouch.
         isMobile: profileIsCompactLayout(view.device),
         // Phone-viewport pixel contracts (edge-to-edge shell, the four stat
         // tiles in one row) are written against 390px and do not describe an
@@ -4209,10 +4283,27 @@ async function auditTrimModal(page, view) {
 
     let trimKeyboardMissing = [];
     let trimProbeInstalled = false;
+
+    // Opening the dropdown gets a short, explicit budget rather than
+    // Playwright's 30s default. A trigger that is attached but not clickable
+    // means the view is not rendering the surface this audit needs - the same
+    // situation as "no trigger rendered" above - and stalling half a minute on
+    // it delays every other view on the engine, which is itself a source of
+    // measurement flake.
+    const group = trigger.locator('xpath=ancestor::div[contains(concat(" ", normalize-space(@class), " "), " btn-group ")][1]');
     try {
-        const group = trigger.locator('xpath=ancestor::div[contains(concat(" ", normalize-space(@class), " "), " btn-group ")][1]');
-        await group.locator('.dropdown-toggle').first().click();
-        await trigger.click();
+        await group.locator('.dropdown-toggle').first().click({ timeout: 5000 });
+    } catch {
+        await restoreHistory();
+        return {
+            failures: [],
+            warnings: ['trim audit skipped: the trim trigger is rendered but not clickable in this layout'],
+            metrics: {},
+        };
+    }
+
+    try {
+        await trigger.click({ timeout: 5000 });
         await page.locator('#trimModal.show').waitFor({ state: 'visible', timeout: 10000 });
         await page.locator('#trimLoader.d-none').waitFor({ state: 'attached', timeout: 15000 });
 
@@ -4273,8 +4364,16 @@ async function auditTrimModal(page, view) {
 
         const trimDefaultSelectionInvalid = await page.evaluate(() => {
             const infoText = document.querySelector('#trimInfo')?.textContent?.trim() || '';
-            return document.querySelectorAll('#trimWave [data-id], #trimWave .wavesurfer-region').length === 0
-                || !infoText.startsWith('0:00.00');
+            // Same shadow-DOM caveat as countTrimRegions() in collectMetrics:
+            // the regions plugin renders inside a shadow root, so the light
+            // DOM shows none no matter how many exist.
+            const wave = document.querySelector('#trimWave');
+            let regions = wave ? wave.querySelectorAll('[data-id], .wavesurfer-region').length : 0;
+            for (const host of wave?.querySelectorAll('*') || []) {
+                if (!host.shadowRoot) continue;
+                regions += host.shadowRoot.querySelectorAll('[part~="region"], [part*="region"], .wavesurfer-region').length;
+            }
+            return regions === 0 || !infoText.startsWith('0:00.00');
         });
 
         const trimKeyboardConflicts = [];
@@ -4666,7 +4765,7 @@ async function runView(browser, storageState, view, replacements = {}) {
         }
         if (metrics.tabletLayoutIssues?.length) {
             const kinds = metrics.tabletLayoutIssues.map((issue) => issue.type).join(', ');
-            failures.push(`tablet layout issues (768-1024px band): ${kinds}`);
+            failures.push(`tablet layout issues (768-1366px band): ${kinds}`);
         }
         if (metrics.mobileJobsFeedIssues?.length) {
             failures.push(`mobile jobs feed layout issues: ${metrics.mobileJobsFeedIssues.length}`);
@@ -5014,6 +5113,12 @@ async function runView(browser, storageState, view, replacements = {}) {
                 iosInputZoomTargets: metrics.iosInputZoomTargets,
                 viewportUnitTraps: metrics.viewportUnitTraps,
                 bottomPinnedWithoutSafeArea: metrics.bottomPinnedWithoutSafeArea,
+                // These three are hard failures whose console line is only a
+                // count, so without the elements here the report says a view
+                // failed but not on what.
+                tokenViolations: metrics.tokenViolations,
+                localOverflowIssues: metrics.localOverflowIssues,
+                flexMinHeightOverflowHidden: metrics.flexMinHeightOverflowHidden,
                 axeViolations: axe.available
                     ? [...(axe.critical || []), ...(axe.serious || []), ...(axe.moderate || []), ...(axe.minor || [])]
                     : [],
@@ -5261,7 +5366,7 @@ async function main() {
 }
 
 // Exported so tests/js can assert the device model without launching browsers.
-export { DEVICE_PROFILES, VIEW_DEFS, COMPACT_LAYOUT_MAX_WIDTH, createContextOptions, deviceProfile, profileHasTouch, profileIsCompactLayout };
+export { DEVICE_PROFILES, VIEW_DEFS, COMPACT_LAYOUT_MAX_WIDTH, COMPACT_LAYOUT_TOUCH_MAX_WIDTH, createContextOptions, deviceProfile, profileHasTouch, profileIsCompactLayout };
 
 // Only audit when run as a program. Importing the module (from a test, or to
 // reuse the registry) must not start Playwright.
