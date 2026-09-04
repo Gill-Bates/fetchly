@@ -6,17 +6,12 @@
 /**
  * @module cookie-paste
  *
- * The "Paste cookies" dialog behind each platform tile in Settings. It walks
- * the user through copying the cookie request header out of the browser's dev
- * tools and hands the text to a caller-supplied submit function.
- *
- * The dialog stays open until that submit succeeds: the server rejects a
- * paste that carries no login cookie (see app/routes/cookies.py), and closing
- * on failure would throw away a paste the user cannot easily reproduce, so
- * the reason is shown in place with the text still in the box.
+ * The "Paste cookies" dialog behind each platform tile in Settings. Stays open
+ * until submit succeeds - the server rejects a login-free paste and closing on
+ * failure would discard hard-to-reproduce text, so the error shows in place.
  */
 
-/** Where the user has to be signed in for the copied header to be worth anything. */
+/** Where the user must be signed in for the copied header to be worth anything. */
 const PLATFORM_SITES = {
     youtube: "https://www.youtube.com",
     tiktok: "https://www.tiktok.com",
@@ -59,11 +54,9 @@ let submitHandler = null;
 /** @type {HTMLElement | null} */
 let lastFocused = null;
 let busy = false;
-// Bumped on every open. The dialog node and its state are shared, so an
-// in-flight submit has to prove it still belongs to what is on screen before
-// it resolves anything: dismissing a dialog mid-request (Escape and the
-// backdrop stay live while the buttons are disabled) and opening the next one
-// would otherwise let the first response close the second dialog.
+// Bumped on every open. An in-flight submit checks it still matches before
+// resolving, so dismissing mid-request and reopening cannot let the first
+// response close the second dialog.
 let openGeneration = 0;
 
 function settle(saved) {
@@ -309,9 +302,8 @@ function buildModal() {
         textarea.focus();
     });
 
-    // Escape, backdrop click, the close icon and Cancel all land here. A
-    // dismissal mid-request would leave the caller's promise dangling, so it
-    // resolves as "not saved" either way.
+    // Escape / backdrop / close / Cancel all land here; resolve "not saved" so
+    // the caller's promise never dangles.
     root.addEventListener("hidden.bs.modal", () => {
         settle(false);
         restoreFocus();
@@ -363,10 +355,9 @@ async function submit() {
 function renderSteps(list, label, siteUrl) {
     list.textContent = "";
     const site = siteUrl.replace(/^https:\/\//, "");
-    // The page request itself is the wrong target: these sites answer it from
-    // a service worker or the cache, and the dev tools then show only
-    // "provisional headers" with no cookie among them. A Fetch/XHR request
-    // always crosses the network, so its headers are the real ones.
+    // The page request is the wrong target: served from a SW/cache, its dev
+    // tools headers are "provisional" with no cookies. A Fetch/XHR request
+    // always crosses the network.
     const steps = [
         `Open ${site} in a tab where you are signed in.`,
         "Press F12, open the Network tab and click the Fetch/XHR filter.",
@@ -383,21 +374,13 @@ function renderSteps(list, label, siteUrl) {
 }
 
 /**
- * Open the paste dialog for one platform.
- *
- * @param {{
- *   platform: string,
- *   label: string,
- *   onSubmit: (text: string) => Promise<void>,
- * }} options - The platform, its display name, and the save handler. The
- *   handler should reject with a readable Error message; the dialog then
- *   stays open and shows it.
- * @returns {Promise<boolean>} Resolves true once the handler succeeded.
+ * Open the paste dialog for one platform. ``onSubmit`` should reject with a
+ * readable Error; the dialog then stays open and shows it.
+ * @param {{ platform: string, label: string, onSubmit: (text: string) => Promise<void> }} options
+ * @returns {Promise<boolean>} true once the handler succeeded
  */
 export function openCookiePasteDialog({ platform, label, onSubmit }) {
-    // Without Bootstrap there is no modal to show, and a native prompt() is
-    // no substitute for a multi-line paste box. The caller surfaces this as a
-    // toast rather than silently doing nothing.
+    // No Bootstrap = no modal; the caller surfaces this as a toast.
     if (typeof bootstrap === "undefined" || !bootstrap?.Modal) {
         return Promise.reject(new Error("Dialog unavailable - reload the page and try again"));
     }
@@ -407,8 +390,7 @@ export function openCookiePasteDialog({ platform, label, onSubmit }) {
         modalInstance = bootstrap.Modal.getOrCreateInstance(els.root);
     }
 
-    // A prior dialog still open: treat it as dismissed before reusing the node.
-    settle(false);
+    settle(false);  // dismiss any prior dialog before reusing the node
     openGeneration += 1;
 
     submitHandler = onSubmit;

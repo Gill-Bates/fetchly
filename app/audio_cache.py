@@ -21,10 +21,7 @@ class CachedAnalysis(TypedDict):
 
 
 def get_cached(hash_value: str) -> CachedAnalysis | None:
-    """Fetch cached audio analysis for the given hash.
-
-    Returns ``None`` on a cache miss.
-    """
+    """Cached audio analysis for a hash, or ``None`` on a miss."""
     row = get_audio_analysis_cache(hash_value)
     if row is None:
         return None
@@ -40,10 +37,9 @@ def store_cache(
     bpm: int | None,
     bpm_confidence: float | None,
 ) -> bool:
-    """Persist audio analysis results to the cache.
+    """Persist audio analysis to the cache.
 
-    Returns ``True`` on success, ``False`` when the write failed or input was
-    invalid (logged as a warning; never raises).
+    Returns ``False`` (logged, never raises) on invalid input or a write error.
     """
     if not hash_value:
         logger.warning("Skipping cache write: empty hash value")

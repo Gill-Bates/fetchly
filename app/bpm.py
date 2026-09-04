@@ -6,7 +6,6 @@
 
 # BPM (beats per minute) detection for audio files using Essentia.
 # Callers are responsible for concurrency control.
-#
 
 import logging
 import subprocess
@@ -19,12 +18,10 @@ from .bpm_normalization import normalize_bpm
 
 logger = logging.getLogger(__name__)
 
-# Only analyze first 2 minutes for long files (performance optimization)
+# Analyze only the first 2 minutes of long files.
 _MAX_ANALYSIS_DURATION: Final[int] = 120
 _FFMPEG_ERROR_TAIL_BYTES: Final[int] = 500
 _FFMPEG_TIMEOUT_SECONDS: Final[int] = 120
-
-# Minimum confidence threshold for valid BPM
 _MIN_CONFIDENCE: Final[float] = 0.2
 
 _essentia_local = threading.local()
@@ -59,16 +56,9 @@ def _run_ffmpeg(
     filters: str | None = None,
     duration: int | None = None,
 ) -> None:
-    """Run ffmpeg with optional audio filters and a duration cap.
+    """Decode to mono 44.1 kHz with optional ``-af`` filters and ``-t`` cap.
 
-    Args:
-        input_path: Source audio file in any ffmpeg-supported format.
-        output_path: Destination file; format is inferred from its extension.
-        filters: Optional ffmpeg audio filter graph passed via ``-af``.
-        duration: Optional maximum output duration in seconds passed via ``-t``.
-
-    Raises:
-        RuntimeError: If ffmpeg exits with a non-zero status or exceeds the timeout.
+    Raises RuntimeError on non-zero exit or timeout.
     """
     cmd = ["ffmpeg", "-y"]
 
@@ -113,20 +103,10 @@ def _run_ffmpeg(
 
 
 def _extract_bpm_essentia(audio_path: Path) -> BPMResult:
-    """
-    Extract BPM using Essentia's RhythmExtractor2013.
-
-    Args:
-        audio_path: Path to mono WAV file
-
-    Returns:
-        BPMResult with detected BPM and confidence score
-    """
-    # Late import to avoid loading heavy library at module level
-    from essentia.standard import MonoLoader
+    """Extract BPM from a mono WAV using Essentia's RhythmExtractor2013."""
+    from essentia.standard import MonoLoader  # heavy; imported lazily
 
     loader = MonoLoader(filename=str(audio_path))
-    # Audio already resampled via ffmpeg, keep loader simple
     audio = loader()
 
     bpm, _, confidence, _, _ = _get_rhythm_extractor()(audio)
@@ -142,26 +122,14 @@ def extract_bpm(
     *,
     max_duration: int = _MAX_ANALYSIS_DURATION,
 ) -> BPMResult:
-    """Extract BPM from an audio file using a single analysis pass.
+    """Extract BPM from an audio file in a single analysis pass.
 
-    Steps:
-    1. Decode to mono 44.1 kHz WAV via ffmpeg.
-    2. Apply highpass filtering and loudness normalization.
-    3. Run Essentia RhythmExtractor2013 BPM detection.
-    4. Normalize the detected BPM into the 70-180 range.
-    5. Return ``bpm=0.0`` when the confidence is below ``_MIN_CONFIDENCE``.
+    Decodes to mono 44.1 kHz WAV (highpass only), runs RhythmExtractor2013,
+    normalizes into the 70-180 range, and forces ``bpm=0.0`` when the result
+    is implausible or below ``_MIN_CONFIDENCE``.
 
-    Args:
-        file_path: Path to audio file (MP3, WAV, FLAC, etc.)
-        max_duration: Maximum seconds to analyze (default 120s for performance)
-
-    Returns:
-        BPMResult with detected BPM and confidence. BPM is forced to 0.0 when
-        the detector result is too unreliable to trust.
-
-    Raises:
-        FileNotFoundError: If the input file doesn't exist.
-        RuntimeError: If ffmpeg or BPM detection fails.
+    Raises FileNotFoundError if the file is missing, RuntimeError if a step
+    fails.
     """
     _ensure_file_exists(file_path)
 
@@ -169,9 +137,8 @@ def extract_bpm(
         tmp_dir = Path(tmp)
         clean_wav = tmp_dir / "clean.wav"
 
-        # Decode to mono WAV, apply preprocessing, and limit duration in one pass.
-        # - highpass=f=40: Remove sub-bass rumble that confuses beat detection
-        # Avoid loudnorm: it can distort transients and harm beat detection
+        # highpass=f=40 removes sub-bass rumble that confuses beat detection.
+        # No loudnorm: it distorts transients and hurts detection.
         logger.debug("Decoding and preprocessing %s for BPM analysis", file_path.name)
         _run_ffmpeg(
             file_path,
@@ -215,22 +182,11 @@ def extract_bpm_cascade(
     *,
     max_duration: int = _MAX_ANALYSIS_DURATION,
 ) -> BPMResult:
-    """Extract BPM using a cascade of algorithms for maximum accuracy.
+    """Extract BPM by cascading Essentia and beat_this.
 
-    The cascade runs:
-    1. Essentia RhythmExtractor2013 (fast, good baseline)
-    2. beat_this with optional DBN postprocessing (state-of-the-art accuracy)
-
-    Results are combined using confidence-weighted averaging. If both algorithms
-    agree (within 5 BPM), confidence is boosted. If they disagree significantly,
-    the higher-confidence result is preferred.
-
-    Args:
-        file_path: Path to audio file (MP3, WAV, FLAC, etc.)
-        max_duration: Maximum seconds to analyze (default 120s for performance)
-
-    Returns:
-        BPMResult with the best BPM estimate and combined confidence.
+    Runs Essentia RhythmExtractor2013, then beat_this (with optional DBN
+    postprocessing). Within 5 BPM, results are confidence-weighted averaged and
+    confidence is boosted; otherwise the higher-confidence result wins.
     """
     _ensure_file_exists(file_path)
 
@@ -277,7 +233,6 @@ def extract_bpm_cascade(
     beat_this_bpm = beat_this_result.bpm
     beat_this_conf = beat_this_result.confidence
 
-    # If one algorithm failed, use the other
     if essentia_bpm <= 0 and beat_this_bpm <= 0:
         logger.debug("Both algorithms failed for %s", file_path.name)
         return BPMResult(bpm=0.0, confidence=0.0)
@@ -290,7 +245,6 @@ def extract_bpm_cascade(
         logger.debug("beat_this failed, using Essentia result: %.1f BPM", essentia_bpm)
         return essentia_result
 
-    # Both algorithms produced results - combine them
     bpm_diff = abs(essentia_bpm - beat_this_bpm)
 
     if bpm_diff <= 5.0:

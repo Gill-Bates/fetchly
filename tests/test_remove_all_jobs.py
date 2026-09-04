@@ -5,7 +5,6 @@
 #
 
 import asyncio
-import os
 import tempfile
 import unittest
 import uuid
@@ -13,8 +12,6 @@ from pathlib import Path
 from unittest.mock import patch
 
 from starlette.requests import Request
-
-os.environ.setdefault("FETCHLY_SECRET_KEY", "test-remove-jobs-secret")
 
 from app import db
 from app.routes import api

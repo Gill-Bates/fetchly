@@ -5,12 +5,9 @@
 #
 
 import asyncio
-import os
 import unittest
 from pathlib import Path
 from unittest.mock import patch
-
-os.environ.setdefault("FETCHLY_SECRET_KEY", "test-host-stats-secret")
 
 from app.utils import host_stats
 

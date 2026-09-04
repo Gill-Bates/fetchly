@@ -13,33 +13,21 @@ salt-follows-username property of the stored hash.
 """
 
 import os
-import tempfile
 import unittest
-from pathlib import Path
 from unittest.mock import patch
-
-os.environ.setdefault("FETCHLY_SECRET_KEY", "test-auth-credentials-secret")
 
 from app import db, session
 from app.routes import auth
 from app.session import refresh_session_settings_cache
 from app.utils.credentials import normalize_admin_username, validate_admin_password
+from tests._support import IsolatedDbTestCase
 
 
-class _IsolatedSettingsDb(unittest.TestCase):
-    """Point db.DB_PATH at a throwaway database for the duration of one test."""
+class _IsolatedSettingsDb(IsolatedDbTestCase):
+    """IsolatedDbTestCase plus the auth-module init this file's tests need."""
 
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-
-        patcher = patch.object(db, "DB_PATH", Path(self._tmp.name) / "jobs.db")
-        patcher.start()
-        self.addCleanup(patcher.stop)
-        db._database_path_prepared = None
-        self.addCleanup(setattr, db, "_database_path_prepared", None)
-        self.addCleanup(db.close_db)
-        db.init_db()
+        super().setUp()
 
         auth.init_auth(object(), "test-auth-credentials-secret")
         # auth.is_authentication_enabled() reads the session-settings cache

@@ -4,11 +4,9 @@
 
 {% block body_class %} app-root--share-lost{% endblock %}
 
-{# This template is only rendered by the public share route, so the navbar is
-dropped unconditionally - visitors here are never authenticated. The footer
-goes with it: this page is a full-bleed standalone scene, and a chrome strip
-across the bottom of it belongs to the app shell, not here. Dropping it also
-keeps the build version out of a page anonymous visitors can reach. #}
+{# Public share route only - drop navbar and footer: visitors are never
+   authenticated, it is a full-bleed scene, and this keeps the build version
+   off a page anonymous visitors can reach. #}
 {% block navbar %}{% endblock %}
 {% block footer %}{% endblock %}
 

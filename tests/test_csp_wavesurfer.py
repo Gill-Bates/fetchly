@@ -6,26 +6,16 @@
 
 """Guards the CSP hash that lets WaveSurfer's shadow-DOM stylesheet load.
 
-WaveSurfer builds a <style> element into the shadow root of the trim view.
-Under `style-src 'self'` the browser blocks it, and the rules that position
-the progress canvas on top of the waveform never apply - the canvas drops
-into normal flow and renders as a second waveform below the first, with the
-playback cursor collapsed to zero height. The policy therefore carries a
-hash of exactly that stylesheet.
-
-The hash covers the stylesheet's text, which interpolates the configured
-waveform height. So it goes stale if either the vendored bundle or that
-height changes - both are pinned here so the change fails loudly instead of
-silently breaking the trim view again.
+Under `style-src 'self'` the browser blocks WaveSurfer's shadow-root <style>,
+and the progress canvas renders as a second waveform. The hash covers that
+stylesheet's text, which interpolates the configured waveform height, so both
+the vendored bundle and that height are pinned here to fail loudly on change.
 """
 
 import hashlib
-import os
 import re
 import unittest
 from pathlib import Path
-
-os.environ.setdefault("FETCHLY_SECRET_KEY", "test-csp-wavesurfer-secret")
 
 from app.main import _WAVESURFER_STYLE_HASH, SecurityHeadersMiddleware
 

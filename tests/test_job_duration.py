@@ -6,29 +6,16 @@
 
 """The runtime a job shows: read at submit, refined by ffprobe, never lost."""
 
-import tempfile
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 
 from app import db
 from app.utils.duration import format_clock
 from app.utils.youtube import extract_video_meta
+from tests._support import IsolatedDbTestCase
 
 
-class InsertJobDurationTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-
-        patcher = patch.object(db, "DB_PATH", Path(self._tmp.name) / "jobs.db")
-        patcher.start()
-        self.addCleanup(patcher.stop)
-        db._database_path_prepared = None
-        self.addCleanup(setattr, db, "_database_path_prepared", None)
-        self.addCleanup(db.close_db)
-        db.init_db()
-
+class InsertJobDurationTests(IsolatedDbTestCase):
     def _insert(self, job_id: str, duration: object) -> None:
         db.insert_job(
             job_id,

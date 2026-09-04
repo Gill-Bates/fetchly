@@ -26,17 +26,12 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# Cache the model to avoid reloading on every call
 _model_lock = threading.RLock()
-_model_instance: File2Beats | None = None
-
-# Minimum number of beats required for reliable BPM calculation
+_model_instance: File2Beats | None = None  # cached across calls
 _MIN_BEATS_FOR_BPM: Final[int] = 4
 
 
 class BeatThisResult(NamedTuple):
-    """Result of beat_this BPM detection."""
-
     bpm: float
     confidence: float
     num_beats: int
@@ -50,12 +45,11 @@ def _get_model() -> File2Beats:
         if _model_instance is not None:
             return _model_instance
 
-        # Lazy import to avoid loading heavy libraries at module level
-        from beat_this.inference import File2Beats
+        from beat_this.inference import File2Beats  # heavy; imported lazily
 
         logger.info("Loading beat_this model...")
 
-        # Use CPU by default for compatibility; GPU detection could be added
+        # CPU by default for compatibility.
         _model_instance = File2Beats(
             checkpoint_path="final0",
             device="cpu",
@@ -67,56 +61,36 @@ def _get_model() -> File2Beats:
 
 
 def _bpm_from_beats(beats: np.ndarray) -> tuple[float, float]:
-    """Calculate BPM from an array of beat timestamps.
+    """Return ``(bpm, confidence)`` from beat timestamps (seconds).
 
-    Args:
-        beats: Array of beat timestamps in seconds.
-
-    Returns:
-        Tuple of (bpm, confidence) where confidence is based on
-        inter-beat interval consistency.
+    BPM is 60 / median inter-beat interval; confidence falls as the interval
+    IQR (relative to the median) grows.
     """
     if len(beats) < _MIN_BEATS_FOR_BPM:
         return 0.0, 0.0
 
-    # Calculate inter-beat intervals
     intervals = np.diff(beats)
-
     if len(intervals) == 0:
         return 0.0, 0.0
 
-    # Use median interval for robustness against outliers
     median_interval = float(np.median(intervals))
-
     if median_interval <= 0:
         return 0.0, 0.0
 
-    # Convert interval to BPM
     raw_bpm = 60.0 / median_interval
 
-    # Calculate confidence based on interval consistency (IQR-based)
     q1, q3 = np.percentile(intervals, [25, 75])
-    iqr = q3 - q1
-    # Confidence is higher when intervals are consistent (low IQR relative to median)
-    normalized_iqr = iqr / median_interval
-    # Map to 0-1 range: perfect consistency = 1.0, very inconsistent = 0.0
+    normalized_iqr = (q3 - q1) / median_interval
     confidence = max(0.0, min(1.0, 1.0 - normalized_iqr))
 
     return raw_bpm, confidence
 
 
 def extract_bpm_beat_this(audio_path: Path) -> BeatThisResult:
-    """Extract BPM using beat_this.
+    """Extract BPM from an audio file using beat_this.
 
-    Args:
-        audio_path: Path to audio file (any format supported by torchaudio/ffmpeg).
-
-    Returns:
-        BeatThisResult with detected BPM, confidence, and beat count.
-
-    Raises:
-        FileNotFoundError: If the audio file doesn't exist.
-        RuntimeError: If beat detection fails.
+    Raises FileNotFoundError if the file is missing, RuntimeError if detection
+    fails.
     """
     if not audio_path.is_file():
         raise FileNotFoundError(f"Audio file not found: {audio_path}")
@@ -125,7 +99,7 @@ def extract_bpm_beat_this(audio_path: Path) -> BeatThisResult:
         model = _get_model()
 
         with _model_lock:
-            # Shared PyTorch model instances are not safe for concurrent forward passes.
+            # A shared PyTorch model is not safe for concurrent forward passes.
             beats, _downbeats = model(str(audio_path))
 
     except ImportError as exc:
@@ -147,10 +121,7 @@ def extract_bpm_beat_this(audio_path: Path) -> BeatThisResult:
         )
         return BeatThisResult(bpm=0.0, confidence=0.0, num_beats=len(beats))
 
-    # Calculate BPM from beat timestamps
     raw_bpm, confidence = _bpm_from_beats(beats)
-
-    # Normalize to standard range
     bpm = normalize_bpm(raw_bpm)
 
     logger.debug(

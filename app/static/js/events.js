@@ -6,10 +6,9 @@
 import { CONFIG } from "./config.js?v=20260831b";
 import { fetchJob, fetchJobs } from "./api.js";
 import { reportError, reportWarning } from "./errors.js";
-// Must stay byte-identical to the specifier main.js uses: a different query
-// string is a different module URL, and the job store would be loaded twice
-// with two separate states.
-import { applyJobUpdate, upsertJobSnapshot } from "./jobs.js?v=20260901b";
+// Specifier must be byte-identical to main.js's: a different query string is a
+// different module, loading the job store twice with separate state.
+import { applyJobUpdate, upsertJobSnapshot } from "./jobs.js?v=20260903b";
 
 export const EVENT_NAMES = Object.freeze({
     JOB_UPDATE: "fetchly:job-update",
@@ -130,10 +129,7 @@ function clearReconnectTimer() {
     }
 }
 
-/**
- * Tear down an EventSource cleanly.
- * @param {EventSource | null} stream - The stream to tear down
- */
+/** @param {EventSource | null} stream - closed and detached */
 function teardown(stream) {
     clearReconnectTimer();
 
@@ -160,9 +156,7 @@ function teardown(stream) {
     }
 }
 
-/**
- * Schedule a reconnect attempt using exponential backoff and jitter.
- */
+/** Schedule a reconnect with exponential backoff + jitter. */
 function scheduleReconnect() {
     if (!shouldReconnect || !streamEnabled) {
         return;
@@ -180,10 +174,7 @@ function scheduleReconnect() {
     }, baseDelay + jitter);
 }
 
-/**
- * Apply a job status update to the DOM.
- * @param {JobUpdatePayload} payload - The job update payload from the server
- */
+/** @param {JobUpdatePayload} payload - applied to the job store, or null if unknown */
 function applyUpdate(payload) {
     if (!payload?.id) {
         reportWarning("SSE update missing job id", {
@@ -249,9 +240,8 @@ async function reconcileVisibleJobs() {
             return;
         }
 
-        // The server returns its first page newest-first. Jobs already in the
-        // store are patched in place; unknown ones are prepended, and that has
-        // to happen oldest-first so the newest still ends up on top.
+        // Server page is newest-first. Known jobs are patched in place; unknown
+        // ones are prepended oldest-first so the newest still lands on top.
         const unknownJobs = [];
         for (const job of jobs) {
             const updatedJob = applyJobUpdate(job);
@@ -296,9 +286,8 @@ async function recoverStreamFailure(stream) {
     teardown(stream);
 
     try {
-        // EventSource does not expose the HTTP status that caused `error`.
-        // A normal authenticated API request lets us distinguish an expired
-        // session from a transient network/server failure.
+        // EventSource hides the failing HTTP status; a normal API request
+        // tells an expired session apart from a transient failure.
         await fetchJobs(0);
     } catch (error) {
         if (error?.status === 401 || error?.status === 403) {
@@ -311,15 +300,12 @@ async function recoverStreamFailure(stream) {
     scheduleReconnect();
 }
 
-/**
- * Handle incoming SSE message and process job updates.
- * @param {string} data - The raw message data
- */
+/** @param {string} data - raw SSE message; parsed and dispatched */
 function handleMessage(data) {
     try {
         const payload = JSON.parse(data);
 
-        // Server shutdown signal - close connection gracefully
+        // Server shutting down: close and reconnect later.
         if (payload.type === "shutdown") {
             shouldReconnect = true;
             if (activeStream) {
@@ -330,9 +316,8 @@ function handleMessage(data) {
         }
 
         if (payload.type === "authentication_required") {
-            // The session is gone server-side (expired or invalidated); stop
-            // reconnecting and tear the stream down before navigating so a
-            // delayed error/visibility event cannot open a new one.
+            // Session gone server-side: stop reconnecting and tear down before
+            // navigating so a late event cannot reopen the stream.
             shouldReconnect = false;
             if (activeStream) {
                 teardown(activeStream);
@@ -346,13 +331,11 @@ function handleMessage(data) {
             return;
         }
 
-        // Handle Lalal.ai progress updates
         if (payload.type === "lalal_progress") {
             dispatchAppEvent(EVENT_NAMES.LALAL_PROGRESS, payload);
             return;
         }
 
-        // Regular job update
         scheduleJobUpdate(payload);
     } catch (err) {
         reportError(err, {
@@ -364,9 +347,8 @@ function handleMessage(data) {
 }
 
 /**
- * Establish an SSE connection for real-time job updates.
- * Reuses the active stream when it is already open or connecting.
- * @returns {EventSource | null} The active or newly created event stream
+ * Establish (or reuse) the SSE connection for real-time job updates.
+ * @returns {EventSource | null}
  */
 export function connectEventStream() {
     if (!streamEnabled) {
@@ -407,8 +389,8 @@ export function connectEventStream() {
 }
 
 /**
- * Enable or disable the dashboard SSE connection.
- * When disabled, any active stream is closed and reconnects are suppressed.
+ * Enable/disable the dashboard SSE connection (disabling closes the stream and
+ * suppresses reconnects).
  * @param {boolean} enabled
  */
 export function setEventStreamEnabled(enabled) {
@@ -426,9 +408,6 @@ export function setEventStreamEnabled(enabled) {
     }
 }
 
-/**
- * Tear down the active SSE stream when the page is being hidden or unloaded.
- */
 function handlePageHide() {
     shouldReconnect = false;
     if (activeStream) {

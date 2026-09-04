@@ -2,6 +2,7 @@
 // tests/js/ui-lint-devices.test.mjs
 // Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 //
+
 // The ui-lint runner separates form factor from touch input. Collapsing the
 // two back into one flag is exactly the regression that left the iPad
 // untested: it either got the 32px desktop hit-area minimum, or was asked for

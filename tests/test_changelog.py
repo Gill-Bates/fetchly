@@ -4,11 +4,8 @@
 # Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 #
 
-import os
 import unittest
 from unittest.mock import patch
-
-os.environ.setdefault("FETCHLY_SECRET_KEY", "test-changelog-secret")
 
 from app.utils import changelog
 

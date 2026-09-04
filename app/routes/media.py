@@ -6,14 +6,10 @@
 
 """Media routes for downloads, thumbnails, and job pages.
 
-Single-identity application: there is at most one credential (the
-``admin_username`` / ``admin_password_hash`` settings, see app/routes/auth.py)
-and the ``jobs`` table has no owner column. Every job therefore belongs to the
-only account that can authenticate, and ``current_user(request)`` is the
-complete authorization check for these routes - there is no second principal to
-isolate a job from.
-Introducing additional accounts would require an owner column plus per-job
-filtering here before that stays true.
+Single-identity application: one credential, and ``jobs`` has no owner column,
+so every job belongs to the only account that can authenticate and
+``current_user(request)`` is the complete authorization check here. More
+accounts would need an owner column plus per-job filtering.
 """
 
 from __future__ import annotations
@@ -28,16 +24,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 
 from ..bpm_naming import tagged_download_name
 from ..common.rate_limit import limiter
 from ..db import DOWNLOADABLE_STATUSES, get_job, get_settings
 from ..governor import governor
-from ..utils.fs import AUDIO_SOURCE_EXTENSIONS, path_is_file
+from ..utils.fs import AUDIO_SOURCE_EXTENSIONS, path_is_file, resolve_within_root
 from .api import job_to_dict
-from .auth import current_user, require_html_auth
+from .auth import get_csrf_token, require_html_auth, require_user_json
 
 if TYPE_CHECKING:
     from fastapi.templating import Jinja2Templates
@@ -46,7 +42,6 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["media"])
 
-# Constants
 _BROWSER_SAFE_AUDIO_EXTENSIONS = frozenset({".mp3", ".m4a", ".aac", ".wav"})
 _AUDIO_MIME_TYPES = {
     ".opus": "audio/opus",
@@ -58,11 +53,9 @@ _AUDIO_MIME_TYPES = {
     ".aac": "audio/aac",
     ".mp3": "audio/mpeg",
 }
-# Download table. ".webm" deliberately overrides the audio entry above: audio
-# jobs are always stored as "<stem>.source.<ext>" and ".webm" is an internal
-# source extension, so an audio .webm never reaches this table - it is served
-# as MP3 by download() or via _AUDIO_MIME_TYPES by audio_source(). A .webm
-# that does reach here came from the video merge fallback.
+# ".webm" overrides the audio entry above on purpose: an audio .webm is always
+# stored as "<stem>.source.webm" and never reaches this table, so a .webm here
+# is video (from the merge fallback).
 _KNOWN_MEDIA_TYPES = {
     **_AUDIO_MIME_TYPES,
     ".mp4": "video/mp4",
@@ -80,7 +73,7 @@ class MediaContext:
     base_dir: Path
     templates: Jinja2Templates
 
-# Module-level state
+
 _MEDIA_CONTEXT: MediaContext | None = None
 _transcode_locks: dict[Path, asyncio.Lock] = {}
 _transcode_lock_refs: dict[Path, int] = {}
@@ -92,7 +85,6 @@ def init_media(
     base_dir: Path,
     templates: Jinja2Templates,
 ) -> None:
-    """Initialize the media module with required dependencies."""
     global _MEDIA_CONTEXT
     context = MediaContext(data_dir=data_dir, base_dir=base_dir, templates=templates)
     if _MEDIA_CONTEXT is not None and context != _MEDIA_CONTEXT:
@@ -118,8 +110,6 @@ def _require_templates() -> Jinja2Templates:
     return _require_media_context().templates
 
 
-
-
 def _guess_media_type(file_path: Path) -> str:
     media_type = _KNOWN_MEDIA_TYPES.get(file_path.suffix.lower())
     if media_type:
@@ -132,9 +122,8 @@ def _guess_media_type(file_path: Path) -> str:
 async def _mp3_cache_is_valid(cache_path: Path, source_path: Path) -> bool:
     """Return True when the cached MP3 is at least as new as its source.
 
-    The transcode is deterministic, so a cache that postdates its source stays
-    valid for the life of the job; job retention removes both together. An
-    absolute age limit would only re-run ffmpeg for an identical result.
+    The transcode is deterministic, so an mtime check is enough; retention
+    removes both together.
     """
     if not await path_is_file(cache_path):
         return False
@@ -181,41 +170,28 @@ async def _get_thumbnail_path(job_id: uuid.UUID) -> Path:
 
 
 def resolve_job_path(raw_filename: str | None) -> Path:
-    """Resolve and validate a job file path.
+    """Resolve a job's raw filename to a Path inside DATA_DIR.
 
-    Args:
-        raw_filename: The raw filename from the job record
-
-    Returns:
-        Resolved Path within DATA_DIR
-
-    Raises:
-        HTTPException: If path is invalid or outside DATA_DIR
+    Raises HTTPException when the path is missing, unresolvable, or escapes
+    DATA_DIR.
     """
-    data_dir = _require_data_dir().resolve()
-
     if not raw_filename:
         raise HTTPException(status_code=404, detail="not ready")
 
     file_path = Path(str(raw_filename).strip())
-    if not file_path.is_absolute():
-        file_path = data_dir / file_path
     try:
-        file_path = file_path.resolve()
+        return resolve_within_root(file_path, _require_data_dir())
     except OSError as exc:
         raise HTTPException(status_code=404, detail="not found") from exc
-    try:
-        file_path.relative_to(data_dir)
     except ValueError as exc:
         raise HTTPException(status_code=403, detail="forbidden") from exc
-    return file_path
 
 
 def is_internal_audio_source(file_path: Path) -> bool:
-    """Return whether the file uses the internal ``<stem>.source.<ext>`` format.
+    """Whether the file uses the internal ``<stem>.source.<ext>`` format.
 
-    The marker describes storage provenance, not codec quality. Some supported
-    source codecs are lossy even though they are kept without a second encode.
+    Describes storage provenance, not codec quality (some kept-as-is codecs
+    are still lossy).
     """
     return file_path.stem.endswith(".source") and file_path.suffix.lower() in AUDIO_SOURCE_EXTENSIONS
 
@@ -232,15 +208,10 @@ def get_mp3_cache_path(source_path: Path) -> Path:
 def needs_browser_audio_fallback(file_path: Path) -> bool:
     """Return True when the source container/codec is not broadly browser-safe.
 
-    iOS Safari is stricter than Chromium and will reject common containers like
-    WebM/Opus or Ogg even though desktop Chrome can play them.
-
-    The extension alone decides this because the inputs are not arbitrary: every
-    audio file here comes from yt-dlp's ``-f ba/b -x`` path (app/worker.py), so
-    the container implies the codec (.m4a -> AAC, .webm -> Opus/Vorbis). A
-    ffprobe call per request would cost more than the occasional needless
-    transcode it would avoid. Widen this to a codec check if audio ever enters
-    from an uncontrolled source.
+    iOS Safari rejects WebM/Opus and Ogg that desktop Chrome plays. The
+    extension is enough here because every audio file comes from yt-dlp's
+    ``-f ba/b -x`` path, so the container implies the codec. Widen to a codec
+    check if audio ever enters from an uncontrolled source.
     """
     return file_path.suffix.lower() not in _BROWSER_SAFE_AUDIO_EXTENSIONS
 
@@ -255,21 +226,10 @@ async def stop_ffmpeg_process(proc: asyncio.subprocess.Process) -> None:
 
 
 async def transcode_to_mp3(source_path: Path, output_path: Path) -> Path:
-    """Transcode an internal audio source to high-quality MP3.
+    """Transcode an internal audio source to MP3 (ffmpeg -q:a 0, ~320kbps VBR)
+    and cache it at ``output_path``.
 
-    Uses ffmpeg with -q:a 0 (VBR ~320kbps) for best quality.
-    The transcoded file is cached for subsequent downloads.
-
-    Args:
-        source_path: Path to internal source audio
-        output_path: Path where MP3 will be written
-
-    Returns:
-        Path to the MP3 file
-
-    Raises:
-        RuntimeError: If ffmpeg is missing, fails, or times out.
-        OSError: If the temporary file cannot be written, replaced, or removed.
+    Raises RuntimeError (ffmpeg missing/failed/timed out) or OSError.
     """
     if await _mp3_cache_is_valid(output_path, source_path):
         return output_path
@@ -316,9 +276,8 @@ async def transcode_to_mp3(source_path: Path, output_path: Path) -> Path:
                     try:
                         _, stderr = await asyncio.wait_for(proc.communicate(), timeout=600)
                     except BaseException:
-                        # BaseException, not Exception: CancelledError (client
-                        # disconnect, server shutdown) is the case that would
-                        # otherwise leave ffmpeg running past its request.
+                        # BaseException catches CancelledError (client
+                        # disconnect / shutdown), which would else orphan ffmpeg.
                         await stop_ffmpeg_process(proc)
                         raise
 
@@ -358,15 +317,9 @@ async def _ensure_mp3(file_path: Path) -> Path:
     return mp3_path
 
 
-# ============================================================================
-# Routes
-# ============================================================================
-
-
 @router.get("/job/{job_id}", response_class=HTMLResponse)
 @limiter.limit("120/minute")
 async def job_page(request: Request, job_id: uuid.UUID):
-    """Job detail page."""
     redirect = require_html_auth(request)
     if redirect:
         return redirect
@@ -377,7 +330,7 @@ async def job_page(request: Request, job_id: uuid.UUID):
     job = await asyncio.to_thread(get_job, job_id_str)
     settings = await asyncio.to_thread(get_settings)
     auth_enabled = bool(settings.get("enable_authentication", False))
-    csrf_token = getattr(request.state, "csrf_token", "")
+    csrf_token = get_csrf_token(request)
     if not job:
         return templates.TemplateResponse(
             request=request,
@@ -394,12 +347,11 @@ async def job_page(request: Request, job_id: uuid.UUID):
 
 
 async def build_job_file_response(job_id: uuid.UUID) -> Response:
-    """Resolve a job's output file and return it as a download response.
+    """Resolve a job's output file into a download response.
 
-    Shared by the authenticated /download route and the public share-link
-    route so both deliver byte-identical results (including the on-the-fly
-    MP3 transcode for internal audio sources). Raises no exceptions: a missing
-    or not-yet-ready job comes back as the matching JSON error response.
+    Shared by /download and the share-link route so both are byte-identical
+    (including the on-the-fly MP3 transcode). Never raises: a missing or
+    not-ready job comes back as a JSON error response.
     """
     try:
         job, file_path = await _get_ready_job_file(job_id)
@@ -431,26 +383,22 @@ async def build_job_file_response(job_id: uuid.UUID) -> Response:
 @router.get("/download/{job_id}")
 @limiter.limit("30/minute")
 async def download(request: Request, job_id: uuid.UUID):
-    """Download a job's output file."""
-    if not current_user(request):
-        return RedirectResponse(url="/login", status_code=303)
+    redirect = require_html_auth(request)
+    if redirect:
+        return redirect
 
     return await build_job_file_response(job_id)
 
 
 @router.get("/audio-source/{job_id}")
 @limiter.limit("60/minute")
-async def audio_source(request: Request, job_id: uuid.UUID):
-    """Serve the job's stored audio file for trimming.
+async def audio_source(request: Request, job_id: uuid.UUID, _user: str = Depends(require_user_json)):
+    """Serve a job's stored audio inline for the waveform/trim UI.
 
-    The X-Audio-Quality header indicates whether the served file is the
-    original source or a cached MP3 fallback for browser playback. The
-    response is served inline: it feeds the waveform/trim UI in the page,
-    unlike /download/{job_id}, which is an attachment.
+    ``X-Audio-Quality`` says whether it is the original source or a cached MP3
+    fallback. Inline, unlike the /download attachment.
     """
-    if not current_user(request):
-        return JSONResponse(status_code=401, content={"error": "unauthorized"})
-
+    _ = request  # required by @limiter.limit, unused now that auth is a Depends()
     try:
         job, file_path = await _get_ready_job_file(job_id)
     except HTTPException as exc:
@@ -498,11 +446,8 @@ async def favicon():
 
 @router.get("/thumbnail/{job_id}")
 @limiter.limit("120/minute")
-async def thumbnail(request: Request, job_id: uuid.UUID):
-    """Serve cached thumbnail for a job."""
-    if not current_user(request):
-        return JSONResponse(status_code=401, content={"error": "unauthorized"})
-
+async def thumbnail(request: Request, job_id: uuid.UUID, _user: str = Depends(require_user_json)):
+    _ = request  # required by @limiter.limit, unused now that auth is a Depends()
     try:
         thumb_path = await _get_thumbnail_path(job_id)
     except HTTPException as exc:

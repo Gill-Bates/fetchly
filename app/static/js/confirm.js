@@ -5,10 +5,8 @@
 
 /**
  * @module confirm
- *
- * In-app confirmation dialog for fetchly. Replaces window.confirm() so every
- * "are you sure?" prompt renders as a Bootstrap modal styled like the rest of
- * the UI instead of a native browser popup.
+ * In-app confirmation dialog replacing window.confirm() with a styled Bootstrap
+ * modal.
  */
 
 const ACCEPT_VARIANTS = new Set(["primary", "danger", "warning", "success"]);
@@ -51,10 +49,7 @@ function restoreFocus() {
     }
 }
 
-/**
- * Build the single reusable modal node and wire its permanent listeners.
- * @returns {ConfirmElements}
- */
+/** @returns {ConfirmElements} the single reusable modal node, listeners wired */
 function buildModal() {
     const root = document.createElement("div");
     root.className = "modal fade";
@@ -116,10 +111,8 @@ function buildModal() {
         modalInstance?.hide();
     });
 
-    // The confirm button leads for a safe action, the cancel button for a
-    // destructive one - set per call, applied once the dialog is on screen.
     root.addEventListener("shown.bs.modal", () => {
-        focusTarget?.focus();
+        focusTarget?.focus();  // set per call - see confirmModal()
     });
 
     // Covers the cancel button, the close icon, Escape and backdrop clicks -
@@ -154,11 +147,9 @@ export function confirmModal(options) {
         variant = "primary",
     } = config;
 
-    // If Bootstrap failed to load (script blocked, stale cache), a native
-    // prompt still beats swallowing the action or blocking the user outright.
+    // If Bootstrap failed to load, a native prompt beats a dead button. This is
+    // the codebase's one sanctioned window.confirm().
     if (typeof bootstrap === "undefined" || !bootstrap?.Modal) {
-        // The one sanctioned native dialog in the codebase: confirmModal() needs
-        // Bootstrap, and this branch is exactly the path where it is missing.
         // eslint-disable-next-line no-alert
         return Promise.resolve(window.confirm(message));
     }

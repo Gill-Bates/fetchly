@@ -4,34 +4,17 @@
 # Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 #
 
-"""Hidden_Captcha: an invisible, no-user-interaction anti-bot check for the
-public, pre-authentication ``POST /login`` endpoint.
+"""Hidden_Captcha: an invisible, no-interaction anti-bot check for the public
+``POST /login`` endpoint. Two signals:
 
-Combines the two standard invisible signals, the same technique used by the
-sister project (vocalix):
+1. **Honeypot field** -- a CSS-hidden form field. A human never fills it; many
+   form-fillers populate every input.
 
-1. **Honeypot field** -- the login page renders a form field that is hidden
-   from humans via CSS (``.hp-field``, off-screen) but present in the DOM.
-   A real user never sees or fills it; many automated form-fillers blindly
-   populate every input, so a non-empty honeypot value is a strong bot tell
-   with effectively zero false positives.
-
-2. **Signed time-trap token** -- the login page embeds a token minted by
-   :func:`issue_captcha_token`, signed with the app's own session-signing
-   key (``FETCHLY_SECRET_KEY``, the same anchor ``app/session.py`` uses for
-   the session cookie -- see that module's ``_encode_token`` for the same
-   base64url(payload + hmac) shape this reuses). On submit the token must:
-   - be present and carry a valid signature (a bot POSTing straight at the
-     endpoint without first loading the page has no valid token),
-   - not be older than ``max_age_seconds`` (a stale form is rejected; tokens
-     remain valid until expiry and are not single-use),
-   - not be *younger* than ``min_age_seconds`` (a form submitted
-     implausibly fast after being served is almost certainly scripted).
-
-No third-party dependency: fetchly already hand-rolls its own HMAC-based
-token signing (see ``app/session.py`` and ``app/routes/auth.py``), so this
-follows the same pattern instead of pulling in a package like
-``itsdangerous`` for a single small use.
+2. **Signed time-trap token** -- a token minted by :func:`issue_captcha_token`,
+   signed with ``FETCHLY_SECRET_KEY`` (same shape as the session cookie). On
+   submit it must be present, correctly signed, not older than
+   ``max_age_seconds``, and not *younger* than ``min_age_seconds`` (an
+   implausibly fast submit is scripted). Tokens are not single-use.
 """
 
 from __future__ import annotations
@@ -43,36 +26,22 @@ from enum import StrEnum
 from hashlib import sha256
 from time import time
 
-# Signing salt namespacing this token apart from every other HMAC use of the
-# same secret key (e.g. the session cookie in ``app/session.py``), so a
-# value minted for one can never be replayed as the other.
+# Salt namespacing this token apart from other HMAC uses of the same key, so a
+# value minted for one cannot be replayed as the other.
 _SALT = "fetchly-hidden-captcha"
 
-# The HTML `name` of the honeypot input the login page renders (hidden from
-# humans via CSS). Deliberately looks like a legitimate, tempting field so a
-# naive form-filling bot populates it; a real user never sees it.
+# `name` of the CSS-hidden honeypot input; looks tempting to a form-filler.
 HONEYPOT_FIELD_NAME = "website"
 
-# Token format version, so a future format change can be told apart from a
-# tampered value.
-_TOKEN_VERSION = "v1"  # noqa: S105  # a format marker, not a credential
+_TOKEN_VERSION = "v1"  # noqa: S105  # format marker, not a credential
 
-# A form older than this is rejected as stale. Tokens remain valid until
-# expiry and are not single-use.
-DEFAULT_MAX_AGE_SECONDS = 6 * 60 * 60  # 6 hours
-
-# A form submitted faster than this after being served is treated as
-# scripted. Pass 0 to disable the too-fast check entirely.
-DEFAULT_MIN_AGE_SECONDS = 1.0
+DEFAULT_MAX_AGE_SECONDS = 6 * 60 * 60  # form rejected as stale after this
+DEFAULT_MIN_AGE_SECONDS = 1.0  # faster submits are scripted; 0 disables
 
 
 class CaptchaOutcome(StrEnum):
-    """Result discriminator for :func:`verify_captcha_token`.
-
-    Only ``OK`` permits the request to proceed. Every other variant means
-    "treat as a bot" -- the caller collapses them all into a single,
-    generic rejection so an attacker can never learn *which* signal
-    tripped.
+    """Result of :func:`verify_captcha_token`. Only ``OK`` proceeds; the caller
+    collapses every other variant into one generic rejection.
     """
 
     OK = "ok"
@@ -90,11 +59,7 @@ def _sign(secret_key: str, payload: str) -> str:
 
 
 def issue_captcha_token(secret_key: str) -> str:
-    """Mint a fresh, signed, timestamped hidden-captcha token.
-
-    Embedded verbatim into the login form by the login view; returned to
-    the server on submit for :func:`verify_captcha_token`.
-    """
+    """Mint a signed, timestamped token for the login form."""
     payload = f"{_TOKEN_VERSION}:{int(time())}"
     signature = _sign(secret_key, payload)
     raw = f"{payload}:{signature}".encode()
@@ -110,24 +75,19 @@ def verify_captcha_token(
     max_age_seconds: int = DEFAULT_MAX_AGE_SECONDS,
     now: float | None = None,
 ) -> CaptchaOutcome:
-    """Evaluate the invisible anti-bot signals for a login submission.
+    """Evaluate the anti-bot signals for a login submission.
 
-    Returns ``CaptchaOutcome.OK`` only when the honeypot is empty AND the
-    token is present, correctly signed, not expired, and (when
-    ``min_age_seconds > 0``) not implausibly fresh. The honeypot is checked
-    first -- it is the cheapest signal and needs no cryptography. ``now`` is
-    injectable so tests can exercise the age windows deterministically.
+    ``OK`` only when the honeypot is empty and the token is present, signed,
+    unexpired and (if ``min_age_seconds > 0``) not implausibly fresh. ``now``
+    is injectable for tests.
     """
-    # 1. Honeypot: any non-empty (non-whitespace) value means a bot filled a
-    #    field no human ever sees.
     if honeypot is not None and honeypot.strip():
         return CaptchaOutcome.HONEYPOT_FILLED
 
-    # 2. Token must be present at all.
     if not token:
         return CaptchaOutcome.MISSING
 
-    # 3. Decode + signature check.
+    # Decode + signature check.
     try:
         padded = token + "=" * (-len(token) % 4)
         raw = base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8")
@@ -147,7 +107,7 @@ def verify_captcha_token(
     except ValueError:
         return CaptchaOutcome.INVALID
 
-    # 4. Age window.
+    # Age window.
     current = now if now is not None else time()
     age_seconds = current - issued_at
     if age_seconds < 0:

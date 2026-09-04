@@ -20,12 +20,8 @@ from typing import TYPE_CHECKING
 
 logger = logging.getLogger(__name__)
 
-# Pure path arithmetic – no I/O occurs here.
 _PROJECT_ROOT = Path(__file__).absolute().parent.parent.parent
-
-# The distribution name declared in pyproject.toml, used for the installed-
-# package fallback below.
-_DIST_NAME = "fetchly"
+_DIST_NAME = "fetchly"  # pyproject distribution name, for the installed fallback
 
 
 def _read_file(name: str) -> str | None:
@@ -40,10 +36,8 @@ def _read_file(name: str) -> str | None:
 def _version_from_pyproject() -> str | None:
     """Return ``[project] version`` from pyproject.toml, or None.
 
-    pyproject.toml is the single source of truth for the release number: the
-    release workflow validates the git tag against it and docker/Dockerfile
-    copies it into the image next to the source tree, so the running container
-    reports exactly the version its tag was cut from.
+    pyproject.toml is the single source of truth: the release workflow checks
+    the git tag against it, and the image bundles it.
     """
     path = _PROJECT_ROOT / "pyproject.toml"
     try:
@@ -66,11 +60,8 @@ def _version_from_pyproject() -> str | None:
 
 @lru_cache(maxsize=1)
 def get_version() -> str:
-    """Return the application version from pyproject.toml, or 'dev'.
-
-    Falls back to the installed distribution metadata so that an install
-    without the source tree (``pip install fetchly``) still reports a real
-    number rather than 'dev'.
+    """Application version from pyproject.toml, then installed distribution
+    metadata, then 'dev'.
     """
     version = _version_from_pyproject()
     if version:
@@ -89,17 +80,12 @@ def get_build_info() -> str:
     return _read_file("BUILD_INFO") or "dev"
 
 
-# --------------------------------------------------------------------------- #
-# Tool versions. These shell out and block for up to their timeout on the first
-# call (lru_cache makes every later call free), so async callers must offload
-# them - see app/routes/api.py, which wraps each one in asyncio.to_thread().
-# --------------------------------------------------------------------------- #
+# Tool versions. Each shells out and blocks (up to its timeout) on the first
+# call; lru_cache makes later calls free. Async callers offload via
+# asyncio.to_thread() - see app/routes/api.py.
 @lru_cache(maxsize=1)
 def get_ytdlp_version() -> str:
-    """Return installed yt-dlp version, or 'unavailable' on failure.
-
-    Blocking: shells out with a 3s timeout on first call. Offload from async code.
-    """
+    """Installed yt-dlp version, or 'unavailable'."""
     try:
         result = subprocess.run(
             ["yt-dlp", "--version"],
@@ -118,10 +104,7 @@ def get_ytdlp_version() -> str:
 
 @lru_cache(maxsize=1)
 def get_ffmpeg_version() -> str:
-    """Return installed ffmpeg version, or 'unavailable' on failure.
-
-    Blocking: shells out with a 3s timeout on first call. Offload from async code.
-    """
+    """Installed ffmpeg version, or 'unavailable'."""
     try:
         result = subprocess.run(
             ["ffmpeg", "-version"],
@@ -141,11 +124,8 @@ def get_ffmpeg_version() -> str:
 
 @lru_cache(maxsize=1)
 def get_ytdlp_ejs_version() -> str:
-    """Return the installed yt-dlp-ejs version, or 'unavailable'.
-
-    yt-dlp needs this package (plus a JavaScript runtime) for full YouTube
-    support; it ships in the image's venv, so a missing distribution means
-    the image was built without it.
+    """Installed yt-dlp-ejs version, or 'unavailable' (needed for full YouTube
+    support, alongside a JS runtime).
     """
     try:
         return metadata.version("yt-dlp-ejs")
@@ -156,12 +136,8 @@ def get_ytdlp_ejs_version() -> str:
 
 @lru_cache(maxsize=1)
 def get_js_runtime_version() -> str:
-    """Return the deno version yt-dlp-ejs runs on, or 'unavailable'.
-
-    deno is the only JavaScript runtime yt-dlp enables by default, so having
-    the binary on PATH is all that is required - no yt-dlp flag is involved.
-
-    Blocking: shells out with a 5s timeout on first call. Offload from async code.
+    """deno version yt-dlp-ejs runs on, or 'unavailable' (deno is the only JS
+    runtime yt-dlp enables by default; just needs to be on PATH).
     """
     try:
         result = subprocess.run(
@@ -182,20 +158,14 @@ def get_js_runtime_version() -> str:
 
 @lru_cache(maxsize=1)
 def get_wavesurfer_version() -> str:
-    """Return the WaveSurfer.js version baked into the image at build time.
-
-    Set via ENV WAVESURFER_VERSION in the Docker runtime stage (see
-    docker/Dockerfile) since the vendored bundle carries no version marker
-    of its own. 'unavailable' outside that image (e.g. local dev).
+    """WaveSurfer.js version from ENV WAVESURFER_VERSION (set in the Docker
+    runtime stage; the vendored bundle has no marker), else 'unavailable'.
     """
     return os.environ.get("WAVESURFER_VERSION") or "unavailable"
 
 
-# --------------------------------------------------------------------------- #
-# Lazy module-level constants – I/O is deferred until first attribute access.
-# --------------------------------------------------------------------------- #
+# VERSION and BUILD_INFO are lazy: I/O is deferred to first attribute access.
 def __getattr__(name: str) -> str:
-    """Lazy-load VERSION and BUILD_INFO on first access."""
     if name == "VERSION":
         return get_version()
     if name == "BUILD_INFO":
@@ -204,11 +174,9 @@ def __getattr__(name: str) -> str:
 
 
 def __dir__() -> list[str]:
-    """Include lazy attributes in dir() output."""
     return sorted({*globals(), "VERSION", "BUILD_INFO"})
 
 
-# Type-checker stubs so that `version.VERSION` is known to be `str`.
-if TYPE_CHECKING:
+if TYPE_CHECKING:  # so version.VERSION is typed as str
     VERSION: str
     BUILD_INFO: str

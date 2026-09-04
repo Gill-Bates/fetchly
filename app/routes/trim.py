@@ -35,7 +35,6 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/trim", tags=["trim"])
 
-# Module-level state
 _DATA_DIR: Path | None = None
 _resolve_job_path: Callable[[str | None], Path] | None = None
 
@@ -58,7 +57,6 @@ def init_trim(
     data_dir: Path,
     resolve_job_path_func: Callable[[str | None], Path],
 ) -> None:
-    """Initialize the trim module with required dependencies."""
     global _DATA_DIR, _resolve_job_path
     _DATA_DIR = data_dir
     _resolve_job_path = resolve_job_path_func
@@ -68,7 +66,6 @@ def _require_init() -> tuple[Path, Callable[[str | None], Path]]:
     if _DATA_DIR is None or _resolve_job_path is None:
         raise RuntimeError("Trim module not initialized: call init_trim() first")
     return _DATA_DIR, _resolve_job_path
-
 
 
 async def _ensure_directory(path: Path) -> None:
@@ -172,7 +169,6 @@ async def trim_audio(
     start = start_ms / 1000
     end = end_ms / 1000
 
-    # Validate selection
     if end <= start:
         return JSONResponse(status_code=400, content={"error": "End time must be after start time"})
 
@@ -186,7 +182,6 @@ async def trim_audio(
             content={"error": f"Selection too long (maximum {LALAL_MAX_DURATION_MINUTES} minutes)"},
         )
 
-    # Get job
     job_id_str = str(job_id)
     job = await asyncio.to_thread(get_job, job_id_str)
     if not job:
@@ -202,7 +197,6 @@ async def trim_audio(
     if duration_error := _duration_validation_error(end, job["duration_seconds"]):
         return duration_error
 
-    # Resolve source file
     raw_filename = job["filename"]
     try:
         source_path = resolve_job_path(raw_filename)
@@ -212,27 +206,20 @@ async def trim_audio(
     if not await path_is_file(source_path):
         return JSONResponse(status_code=404, content={"error": "Source file not found"})
 
-    # Check if source is an audio file (native source preferred, MP3 also accepted for trim).
     if source_path.suffix.lower() not in (AUDIO_SOURCE_EXTENSIONS | {".mp3"}):
         return JSONResponse(status_code=400, content={"error": "Not an audio file"})
 
-    # Prepare output with unique trim_id based on timestamps
     output_dir = data_dir / job_id_str
     await _ensure_directory(output_dir)
 
-    # Generate deterministic trim_id from start/end (millisecond precision)
     trim_id = f"{start_ms}_{end_ms}"
-
-    # Lock to prevent parallel trims for the same requested segment.
     lock_file = output_dir / f".trim_{trim_id}.lock"
 
-    # Use WAV output for broad Lalal compatibility.
-    # This is a PCM re-encode, not bit-exact stream copy.
+    # WAV (PCM re-encode, not stream copy) for broad Lalal compatibility.
     out_file = output_dir / f"trim_{trim_id}.wav"
     temp_file = output_dir / f"trim_{uuid.uuid4().hex}.wav.tmp"
 
-    # Place -ss after -i for more accurate trims.
-    # Use -t to trim by exact duration and keep original channel layout.
+    # -ss after -i for accurate trims.
     cmd = [
         "ffmpeg",
         "-y",
@@ -245,7 +232,6 @@ async def trim_audio(
         str(temp_file),
     ]
 
-    # Dynamic timeout with cap to avoid excessive wait times.
     timeout = min(300, max(30, int(duration * 2)))
 
     try:
@@ -285,8 +271,7 @@ async def trim_audio(
                     await _unlink_file(temp_file)
                     return JSONResponse(status_code=500, content={"error": "Trim operation failed"})
 
-                # Atomic rename after ffmpeg finished successfully.
-                await _replace_file(temp_file, out_file)
+                await _replace_file(temp_file, out_file)  # atomic
                 logger.info("Trimmed audio: %s (%.2fs - %.2fs)", out_file.name, start, end)
                 return TrimResponse(
                     ok=True,
@@ -330,14 +315,7 @@ async def delete_trim(
     trim_id: str | None = None,
     _user: str = Depends(require_user_json),
 ):
-    """Delete trimmed audio file(s) for a job.
-
-    Args:
-        job_id: The job UUID
-        trim_id: Optional specific trim ID to delete. If not provided, deletes all trim files.
-
-    Useful for cleanup after Lalal processing or when user wants to re-trim.
-    """
+    """Delete one trim file (``trim_id``) or all of a job's trim files."""
     _ = request
     data_dir, _ = _require_init()
 
@@ -347,12 +325,10 @@ async def delete_trim(
     deleted_count = 0
 
     if trim_id:
-        # Delete specific trim
         deleted_count = await _delete_trim_files(output_dir, _validate_trim_id(trim_id))
         if deleted_count:
             logger.info("Deleted trim file: %s", output_dir / f"trim_{trim_id}.wav")
     else:
-        # Delete all trim files
         deleted_count = await _delete_trim_files(output_dir, None)
         if deleted_count:
             logger.info("Deleted %d trim file(s) for job %s", deleted_count, job_id_str)
@@ -363,15 +339,7 @@ async def delete_trim(
 @router.get("/{job_id}/{trim_id}/download", response_model=None)
 @limiter.limit("30/minute")
 async def download_trim(request: Request, job_id: uuid.UUID, trim_id: str, _user: str = Depends(require_user_json)):
-    """Download a trimmed audio file.
-
-    Args:
-        job_id: The job UUID
-        trim_id: The trim identifier (format: startMs_endMs)
-
-    Returns:
-        The trimmed WAV file as a download.
-    """
+    """Download a trimmed WAV file (``trim_id`` format: startMs_endMs)."""
     _ = request
     data_dir, _ = _require_init()
 
@@ -383,10 +351,8 @@ async def download_trim(request: Request, job_id: uuid.UUID, trim_id: str, _user
     if not await path_is_file(trim_path):
         return JSONResponse(status_code=404, content={"error": "Trimmed file not found. Please trim again."})
 
-    # Get job info for filename. A sqlite3.Row has no key-membership test -
-    # `"video_title" in job` iterates the row's *values*, so it answered False
-    # for every job and the title never reached the filename. get_job() selects
-    # every column, so read them off the row directly.
+    # Read columns off the row directly: `"video_title" in job` tests a
+    # sqlite3.Row's *values*, not its keys, so it is always False.
     job = await asyncio.to_thread(get_job, job_id_str)
     video_title = job["video_title"] if job else None
     bpm = job["bpm"] if job else None

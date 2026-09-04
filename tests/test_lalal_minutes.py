@@ -6,22 +6,13 @@
 
 """The Lalal.ai balance: read from the validation call, cached, and reported."""
 
-import os
-import tempfile
 import unittest
-from pathlib import Path
 from typing import Any, Self
 from unittest.mock import patch
 
-os.environ.setdefault("FETCHLY_SECRET_KEY", "test-lalal-minutes-secret")
-
-from fastapi.testclient import TestClient
-
 from app import db
 from app.lalal import parse_minutes_left
-from app.main import app, templates
-from app.routes.api import init_api
-from app.session import refresh_session_settings_cache
+from tests._support import WebAppTestCase
 
 
 class FakeLalalClient:
@@ -67,26 +58,9 @@ class ParseMinutesLeftTests(unittest.TestCase):
                 self.assertIsNone(parse_minutes_left(payload))
 
 
-class LalalStatusMinutesTests(unittest.TestCase):
+class LalalStatusMinutesTests(WebAppTestCase):
     def setUp(self) -> None:
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-
-        patcher = patch.object(db, "DB_PATH", Path(self._tmp.name) / "jobs.db")
-        patcher.start()
-        self.addCleanup(patcher.stop)
-        db._database_path_prepared = None
-        self.addCleanup(setattr, db, "_database_path_prepared", None)
-        self.addCleanup(db.close_db)
-        db.init_db()
-
-        init_api(templates)
-        refresh_session_settings_cache()
-
-        from app.common.rate_limit import limiter
-
-        limiter.reset()
-        self.addCleanup(limiter.reset)
+        super().setUp()
 
         FakeLalalClient.calls = 0
         FakeLalalClient.quota = {"minutes_left": 261.5}
@@ -96,9 +70,6 @@ class LalalStatusMinutesTests(unittest.TestCase):
         self.addCleanup(client_patcher.stop)
 
         db.set_settings({"lalalaai_email": "user@example.com", "lalalaai_auth_key": "key-123"})
-
-        self.client = TestClient(app, follow_redirects=False)
-        self.addCleanup(self.client.close)
 
     def _status(self, *, force_refresh: bool = False) -> dict[str, Any]:
         url = "/api/lalal/status?force_refresh=1" if force_refresh else "/api/lalal/status"
@@ -157,7 +128,3 @@ class LalalStatusMinutesTests(unittest.TestCase):
         # account line and the balance into #lalalStatusLine and silently does
         # nothing when that element is missing - as it was once already.
         self.assertIn('id="lalalStatusLine"', self.client.get("/settings").text)
-
-
-if __name__ == "__main__":
-    unittest.main()

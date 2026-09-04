@@ -11,13 +11,9 @@ __all__ = ["cluster_bpms"]
 
 
 def cluster_bpms(bpms: Iterable[int]) -> list[tuple[int, int]]:
-    """Group positive BPM values into 5-BPM buckets.
+    """Group positive BPM values into 5-BPM buckets (non-positive ignored).
 
-    Values that are zero or negative are silently ignored.
-
-    Returns:
-        A list of ``(bucket_bpm, count)`` tuples sorted by count descending,
-        then by bucket ascending.
+    Returns ``(bucket_bpm, count)`` tuples sorted by count desc, then bucket asc.
     """
     buckets: Counter[int] = Counter()
     for bpm in bpms:

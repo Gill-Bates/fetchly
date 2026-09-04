@@ -14,7 +14,6 @@ import re
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from enum import StrEnum
 from multiprocessing.connection import Connection
 from pathlib import Path
@@ -23,22 +22,18 @@ from typing import Any
 from .audio_analysis import AudioAnalysisResult, extract_analysis
 from .audio_cache import get_cached, store_cache
 from .audio_hash import compute_audio_hash
-from .db import get_settings, update_job_if_status, utc_timestamp
+from .db import get_settings, now_iso, update_job_if_status, with_finished_at
 from .governor import governor
 
 logger = logging.getLogger(__name__)
 
 
 class SubmitResult(StrEnum):
-    """Return value of :func:`submit_analysis` — tells the caller why a job
-    was or was not queued so it can log/report the right message."""
+    """Why :func:`submit_analysis` did or did not queue a job."""
 
     QUEUED = "queued"
-    """Job accepted and placed in the analysis queue."""
     REJECTED_SHUTDOWN = "rejected_shutdown"
-    """Worker is shutting down; job was not queued."""
     QUEUE_FULL = "queue_full"
-    """Queue capacity exhausted; job was dropped."""
 
 
 class JobStatus(StrEnum):
@@ -91,11 +86,6 @@ def _analysis_runtime_limits() -> tuple[int | None, int]:
     return max_duration_seconds, timeout_minutes * 60
 
 
-def _now_iso() -> str:
-    """Timestamp for status-event payloads (informational; not persisted)."""
-    return datetime.now(UTC).isoformat()
-
-
 def _emit(job_id: str, status: str, message: str = "", **extra: Any) -> None:
     with _status_callback_lock:
         callback = _status_callback
@@ -105,7 +95,7 @@ def _emit(job_id: str, status: str, message: str = "", **extra: Any) -> None:
         "id": job_id,
         "status": status,
         "message": message,
-        "timestamp": _now_iso(),
+        "timestamp": now_iso(),
     }
     payload.update(extra)
     try:
@@ -127,10 +117,10 @@ def set_status_callback(callback: Callable[[dict[str, Any]], None] | None) -> No
 
 def _finalize_job(job_id: str, status: JobStatus, message: str, **extra: Any) -> bool:
     """Finalize an analysis job only while it still owns the analysis state."""
-    if status in {JobStatus.DONE, JobStatus.ERROR, JobStatus.ANALYSIS_DONE}:
-        # Canonical "YYYY-MM-DD HH:MM:SS" so finished_at stays sortable as text
-        # for the retention/stats range scans (see app/db.py).
-        extra.setdefault("finished_at", utc_timestamp())
+    # with_finished_at() adds finished_at when status is terminal (see
+    # app/db.py::TERMINAL_JOB_STATUSES); shared with worker.py so both modules
+    # enforce the "terminal status => finished_at is set" invariant the same way.
+    extra = with_finished_at(status, extra)
     updated = update_job_if_status(
         job_id,
         (JobStatus.ANALYSIS,),
@@ -217,13 +207,7 @@ def submit_analysis(
     block: bool = False,
     timeout: float = 2.0,
 ) -> SubmitResult:
-    """Queue a downloaded audio file for background analysis.
-
-    Returns:
-        :attr:`SubmitResult.QUEUED` when the job was accepted.
-        :attr:`SubmitResult.REJECTED_SHUTDOWN` when the worker is stopping.
-        :attr:`SubmitResult.QUEUE_FULL` when the queue has no free slot.
-    """
+    """Queue a downloaded audio file for background analysis (see SubmitResult)."""
     if _shutdown_event.is_set():
         logger.info("Skipping analysis enqueue for %s during shutdown", job_id)
         return SubmitResult.REJECTED_SHUTDOWN
@@ -321,9 +305,7 @@ def _extract_analysis_with_timeout(path: Path) -> AudioAnalysisResult:
 
 
 def _apply_analysis(job: AnalysisJob) -> None:
-    """Hash the audio file, check the cache, run BPM extraction if needed,
-    then persist results and emit a status event.
-    """
+    """Hash the file, use the cache or run BPM extraction, then persist."""
     hash_value = compute_audio_hash(job.file_path)
     cached = get_cached(hash_value)
 
@@ -347,8 +329,8 @@ def _apply_analysis(job: AnalysisJob) -> None:
     with governor.analysis_semaphore_sync:
         result = _extract_analysis_with_timeout(job.file_path)
 
-    # The hash -> BPM mapping is worth keeping regardless of what happens to
-    # this job's row, so it is stored before the state-guarded commit.
+    # Keep the hash -> BPM mapping regardless of this job's row: cache first,
+    # then the state-guarded commit.
     if result.bpm is not None and not store_cache(
         hash_value,
         bpm=result.bpm,
@@ -381,11 +363,7 @@ def _apply_analysis(job: AnalysisJob) -> None:
 
 
 def _handle_analysis_job(job: AnalysisJob) -> None:
-    """Gate-check a job before passing it to :func:`_apply_analysis`.
-
-    Skips analysis for tracks that exceed the duration limit or whose file
-    has disappeared since the job was enqueued.
-    """
+    """Skip over-long tracks and vanished files, else run _apply_analysis()."""
     max_duration_seconds, _ = _analysis_runtime_limits()
     if (
         max_duration_seconds is not None
@@ -458,11 +436,7 @@ def _worker_loop() -> None:
 
 
 def start_analysis_workers(n: int | None = None) -> None:
-    """Start background audio analysis worker threads.
-
-    Args:
-        n: Number of workers. Defaults to the configured analysis limit.
-    """
+    """Start background audio analysis workers (default: the analysis limit)."""
     global _workers_started
     if n is None:
         n = governor.analysis_limit
@@ -481,11 +455,9 @@ def start_analysis_workers(n: int | None = None) -> None:
 
 
 def stop_analysis_workers(timeout: float = 30.0) -> None:
-    """Signal all workers to stop and wait for them to drain cleanly.
+    """Signal all workers to stop and wait for them to drain.
 
-    Each worker receives a :data:`_SHUTDOWN_SENTINEL` so it exits the
-    blocking ``queue.get`` immediately rather than waiting up to 0.5 s per
-    iteration.
+    Each gets a :data:`_SHUTDOWN_SENTINEL` so it leaves ``queue.get`` at once.
     """
     global _workers_started
     _shutdown_event.set()

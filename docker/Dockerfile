@@ -337,9 +337,17 @@ PYCHECK
 
 RUN useradd -u 1000 -m --no-log-init appuser
 
-COPY app ./app
-COPY middleware ./middleware
-RUN chmod -R a+rX ./app ./middleware
+# --chmod=a+rX is the old `RUN chmod -R a+rX ./app ./middleware` folded into
+# the copy itself. A RUN after COPY that touches every file's mode duplicates
+# both trees into a second layer - ~6 MB per architecture re-shipped on every
+# push and pull for metadata alone. The symbolic form keeps the
+# old semantics exactly: regular files stay non-executable, directories stay
+# traversable, and appuser (the uid the entrypoint drops to) can read
+# everything even when the local build context carried tighter umask modes.
+# Supported by the pinned # syntax=docker/dockerfile:1.7 frontend, and no new
+# requirement anyway: this file already mandates BuildKit via TARGETARCH.
+COPY --chmod=a+rX app ./app
+COPY --chmod=a+rX middleware ./middleware
 RUN test -s ./app/static/img/fetchly_watermark.png && \
     test -s ./app/static/fonts/roboto-flex.ttf && \
     ffmpeg -hide_banner -v error \

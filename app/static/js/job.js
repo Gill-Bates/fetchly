@@ -36,10 +36,8 @@ function updateStatus(payload) {
 }
 
 function updateProgress(payload) {
-    // Derived from the current payload every time, not only cleared on a
-    // terminal status: a status change (e.g. downloading -> analysis) that
-    // carries no progress/eta must not leave the previous phase's progress
-    // bar and ETA on screen.
+    // Re-derived from every payload, so a phase change with no progress/eta
+    // clears the previous phase's bar and ETA.
     const pct = toProgressPercent(payload.progress);
     const hasProgress = pct !== null;
     progressRow.classList.toggle("d-none", !hasProgress);
@@ -81,10 +79,8 @@ function applyPayload(payload) {
 
     updateProgress(payload);
 
-    // Downloadable is not the same as terminal (e.g. "analysis" is
-    // downloadable while BPM analysis is still pending), so the link must be
-    // toggled on every status update, not only once the job reaches a
-    // terminal state.
+    // Downloadable != terminal ("analysis" is downloadable), so toggle the
+    // link on every status update.
     if (payload.status) {
         linkEl.classList.toggle("d-none", !DOWNLOADABLE_STATUSES.has(payload.status));
     }
@@ -108,9 +104,8 @@ function handleMessage(event) {
         return;
     }
     if (payload.type === "authentication_required") {
-        // The session is gone server-side (expired or invalidated); stop
-        // reconnecting and close the stream before navigating so a delayed
-        // error/pageshow event cannot open a new one.
+        // Session gone server-side: stop reconnecting and close before
+        // navigating so a late event cannot reopen the stream.
         shouldReconnect = false;
         stream?.close();
         window.location.replace("/login");

@@ -6,17 +6,13 @@
 
 """Import and validity checks for platform cookie files.
 
-Cookies are the only way fetchly can download age-/login-gated content from
-YouTube, TikTok, Instagram and Facebook (see app/utils/platform.py and
-app/utils/cookies.py). Settings offers one way in - a paste of whatever the
-browser's dev tools produce, converted by app/utils/cookie_import.py - while
-the file upload below stays for scripted setups that already hold a prepared
-jar. Both end up in the same place, through the same conversion and the same
-structural check from app/utils/cookie_status.py.
+Cookies are how fetchly downloads age-/login-gated content from YouTube,
+TikTok, Instagram and Facebook. A paste from browser dev tools and a file
+upload both go through the same conversion (cookie_import.py) and the same
+structural check (cookie_status.py).
 
-The check is structural only - it never talks to the platform itself, which
-would need an actual API/page request per cookie file and would risk tripping
-the platform's own abuse detection.
+The check is structural only - it never contacts the platform, which would
+need a request per file and risk tripping the platform's abuse detection.
 """
 
 from __future__ import annotations
@@ -42,7 +38,7 @@ from ..utils.cookie_import import (
 from ..utils.cookie_status import CookieAnalysis, analyze_cookie_file
 from ..utils.cookies import default_cookie_file
 from ..utils.platform import PLATFORM_COOKIE_FILENAMES
-from .auth import require_session, require_user
+from .auth import require_user
 
 logger = logging.getLogger(__name__)
 
@@ -55,13 +51,8 @@ _MAX_COOKIE_FILE_BYTES: Final = 256 * 1024
 
 
 class CookiePaste(BaseModel):
-    """Whatever the user copied out of the browser's dev tools.
-
-    ``max_length`` counts characters, so it alone would let a paste of
-    multi-byte characters through at several times the intended size; the
-    endpoint bounds the encoded length as well.
-    """
-
+    # ``max_length`` counts characters, so the endpoint also bounds the
+    # UTF-8-encoded length to stop multi-byte pastes exceeding the limit.
     text: str = Field(min_length=1, max_length=_MAX_COOKIE_FILE_BYTES)
 
 
@@ -73,6 +64,10 @@ class CookieStatus(BaseModel):
     present: bool
     status: str  # "valid" | "expired" | "invalid" | "missing"
     authenticated: bool = False
+    # Single source for the "Needs update" badge/summary decision (see
+    # CookieAnalysis.needs_update) so the initial Jinja render and the
+    # client-side re-render in settings.js cannot drift from each other.
+    needs_update: bool = False
     cookie_count: int = 0
     matching_domain_count: int = 0
     expires_at: int | None = None
@@ -90,6 +85,7 @@ def _status_from_analysis(analysis: CookieAnalysis) -> CookieStatus:
         present=analysis.present,
         status=analysis.status,
         authenticated=analysis.is_authenticated,
+        needs_update=analysis.needs_update,
         cookie_count=analysis.cookie_count,
         matching_domain_count=analysis.matching_domain_count,
         expires_at=analysis.expires_at,
@@ -115,18 +111,10 @@ def _resolve_cookie_path(platform: str) -> Path:
 def _convert(platform: str, text: str, *, require_login: bool) -> CookieImport:
     """Normalize pasted or uploaded cookie text into a Netscape jar.
 
-    ``require_login`` guards the paste box only. A paste without any of the
-    platform's HttpOnly session cookies is almost always the same mistake -
-    ``document.cookie`` typed into the console, which cannot see them - and
-    storing that jar would leave downloads signed out while Settings claims
-    cookies are in place. An uploaded file keeps the old, permissive contract:
-    exports differ, and an operator who prepared a file on purpose is not
-    guessing.
-
-    This is the cheap check, on names alone, so an obvious mistake is refused
-    before anything is written. _validate_and_store repeats it against the
-    parsed jar, where cookie domains are known and a foreign cookie sharing a
-    name cannot pass for the platform's own.
+    ``require_login`` guards the paste box only: a paste with no HttpOnly
+    session cookies is almost always ``document.cookie`` from the console,
+    which cannot see them. Uploads keep the permissive contract. This is the
+    cheap name-only check; _validate_and_store repeats it domain-aware.
     """
     try:
         imported = convert_to_netscape(text, platform)
@@ -142,25 +130,18 @@ def _convert(platform: str, text: str, *, require_login: bool) -> CookieImport:
 def _validate_and_store(platform: str, text: str, *, require_login: bool) -> CookieStatus:
     """Validate converted cookie text, then publish it atomically.
 
-    The candidate is written to a scratch file in the *target directory* and
-    only renamed into place once it parses. Two reasons it may not be written
-    to the live path directly: a reader would otherwise see a half-written
-    jar - up to eight worker threads share this file, and yt-dlp reads it at
-    the start of every job - and a truncate-in-place would leave nothing at
-    all behind if the process died mid-write. os.replace() makes the swap
-    atomic, so a reader sees either the old jar or the new one.
-
-    Publishing a fresh file also repairs the permissions of an existing jar:
-    O_CREAT's mode only applies when the file did not exist, so overwriting a
-    world-readable file left it world-readable.
+    Written to a scratch file in the target directory and renamed into place
+    only once it parses, so a concurrent reader (yt-dlp, every job) sees either
+    the old jar or the new one - never a half-written one, and never nothing.
+    A fresh file also repairs permissions: O_CREAT's mode does not apply when
+    overwriting, so a world-readable jar would stay world-readable.
     """
     filename = _filename_for(platform)
     target = default_cookie_file(filename)
     target.parent.mkdir(parents=True, exist_ok=True)
 
-    # Same directory as the target: os.replace() is only atomic within one
-    # filesystem. mkstemp creates at 0600; fchmod states it independently of
-    # any future change to that default, because this file holds a live login.
+    # Same directory as the target: os.replace() is atomic only within one
+    # filesystem. mkstemp creates at 0600; fchmod re-asserts it explicitly.
     fd, tmp_name = tempfile.mkstemp(dir=target.parent, prefix=".cookies-", suffix=".tmp")
     tmp_path = Path(tmp_name)
     published = False
@@ -175,9 +156,8 @@ def _validate_and_store(platform: str, text: str, *, require_login: bool) -> Coo
         if analysis.status == "invalid":
             raise HTTPException(status_code=400, detail=analysis.detail or "Invalid cookie file")
 
-        # Re-checked against the parsed jar rather than the names the importer
-        # collected: this test is domain-aware, so a cookie named "sessionid"
-        # belonging to some other site cannot satisfy it.
+        # Domain-aware re-check against the parsed jar: a "sessionid" cookie
+        # from another site cannot satisfy it.
         if require_login and analysis.missing_login_cookies:
             raise HTTPException(status_code=400, detail=missing_session_cookie_hint(platform))
 
@@ -199,11 +179,6 @@ def _delete_cookie_files(platform: str) -> bool:
     return True
 
 
-# ============================================================================
-# Routes
-# ============================================================================
-
-
 async def list_cookie_statuses() -> list[CookieStatus]:
     """Return the validity snapshot for every supported platform's cookie file.
 
@@ -223,7 +198,6 @@ async def list_cookie_statuses() -> list[CookieStatus]:
 async def api_cookies_status(
     request: Request, _user: str = Depends(require_user)
 ) -> list[CookieStatus]:
-    """Return the validity snapshot for every supported platform's cookie file."""
     _ = request
     return await list_cookie_statuses()
 
@@ -234,14 +208,9 @@ async def api_cookies_upload(
     request: Request,
     platform: str,
     file: UploadFile = File(...),
-    _user: str = Depends(require_session),
+    _user: str = Depends(require_user),
 ) -> CookieStatus:
-    """Upload a cookie file for one platform.
-
-    Netscape files and the JSON exports of cookie extensions are both
-    accepted; app/utils/cookie_import.py reduces either to the jar yt-dlp
-    reads.
-    """
+    """Upload a cookie file for one platform (Netscape or extension JSON)."""
     _ = request
     _filename_for(platform)  # 404s early for an unknown platform
 
@@ -268,7 +237,7 @@ async def api_cookies_paste(
     request: Request,
     platform: str,
     payload: CookiePaste,
-    _user: str = Depends(require_session),
+    _user: str = Depends(require_user),
 ) -> CookieStatus:
     """Store cookies pasted from the browser's dev tools for one platform."""
     _ = request
@@ -293,7 +262,7 @@ async def api_cookies_paste(
 @router.delete("/{platform}")
 @limiter.limit("10/minute")
 async def api_cookies_delete(
-    request: Request, platform: str, _user: str = Depends(require_session)
+    request: Request, platform: str, _user: str = Depends(require_user)
 ) -> dict[str, Any]:
     """Remove a platform's stored cookie file, if any."""
     _ = request

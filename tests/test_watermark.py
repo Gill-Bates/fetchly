@@ -4,15 +4,12 @@
 # Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 #
 
-import os
 import shutil
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
-
-os.environ.setdefault("FETCHLY_SECRET_KEY", "test-watermark-secret")
 
 from app.utils import watermark
 from app.utils.watermark import (
@@ -21,7 +18,7 @@ from app.utils.watermark import (
     build_watermark,
     video_filter_args,
 )
-from app.worker import _scaled_size
+from app.worker import _scaled_size, _watermark_x264_settings
 
 _HAS_FFMPEG = shutil.which("ffmpeg") is not None
 
@@ -113,6 +110,29 @@ class ScaledSizeTests(unittest.TestCase):
         width, height = _scaled_size((1080, 1920), 720)
         self.assertEqual(height, 720)
         self.assertEqual(width % 2, 0)
+
+
+class WatermarkEncodeSettingsTests(unittest.TestCase):
+    """The "max" watermark pass is the only encode a max download gets."""
+
+    def test_small_sources_get_the_quality_preserving_rung(self):
+        # A 240p/150 kbps upload came back visibly softer at a flat CRF 20.
+        self.assertEqual(_watermark_x264_settings(240), ("medium", "16"))
+        self.assertEqual(_watermark_x264_settings(576), ("medium", "16"))
+
+    def test_hd_sources_trade_a_little_speed_for_the_lower_crf(self):
+        self.assertEqual(_watermark_x264_settings(720), ("fast", "18"))
+        self.assertEqual(_watermark_x264_settings(1080), ("fast", "18"))
+
+    def test_beyond_1080p_the_pass_stays_cheap(self):
+        self.assertEqual(_watermark_x264_settings(2160), ("veryfast", "20"))
+
+    def test_an_unreadable_height_falls_back(self):
+        self.assertEqual(_watermark_x264_settings(None), ("veryfast", "20"))
+
+    def test_the_crf_never_rises_as_the_source_shrinks(self):
+        crfs = [int(_watermark_x264_settings(h)[1]) for h in (240, 480, 720, 1080, 1440, 2160)]
+        self.assertEqual(crfs, sorted(crfs))
 
 
 class VideoFilterArgsTests(unittest.TestCase):

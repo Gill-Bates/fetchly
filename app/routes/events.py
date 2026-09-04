@@ -30,9 +30,8 @@ _shutdown_event: asyncio.Event | None = None
 _SSE_KEEPALIVE_SECONDS = 5.0
 _SSE_QUEUE_MAXSIZE = 32
 _MAX_SSE_CONNECTIONS = 200
-# NOTE: This broker is in-memory and process-local. Connected clients only
-# receive events published by the same Python process. If deployment ever moves
-# beyond a single process, replace this with a shared broker (for example Redis).
+# In-memory and process-local: clients only see events from the same process.
+# A multi-process deployment would need a shared broker (e.g. Redis).
 _sse_connections: set[asyncio.Queue[dict[str, Any]]] = set()
 _job_sse_connections: defaultdict[str, set[asyncio.Queue[dict[str, Any]]]] = defaultdict(set)
 _sse_sequence = count(1)
@@ -157,15 +156,13 @@ async def _sse_stream(request: Request, subscriber: asyncio.Queue[dict[str, Any]
                     shutdown_task.cancel()
                 raise
 
-            # Cleanup pending tasks
             if shutdown_task and not shutdown_task.done():
                 shutdown_task.cancel()
                 with suppress(asyncio.CancelledError):
                     await shutdown_task
 
-            # Check what completed
             if not done:
-                # Timeout - send keepalive
+                # Timed out: send a keepalive.
                 get_task.cancel()
                 with suppress(asyncio.CancelledError):
                     await get_task
@@ -176,7 +173,6 @@ async def _sse_stream(request: Request, subscriber: asyncio.Queue[dict[str, Any]
                 continue
 
             if shutdown_task in done:
-                # Shutdown signaled
                 get_task.cancel()
                 with suppress(asyncio.CancelledError):
                     await get_task
@@ -184,7 +180,6 @@ async def _sse_stream(request: Request, subscriber: asyncio.Queue[dict[str, Any]
                 return
 
             if get_task in done:
-                # Got a message
                 payload = get_task.result()
                 if current_user(request) is None:
                     yield _format_sse({"type": "authentication_required"})

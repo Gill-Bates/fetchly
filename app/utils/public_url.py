@@ -6,17 +6,10 @@
 
 """Operator-configurable public host for outward-facing links.
 
-fetchly hands out share links built from whatever ``Host`` the creating request
-arrived with. Behind a reverse proxy that is often an internal name
-(``fetchly:8000``, ``10.0.0.5``) that the recipient cannot resolve. An admin can
-pin the public hostname in Settings; every share link is then rendered against
-it instead.
-
-The stored value is a bare hostname or IP - no scheme, port or path, matching
-the FQDN field in the wirebuddy sister project. HTTPS is assumed when it is set:
-a public reverse proxy terminates TLS in practically every deployment, and
-leaving the field blank keeps the original request-derived behaviour (including
-plain HTTP) available.
+Share links are built from the creating request's ``Host``, which behind a
+reverse proxy is often an internal name the recipient cannot resolve. An admin
+can pin a bare hostname/IP (no scheme/port/path) in Settings; HTTPS is then
+assumed. Blank keeps the request-derived behaviour.
 """
 
 from __future__ import annotations
@@ -28,27 +21,22 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from fastapi import Request
 
-# RFC 1035 wire limit. The label loop below enforces the 63-octet per-label cap.
-_MAX_HOSTNAME_LENGTH = 253
-# Unanchored: applied with fullmatch(), which - unlike match() with a trailing
-# "$" - also rejects a trailing newline.
+_MAX_HOSTNAME_LENGTH = 253  # RFC 1035; per-label 63 cap enforced below
+# Unanchored: fullmatch() also rejects a trailing newline (unlike match() + "$").
 _HOSTNAME_CHARSET_RE = re.compile(r"[A-Za-z0-9.-]+")
 
 
 def normalize_public_hostname(value: str | None) -> str:
-    """Validate and normalise an operator-provided public hostname or IP.
+    """Validate an operator-provided public hostname or IP.
 
-    Returns the cleaned host, or ``""`` when nothing is configured (the caller
-    then falls back to the request host). Raises :class:`ValueError` with a
-    user-facing message for anything that is neither a bare IP address nor a
-    plausible DNS name.
+    Returns the cleaned host, or ``""`` when unset. Raises ValueError with a
+    user-facing message for anything that is not a bare IP or DNS name.
     """
     host = (value or "").strip()
     if not host:
         return ""
 
-    # A bare IPv4/IPv6 address is accepted and returned in canonical form.
-    # Brackets are tolerated on input ("[::1]") but never stored.
+    # Bare IPv4/IPv6, returned canonical; input brackets tolerated, not stored.
     try:
         return str(ipaddress.ip_address(host.strip("[]")))
     except ValueError:
@@ -70,11 +58,10 @@ def normalize_public_hostname(value: str | None) -> str:
 
 
 def build_public_base_url(request: Request, public_hostname: str | None) -> str:
-    """Return the scheme+host origin that outward-facing links should use.
+    """The scheme+host origin for outward-facing links.
 
-    With a configured hostname: ``https://<host>`` (IPv6 bracketed). Without
-    one: the request's own base URL, which already reflects ``X-Forwarded-*``
-    when a trusted proxy sets them (see ProxyHeadersMiddleware in app/main.py).
+    Configured hostname: ``https://<host>`` (IPv6 bracketed). Otherwise the
+    request's own base URL (already reflects trusted ``X-Forwarded-*``).
     """
     host = (public_hostname or "").strip().strip("[]")
     if not host:

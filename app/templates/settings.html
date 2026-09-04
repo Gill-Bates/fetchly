@@ -264,9 +264,8 @@
                                             download</label>
                                         <select class="form-select ui-input" id="concurrentFragments"
                                             name="download_concurrent_fragments">
-                                            {# The number is what "Automatic" resolves to on this host right
-                                            now (governor.recommended_concurrent_fragments()), not a fixed
-                                            default. #}
+                                            {# The number is what "Automatic" resolves to on this host now
+                                            (governor.recommended_concurrent_fragments()). #}
                                             <option value="0" {{ 'selected' if settings.download_concurrent_fragments |
                                                 default(0)==0 else '' }}>Automatic ({{ auto_concurrent_fragments
                                                 }})</option>
@@ -284,17 +283,24 @@
                                     </div>
                                     <div class="mt-3 pt-3 border-top">
                                         <div class="form-check form-switch">
-                                            <input class="form-check-input" type="checkbox" role="switch" id="mp4Preset"
-                                                name="download_mp4_preset" {{ 'checked' if settings.download_mp4_preset
-                                                | default(true) else '' }}>
-                                            <label class="form-check-label" for="mp4Preset">
-                                                Prefer H.264/AAC for max quality
+                                            <input class="form-check-input" type="checkbox" role="switch"
+                                                id="compatibleOutput" name="download_compatible_output" {{ 'checked' if
+                                                settings.download_compatible_output | default(false) else '' }}>
+                                            <label class="form-check-label" for="compatibleOutput">
+                                                Universally playable output (H.264/AAC)
                                             </label>
                                         </div>
                                         <small class="setting-hint setting-hint--with-icon">
                                             <span class="material-symbols-outlined setting-hint-icon"
                                                 aria-hidden="true">info</span>
-                                            <span>Improves compatibility by skipping VP9/AV1.</span>
+                                            <span>Off keeps the source codec: higher resolution, no Safari/iOS/TV
+                                                playback.</span>
+                                        </small>
+                                        <small class="setting-hint setting-hint--with-icon d-none"
+                                            data-role="compatible-output-forced">
+                                            <span class="material-symbols-outlined setting-hint-icon"
+                                                aria-hidden="true">lock</span>
+                                            <span>Required by the watermark; your choice is kept.</span>
                                         </small>
                                     </div>
                                 </div>
@@ -319,17 +325,49 @@
                                         </label>
                                     </div>
                                     <small class="setting-hint setting-hint--with-icon">
-                                        <span class="material-symbols-outlined setting-hint-icon"
-                                            aria-hidden="true">info</span>
-                                        <span>Burns the logo into the bottom-right corner, with the public
-                                            hostname underneath once set.</span>
-                                    </small>
-                                    <small class="setting-hint setting-hint--with-icon">
                                         <span
                                             class="material-symbols-outlined setting-hint-icon setting-hint-icon--warning"
                                             aria-hidden="true">warning</span>
                                         <span>Max quality needs an extra encoding pass, increasing CPU usage.</span>
                                     </small>
+
+                                    <div class="mt-3 pt-3 border-top">
+                                        <label class="form-label" for="watermarkLogoInput">Custom logo</label>
+                                        <div class="logo-dropzone" data-role="logo-dropzone" tabindex="0" role="button"
+                                            aria-describedby="watermarkLogoHint">
+                                            <input type="file" id="watermarkLogoInput" class="visually-hidden"
+                                                accept="image/svg+xml,.svg,image/png,.png" data-role="logo-input">
+                                            <span class="material-symbols-outlined logo-dropzone__icon"
+                                                aria-hidden="true">upload_file</span>
+                                            <span class="logo-dropzone__label" data-role="logo-label">Drop an SVG or PNG
+                                                here or click to choose</span>
+                                        </div>
+                                        <div class="logo-current" data-role="logo-current">
+                                            <div class="logo-current__preview">
+                                                <img alt="Current watermark logo"
+                                                    src="/static/img/fetchly_watermark.png"
+                                                    data-role="logo-preview-image">
+                                            </div>
+                                            <div class="logo-current__text">
+                                                <span class="logo-current__title" data-role="logo-title">Built-in
+                                                    logo</span>
+                                                <span class="logo-current__meta" data-role="logo-meta">Used on every
+                                                    watermarked video</span>
+                                            </div>
+                                            <button type="button"
+                                                class="btn btn-sm btn-outline-secondary btn-icon logo-current__remove d-none"
+                                                data-role="logo-remove" title="Restore the built-in logo"
+                                                aria-label="Restore the built-in logo">
+                                                <span class="material-symbols-outlined" aria-hidden="true">delete</span>
+                                            </button>
+                                        </div>
+                                        <small class="setting-hint setting-hint--with-icon" id="watermarkLogoHint">
+                                            <span class="material-symbols-outlined setting-hint-icon"
+                                                aria-hidden="true">info</span>
+                                            <span>SVG or PNG with transparency, max 2 MB. Replaces the fetchly
+                                                logo.</span>
+                                        </small>
+                                    </div>
                                 </div>
                             </div>
                         </div>
@@ -403,10 +441,8 @@
                                             </div>
                                         </div>
 
-                                        {# Hidden until a Lalal.ai session exists: these limits only apply to
-                                        Lalal-backed analysis/stem jobs. Toggled by setAnalysisLimitsVisible()
-                                        in app/static/js/settings.js. The inputs stay in the form while
-                                        hidden, so saving keeps their stored values. #}
+                                        {# Hidden until a Lalal.ai session exists (setAnalysisLimitsVisible()
+                                        in settings.js). Inputs stay in the form so saving keeps their values. #}
                                         <div class="lalal-tile-col lalal-tile-col--analysis {{ '' if lalal_configured else 'd-none' }}"
                                             id="lalalAnalysisLimits">
                                             <h3 class="settings-section-title">Analysis &amp; stem limits</h3>
@@ -476,8 +512,7 @@
                                         {% set status_value = cookie_status.status if cookie_status else 'missing' %}
                                         {% set is_authenticated = cookie_status.authenticated if cookie_status else
                                         false %}
-                                        {% set needs_update = status_value in ["expired", "invalid"] or (status_value ==
-                                        "valid" and not is_authenticated) %}
+                                        {% set needs_update = cookie_status.needs_update if cookie_status else false %}
                                         {% set badge_class = "badge bg-warning text-dark" if needs_update else {"valid":
                                         "badge bg-success", "missing": "ui-badge"}[status_value] %}
                                         <span class="{{ badge_class }} cookie-status-badge" data-cookie-status-badge
@@ -521,8 +556,8 @@
 
             <section class="settings-group tab-pane fade" id="settingsSecurityPanel" role="tabpanel"
                 aria-labelledby="settingsSecurityTab" tabindex="0">
-                <div class="settings-grid settings-security-grid">
-                    <div class="settings-grid-item">
+                <div class="settings-grid settings-security-grid settings-grid--cols-2">
+                    <div class="settings-grid-item settings-grid-item--titled">
                         <h2 class="settings-panel-title fw-semibold mb-3 d-flex align-items-center gap-1">
                             <span class="material-symbols-outlined icon-inline" aria-hidden="true">lock_open</span>
                             Authentication
@@ -609,20 +644,27 @@
                                         </div>
                                     </div>
                                 </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="settings-grid-item settings-grid-item--titled">
+                        <h2 class="settings-panel-title fw-semibold mb-3 d-flex align-items-center gap-1">
+                            <span class="material-symbols-outlined icon-inline" aria-hidden="true">timer</span>
+                            Session
+                        </h2>
+                        <div class="ui-card h-100">
+                            <div>
                                 <div class="settings-section">
-                                    <h3 class="settings-section-title">Session</h3>
-                                    <div>
-                                        <label for="sessionIdleMinutes" class="form-label">Session idle timeout
-                                            (min)</label>
-                                        <input type="number" class="form-control ui-input" id="sessionIdleMinutes"
-                                            name="session_idle_minutes" min="1" max="1440"
-                                            value="{{ settings.session_idle_minutes | default(60) }}">
-                                        <small class="setting-hint setting-hint--with-icon">
-                                            <span class="material-symbols-outlined setting-hint-icon"
-                                                aria-hidden="true">info</span>
-                                            <span>Signs an idle session out after this many minutes of inactivity.</span>
-                                        </small>
-                                    </div>
+                                    <label for="sessionIdleMinutes" class="form-label">Session idle timeout
+                                        (min)</label>
+                                    <input type="number" class="form-control ui-input" id="sessionIdleMinutes"
+                                        name="session_idle_minutes" min="1" max="1440"
+                                        value="{{ settings.session_idle_minutes | default(60) }}">
+                                    <small class="setting-hint setting-hint--with-icon">
+                                        <span class="material-symbols-outlined setting-hint-icon"
+                                            aria-hidden="true">info</span>
+                                        <span>Signs an idle session out after this many minutes of inactivity.</span>
+                                    </small>
                                 </div>
                             </div>
                         </div>
@@ -637,7 +679,7 @@
                     System information
                 </h2>
                 {# Mobile only: the dashboard tiles move here because the
-                   dashboard hides them below 768px (see .settings-job-stats). #}
+                dashboard hides them below 768px (see .settings-job-stats). #}
                 {{ dashboard_stats_row(stats, "settings-job-stats") }}
 
                 <div class="row g-3 mb-4 stats-row settings-host-stats" data-host-stats>

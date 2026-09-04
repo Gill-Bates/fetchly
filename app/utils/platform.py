@@ -36,12 +36,9 @@ _PLATFORM_LABELS = {
     PLATFORM_FACEBOOK: "FB",
 }
 
-# Netscape-format cookie file names, keyed by platform. Single source of truth:
-# the worker, the metadata extractor and the API layer all resolve their cookie
-# paths from this map, so a new platform only has to be added here. Wrapped in a
-# MappingProxyType so "single source of truth" is enforced rather than merely
-# intended - the importers only read, and a stray write would silently change
-# which cookie jar every one of them hands to yt-dlp.
+# Netscape cookie file names, keyed by platform - the single source every layer
+# resolves cookie paths from. Read-only (MappingProxyType) so a stray write
+# cannot change which jar reaches yt-dlp.
 PLATFORM_COOKIE_FILENAMES: Final[Mapping[str, str]] = MappingProxyType({
     PLATFORM_YOUTUBE: "youtube_cookies.txt",
     PLATFORM_INSTAGRAM: "instagram_cookies.txt",
@@ -51,8 +48,7 @@ PLATFORM_COOKIE_FILENAMES: Final[Mapping[str, str]] = MappingProxyType({
 
 _INSTAGRAM_EXACT_HOSTS = frozenset({"instagr.am", "www.instagr.am"})
 _FACEBOOK_EXACT_HOSTS = frozenset({"fb.watch", "www.fb.watch", "fb.gg", "www.fb.gg"})
-# ASCII digits only (\d also matches Unicode digits) and a non-empty username
-# after "@" (plain .startswith("@") also accepts the bare "@" segment itself).
+# ASCII digits only; username must be non-empty after "@".
 _TIKTOK_ID_RE = re.compile(r"^[0-9]{8,}$")
 _TIKTOK_USERNAME_RE = re.compile(r"^@[A-Za-z0-9._]{1,24}$")
 _TIKTOK_SHARE_CODE_RE = re.compile(r"^[A-Za-z0-9_-]+$")
@@ -154,11 +150,9 @@ def _validate_instagram_url(url: str) -> tuple[bool, str]:
 def _validate_facebook_url(url: str) -> tuple[bool, str]:
     """Light structural check for Facebook video/reel/share URLs.
 
-    Facebook's URL space is far less regular than TikTok's or Instagram's - the
-    same video is reachable via /watch, a page permalink, a reel, a short
-    fb.watch link and the newer /share/v/ form, and page slugs are effectively
-    unconstrained. Validation therefore only rejects shapes that clearly are
-    not a single video; yt-dlp performs the real resolution.
+    Facebook's URL space is irregular (many forms reach the same video), so
+    this only rejects shapes that are clearly not a single video; yt-dlp
+    resolves the rest.
     """
     parsed = urlparse(url)
     host = (parsed.hostname or "").lower()
@@ -204,10 +198,8 @@ def _validate_facebook_url(url: str) -> tuple[bool, str]:
 
 
 def validate_media_url(url: str | None) -> tuple[bool, str]:
-    """Validate a URL against all supported platforms.
-
-    Returns:
-        (is_valid, error_message). The error message is empty when valid.
+    """Validate a URL against all supported platforms. Returns ``(is_valid,
+    error_message)``; the message is empty when valid.
     """
     if not url or not isinstance(url, str):
         return False, "URL is required"
@@ -226,10 +218,9 @@ def validate_media_url(url: str | None) -> tuple[bool, str]:
     except ValueError:
         return False, "Invalid URL"
 
-    # yt-dlp is handed platform cookie files for this URL, so the *submitted*
-    # URL must use encrypted transport, carry no embedded credentials, and use
-    # the default HTTPS port - this does not constrain redirect targets, which
-    # would need outbound network-level enforcement to control.
+    # yt-dlp gets platform cookies for this URL, so the submitted URL must be
+    # plain HTTPS on the default port with no embedded credentials. Redirect
+    # targets are not constrained here.
     if parsed.username is not None or parsed.password is not None:
         return False, "URL must not contain credentials"
     if port not in (None, 443):

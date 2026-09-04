@@ -14,18 +14,12 @@ that looks right but carries no login.
 import json
 import os
 import stat
-import tempfile
-import unittest
 from pathlib import Path
 from time import time
 from unittest.mock import patch
 
-os.environ.setdefault("FETCHLY_SECRET_KEY", "test-cookie-routes-secret")
-
-from fastapi.testclient import TestClient
-
-from app import db
 from app.utils import cookies
+from tests._support import WebAppTestCase
 
 SIGNED_IN_HEADER = (
     "VISITOR_INFO1_LIVE=abc; __Secure-3PSID=g.a000xyz; __Secure-3PAPISID=aG5YCo; "
@@ -33,40 +27,15 @@ SIGNED_IN_HEADER = (
 )
 
 
-class CookieRouteTests(unittest.TestCase):
+class CookieRouteTests(WebAppTestCase):
     def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        root = Path(self._tmp.name)
+        super().setUp()
 
-        patcher = patch.object(db, "DB_PATH", root / "jobs.db")
-        patcher.start()
-        self.addCleanup(patcher.stop)
-        db._database_path_prepared = None
-        self.addCleanup(setattr, db, "_database_path_prepared", None)
-        self.addCleanup(db.close_db)
-        db.init_db()
-
-        self.cookie_dir = root / "cookies"
+        self.cookie_dir = Path(self._tmp.name) / "cookies"
         self.cookie_dir.mkdir()
         dir_patcher = patch.object(cookies, "_DATA_COOKIES_DIR", self.cookie_dir)
         dir_patcher.start()
         self.addCleanup(dir_patcher.stop)
-
-        from app.main import app, templates
-        from app.routes.api import init_api
-        from app.session import refresh_session_settings_cache
-
-        init_api(templates)
-        refresh_session_settings_cache()
-
-        from app.common.rate_limit import limiter
-
-        limiter.reset()
-        self.addCleanup(limiter.reset)
-
-        self.client = TestClient(app, follow_redirects=False)
-        self.addCleanup(self.client.close)
 
     def _paste(self, platform: str, text: str):
         self.client.get("/login")
@@ -183,7 +152,3 @@ class CookieRouteTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 200, response.text)
         self.assertFalse(self._stored().exists())
-
-
-if __name__ == "__main__":
-    unittest.main()

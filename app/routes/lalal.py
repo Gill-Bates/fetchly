@@ -39,23 +39,20 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/lalal", tags=["lalal"])
 
-# Constants
 _LALAL_AUTH_VALIDATION_CACHE_SECONDS = 300
 _MAX_EMAIL_LENGTH = 320
 _MAX_ACTIVATION_KEY_LENGTH = 1024
 _EMAIL_RE = re.compile(r"^[^@]+@[^@]+\.[^@]+$")
-# Formats handed to Lalal.ai unchanged. Anything else - the .source.opus /
-# .webm / .m4a a finished audio job normally holds - is decoded to WAV first.
-# Lalal.ai returns every stem in the format it received, so uploading Opus came
-# back as Opus; re-encoding to MP3 *before* the upload would instead stack a
-# second lossy generation ahead of the separation, which is exactly where
-# quality must not be lost. WAV keeps the source audio bit-identical and the
-# stems are encoded to MP3 afterwards.
+# Uploaded to Lalal.ai unchanged; anything else is decoded to WAV first.
+# Lalal.ai returns each stem in the uploaded format, so re-encoding to MP3
+# before the split would add a lossy generation ahead of the separation. WAV
+# keeps the source bit-identical; stems are encoded to MP3 afterwards.
 _UPLOAD_READY_SUFFIXES: frozenset[str] = frozenset({".wav", ".flac"})
 _FFMPEG_TIMEOUT_SECONDS = 900
 _FFMPEG_STDERR_TAIL_BYTES = 4096
 _LALAL_MAX_CONCURRENT_PROCESSES = 2
 _LALAL_CAPACITY_WAIT_SECONDS = 1.0
+_LALAL_CAPACITY_EXHAUSTED_DETAIL = "Lalal.ai processing capacity exhausted"
 
 
 async def _read_stderr_tail(stream: asyncio.StreamReader, tail: bytearray) -> None:
@@ -85,10 +82,8 @@ async def _run_ffmpeg(cmd: list[str], *, description: str) -> None:
             await stderr_reader
         raise RuntimeError(f"{description} timed out") from None
     except BaseException:
-        # BaseException, not Exception: the caller wraps this in an
-        # asyncio.timeout well below _FFMPEG_TIMEOUT_SECONDS, so the realistic
-        # exit is a CancelledError - which would otherwise leave ffmpeg running
-        # past the request that started it.
+        # BaseException catches the CancelledError from the caller's shorter
+        # asyncio.timeout, which would else orphan ffmpeg.
         await asyncio.shield(stop_ffmpeg_process(proc))
         stderr_reader.cancel()
         with suppress(asyncio.CancelledError):
@@ -108,9 +103,8 @@ async def _decode_for_upload(
 
     temp_path = output_dir / f"{base_name}.lalalsrc.{uuid.uuid4().hex[:8]}.wav"
     try:
-        # Same governor budget the MP3 transcodes use: an unbounded number of
-        # concurrent decodes is the one part of a split that can saturate a
-        # small VPS on its own.
+        # Same governor budget as the MP3 transcodes: unbounded concurrent
+        # decodes are the part of a split that can saturate a small VPS.
         async with governor.transcode_semaphore:
             await _run_ffmpeg(
                 [
@@ -124,9 +118,8 @@ async def _decode_for_upload(
                 description="Decoding source audio for Lalal.ai",
             )
     except BaseException:
-        # The caller only learns the path on success, so cleanup belongs here:
-        # a failed or cancelled decode would otherwise leave an uncompressed
-        # WAV behind that nothing ever removes.
+        # The caller only learns the path on success, so a failed/cancelled
+        # decode must clean up its WAV here.
         with suppress(OSError):
             await asyncio.shield(asyncio.to_thread(temp_path.unlink, True))
         raise
@@ -138,13 +131,11 @@ async def _finalize_stem(source: Path, target: Path) -> None:
     if source == target:
         return
     if source.suffix.lower() == ".mp3":
-        # Lalal writes source files into output_dir, so this is a same-filesystem
-        # rename. The ready-file check can therefore never observe a partial MP3.
+        # Same-filesystem rename (Lalal wrote into output_dir), so the
+        # ready-file check never sees a partial MP3.
         await asyncio.to_thread(source.replace, target)
         return
-    # transcode_to_mp3() writes a unique temporary file and atomically replaces
-    # target only after ffmpeg exits successfully.
-    await transcode_to_mp3(source, target)
+    await transcode_to_mp3(source, target)  # atomic replace on success
     await asyncio.to_thread(source.unlink, True)
 
 
@@ -153,7 +144,6 @@ _STEM_INSTRUMENTAL = "instrumental"
 _VALID_STEMS = frozenset({_STEM_VOCALS, _STEM_INSTRUMENTAL})
 _LALAL_PROCESS_TIMEOUT_SECONDS = 600
 
-# Module-level state
 _DATA_DIR: Path | None = None
 _queue_event: Callable[[dict[str, Any]], None] | None = None
 _processing_capacity: asyncio.Semaphore | None = None
@@ -163,7 +153,6 @@ def init_lalal(
     data_dir: Path,
     queue_event_func: Callable[[dict[str, Any]], None],
 ) -> None:
-    """Initialize the LALAL module with required dependencies."""
     global _DATA_DIR, _queue_event, _processing_capacity
     _DATA_DIR = data_dir
     _queue_event = queue_event_func
@@ -199,10 +188,8 @@ def _validate_trim_id(trim_id: str) -> str:
 
 
 def _newest_first(output_dir: Path, pattern: str) -> list[Path]:
-    """Match ``pattern`` newest-first, skipping entries that vanish mid-scan.
-
-    glob() and stat() are two trips to the filesystem; a trim deleted between
-    them would otherwise surface as an uncaught FileNotFoundError.
+    """Match ``pattern`` newest-first, skipping entries that vanish between the
+    glob() and the stat().
     """
     candidates: list[tuple[float, Path]] = []
     for path in output_dir.glob(pattern):
@@ -267,9 +254,8 @@ async def _remove_split_outputs(*paths: Path) -> None:
 async def _processing_attempt(lock_file: Path, *outputs: Path) -> AsyncIterator[None]:
     """Hold the processing lock and clean up outputs before releasing it.
 
-    Cleaning up outside the lock would let a request that never owned it - a
-    caller bounced with 409, for instance - delete the outputs of the request
-    that is still working on them.
+    Cleanup outside the lock would let a 409-bounced caller delete outputs the
+    working request still owns.
     """
     async with _acquire_processing_lock(lock_file):
         try:
@@ -279,26 +265,23 @@ async def _processing_attempt(lock_file: Path, *outputs: Path) -> AsyncIterator[
             raise
 
 
-@asynccontextmanager
-async def _processing_capacity_slot() -> AsyncIterator[None]:
-    """Reserve bounded per-process capacity for an expensive Lalal split."""
+def _processing_capacity_slot() -> AsyncIterator[None]:
+    """Reserve bounded per-process capacity for an expensive Lalal split.
+
+    Uses governor.acquire_or_503() rather than a hand-rolled semaphore +
+    timeout so this endpoint-local capacity gate rejects the same way every
+    other governor-backed gate does (503 + Retry-After). The slot count here
+    is a fixed, endpoint-specific budget, not cgroup-scaled like the
+    governor's own semaphores - it stays a local semaphore for that reason.
+    """
     if _processing_capacity is None:
         raise RuntimeError("Lalal routes are not initialized")
 
-    try:
-        async with asyncio.timeout(_LALAL_CAPACITY_WAIT_SECONDS):
-            await _processing_capacity.acquire()
-    except TimeoutError as exc:
-        raise HTTPException(
-            status_code=503,
-            detail="Lalal.ai processing capacity exhausted",
-            headers={"Retry-After": "5"},
-        ) from exc
-
-    try:
-        yield
-    finally:
-        _processing_capacity.release()
+    return governor.acquire_or_503(
+        _processing_capacity,
+        timeout_seconds=_LALAL_CAPACITY_WAIT_SECONDS,
+        detail=_LALAL_CAPACITY_EXHAUSTED_DETAIL,
+    )
 
 
 async def _get_cached_split_response(
@@ -432,8 +415,6 @@ async def _mark_lalal_split_done_if_ready(
 
 
 class ActivationKeyRequest(BaseModel):
-    """JSON body for the manual Lalal.ai activation-key endpoint."""
-
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     email: Annotated[str, StringConstraints(min_length=3, max_length=_MAX_EMAIL_LENGTH)]
@@ -457,17 +438,14 @@ class AuthStatusResponse(BaseModel):
 
 
 class OperationResponse(BaseModel):
-    """Acknowledgement for the auth mutation endpoints."""
-
     ok: Literal[True] = True
     message: str
 
 
-# Storing auth settings is a read, a network round trip, then a write. WORKERS
-# is pinned to 1 (docker/entrypoint.sh), so a process-local guard is enough:
-# every credential change bumps the generation, and a validation that started
-# against an older generation drops its result instead of overwriting newer
-# credentials - or resurrecting ones that were just logged out.
+# Storing auth settings is read, network round trip, then write. WORKERS is
+# pinned to 1, so a process-local generation guard is enough: a validation that
+# started against an older generation drops its result rather than overwrite
+# newer credentials (or resurrect logged-out ones).
 _auth_state_lock = asyncio.Lock()
 _auth_generation = 0
 
@@ -498,11 +476,6 @@ async def _invalidate_auth_validation_cache() -> None:
     except Exception:
         # A stale balance in the settings tile must never fail a finished split.
         logger.warning("Could not expire the Lalal.ai validation cache", exc_info=True)
-
-
-# ============================================================================
-# Routes
-# ============================================================================
 
 
 @router.get("/status", response_model=AuthStatusResponse)
@@ -546,9 +519,8 @@ async def api_lalal_status(
 
         token_valid = False
         validation_error = ""
-        # The validation call is /limits/minutes_left/, so the account balance
-        # comes back with it - keep it rather than paying for the round trip
-        # and throwing the answer away.
+        # The validation call is /limits/minutes_left/, so the balance rides
+        # along - keep it rather than discard it.
         minutes_left = None
         client = LalalClient(auth_key)
         try:
@@ -562,9 +534,8 @@ async def api_lalal_status(
             validation_error = "Authentication validation failed"
 
         checked_at = now_ts
-        # A key saved or cleared while this validation ran makes the result
-        # describe credentials that are no longer stored - report it, but do
-        # not stamp it onto the newer ones.
+        # A key saved/cleared during validation: report the result, but the
+        # generation guard keeps it off the newer credentials.
         await _commit_auth_settings(
             {
                 "lalalaai_auth_checked_at": checked_at,
@@ -646,7 +617,6 @@ async def api_lalal_auth_activation_key(
 async def api_lalal_auth_logout(
     request: Request, _user: str = Depends(require_user)
 ) -> OperationResponse:
-    """Clear Lalal.ai auth credentials."""
     _ = request
     await _commit_auth_settings(
         {
@@ -799,10 +769,8 @@ async def lalal_split(
                         await _finalize_stem(results["backing"], instrumental_path)
                         results["backing"] = instrumental_path
 
-                    # Both stems are always requested, and both the cache
-                    # lookup and lalal_split_done need both. Raise inside the
-                    # lock so a half-finished pair is cleaned up rather than
-                    # reported as a success nothing can reuse.
+                    # Both stems are always needed. Raise inside the lock so a
+                    # half-finished pair is cleaned up, not reported as success.
                     if "stem" not in results or "backing" not in results:
                         raise HTTPException(
                             status_code=500,
@@ -815,9 +783,8 @@ async def lalal_split(
             instrumental_path,
             trimmed=trimmed,
         )
-        # This separation just spent minutes, so the cached balance is stale.
-        # Expiring the validation stamp makes the next status call re-read it
-        # instead of showing the pre-split number for up to five more minutes.
+        # The split spent minutes, so the cached balance is stale; expire the
+        # validation stamp so the next status call re-reads it.
         await _invalidate_auth_validation_cache()
 
         return _make_split_response(
@@ -853,14 +820,7 @@ async def lalal_download(
     trim_id: str | None = None,
     _user: str = Depends(require_user_json),
 ):
-    """Download processed Lalal.ai stem file.
-
-    Args:
-        job_id: The job UUID
-        stem: Type of stem to download ('vocals' or 'instrumental')
-        trimmed: If True, download the trimmed version.
-        trim_id: Optional specific trim ID when trimmed=True.
-    """
+    """Download a processed Lalal.ai stem ('vocals' or 'instrumental')."""
     _ = request
     data_dir = _require_initialized()
 

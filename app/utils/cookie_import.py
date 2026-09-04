@@ -6,41 +6,28 @@
 
 """Turn whatever the browser's dev tools hand out into a Netscape cookie jar.
 
-yt-dlp only reads Netscape-format cookie files, but nothing in a browser
-offers that format by hand: what a user can actually copy out of the dev
-tools is the `cookie:` request header, one of the "Copy as ..." commands from
-the Network tab's context menu, or a JSON export from a cookie extension.
-This module accepts all of those and normalizes them, so Settings can offer a
-paste box instead of demanding a prepared file (see app/routes/cookies.py).
+yt-dlp only reads Netscape files, which no browser exports by hand. This
+module normalizes what a user can actually copy, so Settings offers a paste
+box instead of demanding a prepared file (see app/routes/cookies.py).
 
 Recognized inputs:
 
-* ``header``   - ``name=value; name2=value2``, with or without a leading
-  ``Cookie:``. This is the Network tab's "Copy value" on the cookie request
-  header, and the format everything else is reduced to.
-* ``request``  - a whole "Copy as cURL / fetch / PowerShell" command from the
-  Network tab, in any of the shells the menu offers (bash quoting, cmd caret
-  escapes, PowerShell backticks); the cookies are lifted out of the header,
-  or out of the session object PowerShell seeds instead of one.
-* ``json``     - the array written by cookie-export extensions
-  (Cookie-Editor, EditThisCookie), which is the only input that carries real
-  per-cookie expiry, domain and flags.
-* ``netscape`` - an already-prepared file, passed through unchanged apart
-  from normalization.
+* ``header``   - ``name=value; name2=value2`` (the Network tab's "Copy value"
+  on the cookie header); everything else is reduced to this.
+* ``request``  - a whole "Copy as cURL / fetch / PowerShell" command (any
+  shell); cookies are lifted from its header or PowerShell session object.
+* ``json``     - a cookie-extension export array (the only input with real
+  per-cookie expiry, domain and flags).
+* ``netscape`` - a prepared file, passed through with normalization.
 
-Every format that names its own domains (json, netscape, the PowerShell
-session object) is filtered to the platform's domains before anything is
-stored, so a whole-browser export cannot deposit unrelated sites' session
-tokens on the data volume.
+Every format that names its own domains is filtered to the platform's domains
+first, so a whole-browser export cannot store unrelated sites' tokens.
 
-A copied header carries names and values but no domain, path, flags or
-expiry, so those are reconstructed: the platform's own domain (a request to
-youtube.com only ever carries youtube.com-scoped cookies), path ``/``, the
-secure flag (all four platforms are HTTPS-only, and ``__Secure-``/``__Host-``
-prefixed names are invalid without it) and expiry ``0`` - yt-dlp's marker for
-a session cookie, which it sends but never treats as stale. Guessing a
-plausible future timestamp instead would put a fabricated expiry date in
-front of the user in Settings.
+A copied header has no domain/path/flags/expiry, so those are reconstructed:
+the platform's domain, path ``/``, secure=True (the platforms are HTTPS-only
+and ``__Secure-``/``__Host-`` names require it) and expiry ``0`` - yt-dlp's
+session-cookie marker. Inventing a future timestamp would show the user a
+fabricated expiry date.
 """
 
 from __future__ import annotations
@@ -61,23 +48,16 @@ from .cookie_status import (
 
 _NETSCAPE_HEADER: Final = "# Netscape HTTP Cookie File\n# Written by fetchly - do not edit.\n\n"
 
-# yt-dlp's own prefix for HttpOnly entries. It is stripped on import: plain
-# http.cookiejar (which every validity check in this app goes through) reads
-# those lines as comments and would judge a perfectly good jar as empty.
+# yt-dlp's HttpOnly prefix, stripped on import: plain http.cookiejar (which the
+# validity checks use) reads those lines as comments and would see an empty jar.
 _HTTPONLY_PREFIX: Final = "#HttpOnly_"
 
-# RFC 6265 token characters - anything else in a name means the input was not
-# a cookie header at all.
+# RFC 6265 token chars; anything else means the input was not a cookie header.
 _COOKIE_NAME_RE: Final = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 
-# A Netscape entry is seven tab-separated fields.
-_NETSCAPE_FIELDS: Final = 7
-
-# Generous upper bound; a real browser jar for one site holds a few dozen.
+_NETSCAPE_FIELDS: Final = 7  # tab-separated fields per entry
 _MAX_COOKIES: Final = 512
 
-# The cookie header as it appears in the Network tab's "Copy as ..." output:
-# cURL (bash and cmd), fetch/Node.js, and PowerShell all quote it differently.
 # The request's own URL, as each "Copy as ..." flavour writes it.
 _REQUEST_URL_PATTERNS: Final = (
     re.compile(r"""(?:--url|-Uri)\s+(['"])(?P<url>https?://[^'"\s]+)\1""", re.I),
@@ -92,22 +72,17 @@ _CURL_COOKIE_PATTERNS: Final = (
 )
 
 
-# Anything that came out of the Network tab's context menu. Recognizing it
-# matters for the error message: pasting a request that carries no cookies is
-# a different mistake from pasting something that is not a request at all.
+# A copied command from the Network tab. Detected so a cookie-less request
+# gets a different error from something that is not a request at all.
 _COPIED_COMMAND_RE: Final = re.compile(r"^\s*(?:curl\b|fetch\s*\(|Invoke-WebRequest\b|\$session\b)", re.I)
 
 
 def _unescape_copied_command(text: str) -> str:
-    """Undo the shell quoting Windows puts into a copied request.
+    """Undo Windows shell quoting in a copied request.
 
-    "Copy as cURL (cmd)" escapes every quote, ampersand and percent with a
-    caret and continues lines with a trailing one, so the header this module
-    looks for arrives as ^"cookie: ...^". PowerShell does the same job with
-    backticks. Both are undone here rather than in each pattern below - and
-    undoing them is not optional: without it the extractor finds no header,
-    the raw command falls through to the plain-header parser, and what gets
-    stored is a jar with the first cookie missing and the rest mangled.
+    "Copy as cURL (cmd)" caret-escapes quotes/&/% and continues lines with a
+    trailing caret; PowerShell uses backticks. Without undoing them the
+    extractor finds no header and stores a mangled jar.
     """
     if "^\"" in text:
         # cmd.exe escapes with ^, so ^^ is a literal caret and a trailing ^
@@ -122,9 +97,8 @@ def _unescape_copied_command(text: str) -> str:
     return text
 
 
-# "Copy as PowerShell" does not build a cookie header at all - it seeds a
-# WebRequestSession one cookie at a time, in (name, value, path, domain)
-# order. Without this the paste looks cookie-free and gets refused.
+# "Copy as PowerShell" seeds a WebRequestSession one cookie at a time in
+# (name, value, path, domain) order rather than building a header.
 _POWERSHELL_COOKIE_RE: Final = re.compile(
     r"""New-Object\s+System\.Net\.Cookie\(\s*"([^"]*)"\s*,\s*"([^"]*)"\s*,\s*"([^"]*)"\s*,\s*"([^"]*)"\s*\)""",
     re.I,
@@ -184,13 +158,10 @@ def _netscape_line(
 
 
 def _belongs_to(domain: str, platform: str) -> bool:
-    """Whether a cookie carrying its own domain may be stored for a platform.
+    """Whether a domain-carrying cookie may be stored for a platform.
 
-    JSON exports, PowerShell copies and prepared Netscape files each name a
-    domain per cookie, and an export can cover the whole browser. Without this
-    filter a paste would write every unrelated site's session token into the
-    data volume - and a foreign cookie that happens to be called "sessionid"
-    would satisfy the login check for Instagram.
+    A whole-browser export would otherwise deposit every site's tokens, and a
+    foreign cookie named "sessionid" would pass Instagram's login check.
     """
     return domain_matches(domain, PLATFORM_COOKIE_DOMAINS.get(platform, ()))
 
@@ -252,13 +223,9 @@ def _request_url(text: str) -> str | None:
 
 
 def _reject_foreign_request(text: str, platform: str) -> None:
-    """Refuse a request copied from someone else's domain.
-
-    A page embeds third-party requests (Google's scripts on YouTube, a CDN,
-    an analytics beacon), and those carry that domain's cookies - which look
-    close enough to pass a name check while missing the first-party cookies
-    the downloader needs. Filing them under the platform's domain would
-    produce a jar that Settings calls valid and yt-dlp treats as signed out.
+    """Refuse a request copied from a third-party domain (a CDN or analytics
+    beacon on the page): its cookies can pass a name check but are not the
+    first-party session yt-dlp needs.
     """
     url = _request_url(text)
     if not url:
@@ -417,8 +384,7 @@ def _from_json(text: str, platform: str) -> CookieImport:
             continue
 
         domain = str(entry.get("domain") or fallback_domain).strip() or fallback_domain
-        # A host-only cookie is stored without the leading dot, a domain
-        # cookie with it; extensions disagree on which field carries that.
+        # Host-only cookie: no leading dot; domain cookie: leading dot.
         if entry.get("hostOnly") is True:
             domain = domain.lstrip(".")
         elif not domain.startswith(".") and entry.get("hostOnly") is False:
@@ -484,9 +450,8 @@ def convert_to_netscape(text: str, platform: str) -> CookieImport:
     if from_powershell is not None:
         return from_powershell
 
-    # A copied request with no cookie header in it must never fall through to
-    # the parser below: the command line is full of "name=value" pairs, and
-    # picking those up would store a jar that is part URL and part header.
+    # A cookie-less copied request must not fall through: its "name=value"
+    # command-line pairs would be stored as a bogus jar.
     if _COPIED_COMMAND_RE.match(unescaped):
         site = PLATFORM_PRIMARY_DOMAIN.get(platform, "").lstrip(".")
         raise CookieImportError(
@@ -496,6 +461,5 @@ def convert_to_netscape(text: str, platform: str) -> CookieImport:
             f"and not a call to another domain."
         )
 
-    # A single line of "name=value; ..." - and the fallback for anything else,
-    # so the error the user sees names the format that was expected.
+    # Plain "name=value; ..." - and the fallback for anything unrecognized.
     return _from_header(stripped.replace("\n", " "), platform, "header")

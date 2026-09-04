@@ -6,25 +6,18 @@
 
 """Validation for the single admin account stored in settings.
 
-fetchly ships with authentication switched off and no credentials at all. The
-admin username and password are created in Settings → Security and live only in
-the ``settings`` table - there is no bootstrap account and no environment
-variable that can inject one.
-
-Kept in ``app/utils`` rather than next to the auth routes because ``app/db.py``
-validates the stored username on read/write and must not import a route module.
+The admin username and password are created in Settings → Security and live
+only in the ``settings`` table. Kept in ``app/utils`` so ``app/db.py`` (which
+validates the username on read/write) need not import a route module.
 """
 
 from __future__ import annotations
 
 import re
 
-# Session tokens are colon-delimited (see app/session.py), so a colon in the
-# username would corrupt the payload. Whitespace is rejected outright because a
-# trailing space in a login name is invisible and unloggable-in. Restricted to
-# letters, hyphens and underscores only (case insensitive). Unanchored because
-# it is applied with fullmatch(), which - unlike match() with a trailing "$" -
-# also rejects a trailing newline.
+# Letters/hyphens/underscores only: a colon would corrupt the session token
+# (colon-delimited), whitespace is invisible in a login name. Unanchored -
+# fullmatch() also rejects a trailing newline (unlike match() + "$").
 _USERNAME_RE = re.compile(r"[A-Za-z_-]+")
 
 USERNAME_MAX_LENGTH = 64
@@ -52,11 +45,8 @@ def normalize_admin_username(value: str | None) -> str:
 
 
 def validate_admin_password(value: str | None) -> str:
-    """Validate a new admin password and return it unchanged.
-
-    Deliberately does not strip: a leading or trailing space is a legitimate
-    part of a password, and silently trimming it would lock the user out of the
-    credential they think they set.
+    """Validate a new admin password and return it unchanged (never stripped -
+    leading/trailing spaces are part of the password).
     """
     password = value or ""
     if len(password) < PASSWORD_MIN_LENGTH:

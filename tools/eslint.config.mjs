@@ -8,10 +8,8 @@ import globals from "globals";
 
 export default [
     {
-        // Vendored libraries ship minified and are not ours to fix; node_modules
-        // and build output are noise. app/static/vendor is what keeps the
-        // reverse-proxy CSP at script-src 'self', so it stays checked in but
-        // unlinted.
+        // Vendored (minified, not ours) and build output. app/static/vendor is
+        // checked in for the script-src 'self' CSP but left unlinted.
         ignores: [
             "**/node_modules/**",
             "app/static/vendor/**",
@@ -37,9 +35,7 @@ export default [
             },
         },
         rules: {
-            // The repo rule: no native dialogs, use confirmModal() from
-            // app/static/js/confirm.js. Previously only documented in
-            // docs/development/contributing.md, so nothing enforced it.
+            // Repo rule: no native dialogs (use confirmModal()/showToast()).
             "no-alert": "error",
             "no-restricted-globals": [
                 "error",
@@ -47,8 +43,7 @@ export default [
                 { name: "alert", message: "Use showToast() from app/static/js/toast.js." },
                 { name: "prompt", message: "Use a modal; see app/static/js/confirm.js." },
             ],
-            // A stray console.log in the browser bundle is shipped to users and
-            // shows up as noise in the ui-lint console audit.
+            // A stray console.log ships to users and trips the ui-lint audit.
             "no-console": ["error", { allow: ["warn", "error"] }],
             "no-var": "error",
             "prefer-const": "error",
@@ -58,8 +53,6 @@ export default [
             "no-eval": "error",
             "no-implied-eval": "error",
             "no-new-func": "error",
-            // innerHTML with interpolated data is how XSS gets in; the codebase
-            // builds nodes with textContent instead.
             "no-script-url": "error",
         },
     },

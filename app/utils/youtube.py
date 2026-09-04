@@ -40,15 +40,10 @@ _INFO_CACHE_MAXSIZE = 256
 _YOUTUBE_FALLBACK_PLAYER_CLIENT = "android"
 _SUBPROCESS_TIMEOUT_SECONDS = 20
 
-# Cap how many extractions can be in flight. subprocess.run()'s own timeout
-# below is what actually bounds each one (see _load_video_info_uncached) - a
-# yt_dlp.YoutubeDL().extract_info() call in-process was tried first here, but
-# a genuinely hung extraction cannot be killed from the Python side: an
-# asyncio.wait_for() around asyncio.to_thread() stops *awaiting* the result,
-# it does not stop the underlying OS thread, which keeps running and holding
-# a slot in the default thread pool shared by every asyncio.to_thread() call
-# in the app (DB writes, housekeeping, ...) forever. A subprocess can actually
-# be killed on timeout, so extraction goes through subprocess.run() only.
+# Cap in-flight extractions. Extraction shells out to yt-dlp rather than
+# calling it in-process because a hung in-process call cannot be killed - it
+# would hold a slot in the shared asyncio thread pool forever; a subprocess
+# can be killed on timeout.
 _METADATA_SLOTS = asyncio.Semaphore(4)
 
 
@@ -70,10 +65,9 @@ def strip_zwsp(text: str) -> str:
 def _is_video_id(value: str) -> bool:
     """Return True if *value* is exactly a YouTube video ID.
 
-    Only zero-width characters and surrounding whitespace are stripped; the ID
-    is validated, never repaired. Silently deleting invalid characters would
-    turn a malformed ID into an accepted one while the rest of the pipeline
-    keeps working with the original, unrepaired string.
+    Only zero-width chars and whitespace are stripped; the ID is validated,
+    never repaired (a repaired ID would diverge from the string the rest of
+    the pipeline still carries).
     """
     return _VIDEO_ID_RE.fullmatch(strip_zwsp(value).strip()) is not None
 
@@ -83,14 +77,12 @@ def _is_youtube_host(host: str) -> bool:
 
 
 def _resolve_cookie_path(url: str) -> Path | None:
-    """Return the platform's cookie file for a URL, if it exists and is usable.
+    """The platform's cookie file for a URL, if it exists and is usable.
 
-    An expired jar is skipped for the same reason as in app/worker.py: yt-dlp
-    would still send it, and a stale login is answered less kindly than an
-    anonymous probe.
+    An expired jar is skipped (yt-dlp would still send it, and a stale login is
+    answered worse than an anonymous probe) - same rule as app/worker.py.
     """
-    # Imported lazily: platform.py imports this module at import time, so a
-    # module-level import here would close the cycle.
+    # Lazy import: platform.py imports this module, so this would close the cycle.
     from .platform import PLATFORM_COOKIE_FILENAMES, detect_platform
 
     platform = detect_platform(url)
@@ -108,10 +100,8 @@ def _resolve_cookie_path(url: str) -> Path | None:
 
 
 def _url_for_log(url: str) -> str:
-    """Strip query and fragment before a URL reaches the log.
-
-    TikTok/Instagram share links commonly carry tracking or signed query
-    parameters that do not belong in operational logs.
+    """Strip query and fragment before a URL is logged (share links carry
+    tracking and signed params).
     """
     try:
         parsed = urlsplit(url)
@@ -137,13 +127,8 @@ def _cache_bucket() -> int:
 
 
 def _non_negative_int(value: object) -> int | None:
-    """Coerce a yt-dlp numeric field to InfoPayload's declared int type.
-
-    yt-dlp commonly returns duration/view_count as float (or omits them, or -
-    for some extractors - returns a negative placeholder); InfoPayload
-    promises int | None, and callers rely on that: extract_video_meta() only
-    renders "Duration: ..." behind isinstance(duration, int), so a float here
-    silently drops the line instead of raising anything.
+    """Coerce a yt-dlp numeric field (often float, or a negative placeholder)
+    to InfoPayload's ``int | None`` - callers gate on ``isinstance(x, int)``.
     """
     if isinstance(value, bool):
         return None
@@ -190,35 +175,21 @@ def _prune_info(info: dict[str, Any] | None) -> InfoPayload | None:
 
 
 def validate_youtube_url(url: str) -> tuple[bool, str]:
-    """
-    Validate that a URL is a valid YouTube video URL.
-
-    Args:
-        url: The URL to validate
-
-    Returns:
-        Tuple of (is_valid, error_message)
-    """
+    """Validate that a URL is a YouTube video URL. Returns ``(is_valid, error)``."""
     if not url or not isinstance(url, str):
         return False, "URL is required"
 
     url = url.strip()
-
-    # Normalize common copy/paste issues from mobile apps / HTML sources
-    url = strip_zwsp(url.replace("&amp;", "&"))
+    url = strip_zwsp(url.replace("&amp;", "&"))  # common copy/paste damage
 
     if not url:
         return False, "URL is required"
 
-    # Check URL length (prevent DoS with extremely long URLs)
     if len(url) > 2048:
         return False, "URL is too long"
 
-    # Metadata requests must use encrypted transport. Matched case-insensitively
-    # to agree with platform.validate_media_url(), the gate this sits behind: a
-    # case-sensitive check would let "HTTPS://youtu.be/..." clear the platform
-    # gate and then be rejected here with a scheme error that reads as wrong.
-    # urlparse() lowercases scheme and hostname, so the rest is unaffected.
+    # Case-insensitive to agree with platform.validate_media_url() (the gate
+    # this sits behind); urlparse() lowercases scheme and host anyway.
     if not url.lower().startswith("https://"):
         return False, "URL must start with https://"
 
@@ -255,11 +226,8 @@ def validate_youtube_url(url: str) -> tuple[bool, str]:
 
 
 def normalize_info_url(url: str) -> str:
-    """Normalize a YouTube URL to a single-video URL for metadata extraction.
-
-    This removes playlist context (e.g. list/index) that can trigger slower
-    resolution paths and intermittent timeouts in yt-dlp. Callers should
-    validate the input URL first.
+    """Reduce a YouTube URL to ``watch?v=<id>``, dropping playlist context
+    that makes yt-dlp slower and flakier. Validate the URL first.
     """
     value = strip_zwsp(url.strip().replace("&amp;", "&"))
     try:
@@ -292,18 +260,9 @@ def normalize_info_url(url: str) -> str:
 
 
 def _load_video_info_uncached(url: str) -> InfoPayload | None:
-    """Load video metadata for a URL by shelling out to yt-dlp.
+    """Load video metadata by shelling out to yt-dlp.
 
-    Best-effort: every failure mode - timeout, missing binary, bad JSON,
-    non-zero exit - is swallowed and reported as None so callers degrade
-    gracefully instead of surfacing a server error for what is, from the
-    caller's perspective, just "no metadata available yet".
-
-    Args:
-        url: YouTube video URL
-
-    Returns:
-        Video info dict or None if extraction fails
+    Best-effort: every failure mode is swallowed and reported as None.
     """
     from .platform import detect_platform
 
@@ -326,6 +285,11 @@ def _load_video_info_uncached(url: str) -> InfoPayload | None:
                 check=True,
                 capture_output=True,
                 text=True,
+                # yt-dlp emits UTF-8 JSON regardless of the container locale;
+                # pin the decode so a title in a non-Latin script survives even
+                # when LANG is unset and Python's UTF-8 mode is not in effect.
+                encoding="utf-8",
+                errors="replace",
                 timeout=_SUBPROCESS_TIMEOUT_SECONDS,
             )
             if result.stdout:
@@ -335,10 +299,8 @@ def _load_video_info_uncached(url: str) -> InfoPayload | None:
         except subprocess.TimeoutExpired:
             logger.warning("yt-dlp subprocess timed out for %s", _url_for_log(url))
         except FileNotFoundError:
-            # main.py's startup check refuses to run without yt-dlp on PATH,
-            # so this should be unreachable in a running instance - but this
-            # function's contract (like every sibling except-branch here) is
-            # to degrade to None, not to raise past a best-effort caller.
+            # Startup checks for yt-dlp, so this should be unreachable; degrade
+            # to None rather than raise past a best-effort caller.
             logger.error("yt-dlp command not found in PATH")
         except subprocess.CalledProcessError as exc:
             stderr = exc.stderr[:500] if exc.stderr else None
@@ -371,18 +333,8 @@ def _cached_load_video_info(normalized_url: str, cache_bucket: int) -> InfoPaylo
 def load_video_info(url: str) -> InfoPayload | None:
     """Load video metadata for a supported platform URL using yt-dlp.
 
-    The allowlist is enforced here as well as in the routes: this is the point
-    where yt-dlp performs the outbound request, so an unvalidated URL must
-    never reach it.
-
-    This function is blocking; async callers should use
-    :func:`load_video_info_async` or offload it via ``asyncio.to_thread()``.
-
-    Args:
-        url: Media URL of a supported platform
-
-    Returns:
-        Video info dict or None if the URL is rejected or extraction fails
+    Re-enforces the platform allowlist here, since this is where the outbound
+    request happens. Blocking; async callers use :func:`load_video_info_async`.
     """
     from .platform import validate_media_url
 
@@ -402,16 +354,10 @@ async def load_video_info_async(url: str) -> InfoPayload | None:
 
 
 def extract_video_meta(url: str) -> dict[str, object]:
-    """Best-effort metadata extraction for title + hover details.
+    """Best-effort metadata for title + hover details.
 
-    Args:
-        url: YouTube video URL
-
-    Returns:
-        Dict with video_title, video_meta_hover and duration_seconds keys.
-        ``duration_seconds`` is the source's own runtime, stored on the job so
-        the list can show a length before ffprobe has measured the finished
-        file (app/routes/api.py::submit_job).
+    Returns ``video_title``, ``video_meta_hover``, ``duration_seconds`` (the
+    source's own runtime, shown until ffprobe measures the finished file).
     """
     info = load_video_info(url)
     if info is None:

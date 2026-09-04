@@ -4,10 +4,9 @@
 //
 
 /**
- * trim.js - Audio trim workflow with waveform visualization
- * 
- * Provides a modal-based UI for trimming audio files before Lalal.ai processing.
- * Uses wavesurfer.js for waveform rendering and region selection.
+ * @module trim
+ * Modal UI for trimming audio before Lalal.ai processing, using wavesurfer.js
+ * for the waveform and region selection.
  */
 
 import { showToast } from "./toast.js";
@@ -503,8 +502,8 @@ function handleWheelZoom(e) {
         return;
     }
 
-    // Exponential response keeps a mouse notch and a trackpad swipe comparable,
-    // and the clamp stops one large delta from jumping several zoom steps.
+    // Exponential response makes a mouse notch and a trackpad swipe comparable;
+    // the clamp stops one large delta jumping several zoom steps.
     const factor = clamp(
         Math.exp(-deltaY * ZOOM_WHEEL_SENSITIVITY),
         1 / ZOOM_WHEEL_STEP_MAX,
@@ -1348,25 +1347,22 @@ export async function openTrimModal(jobId, options = {}) {
             return;
         }
 
-        // Setup ready handler
         trimWs.on("ready", () => {
             if (session !== trimSession) return;
 
             trimReady = true;
             setLoading(false);
-            // Start on the full track: minPxPerSec alone would open a long
-            // file scrolled into an arbitrary few seconds of audio.
+            // Fit the whole track, or a long file opens scrolled into a few
+            // arbitrary seconds.
             zoomLevel = getFitZoomLevel();
             trimWs.zoom(zoomLevel);
             lockWaveVerticalScroll();
             scheduleBeatGridDraw();
 
-            // Start with a small, editable range so the common short-clip case
-            // needs no extra interaction.
+            // Small editable range so the common short-clip case needs no interaction.
             createDefaultSelection();
         });
 
-        // Enable buttons when region is created
         regionPlugin.on("region-created", (region) => {
             if (session !== trimSession) return;
             trimRegion = region;
@@ -1435,8 +1431,7 @@ export async function openTrimModal(jobId, options = {}) {
             if (trimInfoEl) trimInfoEl.textContent = "Failed to load audio";
         });
 
-        // Register all handlers before starting the asynchronous load so an
-        // early WaveSurfer failure is observed and its promise is handled.
+        // Handlers first, so an early WaveSurfer failure is observed.
         const fileUrl = `/audio-source/${encodeURIComponent(jobId)}`;
         if (session !== trimSession) return;
         await trimWs.load(fileUrl);
@@ -1677,9 +1672,8 @@ async function runLalal(stem) {
         }
         triggerDownload(data.download_url);
 
-        // Show cached indicator (no API credits used). The button stays
-        // disabled on purpose: the result belongs to this exact selection, so
-        // changing the selection (updateSelectionActions) is what re-arms it.
+        // Button stays disabled: the result is bound to this selection;
+        // changing it (updateSelectionActions) re-arms the button.
         const statusText = data.cached ? "✓ Cached" : "✓ Done";
         setButtonState(btn, { text: statusText });
 

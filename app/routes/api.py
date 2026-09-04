@@ -20,7 +20,7 @@ from urllib.parse import quote
 from weakref import WeakKeyDictionary
 
 import httpx
-from fastapi import APIRouter, Depends, Form, HTTPException, Request
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 from ..bpm_cluster import cluster_bpms
@@ -47,7 +47,7 @@ from ..utils.changelog import get_changelog_html
 from ..utils.cookie_status import cookie_file_is_usable
 from ..utils.cookies import default_cookie_file
 from ..utils.credentials import normalize_admin_username, validate_admin_password
-from ..utils.fs import get_data_dir, get_json_body
+from ..utils.fs import get_data_dir, get_json_body, path_is_file
 from ..utils.host_stats import get_host_stats
 from ..utils.housekeeping import cleanup_job_directory
 from ..utils.platform import PLATFORM_COOKIE_FILENAMES, detect_platform, validate_media_url
@@ -62,6 +62,15 @@ from ..utils.version import (
     get_ytdlp_ejs_version,
     get_ytdlp_version,
 )
+from ..utils.watermark_logo import (
+    MAX_LOGO_BYTES,
+    LogoRejectedError,
+    LogoStatus,
+    custom_logo_path,
+    logo_status,
+    remove_custom_logo,
+    store_custom_logo,
+)
 from ..utils.youtube import (
     empty_info_payload,
     extract_video_meta_async,
@@ -71,10 +80,10 @@ from ..utils.youtube import (
 from ..worker import cancel_job as cancel_worker_job
 from ..worker import clear_cancellation, get_job_queue, submit_download
 from .auth import (
+    get_csrf_token,
     has_admin_credentials,
     hash_password,
     require_html_auth,
-    require_session,
     require_user,
     require_user_json,
 )
@@ -88,7 +97,6 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["api"])
 
-# Constants
 _ALLOWED_MEDIA_TYPES = frozenset({"audio", "video"})
 _ALLOWED_QUALITIES = frozenset({"max", "medium", "small"})
 _STATS_CACHE_TTL_SECONDS = 60.0
@@ -110,18 +118,14 @@ _RUNTIME_LIMIT_BOUNDS: dict[str, tuple[int, int]] = {
     "session_idle_minutes": (1, 1440),
 }
 
-# Module-level state
 _templates: "Jinja2Templates | None" = None
 _stats_cache: dict[str, Any] = {"data": None, "ts": 0.0}
 _stats_locks: "WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock]" = WeakKeyDictionary()
 
 
 def init_api(templates: "Jinja2Templates") -> None:
-    """Initialize the API module with required dependencies."""
     global _templates
     _templates = templates
-
-
 
 
 
@@ -161,7 +165,7 @@ class JobRecord(Protocol):
 
 
 def job_to_dict(job: JobRecord) -> dict[str, Any]:
-    """Convert a job record to a dictionary for JSON responses."""
+    """Convert a job record to a JSON-serializable dict."""
     return {
         "id": job["id"],
         "url": job["url"],
@@ -206,14 +210,8 @@ async def get_cached_stats() -> dict[str, int | float]:
         return stats
 
 
-# ============================================================================
-# Routes
-# ============================================================================
-
-
 @router.get("/health")
 def health() -> dict[str, str]:
-    """Health check endpoint."""
     return {"status": "ok"}
 
 
@@ -222,11 +220,9 @@ def health() -> dict[str, str]:
 async def api_stats(request: Request, _: str = Depends(require_user_json)) -> dict[str, int | float]:
     """Return fresh dashboard stats for live UI updates.
 
-    Annotated int | float, not int: get_stats() rounds total_minutes and
-    total_lalal_minutes to one decimal. FastAPI enforces this annotation as the
-    response model, and pydantic only accepts a float as an int when it carries
-    no fractional part - so "dict[str, int]" happened to pass while the totals
-    landed on whole minutes, and returned 500 the moment one did not.
+    Annotated ``int | float``, not ``int``: total_minutes/total_lalal_minutes
+    are rounded to one decimal, and FastAPI's response-model check 500s on a
+    fractional value under ``dict[str, int]``.
     """
     _ = request
     return await asyncio.to_thread(get_stats)
@@ -234,7 +230,7 @@ async def api_stats(request: Request, _: str = Depends(require_user_json)) -> di
 
 @router.post("/api/stats/reset")
 @limiter.limit("5/minute")
-async def api_reset_stats(request: Request, _user: str = Depends(require_session)) -> dict[str, Any]:
+async def api_reset_stats(request: Request, _user: str = Depends(require_user)) -> dict[str, Any]:
     """Reset dashboard statistics without deleting jobs or their files."""
     _ = request
 
@@ -252,7 +248,7 @@ async def api_reset_stats(request: Request, _user: str = Depends(require_session
 
 @router.post("/api/jobs/remove-all")
 @limiter.limit("2/minute")
-async def api_remove_all_jobs(request: Request, _user: str = Depends(require_session)) -> dict[str, Any]:
+async def api_remove_all_jobs(request: Request, _user: str = Depends(require_user)) -> dict[str, Any]:
     """Cancel and permanently remove every current job, artifact, and share link."""
     _ = request
 
@@ -299,7 +295,6 @@ async def api_remove_all_jobs(request: Request, _user: str = Depends(require_ses
 
 @router.get("/", response_class=HTMLResponse)
 async def index(request: Request) -> Response:
-    """Dashboard home page."""
     redirect = require_html_auth(request)
     if redirect:
         return redirect
@@ -318,7 +313,7 @@ async def index(request: Request) -> Response:
         "lalal_enabled": lalal_enabled,
         "lalal_duration_guard": lalal_duration_guard,
         "auth_enabled": bool(settings.get("enable_authentication", False)),
-        "csrf_token": getattr(request.state, "csrf_token", ""),
+        "csrf_token": get_csrf_token(request),
     })
 
 
@@ -330,7 +325,6 @@ def _cached_lalal_minutes(settings: dict[str, Any]) -> float | None:
 
 @router.get("/settings", response_class=HTMLResponse)
 async def settings_page(request: Request) -> Response:
-    """Settings page."""
     redirect = require_html_auth(request)
     if redirect:
         return redirect
@@ -345,15 +339,12 @@ async def settings_page(request: Request) -> Response:
     ffmpeg_version = await asyncio.to_thread(get_ffmpeg_version)
     wavesurfer_version = get_wavesurfer_version()
     changelog_html = await asyncio.to_thread(get_changelog_html)
-    # Reads the internal settings itself - the page's own snapshot deliberately
-    # excludes admin_password_hash.
+    # Reads internal settings itself; this page's snapshot excludes the hash.
     credentials_present = await asyncio.to_thread(has_admin_credentials)
     cookie_statuses = [status.model_dump() for status in await list_cookie_statuses()]
-    # What "Automatic" resolves to right now, so the hint names a real number
-    # instead of leaving the user to guess (see governor.py).
+    # What "Automatic" resolves to right now, so the hint names a real number.
     auto_fragments = await asyncio.to_thread(governor.recommended_concurrent_fragments)
-    # Mobile moves the dashboard's stat tiles onto the System tab, so the page
-    # needs the same numbers the dashboard renders (see macros/stats.html).
+    # Mobile shows the dashboard stat tiles on the System tab (see macros/stats.html).
     stats = await get_cached_stats()
     return templates.TemplateResponse(
         request=request,
@@ -378,7 +369,7 @@ async def settings_page(request: Request) -> Response:
             "has_admin_credentials": credentials_present,
             "auth_enabled": bool(settings.get("enable_authentication", False)),
             "cookie_statuses": cookie_statuses,
-            "csrf_token": getattr(request.state, "csrf_token", ""),
+            "csrf_token": get_csrf_token(request),
         },
     )
 
@@ -388,10 +379,8 @@ async def settings_page(request: Request) -> Response:
 async def api_updates(request: Request, _user: str = Depends(require_user)) -> dict[str, Any]:
     """Report whether newer upstream releases exist for fetchly and its tools.
 
-    Purely informational: nothing here updates anything, since fetchly and
-    these tools are baked into the image and only a rebuild (or `git pull`)
-    can change them. The upstream lookup is cached for 24 hours, so reloading
-    the settings page does not trigger another request.
+    Informational only - everything is baked into the image; only a rebuild
+    changes it. The upstream lookup is cached for 24h.
     """
     _ = request
 
@@ -409,12 +398,10 @@ async def api_updates(request: Request, _user: str = Depends(require_user)) -> d
 @router.get("/api/system/host")
 @limiter.limit("60/minute")
 async def api_system_host(request: Request, _user: str = Depends(require_user)) -> dict[str, Any]:
-    """Return a snapshot of host resource usage for the Settings -> System panel.
+    """Host resource snapshot for Settings -> System (disk, CPU, memory, uptime).
 
-    Informational only: disk space for the download volume, host CPU and memory
-    load, and host uptime. Each field is null when the host does not expose it.
-    CPU is measured as the delta since the previous call (with a short inline
-    sample the first time), so polling this every few seconds gives live load.
+    Each field is null when the host does not expose it. CPU is the delta since
+    the previous call, so polling every few seconds gives live load.
     """
     _ = request
     return await get_host_stats(get_data_dir())
@@ -428,7 +415,6 @@ async def api_jobs(
     offset: int = 0,
     limit: int = 50,
 ) -> list[dict[str, Any]]:
-    """List jobs with pagination."""
     _ = request
 
     safe_offset = max(0, offset)
@@ -441,7 +427,6 @@ async def api_jobs(
 @router.get("/api/jobs/{job_id}")
 @limiter.limit("60/minute")
 async def api_job(request: Request, job_id: uuid.UUID, _user: str = Depends(require_user)) -> dict[str, Any]:
-    """Return a single job snapshot by id."""
     _ = request
 
     job = await asyncio.to_thread(get_job, str(job_id))
@@ -458,7 +443,6 @@ async def api_bpm_clusters(
     _user: str = Depends(require_user),
     limit: int = 1000,
 ) -> list[dict[str, int]]:
-    """Get BPM clusters for visualization."""
     _ = request
     safe_limit = min(max(1, limit), 2000)
     bpms = await asyncio.to_thread(list_completed_bpms, safe_limit)
@@ -619,11 +603,9 @@ def _thumbnail_signature_matches(data: bytes, content_type: str) -> bool:
 def _is_allowed_thumbnail_url(url: str) -> bool:
     """Allowlist check for outbound thumbnail fetches.
 
-    Parsed with httpx.URL - the same parser httpx uses to build the actual
-    request - so the host that is validated here is exactly the host that gets
-    contacted. urlparse and httpx disagree on enough edge cases (backslashes,
-    percent-encoded and IDN hosts) that using the other parser would leave a
-    gap between the check and the request.
+    Parsed with httpx.URL - the same parser the request uses - so the validated
+    host is exactly the contacted host (urlparse disagrees on enough edge cases
+    to open a gap).
     """
     try:
         parsed = httpx.URL(url)
@@ -640,12 +622,9 @@ def _thumb_cache_key(url: str) -> str:
 
 
 def _cookies_args_for_url(url: str) -> list[str]:
-    """Cookie arguments for a thumbnail fetch, on the same terms as a download.
-
-    Existence alone is not enough: an expired or login-free jar is still sent
-    by yt-dlp (it loads with ignore_expires=True) and a stale session is
-    answered less kindly than an anonymous request. app/worker.py and
-    app/utils/youtube.py gate their yt-dlp calls the same way.
+    """Cookie args for a thumbnail fetch, gated like a download: a usable jar
+    only (an expired one is still sent by yt-dlp and answered worse than
+    anonymous). Same rule in app/worker.py and app/utils/youtube.py.
     """
     platform = detect_platform(url)
     if not platform:
@@ -702,12 +681,11 @@ def _read_cached_thumbnail(cache_key: str) -> tuple[bytes, str] | None:
 
 
 def _write_cached_thumbnail(cache_key: str, data: bytes, content_type: str) -> None:
-    """Publish a thumbnail into the cache via unique temp files + atomic rename.
+    """Publish a thumbnail via unique temp files + atomic rename.
 
-    The temp names carry a random token because the cache key is shared by
-    definition: two concurrent resolves of the same URL land on the same key,
-    and a key-derived temp name would have them writing the same file while the
-    other one is mid-write, publishing a half-written image.
+    The temp names carry a random token: the cache key is shared by concurrent
+    resolves of the same URL, so a key-derived temp name would let them
+    overwrite each other mid-write.
     """
     _THUMB_CACHE_DIR.mkdir(parents=True, exist_ok=True)
     data_path, content_type_path = _thumb_cache_paths(cache_key)
@@ -836,7 +814,7 @@ async def api_thumbnail_resolve(
     url: str,
     _user: str = Depends(require_user),
 ) -> dict[str, object]:
-    """Resolve a media URL to a local persistent thumbnail cache URL."""
+    """Resolve a media URL to a persistent local thumbnail-cache URL."""
     _ = request
 
     is_valid, error_msg = validate_media_url(url)
@@ -906,7 +884,6 @@ async def api_thumbnail_cache(
     cache_key: str,
     _user: str = Depends(require_user),
 ) -> Response:
-    """Serve a previously cached thumbnail by cache key."""
     _ = request
     if not _THUMB_CACHE_KEY_RE.fullmatch(cache_key):
         raise HTTPException(status_code=400, detail="Invalid cache key")
@@ -949,14 +926,102 @@ async def api_thumbnail_proxy(
 @router.get("/api/settings")
 @limiter.limit("60/minute")
 async def api_get_settings(request: Request, _user: str = Depends(require_user)) -> dict[str, Any]:
-    """Get all settings."""
     _ = request
     settings = await asyncio.to_thread(get_settings, include_secrets=True)
     return public_settings(settings)
 
 
+def _logo_status_payload(status: LogoStatus) -> dict[str, Any]:
+    return {
+        "custom": status.custom,
+        "width": status.width,
+        "height": status.height,
+        "bytes": status.bytes,
+        "fingerprint": status.fingerprint,
+    }
+
+
+@router.get("/api/settings/watermark-logo")
+@limiter.limit("60/minute")
+async def api_watermark_logo_status(
+    request: Request, _user: str = Depends(require_user)
+) -> dict[str, Any]:
+    """Whether a custom watermark logo is installed, and its size."""
+    _ = request
+    return _logo_status_payload(await asyncio.to_thread(logo_status))
+
+
+@router.get("/api/settings/watermark-logo/image")
+@limiter.limit("60/minute")
+async def api_watermark_logo_image(request: Request, _user: str = Depends(require_user)) -> Response:
+    """The stored custom logo, for the Settings preview.
+
+    Only ever a PNG - the upload path stores nothing else - and served with
+    nosniff so it cannot be coaxed into being interpreted as a document.
+    """
+    _ = request
+    path = custom_logo_path()
+    if not await path_is_file(path):
+        raise HTTPException(status_code=404, detail="No custom watermark logo")
+
+    data = await asyncio.to_thread(path.read_bytes)
+    return Response(
+        content=data,
+        media_type="image/png",
+        headers={
+            "X-Content-Type-Options": "nosniff",
+            # The fingerprint is in the URL the page requests, so the bytes
+            # behind it never change; revalidation would be wasted.
+            "Cache-Control": "private, max-age=60",
+        },
+    )
+
+
+@router.post("/api/settings/watermark-logo")
+@limiter.limit("10/minute")
+async def api_watermark_logo_upload(
+    request: Request,
+    file: UploadFile = File(...),
+    _user: str = Depends(require_user),
+) -> dict[str, Any]:
+    """Install a custom watermark logo.
+
+    Always a PNG: the Settings page uploads a dropped PNG as it is and
+    rasterizes a dropped SVG in the browser first. Every property it has to
+    have is re-derived from these bytes rather than taken from the client (see
+    utils/watermark_logo.py).
+    """
+    _ = request
+    body = await file.read(MAX_LOGO_BYTES + 1)
+    if len(body) > MAX_LOGO_BYTES:
+        raise HTTPException(status_code=413, detail="That image is too large")
+
+    try:
+        status = await asyncio.to_thread(store_custom_logo, body)
+    except LogoRejectedError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except OSError as exc:
+        logger.warning("Could not store the custom watermark logo: %s", exc)
+        raise HTTPException(status_code=500, detail="Could not store the logo") from exc
+
+    return _logo_status_payload(status)
+
+
+@router.delete("/api/settings/watermark-logo")
+@limiter.limit("10/minute")
+async def api_watermark_logo_delete(
+    request: Request, _user: str = Depends(require_user)
+) -> dict[str, Any]:
+    """Drop the custom logo; the bundled fetchly artwork applies again."""
+    _ = request
+    try:
+        removed = await asyncio.to_thread(remove_custom_logo)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail="Could not remove the logo") from exc
+    return {"removed": removed, **_logo_status_payload(LogoStatus(custom=False))}
+
+
 def _parse_bool(value: Any, name: str) -> bool:
-    """Parse a value as boolean, handling string values robustly."""
     if isinstance(value, bool):
         return value
     if isinstance(value, str):
@@ -975,7 +1040,7 @@ def _parse_bool(value: Any, name: str) -> bool:
 @limiter.limit("5/minute")
 async def api_set_settings(
     request: Request,
-    _user: str = Depends(require_session),
+    _user: str = Depends(require_user),
 ) -> dict[str, Any] | JSONResponse:
     """Update retention/download/session settings and optional admin password."""
     payload = await get_json_body(request)
@@ -1008,9 +1073,9 @@ async def api_set_settings(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=f"Public hostname: {exc}") from exc
 
-    if "download_mp4_preset" in payload:
-        enabled = _parse_bool(payload["download_mp4_preset"], "download_mp4_preset")
-        settings_to_update["download_mp4_preset"] = "true" if enabled else "false"
+    if "download_compatible_output" in payload:
+        enabled = _parse_bool(payload["download_compatible_output"], "download_compatible_output")
+        settings_to_update["download_compatible_output"] = "true" if enabled else "false"
 
     if "video_watermark" in payload:
         enabled = _parse_bool(payload["video_watermark"], "video_watermark")
@@ -1105,7 +1170,6 @@ async def api_submit(
     confirm_duplicate: bool = Form(False),
     _user: str = Depends(require_user),
 ) -> dict[str, Any] | JSONResponse:
-    """Submit a new download job."""
     _ = request
     media_type = str(media_type).strip().lower()
     quality_value = str(quality).strip().lower()
@@ -1118,18 +1182,16 @@ async def api_submit(
             detail=f"Invalid quality. Allowed: {', '.join(sorted(_ALLOWED_QUALITIES))}",
         )
 
-    # Validate media URL (platform detected from URL: YouTube / TikTok / Instagram)
     is_valid, error_msg = validate_media_url(url)
     if not is_valid:
         raise HTTPException(status_code=400, detail=error_msg)
 
     clean_url = url.strip()
 
-    # Same (url, type, quality) already downloaded or in flight: surface it to
-    # the caller as a conflict instead of silently creating a second job (see
-    # find_active_job_for_submission - errored/cancelled jobs don't count, so a
-    # retry after failure is never blocked). The frontend re-submits with
-    # confirm_duplicate=true once the user confirms they want it anyway.
+    # Same (url, type, quality) already downloaded or in flight: return a 409
+    # rather than silently making a second job. Errored/cancelled don't count
+    # (find_active_job_for_submission), so a retry is never blocked; the
+    # frontend re-submits with confirm_duplicate=true on confirmation.
     if not confirm_duplicate:
         existing_job = await asyncio.to_thread(
             find_active_job_for_submission, clean_url, media_type, quality_value
@@ -1140,7 +1202,7 @@ async def api_submit(
                 content={"detail": "duplicate_job", "existing_job": job_to_dict(existing_job)},
             )
 
-    # Try to extract metadata with short timeout - don't block job creation if it fails
+    # Best-effort metadata; job creation must not block on it.
     meta: dict[str, object] = {"video_title": None, "video_meta_hover": None, "duration_seconds": None}
     try:
         meta = await asyncio.wait_for(extract_video_meta_async(clean_url), timeout=8.0)
@@ -1161,8 +1223,8 @@ async def api_submit(
         "queued",
         video_title=meta["video_title"],
         video_meta_hover=meta["video_meta_hover"],
-        # The source's own runtime, so the job shows a length while it is still
-        # queued; the worker replaces it with the ffprobe value when done.
+        # Source runtime, so the job shows a length while queued; the worker
+        # replaces it with the ffprobe value.
         duration_seconds=meta.get("duration_seconds"),
     )
     if not submit_download((job_id, clean_url, media_type, quality_value)):
@@ -1179,9 +1241,8 @@ async def api_submit(
         raise HTTPException(status_code=503, detail="Job queue is full, please try again later")
     job = await asyncio.to_thread(get_job, job_id)
     if not job:
-        # Row vanished between insert and read (concurrent retention sweep or
-        # manual delete). The job is queued either way, but there is nothing to
-        # hand back, so say so instead of failing inside job_to_dict().
+        # Row vanished between insert and read (retention sweep or manual
+        # delete); the job is queued, but there is nothing to hand back.
         raise HTTPException(status_code=500, detail="Submitted job could not be loaded")
     return job_to_dict(job)
 
@@ -1193,7 +1254,6 @@ async def cancel_job(
     job_id: uuid.UUID,
     _user: str = Depends(require_user_json),
 ) -> dict[str, Any]:
-    """Cancel a running or queued job."""
     _ = request
 
     job_id_str = str(job_id)
@@ -1217,7 +1277,9 @@ async def cancel_job(
     if not cancelled:
         raise HTTPException(status_code=409, detail="Job state changed before cancellation")
 
-    cancel_worker_job(job_id_str)
+    # Terminates the job's subprocess with a SIGTERM/SIGKILL grace period, so it
+    # blocks for up to ~2s - off the event loop, like every other call here.
+    await asyncio.to_thread(cancel_worker_job, job_id_str)
     logger.info("Cancellation requested for job %s (status: %s)", job_id_str, status)
 
     job = await asyncio.to_thread(get_job, job_id_str)
@@ -1233,15 +1295,12 @@ async def retry_job(
     job_id: uuid.UUID,
     _user: str = Depends(require_user_json),
 ) -> dict[str, Any]:
-    """Re-queue a failed or cancelled job in place, keeping its row and id.
+    """Re-queue a failed/cancelled job in place, keeping its row and id.
 
-    Only allowed from "error" and "cancelled": retrying a job that is still
-    in flight (or already succeeded) would race the worker or duplicate a
-    completed download. Resetting the existing row - rather than inserting a
-    new one - is what makes this a refresh of the same list entry instead of
-    a second job appearing above it; every result field the previous attempt
-    left behind (message, filesize, codec, ...) is cleared so the row does
-    not show stale data from the failed run while the retry is in flight.
+    Only from "error"/"cancelled" (retrying an in-flight or done job would
+    race the worker or duplicate a download). The row is reset - not replaced -
+    so it refreshes in place, and every result field from the failed run is
+    cleared so no stale data shows.
     """
     _ = request
 
@@ -1278,8 +1337,8 @@ async def retry_job(
     if not requeued:
         raise HTTPException(status_code=409, detail="Job state changed before retry")
 
-    # A job cancelled while it was queued still carries its in-memory cancel
-    # marker (and possibly its queue entry). Both would cancel the retry again.
+    # A job cancelled while queued still carries its in-memory cancel marker
+    # (and maybe its queue entry); both would cancel the retry again.
     clear_cancellation(job_id_str)
 
     if not submit_download((job_id_str, str(job["url"]), str(job["type"]), str(job["quality"]))):

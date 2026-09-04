@@ -16,9 +16,7 @@ export default {
     ],
 
     rules: {
-        // The stylesheet is hand-written and heavily commented; these are
-        // cosmetic rules that would churn thousands of lines without changing
-        // a single rendered pixel.
+        // Cosmetic rules that would churn thousands of lines for no pixel change.
         "comment-empty-line-before": null,
         "declaration-empty-line-before": null,
         "rule-empty-line-before": null,
@@ -35,14 +33,12 @@ export default {
         // rgb()-with-slash form buys nothing and would churn 140 declarations.
         "color-function-alias-notation": null,
 
-        // -webkit-* prefixes here are load-bearing, not legacy: Safari and
-        // iOS/iPadOS still need -webkit-backdrop-filter, -webkit-line-clamp and
-        // -webkit-overflow-scrolling. Stripping them would break the very
-        // browsers the mobile audit targets.
+        // -webkit-* prefixes here are load-bearing for Safari/iOS
+        // (backdrop-filter, line-clamp, overflow-scrolling).
         "property-no-vendor-prefix": null,
 
-        // Range notation - (width <= 767.98px) - only landed in Safari 16.4.
-        // The prefix form works on every iOS version fetchly still supports.
+        // Range notation only landed in Safari 16.4; the prefix form works on
+        // every iOS version fetchly supports.
         "media-feature-range-notation": null,
 
         // BEM: block, block__element, block--modifier.
@@ -58,9 +54,8 @@ export default {
             { message: "Expected id selector to be camelCase or kebab-case, matching the JS lookups" },
         ],
 
-        // style.css is organised in component sections, so a selector may be
-        // declared once for layout and again in a later theme section. That is
-        // deliberate here, not an accidental override.
+        // A selector may be declared in a layout section and again in a theme
+        // section - deliberate here.
         "no-duplicate-selectors": null,
 
         // These catch real defects rather than formatting drift.
@@ -90,10 +85,8 @@ export default {
         "string-no-newline": true,
         "unit-no-unknown": true,
 
-        // iOS/iPad safety net: `100vh` does not account for Safari's collapsing
-        // toolbar, so a full-height shell overflows on iPhone and in iPad
-        // Split View. Pair it with a 100dvh (or svh) declaration right after -
-        // the duplicate-property ignore above permits exactly that.
+        // `100vh` overflows under Safari's collapsing toolbar; pair it with a
+        // 100dvh declaration (permitted by the duplicate-property ignore above).
         "declaration-property-value-disallowed-list": [
             {
                 "/^(min-|max-)?height$/": ["/^100vh$/"],

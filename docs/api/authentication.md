@@ -68,15 +68,15 @@ with `Set-Cookie: fetchly_session=...`.
 
 ## CSRF
 
-`/login`, `/logout`, and `/api/submit` are protected by a double-submit cookie.
+`/login`, `/logout`, and the entire `/api` prefix are protected by a double-submit
+cookie — not just `/api/submit`. Every `POST`/`PUT`/`PATCH`/`DELETE` under `/api/*`
+(settings writes, job cancel/retry/remove-all, cookie import/delete, trim create/delete,
+Lalal.ai actions, share link creation, and more) requires the token. Safe methods
+(`GET`, `HEAD`, `OPTIONS`) are never checked, protected or not.
 
 1. `GET /login` sets the `fetchly_csrf` cookie and embeds the same value in the page
 2. Send it back in the `X-CSRF-Token` header, or as a `csrf_token` form field
 3. A mismatch returns `403`
-
-Other API routes are not CSRF-protected: they are JSON-only endpoints that a
-cross-origin form cannot forge, and the `SameSite=Lax` session cookie is not attached to
-cross-site requests.
 
 ## Using the session
 

@@ -76,6 +76,12 @@
         </div>
     </div>
 
+    {# Holds this session's just-started job so it stays visible with Show Job
+       History off. Filled by current-job.js; empty/hidden on a fresh load. No
+       card chrome or heading (the job item is already a card); the label is in
+       aria-label. #}
+    <section class="current-job-card d-none mb-4" id="currentJobCard" aria-label="Current job"></section>
+
     <div class="mobile-job-history-option" id="mobileJobHistoryOption">
         <div class="form-check form-switch d-flex align-items-center justify-content-between w-100 m-0">
             <label class="form-check-label" for="showJobHistoryToggle">Show Job History</label>
@@ -148,9 +154,8 @@
                 <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close dialog"></button>
             </div>
             <div class="modal-body d-flex flex-column gap-3">
-                <!-- Waveform. The loader overlays it instead of replacing it:
-                     WaveSurfer measures its container the moment it is created,
-                     so #trimWave must never be display:none while it exists. -->
+                <!-- Waveform. The loader overlays it (never display:none):
+                     WaveSurfer measures its container on creation. -->
                 <div class="trim-wave-stage">
                     <div id="trimLoader" class="trim-loader">
                         <div class="spinner-border text-primary" role="status">
@@ -332,5 +337,5 @@
 {% endblock %}
 
 {% block page_scripts %}
-<script type="module" src="/static/js/main.js?v=20260902a"></script>
+<script type="module" src="/static/js/main.js?v=20260903a"></script>
 {% endblock %}

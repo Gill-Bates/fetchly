@@ -42,39 +42,40 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# Client-facing message for a failed Hidden_Captcha check. Deliberately
-# generic and identical for every failing signal (honeypot filled, missing/
-# invalid/expired token, too-fast submit) so a caller can never learn which
-# invisible check tripped.
+# One generic message for every Hidden_Captcha failure (honeypot, bad/expired
+# token, too-fast submit) so a caller cannot tell which check tripped.
 _CAPTCHA_REJECTED_MESSAGE = (
     "We couldn't verify your submission. Please reload the page and try again."
 )
 
-# Effective identity while authentication is switched off. fetchly has a single
-# admin account and no per-user data ownership, so the authorization
-# dependencies just need *some* stable truthy principal to hand back. This is
-# never a login name: with authentication off there is no login at all, and
-# with it on the real name comes from the admin_username setting.
+# Stand-in principal while authentication is off - the auth dependencies just
+# need some stable truthy value. Never a login name (the real one comes from
+# the admin_username setting when authentication is on).
 LOCAL_USER: Final = "local"
 
-# Module-level state (set during init)
 _templates: Jinja2Templates | None = None
 _SECRET_KEY: str = ""
 
 
+def get_csrf_token(request: Request) -> str:
+    """Read the CSRF token CSRFMiddleware attached to request.state.
+
+    Empty when the request path is not one of the middleware's protected
+    paths (see middleware/csrf.py), which never happens for a page that
+    renders a form needing this token.
+    """
+    return getattr(request.state, "csrf_token", "")
+
+
 def _login_template_context(request: Request, **extra: object) -> dict[str, object]:
-    """Build template context with CSRF token for login page."""
-    context: dict[str, object] = {"csrf_token": getattr(request.state, "csrf_token", "")}
+    context: dict[str, object] = {"csrf_token": get_csrf_token(request)}
     context.update(extra)
     return context
 
 
 def init_auth(templates: Jinja2Templates, secret_key: str) -> None:
-    """Initialize the auth module with required dependencies.
-
-    Must be called before routes are used. There is deliberately no bootstrap
-    credential to pass in: the admin account is created in Settings → Security
-    and lives only in the database.
+    """Initialize the auth module. No bootstrap credential: the admin account
+    is created in Settings → Security and lives only in the database.
     """
     global _templates, _SECRET_KEY
     _templates = templates
@@ -82,12 +83,10 @@ def init_auth(templates: Jinja2Templates, secret_key: str) -> None:
 
 
 def _derive_salt(username: str) -> bytes:
-    """Derive a salt from the secret key and username."""
     return sha256(f"{_SECRET_KEY}:{username}:salt".encode()).digest()
 
 
 def _derive_pepper() -> str:
-    """Derive a pepper from the secret key."""
     return sha256(f"{_SECRET_KEY}:pepper".encode()).hexdigest()
 
 
@@ -147,10 +146,8 @@ def verify_login(username: str, password: str) -> bool:
 
 
 def current_user(request: Request) -> str | None:
-    """Get current authenticated user from request cookies."""
+    """Current user from the session cookie, or LOCAL_USER when auth is off."""
     if not is_authentication_enabled():
-        # No login gate at all: hand back the local principal so every
-        # authorization dependency keeps working unchanged.
         return LOCAL_USER
     return validate_session(request.cookies.get(SESSION_COOKIE))
 
@@ -158,28 +155,16 @@ def current_user(request: Request) -> str | None:
 def is_authentication_enabled() -> bool:
     """Return whether the application requires a login.
 
-    Reads the in-memory session-settings cache rather than sqlite directly:
-    this is called from ``current_user()``, which async route handlers invoke
-    inline (not through ``Depends``) on every HTML page and SSE tick, so a
-    blocking database read here would run on the event loop. The cache is
-    refreshed synchronously at startup and on every settings write (see
-    app/session.py::refresh_session_settings_cache), and periodically in the
-    background, so it fails closed by default and never lags a local change
-    by more than app/main.py's refresh interval.
+    Reads the in-memory session-settings cache, not sqlite: ``current_user()``
+    calls this inline on every HTML page and SSE tick, so a blocking read would
+    hit the event loop. The cache fails closed and is refreshed at startup, on
+    every settings write, and periodically (see refresh_session_settings_cache).
     """
     return get_cached_authentication_enabled()
 
 
 def require_user(request: Request) -> str:
-    """Dependency: require authenticated user."""
-    user = current_user(request)
-    if not user:
-        raise HTTPException(status_code=401, detail="Authentication required")
-    return user
-
-
-def require_session(request: Request) -> str:
-    """Dependency: require a valid authenticated session."""
+    """Dependency: authenticated user, else 401."""
     user = current_user(request)
     if not user:
         raise HTTPException(status_code=401, detail="Authentication required")
@@ -187,7 +172,7 @@ def require_session(request: Request) -> str:
 
 
 def require_user_json(request: Request) -> str:
-    """Dependency: require authenticated user (JSON response)."""
+    """Dependency: authenticated user, else 401 with a JSON-friendly detail."""
     user = current_user(request)
     if not user:
         raise HTTPException(status_code=401, detail="unauthorized")
@@ -195,7 +180,7 @@ def require_user_json(request: Request) -> str:
 
 
 def require_html_auth(request: Request) -> RedirectResponse | None:
-    """Check auth and return redirect if not authenticated."""
+    """Return a /login redirect when not authenticated, else None."""
     if current_user(request):
         return None
     return RedirectResponse(url="/login", status_code=303)
@@ -213,15 +198,9 @@ def _do_logout(request: Request) -> RedirectResponse:
     return response
 
 
-# ============================================================================
-# Routes
-# ============================================================================
-
-
 @router.get("/login", response_class=HTMLResponse)
 @limiter.limit("20/minute")
 async def login_page(request: Request):
-    """Login page."""
     if current_user(request):
         return RedirectResponse(url="/", status_code=303)
 
@@ -238,7 +217,6 @@ async def login_page(request: Request):
 
 
 class LoginRequest(BaseModel):
-    """JSON body for login API."""
     model_config = ConfigDict(extra="forbid")
 
     username: str = Field(min_length=1, max_length=128)
@@ -250,11 +228,9 @@ class LoginRequest(BaseModel):
 @router.post("/login")
 @limiter.limit("5/minute")
 async def login(request: Request, body: LoginRequest):
-    """Process login (JSON API)."""
     if not is_authentication_enabled():
-        # Authentication-disabled mode has no login gate. Keep CAPTCHA and
-        # credential verification inactive as well and let the caller proceed
-        # as the configured application user via current_user().
+        # No login gate: skip CAPTCHA/credential checks; current_user() grants
+        # LOCAL_USER anyway.
         return JSONResponse(content={"ok": True, "redirect": "/"})
 
     captcha_outcome = verify_captcha_token(
@@ -283,5 +259,4 @@ async def login(request: Request, body: LoginRequest):
 @router.post("/logout")
 @limiter.limit("20/minute")
 async def logout_post(request: Request):
-    """Process logout (POST)."""
     return _do_logout(request)

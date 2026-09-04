@@ -5,8 +5,8 @@
 #
 
 """Lalal.ai API client for audio stem separation.
-   OpenAPI Spec: https://www.lalal.ai/api/v1/openapi.json
 
+OpenAPI spec: https://www.lalal.ai/api/v1/openapi.json
 """
 
 import asyncio
@@ -112,8 +112,6 @@ class LalalProcessingError(LalalError):
 
 
 class UploadResult(TypedDict):
-    """Result of file upload."""
-
     id: str
     name: str
     duration: float
@@ -121,10 +119,8 @@ class UploadResult(TypedDict):
 
 
 class SplitResult(TypedDict):
-    """Result of stem split."""
-
-    stem_track: str  # URL to download stem (e.g., vocals)
-    back_track: str  # URL to download backing track (e.g., instrumental)
+    stem_track: str  # URL to download stem (e.g. vocals)
+    back_track: str  # URL to download backing track (e.g. instrumental)
     stem_track_size: int
     back_track_size: int
     duration: float
@@ -164,11 +160,9 @@ def _stringify_error_value(value: Any) -> str | None:
 def _json_object(response: httpx.Response) -> dict[str, Any]:
     """Return the response body as a dict, or ``{}`` when it is not a JSON object.
 
-    Proxies and CDNs answer with HTML error pages, so ``response.json()`` raises
-    on exactly the responses whose status code the callers want to report. Every
-    caller already treats a non-dict body as "no usable payload", so an
-    unparseable body is folded into the same case and the status check decides
-    which LalalError to raise.
+    Proxies and CDNs answer errors with HTML, so ``response.json()`` raises on
+    exactly the responses callers want to report on. Folding an unparseable
+    body into the "no payload" case lets the status check pick the LalalError.
     """
     try:
         payload = response.json()
@@ -195,10 +189,8 @@ def _extract_api_error(data: dict[str, Any]) -> str:
 def parse_minutes_left(quota: object) -> float | None:
     """Read the remaining processing minutes from a check_quota() payload.
 
-    The API answers ``{"minutes_left": 261.5}`` in minutes. The web-session
-    client has no equivalent endpoint and returns constraints instead, so a
-    missing or unusable value is reported as "unknown" rather than as zero -
-    the difference between "no balance left" and "never asked".
+    The API answers ``{"minutes_left": 261.5}``. A missing or unusable value is
+    "unknown" (None), not zero - the web-session client has no such endpoint.
     """
     if not isinstance(quota, dict):
         return None
@@ -303,7 +295,6 @@ class _BaseLalalClient:
         raise NotImplementedError
 
     async def close(self) -> None:
-        """Close the underlying HTTP client."""
         async with self._client_lock:
             if self._client is not None:
                 await self._client.aclose()
@@ -402,12 +393,6 @@ class LalalClient(_BaseLalalClient):
     """Async client for Lalal.ai API."""
 
     def __init__(self, api_key: str, timeout: float = 300.0) -> None:
-        """Initialize the Lalal.ai client.
-
-        Args:
-            api_key: Your Lalal.ai API license key
-            timeout: HTTP timeout in seconds (default 5 minutes for uploads)
-        """
         if not api_key:
             raise ValueError("API key is required")
 
@@ -459,12 +444,8 @@ class LalalClient(_BaseLalalClient):
         )
 
     async def check_quota(self) -> dict[str, Any]:
-        """Check remaining API quota/credits.
-
-        Returns:
-            Dictionary with quota information; ``minutes_left`` holds the
-            processing minutes the account can still spend (see
-            :func:`parse_minutes_left`).
+        """Check remaining API quota; ``minutes_left`` holds spendable minutes
+        (see :func:`parse_minutes_left`).
         """
         client = await self._get_client()
         response = await client.post(f"{LALAL_API_PREFIX}/limits/minutes_left/", timeout=30.0)
@@ -478,14 +459,7 @@ class LalalClient(_BaseLalalClient):
         return data
 
     async def upload_file(self, file_path: Path | str) -> UploadResult:
-        """Upload an audio file for processing.
-
-        Args:
-            file_path: Path to the audio file
-
-        Returns:
-            Upload result with file ID and metadata
-        """
+        """Upload an audio file for processing; returns its file ID and metadata."""
         file_path = Path(file_path)
 
         if not file_path.exists():
@@ -536,21 +510,10 @@ class LalalClient(_BaseLalalClient):
         extraction_level: ExtractionLevel | str | None = None,
         multivocal: str | None = None,
     ) -> str:
-        """Start stem separation processing.
+        """Start stem separation for an uploaded ``file_id``; returns a task ID.
 
-        Args:
-            file_id: ID from upload_file result
-            stem: Type of stem to extract
-            split_type: Neural network to use
-            enhanced_processing: Forward Lalal.ai's enhanced-processing flag when supported
-            split_mode: Processing mode/endpoint (v1 API)
-            noise_cancelling_level: Optional noise cancelling level (0-2)
-            dereverb_enabled: Optional dereverb toggle
-            extraction_level: Optional extraction intensity
-            multivocal: Optional multi-vocal mode ("lead_back")
-
-        Returns:
-            Processing task ID
+        ``noise_cancelling_level`` is 0-2, ``multivocal`` is ``"lead_back"`` or
+        None. ``split_mode`` selects the endpoint family.
         """
         client = await self._get_client()
         if noise_cancelling_level is not None and not (0 <= noise_cancelling_level <= 2):
@@ -617,14 +580,7 @@ class LalalClient(_BaseLalalClient):
         return task_id
 
     async def check_progress(self, task_id: str) -> dict[str, Any]:
-        """Check processing progress.
-
-        Args:
-            task_id: Task ID from split()
-
-        Returns:
-            Progress information including state and percentage
-        """
+        """Return the progress payload (state + percentage) for a split() task."""
         client = await self._get_client()
         response = await client.post(
             f"{LALAL_API_PREFIX}/check/",
@@ -661,24 +617,9 @@ class LalalClient(_BaseLalalClient):
         download_backing: bool = True,
         progress_callback: StageProgressCallback | None = None,
     ) -> dict[str, Path]:
-        """Complete workflow: upload, process, and download results.
+        """Full workflow (upload, process, download); returns ``{name: path}``.
 
-        Args:
-            input_path: Path to input audio file
-            output_dir: Directory for output files
-            stem: Type of stem to extract
-            split_type: Neural network to use
-            split_mode: Processing mode/endpoint (v1 API)
-            noise_cancelling_level: Optional noise cancelling level (0-2)
-            dereverb_enabled: Optional dereverb toggle
-            extraction_level: Optional extraction intensity
-            multivocal: Optional multi-vocal mode ("lead_back")
-            download_stem: Download the extracted stem
-            download_backing: Download the backing track
-            progress_callback: Optional callback(stage: str, progress: int)
-
-        Returns:
-            Dictionary with paths to downloaded files
+        ``progress_callback`` is ``(stage: str, progress: int)``.
         """
         input_path = Path(input_path)
         output_dir = Path(output_dir)
@@ -723,9 +664,8 @@ class LalalClient(_BaseLalalClient):
         # 4. Download results
         results: dict[str, Path] = {}
         base_name = input_path.stem
-        # Lalal.ai returns each stem in the format that was uploaded. Hardcoding
-        # ".mp3" here wrote Opus payloads into files named .mp3, which players
-        # and the download route then had to guess at.
+        # Lalal.ai returns each stem in the uploaded format; a hardcoded ".mp3"
+        # would mislabel Opus payloads.
         result_suffix = input_path.suffix.lower() or ".mp3"
 
         if download_stem and split_result["stem_track"]:
@@ -749,8 +689,8 @@ class LalalClient(_BaseLalalClient):
 class LalalWebSessionClient(_BaseLalalClient):
     """Experimental client using Lalal.ai website session credentials.
 
-    This mode is best-effort and may break when Lalal.ai web endpoints change.
-    Prefer LalalClient with official API key for production automation.
+    Best-effort; may break when the web endpoints change. Prefer LalalClient
+    with an official API key.
     """
 
     def __init__(self, session_cookie: str, csrf_token: str, timeout: float = 300.0) -> None:
@@ -808,10 +748,7 @@ class LalalWebSessionClient(_BaseLalalClient):
         )
 
     async def check_quota(self) -> dict[str, Any]:
-        """Best-effort check for website session mode.
-
-        The web API does not expose official API minutes like /api/v1/limits/minutes_left/.
-        """
+        """Best-effort quota check; the web API exposes no minutes_left endpoint."""
         client = await self._get_client()
         response = await client.post("/api/constraints/", data={"params": "[]"}, timeout=30.0)
         if response.status_code in {401, 403}:
@@ -969,11 +906,7 @@ class LalalWebSessionClient(_BaseLalalClient):
 
 
 def get_lalal_client() -> LalalClient | None:
-    """Get Lalal.ai client using stored auth key credentials.
-
-    Returns:
-        Lalal provider instance or None if not configured
-    """
+    """LalalClient from the stored auth key, or None when not configured."""
     from .db import get_settings
     from .utils.template_filters import is_lalala_configured
 
@@ -993,20 +926,9 @@ async def separate_vocals(
     extract_instrumental: bool = True,
     progress_callback: StageProgressCallback | None = None,
 ) -> dict[str, Path]:
-    """Convenience function to separate vocals from instrumental.
+    """Separate vocals from instrumental; returns ``{'vocals'|'instrumental': path}``.
 
-    Args:
-        input_path: Path to input audio file
-        output_dir: Directory for output files
-        extract_vocals: Download vocals track
-        extract_instrumental: Download instrumental track
-        progress_callback: Optional callback(stage: str, progress: int)
-
-    Returns:
-        Dictionary with 'vocals' and/or 'instrumental' paths
-
-    Raises:
-        LalalError: If auth key is not configured or processing fails
+    Raises LalalError when the auth key is missing or processing fails.
     """
     try:
         client = await asyncio.to_thread(get_lalal_client)
@@ -1027,7 +949,6 @@ async def separate_vocals(
     finally:
         await client.close()
 
-    # Rename keys for clarity
     output: dict[str, Path] = {}
     if "stem" in results:
         output["vocals"] = results["stem"]

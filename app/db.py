@@ -48,17 +48,16 @@ __all__ = [
     "list_jobs",
     "list_jobs_requiring_audio_analysis",
     "list_queued_jobs",
+    "now_iso",
     "paginate_jobs",
     "set_settings",
     "update_job",
     "update_job_if_status",
     "upsert_audio_analysis_cache",
     "utc_timestamp",
+    "with_finished_at",
 ]
 
-# --------------------------------------------------------------------------- #
-# Configuration
-# --------------------------------------------------------------------------- #
 DB_PATH: Final = get_data_dir() / "jobs.db"
 
 # Whitelist of updatable columns to prevent SQL injection via column names.
@@ -133,11 +132,16 @@ _SETTINGS_DEFAULTS: Final[dict[str, str]] = {
     "download_timeout_minutes": "60",
     "transcode_timeout_minutes": "120",
     "download_max_filesize_gib": "4",
-    # Default on: the downloaded file is played back in the browser (player,
-    # waveform, trim view), and only H.264/AAC in MP4 plays everywhere -
-    # VP9/AV1 renditions do not in Safari/iOS. Users who want the highest
-    # resolution over compatibility can turn it off on the settings page.
-    "download_mp4_preset": "true",
+    # Off means "what the source delivers is what the user gets": yt-dlp picks
+    # the best rendition regardless of codec and the streams are only muxed
+    # (losslessly) into whatever container fits - .webm for VP9/Opus, .mkv for
+    # AV1. On means H.264/AAC in MP4, which plays on Safari, iOS, TVs and
+    # editing software; it is preferred at format-selection time and only
+    # re-encoded when the source has no compatible rendition at all. The
+    # watermark implies it (that pass encodes anyway), so the effective value
+    # is `download_compatible_output or video_watermark` - see
+    # app/worker.py::_compatible_output_required.
+    "download_compatible_output": "false",
     # Burns the fetchly logo into the bottom-right corner of every downloaded
     # video, with the public hostname underneath when one is configured. On by
     # default; costs nothing on the capped qualities (the overlay rides along
@@ -225,13 +229,25 @@ def utc_timestamp() -> str:
     return datetime.now(UTC).replace(microsecond=0).strftime("%Y-%m-%d %H:%M:%S")
 
 
+def now_iso() -> str:
+    """Return the current UTC timestamp as ISO-8601 with an offset.
+
+    For status-event payloads only (informational, never persisted) - stored
+    timestamps always go through utc_timestamp() above, whose plain
+    "YYYY-MM-DD HH:MM:SS" format sorts correctly as text in SQLite. Mixing the
+    two formats in a stored column previously caused finished_at to sort
+    incorrectly; keep them distinct and never persist this one.
+    """
+    return datetime.now(UTC).isoformat()
+
+
 _INTERNAL_SETTINGS_KEYS: Final[frozenset[str]] = frozenset({
     "admin_password_hash",
     "session_version",
     "statistics_reset_at",
 })
 _SECRET_SETTINGS_KEYS: Final[frozenset[str]] = frozenset({"lalalaai_auth_key"})
-# Only user-writable keys.  Internal keys require allow_internal=True in set_settings.
+# User-writable keys only; internal keys need allow_internal=True in set_settings.
 _ALLOWED_SETTINGS_KEYS: Final[frozenset[str]] = frozenset(_SETTINGS_DEFAULTS)
 
 # Statuses that count as "completed" for downloads / stats purposes.
@@ -241,6 +257,18 @@ DOWNLOADABLE_STATUSES: Final[frozenset[str]] = COMPLETED_STATUSES | frozenset({"
 # All terminal statuses (no further transitions possible).
 TERMINAL_JOB_STATUSES: Final[frozenset[str]] = COMPLETED_STATUSES | frozenset({"error", "cancelled"})
 _RECOVERABLE_IN_FLIGHT_STATUSES: Final[frozenset[str]] = frozenset({"processing", "downloading", "transcoding"})
+
+
+def with_finished_at(status: str, extra: dict[str, Any]) -> dict[str, Any]:
+    """Add ``finished_at`` to *extra* when *status* is terminal.
+
+    Centralizes the invariant "a terminal status write must carry a
+    finished_at timestamp" so worker modules do not each have to remember it
+    per call site. A caller-supplied ``finished_at`` is left untouched.
+    """
+    if status in TERMINAL_JOB_STATUSES and "finished_at" not in extra:
+        return {**extra, "finished_at": utc_timestamp()}
+    return extra
 
 _SETTINGS_TYPES: Final[dict[str, Callable[[object], Any]]] = {
     "retention_days": lambda value: _parse_bounded_int(value, minimum=0, maximum=365),
@@ -255,7 +283,7 @@ _SETTINGS_TYPES: Final[dict[str, Callable[[object], Any]]] = {
     "download_timeout_minutes": lambda value: _parse_bounded_int(value, minimum=1, maximum=240),
     "transcode_timeout_minutes": lambda value: _parse_bounded_int(value, minimum=1, maximum=480),
     "download_max_filesize_gib": lambda value: _parse_bounded_int(value, minimum=1, maximum=100),
-    "download_mp4_preset": _parse_bool,
+    "download_compatible_output": _parse_bool,
     "video_watermark": _parse_bool,
     "audio_analysis_max_minutes": lambda value: _parse_bounded_int(value, minimum=0, maximum=240),
     "audio_analysis_timeout_minutes": lambda value: _parse_bounded_int(value, minimum=1, maximum=60),
@@ -272,9 +300,6 @@ _SETTINGS_TYPES: Final[dict[str, Callable[[object], Any]]] = {
 }
 
 
-# --------------------------------------------------------------------------- #
-# Connection management
-# --------------------------------------------------------------------------- #
 def _configure_connection(con: sqlite3.Connection) -> None:
     con.row_factory = sqlite3.Row
     # Enforce share_links.job_id -> jobs(id) ON DELETE CASCADE. SQLite defaults
@@ -364,19 +389,14 @@ def close_db() -> None:
             con.close()
 
 
-# --------------------------------------------------------------------------- #
-# Schema – idempotent initial creation
-# --------------------------------------------------------------------------- #
 def init_db() -> None:
-    """Create the database schema for a fresh deployment and stamp its version.
+    """Create the schema for a fresh deployment and stamp its version.
 
-    There is no versioned migration runner: the project ships a single schema
-    and every table is created with ``IF NOT EXISTS``. The only cross-version
-    safety here is the ``PRAGMA user_version`` guard below, which stops an older
-    build from opening a database a newer build has already written.
+    No versioned migration runner: a single schema, every table created with
+    ``IF NOT EXISTS``. The ``PRAGMA user_version`` guard below is the only
+    cross-version safety - it stops an older build from opening a newer file.
     """
     with get_db() as con:
-        # Configure persistent database pragmas
         _configure_database(con)
 
         schema_version = int(con.execute("PRAGMA user_version").fetchone()[0])
@@ -452,6 +472,17 @@ def init_db() -> None:
             "WHERE finished_at IS NOT NULL AND finished_at LIKE '%T%'"
         )
 
+        # "download_mp4_preset" became "download_compatible_output" when the
+        # setting stopped being a yt-dlp format-sort preset and became a
+        # promise about the output. Same meaning, so the stored choice carries
+        # over; without this an upgraded install would silently fall back to
+        # the new default. No-op once migrated (the old row is dropped).
+        con.execute(
+            "INSERT OR IGNORE INTO settings (key, value) "
+            "SELECT 'download_compatible_output', value FROM settings WHERE key = 'download_mp4_preset'"
+        )
+        con.execute("DELETE FROM settings WHERE key = 'download_mp4_preset'")
+
         con.execute("CREATE INDEX IF NOT EXISTS idx_jobs_created_at_id ON jobs(created_at DESC, id DESC)")
         con.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status_finished_at ON jobs(status, finished_at)")
         con.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status_created_at ON jobs(status, created_at DESC)")
@@ -476,9 +507,6 @@ def init_db() -> None:
         con.commit()
 
 
-# --------------------------------------------------------------------------- #
-# CRUD
-# --------------------------------------------------------------------------- #
 def insert_job(
     job_id: str,
     url: str,
@@ -516,11 +544,9 @@ def update_job(job_id: str, **fields: Any) -> bool:
     if not fields:
         return False
 
-    # Validate that all fields are known; raise if any unknown fields are provided.
     unknown_fields = set(fields) - _UPDATEABLE_COLUMNS
     if unknown_fields:
         raise ValueError(f"Unknown fields: {sorted(unknown_fields)}")
-
     if not all(column.isidentifier() for column in fields):
         raise ValueError("Invalid column name")
     if "status" in fields:
@@ -647,10 +673,8 @@ def list_queued_jobs(limit: int = 500) -> list[sqlite3.Row]:
 
 
 def claim_next_queued_job() -> sqlite3.Row | None:
-    """Atomically claim and transition the next queued job to processing.
-
-    This prevents multiple workers from processing the same job.
-    Returns the updated job row or None if no queued jobs exist.
+    """Atomically move the next queued job to processing so two workers cannot
+    claim the same one. Returns the updated row, or None if none are queued.
     """
     with get_db() as con:
         row = con.execute(
@@ -855,7 +879,6 @@ def delete_jobs_and_share_links(job_ids: list[str]) -> tuple[int, int]:
 
 
 def job_exists(job_id: str) -> bool:
-    """Check if a job exists in the database."""
     with get_db() as con:
         row = con.execute(
             "SELECT 1 FROM jobs WHERE id=? LIMIT 1",
@@ -1004,9 +1027,6 @@ def purge_old_jobs(keep_days: int, *, batch_size: int = _MAX_QUERY_LIMIT) -> lis
     return deleted
 
 
-# --------------------------------------------------------------------------- #
-# Settings
-# --------------------------------------------------------------------------- #
 def get_settings(
     *,
     include_internal: bool = False,
@@ -1014,14 +1034,9 @@ def get_settings(
 ) -> dict[str, Any]:
     """Retrieve settings with type coercion.
 
-    Args:
-        include_internal: When False (default), exclude internal keys such as
-            admin_password_hash and session_version. Set to True only when
-            retrieving settings for internal use (e.g., authentication).
-            User-facing APIs should always use the default False to prevent
-            accidental information disclosure.
-        include_secrets: Include stored credentials such as the Lalal.ai auth
-            key. Callers must opt in explicitly and must not serialize them.
+    ``include_internal`` adds internal keys (admin_password_hash,
+    session_version, ...); ``include_secrets`` adds stored credentials. Both
+    default off - user-facing APIs must never opt in, to avoid disclosure.
     """
     allowed = _ALLOWED_SETTINGS_KEYS - _SECRET_SETTINGS_KEYS
     if include_internal:
@@ -1058,15 +1073,11 @@ def get_settings(
 
 
 def set_settings(data: dict[str, Any], *, allow_internal: bool = False) -> None:
-    """Update settings. Unknown keys are ignored.
+    """Update settings; unknown keys are ignored.
 
-    Args:
-        data: Key/value pairs to persist.
-        allow_internal: When ``True``, internal keys such as
-            ``admin_password_hash`` are also accepted.  Callers that receive
-            data directly from user input must leave this as ``False`` so that
-            the password hash cannot be overwritten without explicit
-            verification.
+    ``allow_internal`` also accepts internal keys such as
+    ``admin_password_hash``. Callers handling user input must leave it
+    ``False`` so the password hash cannot be overwritten unverified.
     """
     allowed = _ALLOWED_SETTINGS_KEYS | _INTERNAL_SETTINGS_KEYS if allow_internal else _ALLOWED_SETTINGS_KEYS
     filtered = {k: v for k, v in data.items() if k in allowed}

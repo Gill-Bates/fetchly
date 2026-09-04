@@ -6,10 +6,8 @@
 
 """pyproject.toml is the single source of truth for the release version.
 
-The release workflow validates the git tag against ``[project] version`` and
-docker/Dockerfile copies the manifest into the image, so a regression that
-reintroduced a second version file - or made the reader fall back to "dev" -
-would ship images labelled with a number nothing else agrees with.
+A regression that reintroduced a second version file, or fell back to "dev",
+would ship mislabelled images.
 """
 
 import tomllib

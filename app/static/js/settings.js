@@ -8,6 +8,7 @@ import { confirmModal } from "./confirm.js";
 import { openCookiePasteDialog } from "./cookie-paste.js?v=20260901a";
 import { fetchStats, toErrorMessage } from "./api.js";
 import { formatLalalMinutes, getCsrfToken, humanSize, isSafeSameOriginRedirect } from "./utils.js";
+import { MAX_LOGO_BYTES, logoFileKind, prepareLogoUpload } from "./watermark-logo.js?v=20260904a";
 
 const AUTO_SAVE_DELAY_MS = 800;
 const REQUEST_TIMEOUT_MS = 10_000;
@@ -193,7 +194,7 @@ const lalalAuthUseKeyBtn = document.getElementById("lalalAuthUseKeyBtn");
 const lalalAuthUseKeySpinner = document.getElementById("lalalAuthUseKeySpinner");
 const lalalActivationKey = document.getElementById("lalalActivationKey");
 const lalalDurationGuard = document.getElementById("lalalDurationGuard");
-const mp4PresetEl = document.getElementById("mp4Preset");
+const compatibleOutputEl = document.getElementById("compatibleOutput");
 const videoWatermarkEl = document.getElementById("videoWatermark");
 const enableAuthenticationEl = document.getElementById("enableAuthentication");
 const retentionDaysEl = document.getElementById("retentionDays");
@@ -344,7 +345,7 @@ function renderLalalStatusLine({ email, remainingMinutes }) {
     lalalStatusLine.replaceChildren();
 
     if (email) {
-        lalalStatusLine.append("Logged in as ");
+        lalalStatusLine.append("Logged in as");
 
         const code = document.createElement("code");
         code.className = "lalal-status-email";
@@ -356,9 +357,15 @@ function renderLalalStatusLine({ email, remainingMinutes }) {
 
     const balance = formatLalalMinutes(remainingMinutes);
     if (balance) {
+        const sep = document.createElement("span");
+        sep.className = "lalal-status-sep";
+        sep.textContent = "·";
+        sep.setAttribute("aria-hidden", "true");
+        lalalStatusLine.appendChild(sep);
+
         const minutes = document.createElement("span");
         minutes.className = "lalal-status-minutes";
-        minutes.textContent = ` - ${balance}`;
+        minutes.textContent = balance;
         minutes.title = "Processing minutes left on this Lalal.ai account";
         lalalStatusLine.appendChild(minutes);
     }
@@ -484,7 +491,9 @@ function validateSettings() {
             download_concurrent_fragments: fragments,
             share_link_max_uses: shareMaxUses,
             public_hostname: publicHostname,
-            download_mp4_preset: mp4PresetEl ? mp4PresetEl.checked : true,
+            // The user's own choice, never the value the watermark forces on
+            // screen - see syncCompatibleOutputLock().
+            download_compatible_output: compatibleOutputEl ? compatibleOutputEl.dataset.userChoice === "true" : false,
             video_watermark: videoWatermarkEl ? videoWatermarkEl.checked : true,
             lalalaai_duration_guard: lalalDurationGuard ? lalalDurationGuard.checked : true,
             ...runtimeLimits,
@@ -996,8 +1005,6 @@ function persistPendingSettingsOnPageHide() {
         saveTimeoutId = null;
     }
 
-    // Normal autosaves use keepalive as well, so an in-flight request can
-    // finish after pagehide without racing a second write of the same fields.
     if (!settingsDirty || isSaving || isSavingAuthentication) {
         return;
     }
@@ -1008,13 +1015,12 @@ function persistPendingSettingsOnPageHide() {
         return;
     }
 
-    // iOS fires pagehide on every tab switch. Clearing the flag up front keeps
-    // a suspended-and-resumed page from re-sending the same payload each time.
+    // iOS fires pagehide on every tab switch; clear the flag up front so a
+    // resumed page does not re-send the payload.
     settingsDirty = false;
 
-    // iOS/Safari may suspend the page before the debounced save runs. The
-    // request is intentionally small and idempotent so keepalive can finish
-    // it during navigation or BFCache entry.
+    // The request is small and idempotent, so keepalive can finish it during
+    // navigation / BFCache entry even if iOS suspends the page.
     isPagehideSaving = true;
     activePagehideSave = fetchWithTimeout("/api/settings", {
         method: "POST",
@@ -1048,7 +1054,7 @@ window.addEventListener("pageshow", (event) => {
 
 const AUTO_SAVE_INPUT_SELECTOR = [
     '[name="download_concurrent_fragments"]',
-    '[name="download_mp4_preset"]',
+    '[name="download_compatible_output"]',
     '[name="video_watermark"]',
     '[name="lalalaai_duration_guard"]',
     '[name="download_worker_count"]',
@@ -1060,6 +1066,211 @@ const AUTO_SAVE_INPUT_SELECTOR = [
     '[name="lalal_max_download_gib"]',
     '[name="session_idle_minutes"]',
 ].join(", ");
+
+/**
+ * Keep the compatibility switch in sync with the watermark.
+ *
+ * The watermark re-encodes to H.264/AAC anyway, so it requires the promise.
+ * Rather than writing that into the stored setting - which would silently
+ * destroy the user's own choice the moment they turn the watermark on - the
+ * switch is only *shown* as forced on and locked. `dataset.userChoice` stays
+ * the single source of truth and is what gets saved.
+ */
+function syncCompatibleOutputLock() {
+    if (!compatibleOutputEl) {
+        return;
+    }
+    const forced = Boolean(videoWatermarkEl?.checked);
+    compatibleOutputEl.checked = forced || compatibleOutputEl.dataset.userChoice === "true";
+    compatibleOutputEl.disabled = forced;
+    document
+        .querySelector('[data-role="compatible-output-forced"]')
+        ?.classList.toggle("d-none", !forced);
+}
+
+function bindCompatibleOutput() {
+    if (!compatibleOutputEl) {
+        return;
+    }
+    // Server-rendered state is the stored choice; the watermark lock is applied
+    // on top of it, never into it.
+    compatibleOutputEl.dataset.userChoice = String(compatibleOutputEl.checked);
+    compatibleOutputEl.addEventListener("change", () => {
+        compatibleOutputEl.dataset.userChoice = String(compatibleOutputEl.checked);
+    });
+    videoWatermarkEl?.addEventListener("change", syncCompatibleOutputLock);
+    syncCompatibleOutputLock();
+}
+
+const logoDropzoneEl = document.querySelector('[data-role="logo-dropzone"]');
+const logoInputEl = document.querySelector('[data-role="logo-input"]');
+const logoPreviewImageEl = document.querySelector('[data-role="logo-preview-image"]');
+const logoLabelEl = document.querySelector('[data-role="logo-label"]');
+const logoTitleEl = document.querySelector('[data-role="logo-title"]');
+const logoMetaEl = document.querySelector('[data-role="logo-meta"]');
+const logoRemoveEl = document.querySelector('[data-role="logo-remove"]');
+
+/** The preview always shows the logo in use, bundled or custom. */
+const BUILT_IN_LOGO_SRC = "/static/img/fetchly_watermark.png";
+
+function renderLogoStatus(status) {
+    const custom = Boolean(status?.custom);
+    logoRemoveEl?.classList.toggle("d-none", !custom);
+
+    if (logoLabelEl) {
+        logoLabelEl.textContent = custom
+            ? "Drop an SVG or PNG to replace this logo"
+            : "Drop an SVG or PNG here or click to choose";
+    }
+    if (logoTitleEl) {
+        logoTitleEl.textContent = custom ? "Your logo" : "Built-in logo";
+    }
+    if (logoMetaEl) {
+        logoMetaEl.textContent = custom
+            ? `${status.width}×${status.height} · ${humanSize(status.bytes)}`
+            : "Used on every watermarked video";
+    }
+    if (logoPreviewImageEl instanceof HTMLImageElement) {
+        // The fingerprint busts the browser cache when the logo is replaced;
+        // without it the old artwork would stay on screen.
+        logoPreviewImageEl.src = custom
+            ? `/api/settings/watermark-logo/image?v=${encodeURIComponent(status.fingerprint || "")}`
+            : BUILT_IN_LOGO_SRC;
+    }
+}
+
+async function loadLogoStatus() {
+    if (!logoDropzoneEl) return;
+    try {
+        const res = await fetchWithTimeout("/api/settings/watermark-logo", { credentials: "same-origin" });
+        const payload = await parseResponsePayload(res);
+        if (res.ok) {
+            renderLogoStatus(payload);
+        }
+    } catch {
+        // A failed status read leaves the zone in its "no custom logo" state,
+        // which is also what the server falls back to.
+    }
+}
+
+function setLogoBusy(busy) {
+    logoDropzoneEl?.classList.toggle("logo-dropzone--busy", busy);
+    if (logoRemoveEl instanceof HTMLButtonElement) {
+        logoRemoveEl.disabled = busy;
+    }
+}
+
+async function uploadLogo(file) {
+    if (!file) return;
+
+    if (file.size > MAX_LOGO_BYTES) {
+        showToast(`Error: that file is larger than ${humanSize(MAX_LOGO_BYTES)}`, "danger");
+        return;
+    }
+    if (!logoFileKind(file)) {
+        showToast("Error: please choose an SVG or a PNG file", "danger");
+        return;
+    }
+
+    setLogoBusy(true);
+    try {
+        // A PNG goes up as it is; an SVG is rasterized first, because the
+        // server stores flat pixels and never the SVG itself.
+        const png = await prepareLogoUpload(file);
+        const body = new FormData();
+        body.append("file", png, "watermark-logo.png");
+
+        const res = await fetchWithTimeout("/api/settings/watermark-logo", {
+            method: "POST",
+            credentials: "same-origin",
+            headers: { "X-CSRF-Token": requireCsrfToken() },
+            body,
+        });
+        const payload = await parseResponsePayload(res);
+        if (!res.ok) {
+            throw new Error(toErrorMessage(payload.detail) || `HTTP ${res.status}`);
+        }
+
+        renderLogoStatus(payload);
+        showToast("Watermark logo updated", "success");
+    } catch (err) {
+        const message = err?.name === "AbortError" ? "Request timed out" : (err?.message || "Upload failed");
+        showToast(`Error: ${message}`, "danger");
+    } finally {
+        setLogoBusy(false);
+        if (logoInputEl instanceof HTMLInputElement) {
+            // So re-picking the same file fires a change event again.
+            logoInputEl.value = "";
+        }
+    }
+}
+
+async function removeLogo() {
+    const confirmed = await confirmModal({
+        title: "Remove custom logo",
+        message: "Remove your logo? New downloads are watermarked with the built-in fetchly logo again.",
+        confirmText: "Remove",
+        variant: "danger",
+    });
+    if (!confirmed) return;
+
+    setLogoBusy(true);
+    try {
+        const res = await fetchWithTimeout("/api/settings/watermark-logo", {
+            method: "DELETE",
+            credentials: "same-origin",
+            headers: { "X-CSRF-Token": requireCsrfToken() },
+        });
+        const payload = await parseResponsePayload(res);
+        if (!res.ok) {
+            throw new Error(toErrorMessage(payload.detail) || `HTTP ${res.status}`);
+        }
+        renderLogoStatus({ custom: false });
+        showToast("Custom logo removed", "success");
+    } catch (err) {
+        const message = err?.name === "AbortError" ? "Request timed out" : (err?.message || "Request failed");
+        showToast(`Error: ${message}`, "danger");
+    } finally {
+        setLogoBusy(false);
+    }
+}
+
+function bindWatermarkLogo() {
+    if (!logoDropzoneEl) return;
+
+    logoDropzoneEl.addEventListener("click", () => logoInputEl?.click());
+    logoDropzoneEl.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            logoInputEl?.click();
+        }
+    });
+
+    ["dragenter", "dragover"].forEach((name) => {
+        logoDropzoneEl.addEventListener(name, (event) => {
+            event.preventDefault();
+            logoDropzoneEl.classList.add("logo-dropzone--over");
+        });
+    });
+    ["dragleave", "dragend", "drop"].forEach((name) => {
+        logoDropzoneEl.addEventListener(name, () => {
+            logoDropzoneEl.classList.remove("logo-dropzone--over");
+        });
+    });
+
+    logoDropzoneEl.addEventListener("drop", (event) => {
+        event.preventDefault();
+        void uploadLogo(event.dataTransfer?.files?.[0]);
+    });
+    logoInputEl?.addEventListener("change", () => {
+        void uploadLogo(logoInputEl.files?.[0]);
+    });
+    logoRemoveEl?.addEventListener("click", () => {
+        void removeLogo();
+    });
+
+    void loadLogoStatus();
+}
 
 function bindSettingsInputs() {
     formEl?.querySelectorAll(AUTO_SAVE_INPUT_SELECTOR).forEach((input) => {
@@ -1074,9 +1285,8 @@ function bindSettingsInputs() {
 
     enableAuthenticationEl?.addEventListener("change", async () => {
         if (enableAuthenticationEl.checked) {
-            // Without an admin account there is nothing to log in with, so the
-            // flag is held back until the credentials form has been saved -
-            // enabling it now would lock everyone out of the instance.
+            // No account = nobody could log in; hold the flag until credentials
+            // are saved.
             if (!hasAdminCredentials) {
                 authEnablePending = true;
                 renderAuthState();
@@ -1090,8 +1300,7 @@ function bindSettingsInputs() {
             return;
         }
 
-        // Turning authentication off exposes the whole instance to anyone who
-        // can reach it, so a stray click must not be enough to do it.
+        // Turning auth off opens the instance to anyone; confirm first.
         if (!authEnablePending) {
             const confirmed = await confirmModal({
                 title: "Disable authentication",
@@ -1106,8 +1315,7 @@ function bindSettingsInputs() {
             }
         }
 
-        // Unchecking a pending toggle just abandons the intent; nothing was
-        // ever persisted, so there is nothing to save.
+        // Unchecking a pending toggle just abandons the intent - nothing to save.
         const wasPending = authEnablePending;
         authEnablePending = false;
         renderAuthState();
@@ -1158,9 +1366,7 @@ function detectPublicHostname() {
 }
 
 function bindPublicHostnameDetect() {
-    // A plain "input" save without confirmation leaves it unclear whether
-    // leaving the field actually persisted anything, so this one gets its
-    // own toast on "change" (fires on blur), like the sliders below.
+    // Save + toast on "change" (blur), like the sliders, so the user knows it persisted.
     publicHostnameEl?.addEventListener("change", () => {
         scheduleAutoSave(0, "Public hostname updated");
     });
@@ -1181,13 +1387,38 @@ function bindPublicHostnameDetect() {
 }
 
 /**
- * Changelog card (Settings → System): keep expanding the "Previous versions"
- * disclosure from scrolling the reader away from the toggle they just clicked.
- * Ported from initChangelogDetailsScroll() in the wirebuddy sister project.
- *
- * The card's height is capped purely in CSS (see .changelog-content): the
- * scroll container is what gets the max-height, so the tile stays put and the
- * extra entries land in its own scrollbar.
+ * Settings tab strip (mobile): the CSS fade-out at both edges (see
+ * .settings-tabs in style.css) is a hint that there's more to scroll to, but
+ * it shouldn't dim the first/last pill once you're already scrolled all the
+ * way to that edge. Toggle .is-at-start / .is-at-end so the mask is dropped
+ * on whichever side has nothing left to reveal.
+ */
+function bindSettingsTabsScrollFade() {
+    const tabs = document.getElementById("settingsTabs");
+    if (!tabs) return;
+
+    const SCROLL_EDGE_SLOP_PX = 1;
+
+    const updateEdges = () => {
+        const maxScrollLeft = tabs.scrollWidth - tabs.clientWidth;
+        // Nothing to scroll at all: treat as both edges to fully drop the mask.
+        if (maxScrollLeft <= SCROLL_EDGE_SLOP_PX) {
+            tabs.classList.add("is-at-start", "is-at-end");
+            return;
+        }
+        tabs.classList.toggle("is-at-start", tabs.scrollLeft <= SCROLL_EDGE_SLOP_PX);
+        tabs.classList.toggle("is-at-end", tabs.scrollLeft >= maxScrollLeft - SCROLL_EDGE_SLOP_PX);
+    };
+
+    tabs.addEventListener("scroll", updateEdges, { passive: true });
+    window.addEventListener("resize", updateEdges);
+    updateEdges();
+}
+
+/**
+ * Changelog card: keep expanding the "Previous versions" disclosure from
+ * scrolling the reader away from the toggle. The card height is CSS-capped
+ * (.changelog-content), so extra entries scroll inside the tile.
  */
 function bindChangelog() {
     const container = document.querySelector("[data-changelog]");
@@ -1223,9 +1454,8 @@ function bindChangelog() {
         const scrollSummaryIntoView = () => {
             summary.scrollIntoView({ block: "nearest" });
         };
-        // The card grows downward until it hits its CSS cap, which can leave
-        // its bottom edge below the fold even though the toggle itself is
-        // still visible. Nudge the page just enough to show the whole tile.
+        // The card can grow past the fold while the toggle stays visible; nudge
+        // the page to show the whole tile.
         const scrollCardIntoView = () => {
             card?.scrollIntoView({ block: "nearest" });
         };
@@ -1360,7 +1590,10 @@ function describeCookieState(status) {
         };
     }
 
-    if (state !== "valid" || !isCookieAuthenticated(status)) {
+    // needs_update is server-decided (CookieAnalysis.needs_update in
+    // app/utils/cookie_status.py) so the initial Jinja render and this
+    // client-side re-render always agree on the same rule.
+    if (status?.needs_update) {
         return {
             badgeClass: "badge bg-warning text-dark",
             label: "Needs update",
@@ -1436,8 +1669,7 @@ async function pasteCookies(platform) {
         await openCookiePasteDialog({
             platform,
             label,
-            // Rejecting here keeps the dialog open with the paste intact, so
-            // the user can fix it rather than start over.
+            // Rejecting keeps the dialog open with the paste intact.
             onSubmit: async (text) => {
                 const res = await fetchWithTimeout(
                     `/api/cookies/${encodeURIComponent(platform)}/paste`,
@@ -1977,7 +2209,10 @@ function init() {
     bindRetentionSlider();
     bindShareLinkMaxUsesSlider();
     bindSettingsInputs();
+    bindCompatibleOutput();
+    bindWatermarkLogo();
     bindPublicHostnameDetect();
+    bindSettingsTabsScrollFade();
     bindChangelog();
     bindLalalEvents();
     bindCookieEvents();

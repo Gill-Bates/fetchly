@@ -29,6 +29,7 @@ under it:
 ├── jobs.db               # SQLite database (WAL mode): jobs, settings, share links
 ├── <job-uuid>/           # One directory per job: media, thumbnail, trims, stems
 ├── cookies/              # Imported per-platform cookie jars
+├── logo/                 # Uploaded watermark logo, if any
 ├── thumb-cache/          # Cached remote thumbnails
 ├── watermark-cache/      # Rendered video watermark badges
 ├── update_check.json     # Cached upstream release check (24 h)

@@ -13,10 +13,8 @@ export const ACTION_CATEGORY = Object.freeze({
     DETAIL: "detail",
 });
 
-// One label per phase: "Running" told the user nothing about whether the job is
-// still fetching bytes, re-encoding them, or analysing the result. Keep the
-// wording in sync with status_label() in app/utils/template_filters.py so the
-// server-rendered pill does not change text on the first SSE update.
+// One label per phase. Keep in sync with status_label() in
+// app/utils/template_filters.py so the pill text does not jump on the first SSE update.
 export const STATUS_META = Object.freeze({
     analysis: { color: "primary", label: "Analyzing" },
     analysis_done: { color: "success", label: "Done" },
@@ -29,13 +27,14 @@ export const STATUS_META = Object.freeze({
     transcoding: { color: "primary", label: "Transcoding" },
 });
 
-const PROGRESS_STATUSES = new Set(["analysis", "downloading", "processing", "transcoding"]);
+// Statuses whose status events actually carry a progress percentage (see
+// worker.py's _emit() call sites). Matches PROGRESS_BEARING_STATUSES in
+// jobs.js - kept as two names because they serve different call sites
+// (label text here, stored-progress reset there), but must list the same
+// statuses.
+const PROGRESS_STATUSES = new Set(["downloading", "transcoding"]);
 
-/**
- * Canonical form of a job status for comparisons.
- * @param {string | null | undefined} status
- * @returns {string}
- */
+/** @param {string | null | undefined} status @returns {string} canonical form */
 export function normalizeStatus(status) {
     return String(status || "queued").trim().toLowerCase();
 }
@@ -56,15 +55,14 @@ export function getStatusText(status, progress = null) {
         return meta.label;
     }
 
-    // Number(null) and Number("") are both 0, so an absent measurement used to
-    // render as a hard "0%" that never moved. Only an actual number counts.
+    // Number(null)/Number("") are 0, which would render an absent measurement
+    // as a stuck "0%"; only an actual number counts.
     const parsedProgress = toProgressPercent(progress);
     return parsedProgress === null ? meta.label : `${meta.label} ${parsedProgress}%`;
 }
 
 /**
- * Coerce a progress value to a 0-100 integer, or null when there is no
- * measurement to show (null, undefined, "", NaN, booleans).
+ * A 0-100 integer, or null when there is nothing to show (null/""/NaN/bool).
  * @param {unknown} progress
  * @returns {number | null}
  */
@@ -160,11 +158,7 @@ function createDownloadLink(className, jobId, {
     return link;
 }
 
-/**
- * Create a Material Symbols icon span.
- * @param {string} name
- * @returns {HTMLSpanElement}
- */
+/** @param {string} name @returns {HTMLSpanElement} a Material Symbols icon span */
 function icon(name) {
     const span = document.createElement("span");
     span.className = "material-symbols-outlined icon-inline";
@@ -306,9 +300,8 @@ function createDownloadOptionsMenu(job, downloadHref) {
         appendAudioDownloadActions(menu, job);
     }
 
-    // Every other action category ends in a Details button (see
-    // renderDesktopAction), so downloadable jobs reach the same dialog from
-    // the menu rather than being the one state without it.
+    // Every other category ends in a Details button; downloadable jobs get it
+    // here so no state is without one.
     menu.appendChild(createDivider());
     menu.appendChild(createDropdownButton("info", "Details", { action: "open-detail", jobId }));
     return menu;
@@ -406,13 +399,13 @@ export function resolveJobAction(job) {
 }
 
 /**
- * Build a status pill, optional file-size badge, and an error tooltip.
- * Returns a <div class="status-inline">, which events.js relies on for live updates.
+ * Build the status pill (+ optional size badge, error tooltip). The returned
+ * `<div class="status-inline">` is what events.js updates in place.
  * @param {string} status
  * @param {number | null | undefined} sizeBytes
  * @param {number | null | undefined} progress
  * @param {string | null | undefined} message
- * @returns {HTMLDivElement} Element with class "status-inline"
+ * @returns {HTMLDivElement}
  */
 export function createStatusElement(status, sizeBytes, progress = null, message = null, { showSize = true } = {}) {
     const wrapper = document.createElement("div");
@@ -444,20 +437,12 @@ export function createStatusElement(status, sizeBytes, progress = null, message 
 }
 
 /**
- * Build the action-cell content for a job row.
- *
- * Returns one of three variants:
- * - download split button with dropdown when the job is downloadable
- * - cancel button while the job is actively running
- * - detail button for all remaining states
- *
- * Audio downloads add Trim plus Lalal stem-split actions.
- * Lalal entries remain visible when unavailable and are rendered disabled
- * based on <html data-lalal-enabled>.
- * Sets `data-action-category` on the wrapper for live-update handlers.
- *
+ * Build the action-cell content for a job row: a download split button, a
+ * cancel button, a retry pair, or a lone details button depending on status
+ * (audio adds Trim + Lalal stem-split). Sets `data-action-category` on the
+ * wrapper for live-update handlers.
  * @param {object} job
- * @returns {HTMLDivElement} Wrapper containing the appropriate action controls
+ * @returns {HTMLDivElement}
  */
 export function createActionButton(job) {
     return renderDesktopAction(resolveJobAction(job));
@@ -494,9 +479,8 @@ function renderDesktopAction(action) {
 }
 
 /**
- * Build the primary action used by the dense mobile jobs list. Downloadable
- * jobs use a compact split action so Download stays one tap away while Share
- * and the remaining media actions are available from the adjacent menu.
+ * The primary action for the dense mobile jobs list (a compact split action
+ * for downloadable jobs; the rest live in the adjacent menu).
  * @param {object} job
  * @returns {HTMLAnchorElement | HTMLButtonElement | HTMLDivElement}
  */

@@ -50,9 +50,8 @@ class CSRFMiddleware:
         if _BAD_COOKIE_NAME_CHARS.search(csrf_cookie_name):
             raise ValueError("csrf_cookie_name contains illegal characters")
 
-        # Required rather than defaulted on purpose: a built-in default would
-        # silently drift out of sync with the real prefix list in app/main.py,
-        # and a too-narrow list leaves state-changing routes unprotected.
+        # Required, not defaulted: a default would drift out of sync with the
+        # real prefix list in app/main.py.
         if not protected_paths:
             raise ValueError("protected_paths must not be empty")
 
@@ -82,12 +81,10 @@ class CSRFMiddleware:
 
     @staticmethod
     async def _read_body(receive: Callable[[], Awaitable[dict]]) -> tuple[bytes, bool]:
-        """Read the full request body.
+        """Read the full request body, returning ``(body, disconnected)``.
 
-        Returns ``(body, disconnected)``. When ``disconnected`` is True the body
-        is truncated and must not be parsed or replayed downstream - a partial
-        form body can still contain a syntactically valid ``csrf_token`` while
-        the remaining fields are missing.
+        A truncated (``disconnected``) body must not be parsed or replayed - it
+        can carry a valid ``csrf_token`` while the other fields are missing.
         """
         chunks: list[bytes] = []
 
@@ -198,16 +195,13 @@ class CSRFMiddleware:
         path = request.url.path
         secure = request.url.scheme == "https"
 
-        # Track if we've consumed the body (need to replay for downstream)
+        # A consumed body must be replayed for downstream handlers.
         body_cache: bytes | None = None
         body_consumed = False
 
         if method not in SAFE_METHODS and self._path_protected(path):
-            # Check header first (for JS fetch requests)
-            sent_token = request.headers.get("X-CSRF-Token")
-
-            # Fall back to form data for traditional HTML form submissions.
-            if not sent_token:
+            sent_token = request.headers.get("X-CSRF-Token")  # JS fetch path
+            if not sent_token:  # traditional form submit
                 content_type = self._normalize_content_type(request.headers.get("content-type", ""))
                 if content_type in {"application/x-www-form-urlencoded", "multipart/form-data"}:
                     sent_token, body_cache, disconnected = await self._extract_form_token(
@@ -249,7 +243,6 @@ class CSRFMiddleware:
                 )
                 return
 
-        # If we consumed the body, create a receive that replays it
         if body_consumed and body_cache is not None:
             receive = self._build_replay_receive(body_cache)
 

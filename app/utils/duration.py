@@ -4,15 +4,11 @@
 # Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 #
 
-"""Central rounding for the second values the app stores and compares.
+"""Central rounding for every second value the app stores and compares, so the
+same duration never disagrees with itself across two code paths.
 
-Every duration in fetchly - what ffprobe reports, what the jobs table holds,
-what a trim selection is validated against - passes through here, so the same
-value never disagrees with itself across two code paths.
-
-One decimal is the app's working precision: the trim UI snaps selections to
-``SNAP_INTERVAL_SECONDS`` (0.5 s, see app/static/js/utils.js), so a legitimate
-selection never carries more than one decimal place either.
+One decimal is the working precision: the trim UI snaps to 0.5 s
+(SNAP_INTERVAL_SECONDS, app/static/js/utils.js).
 """
 
 from __future__ import annotations

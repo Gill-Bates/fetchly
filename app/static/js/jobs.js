@@ -6,10 +6,8 @@
 /**
  * @module jobs
  *
- * Manages the jobs collection DOM for both desktop and mobile renderers.
- * Desktop remains table-based, while mobile renders a feed of articles from
- * the same in-memory job list while maintaining parallel desktop and mobile
- * DOM representations.
+ * The jobs collection DOM: a desktop table and a mobile feed rendered in
+ * parallel from one in-memory job list.
  */
 
 import { CONFIG, TERMINAL_STATUSES } from "./config.js?v=20260831b";
@@ -76,7 +74,7 @@ const mediaQuery = typeof window !== "undefined" && typeof window.matchMedia ===
     ? window.matchMedia(MOBILE_BREAKPOINT)
     : null;
 
-/** @type {{ loading: boolean, done: boolean, nextOffset: number, preserveHistory: boolean, jobs: object[], jobIds: Set<string>, desktopNodes: Map<string, HTMLElement>, mobileNodes: Map<string, HTMLElement>, mobileView: boolean, initialized: boolean }} */
+/** @type {{ loading: boolean, done: boolean, nextOffset: number, preserveHistory: boolean, jobs: object[], jobIds: Set<string>, desktopNodes: Map<string, HTMLElement>, mobileNodes: Map<string, HTMLElement>, mobileView: boolean, initialized: boolean, detachedJobId: string | null }} */
 const state = {
     loading: false,
     done: false,
@@ -88,6 +86,7 @@ const state = {
     mobileNodes: new Map(),
     mobileView: mediaQuery?.matches ?? false,
     initialized: false,
+    detachedJobId: null,
 };
 
 /** @returns {HTMLTableSectionElement | null} */
@@ -123,9 +122,7 @@ function getTitleText(job) {
 
 function getQualityLabel(job) {
     if (job?.type === JOB_TYPE.AUDIO) {
-        // Audio downloads always pull the best available quality, so unlike
-        // video there is no tier worth naming here - it would just repeat
-        // "Max" on every row. The codec (once known) is shown separately.
+        // Audio is always best-quality; there is no tier worth naming.
         return EMPTY_VALUE;
     }
 
@@ -140,8 +137,7 @@ function getTypeLabel(job) {
     return type ? type.charAt(0).toUpperCase() + type.slice(1) : EMPTY_VALUE;
 }
 
-// Material Symbols glyph shown in place of the "Video"/"Audio" text in the
-// media column, mirroring the 🎬/🎵 emoji already used in the format select.
+// Material Symbols glyph for the media column (mirrors the 🎬/🎵 format select).
 function getTypeIcon(job) {
     const type = String(job?.type || "").toLowerCase();
     if (type === "audio") return "music_note";
@@ -230,13 +226,36 @@ function replaceJobs(nextJobs) {
     state.jobIds = new Set(nextJobs.map((job) => getJobId(job)).filter(Boolean));
 }
 
-/**
- * Return a stored job by id.
- * @param {string} jobId
- * @returns {object | null}
- */
+/** @param {string} jobId @returns {object | null} */
 export function getJobById(jobId) {
     return getStoredJob(String(jobId || ""));
+}
+
+/**
+ * The jobs the two list surfaces render - a detached job is left out (the
+ * current-job card owns its node).
+ * @returns {object[]}
+ */
+function getListJobs() {
+    if (!state.detachedJobId) {
+        return state.jobs;
+    }
+    return state.jobs.filter((job) => getJobId(job) !== state.detachedJobId);
+}
+
+/**
+ * Detach one job from the list surfaces (empty id re-attaches it). The job
+ * stays in the store; only the table and feed skip it.
+ * @param {string} jobId
+ */
+export function setDetachedJobId(jobId) {
+    const nextId = String(jobId || "") || null;
+    if (state.detachedJobId === nextId) {
+        return;
+    }
+
+    state.detachedJobId = nextId;
+    renderActiveJobs();  // also re-attaches a previously detached job
 }
 
 
@@ -249,16 +268,16 @@ function trimRenderedNodes(container, renderedNodes) {
         return;
     }
 
-    while (renderedNodes.size > state.jobs.length) {
+    const listJobCount = getListJobs().length;
+    while (renderedNodes.size > listJobCount) {
         const trailingNode = container.lastElementChild;
         if (!(trailingNode instanceof HTMLElement)) {
             return;
         }
 
         const jobId = trailingNode.dataset.jobId || "";
-        // Untracked trailing nodes (empty states, the search/status filter
-        // placeholder main.js mounts) do not shrink the map. Removing one here
-        // would keep the loop running and eat real job rows instead.
+        // Stop at an untracked trailing node (empty state / filter placeholder),
+        // or the loop would eat real job rows.
         if (!renderedNodes.has(jobId)) {
             return;
         }
@@ -280,8 +299,8 @@ function syncSurfaceVisibility() {
 }
 
 /**
- * Normalize a partial job update from SSE or action responses.
- * Only defined fields are copied so store merges can preserve existing data.
+ * Normalize a partial job update; only defined fields are copied so a store
+ * merge keeps existing data.
  * @param {object | null | undefined} payload
  * @returns {object | null}
  */
@@ -324,8 +343,8 @@ export function normalizeJobUpdate(payload) {
     return update;
 }
 
-// Statuses whose events carry a percentage. A status change into anything else
-// drops a stale percentage instead of showing the previous phase's number.
+// Statuses whose events carry a percentage; a change to any other status
+// drops the stale percentage.
 const PROGRESS_BEARING_STATUSES = new Set([STATUS.DOWNLOADING, STATUS.TRANSCODING]);
 
 function mergeStoredJob(existingJob, update) {
@@ -412,9 +431,8 @@ function renderDesktopTitle(job) {
     return td;
 }
 
-// Builds the "[icon] Quality" content for the media column, swapping the
-// former "Video"/"Audio" word for its Material Symbols pictogram. The type
-// is still available to assistive tech via a visually-hidden label.
+// The media-column type: a Material Symbols glyph plus a visually-hidden label
+// for assistive tech.
 function buildTypeIconFragment(job) {
     const fragment = document.createDocumentFragment();
     const icon = getTypeIcon(job);
@@ -439,6 +457,54 @@ function buildTypeIconFragment(job) {
     return fragment;
 }
 
+// H.264 in an MP4-family container is the one combination that plays on
+// Safari, iOS, TVs and in editing software. Anything else is what the user
+// asked for by turning "Universally playable output" off (app/db.py), so it is
+// flagged, not treated as an error.
+const UNIVERSAL_VIDEO_CODECS = new Set(["h264", "avc1"]);
+const UNIVERSAL_CONTAINERS = new Set(["mp4", "m4v", "mov"]);
+
+function fileExtension(filename) {
+    const name = String(filename || "").split(/[\\/]/).pop() || "";
+    const dot = name.lastIndexOf(".");
+    return dot > 0 ? name.slice(dot + 1).toLowerCase() : "";
+}
+
+export function hasLimitedPlayback(job) {
+    if (job?.type !== "video") {
+        return false;
+    }
+    const codec = String(job?.codec || "").toLowerCase();
+    const container = fileExtension(job?.filename);
+    // Both unknown means the download has not produced a file yet.
+    if (!codec && !container) {
+        return false;
+    }
+    if (codec && !UNIVERSAL_VIDEO_CODECS.has(codec)) {
+        return true;
+    }
+    return Boolean(container) && !UNIVERSAL_CONTAINERS.has(container);
+}
+
+function buildLimitedPlaybackFragment(job) {
+    const fragment = document.createDocumentFragment();
+    if (!hasLimitedPlayback(job)) {
+        return fragment;
+    }
+    const chip = document.createElement("span");
+    chip.className = "job-playback-warning";
+    chip.title = "Not playable on Safari, iOS or most TVs — turn on \"Universally playable output\" in Settings for future downloads";
+    const icon = document.createElement("span");
+    icon.className = "material-symbols-outlined";
+    icon.setAttribute("aria-hidden", "true");
+    icon.textContent = "devices_off";
+    const label = document.createElement("span");
+    label.textContent = "Limited playback";
+    chip.append(icon, label);
+    fragment.append(chip);
+    return fragment;
+}
+
 function buildDesktopMediaPrimaryFragment(job) {
     const fragment = document.createDocumentFragment();
     fragment.append(buildTypeIconFragment(job));
@@ -452,13 +518,15 @@ function buildDesktopMediaPrimaryFragment(job) {
         fragment.append(document.createTextNode(EMPTY_VALUE));
     }
 
+    fragment.append(buildLimitedPlaybackFragment(job));
+
     return fragment;
 }
 
 function formatDesktopMediaSecondary(job) {
     const parts = [
-        // Known from the source metadata while the job is still queued, so it
-        // is the one detail here that does not wait for the download.
+        // Known from source metadata while queued - the one detail that does
+        // not wait for the download.
         formatDuration(job?.duration_seconds),
         job?.codec || "",
         formatBpmCompact(job?.bpm),
@@ -528,7 +596,10 @@ function renderMobileDetails(job) {
 
     details.append(
         createMobileDetailItem("Duration", formatDuration(job?.duration_seconds)),
-        createMobileDetailItem("Codec", job?.codec || EMPTY_VALUE),
+        createMobileDetailItem(
+            "Codec",
+            hasLimitedPlayback(job) ? `${job?.codec || EMPTY_VALUE} · limited playback` : job?.codec || EMPTY_VALUE,
+        ),
         createMobileDetailItem("Bitrate", formatBitrateText(job?.bitrate_kbps)),
         createMobileDetailItem("Added", formatCreatedText(job?.created_at) || EMPTY_VALUE),
     );
@@ -573,17 +644,14 @@ function renderJobActions(job, { mobile = false } = {}) {
     return container;
 }
 
-/**
- * Updates the status CSS classes on an existing job node.
- * @param {HTMLElement} element
- * @param {string} status
- */
+/** @param {HTMLElement} element @param {string} status */
 function applyRowStatusClasses(element, status) {
     element.classList.toggle(
         "row-done",
         status === STATUS.DONE || status === STATUS.ANALYSIS_DONE,
     );
     element.classList.toggle("row-error", status === STATUS.ERROR);
+    element.classList.toggle("row-cancelled", status === STATUS.CANCELLED);
     element.classList.toggle("row-pending", status !== "" && !TERMINAL_STATUSES.has(String(status || "")));
     element.dataset.status = status;
 }
@@ -622,8 +690,7 @@ function buildEmptyStateIcon(icon) {
 }
 
 /**
- * Build the desktop (table row) empty state. Shared with main.js, which mounts
- * its own instance as the search/status filter placeholder.
+ * Desktop (table row) empty state; main.js reuses it for the filter placeholder.
  * @param {string} message
  * @param {{ id?: string, icon?: string }} [options]
  * @returns {HTMLTableRowElement}
@@ -649,8 +716,7 @@ export function buildDesktopEmptyState(message, { id = "emptyRow", icon = "inbox
 }
 
 /**
- * Build the mobile (feed item) empty state. Shared with main.js, which mounts
- * its own instance as the search/status filter placeholder.
+ * Mobile (feed item) empty state; main.js reuses it for the filter placeholder.
  * @param {string} message
  * @param {{ id?: string, icon?: string }} [options]
  * @returns {HTMLDivElement}
@@ -721,6 +787,28 @@ function buildMobileJob(job) {
 
     article.append(body, actionWrap);
     return article;
+}
+
+/**
+ * A standalone job card for surfaces outside the list - same structure as a
+ * mobile feed item, so updates and actions behave identically.
+ * @param {object} job
+ * @returns {HTMLElement}
+ */
+export function buildJobCard(job) {
+    const node = buildMobileJob(job);
+    node.classList.remove("jobs-mobile-item", "jobs-mobile-feed-item");
+    node.classList.add("current-job-item");
+    return node;
+}
+
+/**
+ * Patch a node built by {@link buildJobCard} in place.
+ * @param {HTMLElement} node
+ * @param {object} job
+ */
+export function patchJobCard(node, job) {
+    patchMobileJobNode(node, job);
 }
 
 function patchDesktopJobNode(row, job) {
@@ -831,7 +919,8 @@ function renderDesktopJobs() {
         return;
     }
 
-    if (state.jobs.length === 0) {
+    const listJobs = getListJobs();
+    if (listJobs.length === 0) {
         tbody.replaceChildren(buildDesktopEmptyState("No downloads yet. Add a URL above!"));
         state.desktopNodes.clear();
         return;
@@ -839,7 +928,7 @@ function renderDesktopJobs() {
 
     const fragment = document.createDocumentFragment();
     const nextNodes = new Map();
-    for (const job of state.jobs) {
+    for (const job of listJobs) {
         const node = buildDesktopJob(job);
         fragment.append(node);
         nextNodes.set(getJobId(job), node);
@@ -854,7 +943,8 @@ function renderMobileJobs() {
         return;
     }
 
-    if (state.jobs.length === 0) {
+    const listJobs = getListJobs();
+    if (listJobs.length === 0) {
         mobileList.replaceChildren(buildMobileEmptyState("No downloads yet. Add a URL above!"));
         state.mobileNodes.clear();
         return;
@@ -862,7 +952,7 @@ function renderMobileJobs() {
 
     const fragment = document.createDocumentFragment();
     const nextNodes = new Map();
-    for (const job of state.jobs) {
+    for (const job of listJobs) {
         const node = buildMobileJob(job);
         fragment.append(node);
         nextNodes.set(getJobId(job), node);
@@ -934,7 +1024,15 @@ function prependRenderedJob(job) {
         return;
     }
 
-    if (state.jobs.length > 0 && (state.desktopNodes.size === 0 || state.mobileNodes.size === 0)) {
+    // A detached job lives on the current-job card, but the store may have
+    // dropped a trailing job for the row cap - trimmed here.
+    if (getJobId(job) === state.detachedJobId) {
+        trimRenderedNodes(tbody, state.desktopNodes);
+        trimRenderedNodes(mobileList, state.mobileNodes);
+        return;
+    }
+
+    if (getListJobs().length > 0 && (state.desktopNodes.size === 0 || state.mobileNodes.size === 0)) {
         renderActiveJobs();
         return;
     }
@@ -959,7 +1057,7 @@ function appendRenderedJobs(jobs) {
         return;
     }
 
-    if (state.jobs.length > 0 && (state.desktopNodes.size === 0 || state.mobileNodes.size === 0)) {
+    if (getListJobs().length > 0 && (state.desktopNodes.size === 0 || state.mobileNodes.size === 0)) {
         renderActiveJobs();
         return;
     }
@@ -977,6 +1075,12 @@ function appendRenderedJobs(jobs) {
 export function renderStoredJob(jobId) {
     const job = getStoredJob(jobId);
     if (!job) {
+        return null;
+    }
+
+    // The current-job card owns this node; falling through would re-render both
+    // surfaces on every progress tick.
+    if (jobId === state.detachedJobId) {
         return null;
     }
 
@@ -1017,7 +1121,7 @@ export function applyStoredJobTitleFilter(query, statusFilter = "all") {
     let visibleCount = 0;
     const changes = [];
 
-    for (const job of state.jobs) {
+    for (const job of getListJobs()) {
         const jobId = getJobId(job);
         totalCount += 1;
 
@@ -1096,9 +1200,8 @@ export function syncMobileJobsList() {
 }
 
 /**
- * Whether the jobs list currently renders its mobile surface.
- * This module owns MOBILE_BREAKPOINT; consumers must read the decision here
- * instead of running a second matchMedia against a copy of the query.
+ * Whether the jobs list currently renders its mobile surface. This module owns
+ * MOBILE_BREAKPOINT - read the decision here, don't re-run matchMedia.
  * @returns {boolean}
  */
 export function isMobileJobsView() {
@@ -1117,8 +1220,7 @@ function trimJobs() {
     }
 
     if (state.preserveHistory) {
-        // `nextOffset` belongs to the server's complete result set. Local
-        // trimming must not move it backwards and fetch the same page again.
+        // Local trimming must not rewind the server offset and refetch a page.
         state.done = true;
     }
 }
@@ -1159,10 +1261,7 @@ function readBootstrapJobs() {
     }
 }
 
-/**
- * Prepends a job to the active collection, replacing any existing entry.
- * @param {object} job
- */
+/** @param {object} job - prepended to the collection, replacing any existing entry */
 export function prependJob(job) {
     const jobId = getJobId(job);
     if (!jobId) {

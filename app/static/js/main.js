@@ -7,8 +7,9 @@ import { AUDIO_TYPE, CONFIG, DOWNLOADABLE_STATUSES, RETRYABLE_STATUSES, TERMINAL
 import { fetchJobs, fetchResolvedThumbnail, fetchStats, submitJob, fetchVideoInfo, toErrorMessage } from "./api.js";
 import { reportWarning } from "./errors.js";
 import { createTimeoutSignal, EMPTY_VALUE, getCsrfToken, humanSize, isValidMediaUrl, detectPlatform, platformPillLabel, PLATFORM, extractYouTubeVideoId, formatDuration, isSafeRedirect, subscribeToLalalProgress, triggerDownload } from "./utils.js";
-import { prependJob, loadMore, applyJobUpdate, getJobById, applyStoredJobTitleFilter, formatCreatedText, isMobileJobsView, buildDesktopEmptyState, buildMobileEmptyState } from "./jobs.js?v=20260901b";
-import { EVENT_NAMES, dispatchJobUpdate, setEventStreamEnabled } from "./events.js?v=20260831a";
+import { prependJob, loadMore, applyJobUpdate, getJobById, applyStoredJobTitleFilter, formatCreatedText, isMobileJobsView, buildDesktopEmptyState, buildMobileEmptyState, hasLimitedPlayback } from "./jobs.js?v=20260903b";
+import { refreshCurrentJob, setCurrentJob } from "./current-job.js?v=20260903a";
+import { EVENT_NAMES, dispatchJobUpdate, setEventStreamEnabled } from "./events.js?v=20260903a";
 import { normalizeStatus } from "./ui.js?v=20260831c";
 import { showToast } from "./toast.js";
 import { confirmModal } from "./confirm.js";
@@ -35,6 +36,7 @@ const jobsMobileList = document.getElementById("jobsMobileList");
 const jobsRenderRoot = document.getElementById("jobsRenderRoot");
 const jobsScrollContainer = document.querySelector("#jobsCard .jobs-list-shell");
 const jobsSentinel = document.getElementById("jobsSentinel");
+const currentJobCard = document.getElementById("currentJobCard");
 const detailModalEl = document.getElementById("detailModal");
 const settingsBtn = document.getElementById("settingsBtn");
 const titlePopover = document.getElementById("titlePopover");
@@ -86,13 +88,18 @@ const DETAIL_DATE_FORMATTER = new Intl.DateTimeFormat("en-GB", {
     hour: "2-digit",
     minute: "2-digit",
 });
+// "Done" here matches STATUS_META's label (ui.js) and status_label() in
+// app/utils/template_filters.py so the job detail modal never disagrees with
+// the jobs list pill for the same status. In-flight statuses collapse to the
+// single "Processing" label on purpose: the modal shows one coarse phase,
+// the pill shows the finer-grained one.
 const DETAIL_STATUS_LABELS = Object.freeze({
     analysis: "Processing",
-    analysis_done: "Completed",
+    analysis_done: "Done",
     cancelled: "Cancelled",
-    done: "Completed",
+    done: "Done",
     downloading: "Processing",
-    error: "Failed",
+    error: "Error",
     processing: "Processing",
     queued: "Queued",
     transcoding: "Processing",
@@ -157,12 +164,22 @@ function positionTitlePopover(target) {
     }
     left = Math.max(viewportPadding, left);
 
-    const fitsBelow = rect.bottom + margin + measuredHeight <= window.innerHeight - viewportPadding;
+    // The popover is position: fixed, so "fits below" checking only the
+    // window let it flow past the bottom edge of the jobs card and onto
+    // whatever the page renders under it (the footer, on a short list) - the
+    // window can easily have room the card itself does not. Clamp both
+    // placements to the card's own bounds when the row lives in one.
+    const card = target.closest(".ui-card");
+    const cardRect = card?.getBoundingClientRect();
+    const bottomBound = cardRect ? Math.min(window.innerHeight, cardRect.bottom) : window.innerHeight;
+    const topBound = cardRect ? Math.max(0, cardRect.top) : 0;
+
+    const fitsBelow = rect.bottom + margin + measuredHeight <= bottomBound - viewportPadding;
     titlePopover.dataset.placement = fitsBelow ? "bottom" : "top";
     titlePopover.style.left = `${left}px`;
     titlePopover.style.top = fitsBelow
         ? `${rect.bottom + margin}px`
-        : `${Math.max(viewportPadding, rect.top - margin)}px`;
+        : `${Math.max(topBound + viewportPadding, rect.top - margin)}px`;
 }
 
 function showTitlePopover(target) {
@@ -368,13 +385,15 @@ function disposeDropdowns(root) {
 }
 
 function observeJobDropdowns() {
-    if (!jobsRenderRoot) {
+    // Both surfaces that mount job action buttons: the list and the current-job card.
+    const roots = [jobsRenderRoot, currentJobCard].filter((root) => root instanceof Element);
+    if (roots.length === 0) {
         return;
     }
 
     dropdownObserver?.disconnect();
 
-    initDropdowns(jobsRenderRoot);
+    roots.forEach(initDropdowns);
 
     dropdownObserver = new MutationObserver((mutations) => {
         for (const mutation of mutations) {
@@ -391,7 +410,9 @@ function observeJobDropdowns() {
         }
     });
 
-    dropdownObserver.observe(jobsRenderRoot, { childList: true, subtree: true });
+    roots.forEach((root) => {
+        dropdownObserver.observe(root, { childList: true, subtree: true });
+    });
 }
 
 function cleanupDropdownObserver() {
@@ -407,8 +428,8 @@ function removeFilterEmptyState() {
 const FILTER_EMPTY_MESSAGE = "No jobs match this title or URL search.";
 
 function getOrCreateFilterEmptyState() {
-    // jobs.js owns both the breakpoint and the empty-state markup; reusing them
-    // keeps this placeholder in sync with the surface it is mounted into.
+    // Reuse jobs.js's breakpoint and empty-state markup so this placeholder
+    // matches its surface.
     if (isMobileJobsView()) {
         if (!jobsMobileList) return null;
 
@@ -636,10 +657,8 @@ function abortAndResetPreview() {
 }
 
 /**
- * Restore the quality select after a preview load.
- *
- * The options are static for both audio and video: the server-reported formats
- * do not narrow them, and quality is ignored for audio downloads entirely.
+ * Restore the quality select after a preview load. The options are static -
+ * server formats do not narrow them, and audio ignores quality.
  */
 function updateQualityOptions() {
     resetQualityOptions();
@@ -686,9 +705,7 @@ function renderPreviewSummary(info) {
         getPreviewCreator(info?.channel, info?.uploader),
         formatDuration(info?.duration),
         formatPreviewViewCount(info?.view_count),
-        // A live stream has no length to report: drop the placeholder instead
-        // of putting a bare dash between creator and view count.
-    ].filter((part) => part && part !== EMPTY_VALUE);
+    ].filter((part) => part && part !== EMPTY_VALUE);  // drop a live stream's dash
     setText(metaSummary, parts.join(" • ") || "Unknown source");
 }
 
@@ -802,7 +819,7 @@ async function updateVideoPreview() {
         renderPreviewFormats(info.formats, info.formats_total, info.formats_truncated);
         updateQualityOptions();
 
-        // For non-YouTube platforms, resolve and render a server-local cached thumbnail.
+        // Non-YouTube: resolve and render a server-cached thumbnail.
         if (platform !== PLATFORM.YOUTUBE) {
             let thumbnailSrc = "";
             try {
@@ -995,8 +1012,7 @@ function setDetailThumbnail(job) {
         return;
     }
 
-    // Use the server-cached thumbnail (downloaded by yt-dlp for every platform).
-    // Falls back to the placeholder until the worker has fetched it.
+    // Server-cached thumbnail; placeholder until the worker has fetched it.
     image.onload = () => {
         fallback?.classList.add("d-none");
         image.classList.remove("d-none");
@@ -1130,7 +1146,7 @@ function updateOpenDetailStatus(job) {
     }
 
     setDetailChip("mFileSize", humanSize(job.filesize_bytes));
-    setDetailChip("mCodec", job.codec || "");
+    setDetailChip("mCodec", formatDetailCodec(job));
     setDetailChip("mBitrate", formatDetailBitrate(job.bitrate_kbps));
     setDetailChip("mBpm", job.bpm ? `${job.bpm} BPM` : "");
 
@@ -1146,6 +1162,15 @@ function updateOpenDetailStatus(job) {
     }
 }
 
+/** Codec chip, marked when the file will not play outside Chrome/Firefox. */
+function formatDetailCodec(job) {
+    const codec = job?.codec || "";
+    if (!codec) {
+        return "";
+    }
+    return hasLimitedPlayback(job) ? `${codec} · limited playback` : codec;
+}
+
 function populateDetailFromJob(job) {
     const jobId = getJobById(job.id)?.id || job.id || "";
     renderDetailTitle(job, job.video_title || job.url || "Untitled");
@@ -1156,11 +1181,10 @@ function populateDetailFromJob(job) {
     const qualityLabel = String(job.quality || "");
     setDetailChip("mType", typeLabel ? typeLabel.charAt(0).toUpperCase() + typeLabel.slice(1) : "");
     setDetailChip("mQuality", qualityLabel === "max" ? "Max" : qualityLabel);
-    // Stored on the job, so it is there right away - unlike the meta line
-    // below, which waits for hydrateDetailMedia() to reach the source.
+    // Stored on the job, so it shows at once (the meta line waits for hydrateDetailMedia()).
     setDetailChip("mDuration", formatDuration(job.duration_seconds));
     setDetailChip("mFileSize", humanSize(job.filesize_bytes));
-    setDetailChip("mCodec", job.codec || "");
+    setDetailChip("mCodec", formatDetailCodec(job));
     setDetailChip("mBitrate", formatDetailBitrate(job.bitrate_kbps));
     setText(document.getElementById("mId"), formatShortJobId(jobId));
     document.getElementById("mId")?.setAttribute("title", jobId);
@@ -1202,7 +1226,7 @@ async function hydrateDetailMedia(job) {
         if (controller.signal.aborted) {
             return;
         }
-        // The source is unreachable, but the runtime stored on the job still is.
+        // Source unreachable; the job's stored runtime still is.
         setDetailMetaLine({ channel: "Metadata unavailable", duration: job.duration_seconds });
     } finally {
         if (detailInfoAbortController === controller) {
@@ -1305,9 +1329,8 @@ async function handleRetryJob(btn) {
     if (!jobId) return;
 
     try {
-        // The server resets the existing row back to "queued" instead of
-        // inserting a new one, so this refreshes the same list entry in place
-        // rather than adding a second job above it.
+        // The server resets the same row to "queued", so this refreshes the
+        // list entry in place rather than adding a second job.
         const payload = await handleActionPost(btn, `/api/jobs/${encodeURIComponent(jobId)}/retry`);
         if (payload && typeof payload === "object") {
             const updatedJob = applyJobUpdate(payload);
@@ -1386,8 +1409,7 @@ async function handleShareJob(btn) {
         await writeToClipboard(url);
         showToast(`Sharing link added to clipboard${limitNote}`, "success", 2600);
     } catch (error) {
-        // The link exists either way - show it so it is not lost to a
-        // clipboard permission the browser refused.
+        // Clipboard refused: show the link so it is not lost.
         showToast(`Share link: ${url}`, "info", 8000);
     }
 }
@@ -1447,6 +1469,8 @@ document.addEventListener("keydown", (event) => {
 document.addEventListener(EVENT_NAMES.JOB_UPDATE, (event) => {
     const payload = event.detail;
     if (!payload) return;
+
+    refreshCurrentJob(payload);
 
     if (payload.id === activeDetailId) {
         const activeJob = getJobById(payload.id);
@@ -1527,6 +1551,8 @@ function describeDuplicateJob(existingJob) {
 }
 
 function onSubmitSuccess(job) {
+    // Claim the card before prependJob, or the list renders a second copy.
+    setCurrentJob(job);
     prependJob(job);
     scheduleJobTitleFilter();
     showToast("Download job started", "success", 2500);
@@ -1544,11 +1570,9 @@ submitForm?.addEventListener("submit", async (event) => {
 
     setError("");
 
-    // Snapshotted once, before the request, and reused as-is if the server
-    // reports a conflict: the form stays editable while the request is in
-    // flight, so re-reading its live values in the catch block could confirm
-    // and submit a different (url, type, quality) than the one the 409 (and
-    // the modal's description of `existing_job`) actually refers to.
+    // Snapshotted before the request and reused on a 409: the form stays
+    // editable, so re-reading it in the catch could submit a different
+    // (url, type, quality) than the conflict refers to.
     let submittedFormData = null;
 
     try {
@@ -1563,7 +1587,7 @@ submitForm?.addEventListener("submit", async (event) => {
         setSubmitBusy(true);
 
         submittedFormData = new FormData(submitForm);
-        // Audio downloads ignore quality selection - always use max (best audio)
+        // Audio ignores the quality choice - always best.
         if (typeSelect?.value === AUDIO_TYPE) {
             submittedFormData.set("quality", "max");
         }
@@ -1616,18 +1640,15 @@ urlInput?.addEventListener("change", scheduleVideoPreviewUpdateFromChange);
 
 typeSelect?.addEventListener("change", () => {
     if (typeSelect.value === AUDIO_TYPE) {
-        // Reset quality to the first option when audio is selected;
-        // audio ignores the choice and the backend enforces max quality.
+        // Audio ignores quality (backend forces max): reset and disable.
         if (qualitySelect && qualitySelect.options.length > 0) {
             qualitySelect.selectedIndex = 0;
         }
-        // Disable quality select for audio (always use best quality)
         if (qualitySelect) {
             qualitySelect.disabled = true;
             qualitySelect.classList.add("is-disabled");
         }
     } else {
-        // Enable quality select for video format
         if (qualitySelect) {
             qualitySelect.disabled = false;
             qualitySelect.classList.remove("is-disabled");
@@ -1681,18 +1702,14 @@ window.addEventListener("pageshow", (event) => {
 window.addEventListener("beforeunload", cleanupDropdownObserver);
 
 /**
- * POST to an action endpoint with CSRF protection, inflight deduplication,
- * and inline button feedback.
+ * POST to an action endpoint with CSRF, inflight dedup, and inline button
+ * feedback (spinner while active, brief checkmark on success).
  *
- * Disables the button while the request is active and shows a spinner.
- * On success, briefly shows a checkmark icon before restoring the button state.
- * Throws if the same button already has an in-flight request.
- *
- * @param {HTMLElement} btn - Triggering button used as the inflight lock key.
- * @param {string} url - Endpoint URL for the POST request.
+ * @param {HTMLElement} btn - triggering button; also the inflight lock key
+ * @param {string} url
  * @param {{ timeoutMs?: number, headers?: Record<string, string>, body?: BodyInit }} [options]
- * @returns {Promise<object>} Parsed JSON response body.
- * @throws {Error} If the button is missing, already busy, or the request fails.
+ * @returns {Promise<object>} parsed JSON body
+ * @throws {Error} if the button is missing, already busy, or the request fails
  */
 async function handleActionPost(btn, url, options = {}) {
     if (!btn || inflightActions.has(btn)) {

@@ -5,15 +5,12 @@
 #
 
 import asyncio
-import os
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
 from fastapi import HTTPException
-
-os.environ.setdefault("FETCHLY_SECRET_KEY", "test-lalal-route-secret")
 
 from app.routes import lalal
 

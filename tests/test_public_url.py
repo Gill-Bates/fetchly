@@ -4,17 +4,12 @@
 # Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 #
 
-import os
-import tempfile
 import unittest
-from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
-
-os.environ.setdefault("FETCHLY_SECRET_KEY", "test-public-url-secret")
 
 from app import db
 from app.utils.public_url import build_public_base_url, normalize_public_hostname
+from tests._support import IsolatedDbTestCase
 
 
 class NormalizePublicHostnameTests(unittest.TestCase):
@@ -71,22 +66,7 @@ class BuildPublicBaseUrlTests(unittest.TestCase):
         )
 
 
-class SettingsRoundTripTests(unittest.TestCase):
-    def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-        db_path = Path(self._tmp.name) / "jobs.db"
-
-        patcher = patch.object(db, "DB_PATH", db_path)
-        patcher.start()
-        self.addCleanup(patcher.stop)
-        # DB_PATH is memoised inside _prepare_database_path(); drop it so the
-        # patched path is (re)created for this test.
-        db._database_path_prepared = None
-        self.addCleanup(setattr, db, "_database_path_prepared", None)
-
-        db.init_db()
-
+class SettingsRoundTripTests(IsolatedDbTestCase):
     def test_public_hostname_persists_and_clears(self):
         self.assertEqual(db.get_settings().get("public_hostname"), "")
 

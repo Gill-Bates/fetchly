@@ -5,8 +5,7 @@
 #
 
 # Centralized resource governor for CPU detection, semaphore management,
-# backpressure control, and worker scaling. Designed for small VPS under load.
-#
+# backpressure control, and worker scaling. Designed for a small VPS under load.
 
 import asyncio
 import contextlib
@@ -14,10 +13,14 @@ import logging
 import math
 import os
 import threading
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from time import monotonic
 from typing import Final, Self, TypedDict
+
+from fastapi import HTTPException
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +55,6 @@ def _read_cgroup_file(path: str) -> str | None:
 
 
 def _env_int(name: str, default: int, *, min_value: int | None = None, max_value: int | None = None) -> int:
-    """Parse an integer environment variable with explicit validation."""
     raw = os.environ.get(name)
     if raw is None:
         return default
@@ -70,7 +72,6 @@ def _env_int(name: str, default: int, *, min_value: int | None = None, max_value
 
 
 def _env_bool(name: str, default: bool) -> bool:
-    """Parse a boolean environment variable with explicit validation."""
     raw = os.environ.get(name)
     if raw is None:
         return default
@@ -105,34 +106,26 @@ def _parse_cpuset(spec: str | None) -> int | None:
 
 
 def _detect_effective_cpus() -> float:
-    """
-    Detect effective CPU count respecting Docker/cgroup limits.
+    """Effective CPU count respecting Docker/cgroup limits.
 
-    Checks (in order of priority):
-    1. sched_getaffinity (cpuset binding)
-    2. cgroup v2 cpuset.cpus.effective
-    3. cgroup v1 cpuset.cpus
-    4. cgroup v2 cpu.max (quota/period)
-    5. cgroup v1 cpu.cfs_quota_us/cpu.cfs_period_us
-    6. os.cpu_count() as fallback
-
-    Returns the minimum of all applicable limits (at least 0.5).
+    Returns the minimum of every applicable limit, checked in priority order:
+    sched_getaffinity, cgroup v2/v1 cpuset, cgroup v2/v1 cpu quota, then
+    os.cpu_count(). Never below 0.5.
     """
     limits: list[float] = []
 
-    # 1. sched_getaffinity - CPU pinning via cpuset
+    # sched_getaffinity - CPU pinning via cpuset
     with contextlib.suppress(AttributeError, OSError):
         limits.append(float(len(os.sched_getaffinity(0))))
 
-    # 2. cgroup v2 cpuset
+    # cgroup v2 then v1 cpuset
     cpuset = _parse_cpuset(_read_cgroup_file("/sys/fs/cgroup/cpuset.cpus.effective"))
     if cpuset is None:
-        # 3. cgroup v1 cpuset
         cpuset = _parse_cpuset(_read_cgroup_file("/sys/fs/cgroup/cpuset/cpuset.cpus"))
     if cpuset is not None:
         limits.append(float(cpuset))
 
-    # 4. cgroup v2 cpu.max (quota period format: "100000 100000" or "max 100000")
+    # cgroup v2 cpu.max (format: "100000 100000" or "max 100000")
     cpu_max = _read_cgroup_file("/sys/fs/cgroup/cpu.max")
     if cpu_max:
         parts = cpu_max.split()
@@ -140,7 +133,7 @@ def _detect_effective_cpus() -> float:
             with contextlib.suppress(ValueError, ZeroDivisionError):
                 limits.append(float(parts[0]) / float(parts[1]))
     else:
-        # 5. cgroup v1 quota/period
+        # cgroup v1 quota/period
         quota = _read_cgroup_file("/sys/fs/cgroup/cpu/cpu.cfs_quota_us")
         period = _read_cgroup_file("/sys/fs/cgroup/cpu/cpu.cfs_period_us")
         if quota and period:
@@ -151,7 +144,6 @@ def _detect_effective_cpus() -> float:
             except ValueError:
                 pass
 
-    # 6. Fallback to os.cpu_count()
     if not limits:
         fallback = os.cpu_count() or 1
         limits.append(float(fallback))
@@ -164,13 +156,8 @@ def _detect_effective_cpus() -> float:
 def _auto_concurrent_fragments(effective_cpus: float, memory_available_mb: int) -> int:
     """Scale yt-dlp's ``--concurrent-fragments`` to the host's capacity.
 
-    Args:
-        effective_cpus: Effective CPU count from :func:`_detect_effective_cpus`.
-        memory_available_mb: Free memory in MB, or -1 when it is unknown - in
-            which case only the CPU quota is taken into account.
-
-    Returns:
-        A fragment count within ``_AUTO_FRAGMENTS_MIN.._AUTO_FRAGMENTS_MAX``.
+    ``memory_available_mb`` of -1 means unknown; only the CPU quota then
+    applies. Result is within ``_AUTO_FRAGMENTS_MIN.._AUTO_FRAGMENTS_MAX``.
     """
     fragments = math.ceil(effective_cpus * _AUTO_FRAGMENTS_PER_CPU)
     fragments = max(_AUTO_FRAGMENTS_MIN, min(_AUTO_FRAGMENTS_MAX, fragments))
@@ -182,29 +169,23 @@ def _auto_concurrent_fragments(effective_cpus: float, memory_available_mb: int) 
 
 @dataclass(slots=True)
 class GovernorConfig:
-    """Configuration for the Governor."""
+    """Governor configuration; 0 means auto-detect for every count/limit."""
 
-    # Worker counts (0 = auto-detect)
     worker_count: int = 0
-
-    # Queue settings
     queue_maxsize: int = 0  # 0 = auto (2x workers)
 
-    # Semaphore limits (0 = auto-detect)
     cpu_semaphore_limit: int = 0
     analysis_semaphore_limit: int = 0
     io_semaphore_limit: int = 0
     transcode_semaphore_limit: int = 0
 
-    # Memory threshold in megabytes. Stop accepting jobs below this value.
+    # Stop accepting jobs when free memory drops below this (MB).
     memory_threshold_mb: int = 256
 
-    # Backpressure settings
     enable_backpressure: bool = True
 
     @classmethod
     def from_env(cls) -> Self:
-        """Create config from environment variables."""
         return cls(
             # Worker count comes from the persisted settings store and is
             # applied at startup from app/main.py.
@@ -221,7 +202,7 @@ class GovernorConfig:
 
 @dataclass(slots=True)
 class ResourceLimits:
-    """Calculated resource limits based on system detection."""
+    """Resource limits calculated from system detection."""
 
     effective_cpus: float
     worker_count: int
@@ -248,32 +229,12 @@ class GovernorStatus(TypedDict):
 
 
 class Governor:
-    """
-    Central resource governor for managing system resources.
+    """Central resource governor: cgroup-aware CPU detection, worker/queue
+    sizing, memory backpressure, and per-workload semaphores (async and sync).
 
-    Provides:
-    - Auto-detection of available CPUs (Docker cgroup-aware)
-    - Semaphores for different workload types (CPU, IO, transcoding)
-    - Queue configuration with backpressure
-    - Worker count calculation
-    - Memory monitoring
-
-    Usage:
-        from app.governor import governor
-
-        # Configure at startup
-        governor.configure()
-
-        # Get worker count
-        n_workers = governor.worker_count
-
-        # Use semaphores for rate limiting
-        async with governor.transcode_semaphore:
-            await transcode_video()
-
-        # Sync semaphore for threading
-        with governor.cpu_semaphore_sync:
-            cpu_intensive_work()
+    Call ``configure()`` once at startup, then read the properties and use the
+    semaphores (``async with governor.transcode_semaphore`` /
+    ``with governor.cpu_semaphore_sync``).
     """
 
     def __init__(self) -> None:
@@ -288,7 +249,6 @@ class Governor:
         self._io_sem: asyncio.Semaphore | None = None
         self._transcode_sem: asyncio.Semaphore | None = None
 
-        # Sync semaphores (threading)
         self._cpu_sem_sync: threading.Semaphore | None = None
         self._analysis_sem_sync: threading.Semaphore | None = None
         self._io_sem_sync: threading.Semaphore | None = None
@@ -301,12 +261,9 @@ class Governor:
         self._configured = False
 
     def configure(self, config: GovernorConfig | None = None) -> None:
-        """
-        Configure the governor with resource limits.
+        """Configure resource limits (idempotent; later calls are ignored).
 
-        Idempotent: subsequent calls are ignored and keep the original
-        configuration. If config is None, settings are auto-detected from the
-        environment and system.
+        ``config`` of None auto-detects from the environment and system.
         """
         with self._lock:
             if self._configured:
@@ -316,23 +273,19 @@ class Governor:
             self._config = config or GovernorConfig.from_env()
             effective_cpus = _detect_effective_cpus()
 
-            # Calculate worker count
             if self._config.worker_count > 0:
                 worker_count = self._config.worker_count
             else:
-                # Auto: 2 workers per CPU, min 1, max 8
+                # 2 workers per CPU, clamped to 1..8
                 worker_count = max(1, min(8, math.ceil(effective_cpus * 2)))
 
-            # Calculate queue maxsize
             if self._config.queue_maxsize > 0:
                 queue_maxsize = self._config.queue_maxsize
             elif self._config.enable_backpressure:
-                # Auto: 2x workers for backpressure
                 queue_maxsize = worker_count * 2
             else:
-                queue_maxsize = 0  # Unlimited
+                queue_maxsize = 0  # unlimited
 
-            # Calculate semaphore limits
             cpu_limit = self._config.cpu_semaphore_limit or max(1, math.ceil(effective_cpus))
             analysis_limit = self._config.analysis_semaphore_limit or max(1, min(2, math.ceil(effective_cpus)))
             io_limit = self._config.io_semaphore_limit or max(2, math.ceil(effective_cpus * 4))
@@ -378,7 +331,6 @@ class Governor:
         return value
 
     def _require_configured(self) -> tuple[GovernorConfig, ResourceLimits]:
-        """Return the configured governor state or raise if not initialized."""
         return (
             self._require_value(self._config, "config"),
             self._require_value(self._limits, "limits"),
@@ -391,31 +343,26 @@ class Governor:
 
     @property
     def worker_count(self) -> int:
-        """Recommended worker count."""
         return self._require_configured()[1].worker_count
 
     @property
     def queue_maxsize(self) -> int:
-        """Recommended queue maxsize for backpressure."""
         return self._require_configured()[1].queue_maxsize
 
     @property
     def analysis_limit(self) -> int:
-        """Recommended concurrency limit for audio analysis work."""
         return self._require_configured()[1].analysis_limit
 
     @property
     def transcode_limit(self) -> int:
-        """Recommended concurrency limit for transcoding/analysis work."""
         return self._require_configured()[1].transcode_limit
 
     def recommended_concurrent_fragments(self) -> int:
         """Fragment parallelism for downloads when the setting is "Automatic".
 
-        Derived from the CPU quota and the free memory at call time, so a host
-        that is currently under pressure gets a smaller value than an idle one.
-        Unlike the other limits this works before :meth:`configure`, because the
-        settings page reports the current value outside the worker runtime.
+        Derived from the CPU quota and free memory at call time. Unlike the
+        other limits this works before :meth:`configure`, so the settings page
+        can report the current value outside the worker runtime.
         """
         with self._lock:
             limits = self._limits
@@ -424,43 +371,67 @@ class Governor:
 
     @property
     def cpu_semaphore(self) -> asyncio.Semaphore:
-        """Async semaphore for CPU-intensive operations."""
         return self._require_value(self._cpu_sem, "cpu_semaphore")
 
     @property
     def analysis_semaphore(self) -> asyncio.Semaphore:
-        """Async semaphore for audio analysis operations."""
         return self._require_value(self._analysis_sem, "analysis_semaphore")
 
     @property
     def io_semaphore(self) -> asyncio.Semaphore:
-        """Async semaphore for IO operations."""
         return self._require_value(self._io_sem, "io_semaphore")
 
     @property
     def transcode_semaphore(self) -> asyncio.Semaphore:
-        """Async semaphore for transcoding operations."""
         return self._require_value(self._transcode_sem, "transcode_semaphore")
 
     @property
     def cpu_semaphore_sync(self) -> threading.Semaphore:
-        """Threading semaphore for CPU-intensive operations."""
         return self._require_value(self._cpu_sem_sync, "cpu_semaphore_sync")
 
     @property
     def analysis_semaphore_sync(self) -> threading.Semaphore:
-        """Threading semaphore for audio analysis operations."""
         return self._require_value(self._analysis_sem_sync, "analysis_semaphore_sync")
 
     @property
     def io_semaphore_sync(self) -> threading.Semaphore:
-        """Threading semaphore for IO operations."""
         return self._require_value(self._io_sem_sync, "io_semaphore_sync")
 
     @property
     def transcode_semaphore_sync(self) -> threading.Semaphore:
-        """Threading semaphore for transcoding operations."""
         return self._require_value(self._transcode_sem_sync, "transcode_semaphore_sync")
+
+    @asynccontextmanager
+    async def acquire_or_503(
+        self,
+        semaphore: asyncio.Semaphore,
+        *,
+        timeout_seconds: float,
+        detail: str,
+        retry_after_seconds: int = 5,
+    ) -> AsyncIterator[None]:
+        """Acquire *semaphore* within *timeout_seconds*, else raise a 503.
+
+        Shared "wait briefly for capacity, then reject" pattern for request
+        paths that need a bounded-concurrency gate distinct from the
+        governor's own semaphores (e.g. a per-endpoint capacity limit). Reuses
+        this instead of a hand-rolled asyncio.Semaphore + asyncio.timeout so
+        every such gate reports rejection the same way (503 + Retry-After).
+        """
+        try:
+            async with asyncio.timeout(timeout_seconds):
+                await semaphore.acquire()
+        except TimeoutError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=detail,
+                headers={"Retry-After": str(retry_after_seconds)},
+            ) from exc
+
+        try:
+            yield
+        finally:
+            semaphore.release()
 
     def _read_memory_available_mb_uncached(self) -> int:
         """Read available memory in MB from cgroup or /proc without caching."""
@@ -562,17 +533,11 @@ class Governor:
             return cached_value
 
     def get_memory_available_mb(self) -> int:
-        """Get available memory in MB (cgroup-aware).
+        """Available memory in MB (cgroup-aware), or -1 when undeterminable.
 
-        Cache hits are lock-protected and return immediately. On cache miss
-        (first call after startup), a synchronous file read is performed.
-        When the cache expires and a previous value exists, this returns the
-        stale value immediately and refreshes the cache in a background thread
-        to avoid blocking async callers.
-
-        Returns:
-            Available memory in MB, or -1 when the value cannot be determined.
-            A value of -1 disables memory backpressure checks in can_accept_job().
+        Cache hits return immediately. A cold cache does a synchronous read; an
+        expired cache returns the stale value and refreshes in the background.
+        -1 disables the memory backpressure check in can_accept_job().
         """
         cached_value = self._cached_memory_or_start_refresh()
         if cached_value is not None:
@@ -683,5 +648,4 @@ class Governor:
         }
 
 
-# Global singleton
 governor = Governor()

@@ -6,10 +6,8 @@
 /**
  * Pointer parallax for the public "Lost in Space" share-error page.
  *
- * Layers declare their depth via data-parallax (higher = moves further). The
- * offsets are written with direct element.style.transform assignments: that is
- * CSSOM and therefore allowed under the app's style-src 'self' CSP, unlike
- * setAttribute("style", ...) or style.cssText.
+ * Layers declare depth via data-parallax. Offsets go through element.style.*
+ * (CSSOM), which the style-src 'self' CSP allows (unlike style.cssText).
  */
 
 const REDUCED_MOTION = window.matchMedia?.("(prefers-reduced-motion: reduce)");

@@ -86,10 +86,6 @@ from .worker import set_status_callback, signal_shutdown, start_workers, stop_wo
 
 logger = logging.getLogger(__name__)
 
-# ============================================================================
-# Configuration & Constants
-# ============================================================================
-
 type EventPayload = dict[str, Any]
 type EventQueue = asyncio.Queue[EventPayload]
 
@@ -123,13 +119,8 @@ _SKIP_RENEW_PREFIXES = (
     "/download",
 )
 
-# ============================================================================
-# Templates & Event Dispatch
-# ============================================================================
-
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
 
-# Register template filters and globals
 register_filters(templates)
 templates.env.globals["now"] = lambda: datetime.now(UTC)
 templates.env.globals["VERSION"] = VERSION
@@ -189,11 +180,6 @@ def _make_event_callbacks(
     return _enqueue_event, _thread_status_callback, _disable_events
 
 
-# ============================================================================
-# Background Tasks
-# ============================================================================
-
-
 async def _event_broadcaster(queue: EventQueue) -> None:
     """Broadcast status events to all connected SSE clients."""
     try:
@@ -212,7 +198,7 @@ async def _event_broadcaster(queue: EventQueue) -> None:
 
 
 def _run_housekeeping_once() -> None:
-    """Load retention settings and clean expired job files in one worker-thread call."""
+    """One retention sweep: read settings, clean expired job files and orphans."""
     settings = get_settings()
     keep_days = settings.get("retention_days", 0)
     expired_ids = list_expired_job_ids(keep_days)
@@ -229,7 +215,7 @@ def _run_housekeeping_once() -> None:
 
 
 async def _housekeeping_daemon() -> None:
-    """Periodically clean up expired jobs and associated files using retention settings."""
+    """Run _run_housekeeping_once() on a fixed interval."""
     log = logging.getLogger("fetchly.housekeeping")
     try:
         while True:
@@ -354,11 +340,7 @@ async def _session_settings_refresh_daemon() -> None:
 
 
 def _check_dependencies() -> None:
-    """Verify required external tools are available.
-
-    Raises:
-        RuntimeError: If yt-dlp or ffmpeg is missing from PATH.
-    """
+    """Raise RuntimeError if yt-dlp or ffmpeg is missing from PATH."""
     missing = [cmd for cmd in ("yt-dlp", "ffmpeg") if shutil.which(cmd) is None]
 
     if missing:
@@ -392,13 +374,11 @@ type _SignalHandler = Callable[[int, FrameType | None], Any] | int | None
 def _install_shutdown_signal_hook() -> Callable[[], None]:
     """Close SSE streams as soon as a termination signal arrives.
 
-    Uvicorn waits for open connections to finish *before* it emits the lifespan
-    shutdown event, so signalling the streams from the lifespan teardown only
-    happens after the graceful-shutdown timeout has elapsed and the long-lived
-    /events request has already been cancelled. Chaining onto the server's own
-    signal handler ends those streams while the server is still waiting.
-
-    Returns a callable that restores the previous handlers.
+    Uvicorn waits for open connections *before* emitting the lifespan shutdown
+    event, so signalling from the lifespan teardown only fires after the
+    graceful-shutdown timeout. Chaining onto the server's own signal handler
+    ends the streams while it is still waiting. Returns a handler-restore
+    callable.
     """
     loop = asyncio.get_running_loop()
     previous: dict[int, _SignalHandler] = {}
@@ -441,14 +421,8 @@ def _log_background_task_completion(task: asyncio.Task[None]) -> None:
         logger.critical("Background task %s crashed", task.get_name(), exc_info=exc)
 
 
-# ============================================================================
-# Application Lifecycle
-# ============================================================================
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Application startup and shutdown lifecycle."""
     _ = app
     _check_dependencies()
     await asyncio.to_thread(DATA_DIR.mkdir, parents=True, exist_ok=True)
@@ -469,7 +443,6 @@ async def lifespan(app: FastAPI):
     startup_settings = await asyncio.to_thread(get_settings)
     await asyncio.to_thread(governor.configure, _governor_config_from_settings(startup_settings))
 
-    # Initialize route modules
     init_api(templates)
     init_media(DATA_DIR, BASE_DIR, templates)
     init_share(templates)
@@ -484,7 +457,6 @@ async def lifespan(app: FastAPI):
 
     await _fill_analysis_queue()
 
-    # Start background tasks that run for the full application lifespan.
     background_tasks: list[asyncio.Task[None]] = [
         asyncio.create_task(_event_broadcaster(event_queue), name="event_broadcaster"),
         asyncio.create_task(_housekeeping_daemon(), name="housekeeping_daemon"),
@@ -508,16 +480,12 @@ async def lifespan(app: FastAPI):
 
         await _cancel_background_tasks(background_tasks, timeout=2.0)
 
-        # Run blocking stop functions in threads to avoid blocking event loop
+        # Blocking stops run in threads so the event loop stays responsive.
         await asyncio.to_thread(stop_analysis_workers, 5.0)
         await asyncio.to_thread(stop_workers, 2.0)
         await asyncio.to_thread(close_db)
         logger.info("Shutdown complete")
 
-
-# ============================================================================
-# FastAPI Application
-# ============================================================================
 
 # Swagger UI, ReDoc, and the raw schema are disabled at their default paths and
 # re-registered below behind the same session check as every HTML page (see
@@ -619,18 +587,12 @@ class SecurityHeadersMiddleware:
     _CSP = "; ".join([
         "default-src 'self'",
         "script-src 'self'",
-        # No 'unsafe-inline': templates carry no <style> blocks or style=
-        # attributes. Progress updates assign element.style.width directly,
-        # which is CSSOM and not subject to style-src (unlike setAttribute
-        # ("style", ...) or style.cssText, which the code does not use).
-        #
-        # The hash covers the one <style> element the app does not author: the
-        # vendored WaveSurfer builds one into the trim view's shadow root. Its
-        # rules are what position the progress canvas on top of the waveform;
-        # blocked, that canvas drops into normal flow and renders as a second
-        # waveform below the first. The stylesheet interpolates the configured
-        # height (trim.js: height 100), so the hash covers that value too -
-        # tests/test_csp_wavesurfer.py fails if either drifts.
+        # No 'unsafe-inline': templates have no <style>/style= and progress
+        # updates use element.style.* (CSSOM, not subject to style-src). The
+        # hash covers the one <style> the app does not author - WaveSurfer's
+        # shadow-root sheet, which positions the progress canvas over the
+        # waveform and interpolates the configured height (trim.js). Drift in
+        # either fails tests/test_csp_wavesurfer.py.
         f"style-src 'self' '{_WAVESURFER_STYLE_HASH}'",
         "img-src 'self' data: https://img.youtube.com https://i.ytimg.com",
         "font-src 'self'",
@@ -678,7 +640,6 @@ class OriginalClientMiddleware:
         await self.app(scope, receive, send)
 
 
-# Add middleware
 app.add_middleware(SessionRenewalMiddleware)
 app.add_middleware(
     CSRFMiddleware,
@@ -703,7 +664,6 @@ async def handle_rate_limit_exceeded(_request: Request, _exc: RateLimitExceeded)
     return JSONResponse(status_code=429, content={"detail": "Rate limit exceeded"})
 
 
-# Include route modules
 app.include_router(auth_router)
 app.include_router(api_router)
 app.include_router(cookies_router)

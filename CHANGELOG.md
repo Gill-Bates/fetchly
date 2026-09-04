@@ -1,3 +1,20 @@
+
+## [1.2.1] - 2026-09-04
+
+- ``New`` On phones and tablets, a "Current job" card keeps the download you just started visible even with Job History collapsed; it rejoins the list once the screen is wide enough.
+- ``New`` Upload your own SVG or transparent PNG as the video watermark instead of the fetchly logo (Settings → Processing → Watermark), with a live preview and a one-click reset to the built-in artwork. The server validates format, size, proportions and transparency.
+- ``New`` `max` quality now keeps the source untouched: the highest available resolution is muxed into its native container (`.webm`, `.mkv`) with no re-encoding. Downloads that will not play on Safari, iOS or most TVs are marked "Limited playback" in the job list and job details.
+- ``New`` "Prefer H.264/AAC for max quality" becomes "Universally playable output (H.264/AAC)" and now guarantees a compatible format, re-encoding only when the source is not already compatible. Existing installations keep their previous setting; enabling the watermark locks this option on.
+- ``Fix`` With the watermark enabled, `max` downloads are no longer softer than the source: the encoder now derives its quality from the source resolution. Turning the watermark off still skips re-encoding entirely.
+- ``Fix`` Downloads with a very long or non-Latin (e.g. CJK, Cyrillic) title no longer fail with a filesystem name-length error.
+- ``Fix`` Fetching a video's title now fails fast instead of tying up a worker slot when the source is blocked or unreachable.
+- ``Fix`` A worker thread that fails to stop in time on restart is no longer left behind, which could otherwise run a second, overlapping set of download workers.
+- ``Security`` Error messages and logs from failed downloads no longer contain signed access tokens from CDN URLs.
+
+
+<details markdown="1">
+<summary>Previous versions...</summary>
+
 ## [1.2.0] - 2026-09-03
 
 - ``New`` Optional fetchly watermark on downloaded videos (Settings → General → Downloads), on by default; free for capped qualities, adds an encoding pass on `max`.
@@ -12,7 +29,6 @@
 - ``Fix`` Repeating the same notification no longer stacks copies in the corner; the visible one's dismiss timer just restarts.
 - ``Fix`` Fewer "database is locked" errors under heavy concurrent use.
 - ``Fix`` The video watermark renders reliably when the bundled font check would previously have raced and skipped it.
-- ``Fix`` The video watermark's bottom margin now matches its right margin, its drop shadow is lighter, and the logo itself is translucent like a broadcaster's on-screen bug; the hostname line stays fully opaque and legible.
 - ``Fix`` Unknown track lengths show clearly instead of `0:00` or a blank field.
 - ``Fix`` Trim view no longer draws a second, cut-off waveform, and the playback cursor and progress highlight are back.
 - ``Fix`` Changing the public hostname now confirms the save.
@@ -21,10 +37,6 @@
 - ``Fix`` On iPad, tapping a Settings field or the job search box no longer zooms the page in with no way back out, and the Settings controls are touch-sized there as they already were on phones.
 - ``Security`` Admin username and public-hostname fields reject values with a hidden trailing newline.
 - ``Security`` Form submissions on a dropped connection are rejected outright instead of being processed with only part of their data.
-
-
-<details markdown="1">
-<summary>Previous versions...</summary>
 
 ## [1.1.1] - 2026-09-02
 

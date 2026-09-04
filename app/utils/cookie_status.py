@@ -6,21 +6,12 @@
 
 """Structural validity check for one platform's stored cookie jar.
 
-Both ends of the application ask the same question about a cookie file - the
-Settings UI ("what should this tile say?", see app/routes/cookies.py) and the
-download path ("is it worth handing this to yt-dlp?", see app/worker.py and
-app/utils/youtube.py) - so the judgement lives here once instead of in each
-caller.
+Shared by the Settings UI and the download path. Structural only: does the
+file parse, does it carry unexpired cookies for the platform's domain. Not a
+live check - that would need a request per file and risk abuse detection.
 
-It is deliberately a *structural* check: does the file parse as a Netscape
-cookie jar, does it carry cookies for that platform's domain, and are they
-unexpired. It is not a live check against the platform - that would need an
-actual request per cookie file and would risk tripping the platform's own
-abuse detection.
-
-This module knows about platforms but must not import app/utils/platform.py:
-that module imports youtube.py, which imports this one for the cookie gate.
-The maps below are keyed by the same platform identifiers.
+Must not import app/utils/platform.py (that imports youtube.py, which imports
+this one); the maps below use the same platform identifiers.
 """
 
 from __future__ import annotations
@@ -34,10 +25,8 @@ from typing import Final
 
 logger = logging.getLogger(__name__)
 
-# Cookie domains expected for each platform's session cookies. This is a
-# sanity check that the jar actually belongs to that platform, not an
-# exhaustive list of every cookie a browser export may contain (Google auth
-# cookies for YouTube are commonly set on google.com, not youtube.com).
+# Domains that mark a jar as belonging to a platform - a sanity check, not an
+# exhaustive list (YouTube auth cookies often live on google.com).
 PLATFORM_COOKIE_DOMAINS: Final[dict[str, tuple[str, ...]]] = {
     "youtube": (".youtube.com", ".google.com"),
     "tiktok": (".tiktok.com",),
@@ -45,11 +34,8 @@ PLATFORM_COOKIE_DOMAINS: Final[dict[str, tuple[str, ...]]] = {
     "facebook": (".facebook.com",),
 }
 
-# The domain a cookie is filed under when the source format does not name one
-# (a copied `cookie:` request header carries names and values only). A request
-# to youtube.com only ever carries youtube.com-scoped cookies, so attributing
-# the whole header to the platform's own domain reproduces what the browser
-# sent.
+# The domain a cookie is filed under when the source format names none (a
+# copied header). A request to youtube.com carries only youtube.com cookies.
 PLATFORM_PRIMARY_DOMAIN: Final[dict[str, str]] = {
     "youtube": ".youtube.com",
     "tiktok": ".tiktok.com",
@@ -57,25 +43,15 @@ PLATFORM_PRIMARY_DOMAIN: Final[dict[str, str]] = {
     "facebook": ".facebook.com",
 }
 
-# What a jar must carry to count as a signed-in session, as groups: one
-# cookie from every group has to be present. They are all HttpOnly, so their
-# absence is also the reliable signal that an import came from
-# `document.cookie` in the console, which cannot see them.
-#
-# The YouTube entry mirrors yt-dlp's own test rather than guessing
-# (YoutubeBaseInfoExtractor._has_auth_cookies): LOGIN_INFO *and* one of the
-# SAPISID family. LOGIN_INFO matters because it is the one YouTube clears on
-# rotation, and it only exists on youtube.com - a jar copied from a
-# google.com request passes a naive "has a SID cookie" check and is then
-# treated as signed out by the downloader.
+# A signed-in session needs one cookie from every group. All HttpOnly, so
+# their absence also flags a `document.cookie` console import. The YouTube
+# entry mirrors yt-dlp's own _has_auth_cookies test (LOGIN_INFO + a SAPISID).
 PLATFORM_REQUIRED_COOKIES: Final[dict[str, tuple[tuple[str, ...], ...]]] = {
     "youtube": (
         ("LOGIN_INFO",),
         ("SAPISID", "__Secure-1PAPISID", "__Secure-3PAPISID"),
     ),
-    # yt-dlp's TikTok extractor authenticates with sid_tt specifically
-    # (TikTokBaseIE._real_initialize and its format handling), not sessionid -
-    # TikTok sets them together, so requiring the one that is read is free.
+    # yt-dlp's TikTok extractor reads sid_tt, not sessionid (set together).
     "tiktok": (("sid_tt",),),
     "instagram": (("sessionid",),),
     "facebook": (("c_user",), ("xs",)),
@@ -99,26 +75,32 @@ class CookieAnalysis:
 
     @property
     def is_usable(self) -> bool:
-        """Whether the file parses and still holds unexpired platform cookies.
-
-        This is a structural judgement only - it says the jar is readable and
-        current, not that anyone is signed in.
+        """Structural only: the jar parses and holds unexpired platform cookies
+        (not that anyone is signed in).
         """
         return self.status == "valid"
 
     @property
     def is_authenticated(self) -> bool:
-        """Whether this jar should be handed to yt-dlp at all.
+        """Whether to hand this jar to yt-dlp at all.
 
-        Structural validity is not enough. A jar without the platform's login
-        cookies authenticates nothing, and an expired or malformed one is
-        worse than none: yt-dlp loads cookie files with ignore_expires=True,
-        so a dead session would still be sent, and platforms answer a stale
-        or half-present login less kindly than an anonymous request. Both
-        cases fall back to the anonymous path the app takes with no file at
-        all - which is what the Settings tile promises.
+        Needs structural validity *and* the login cookies: yt-dlp sends an
+        expired jar anyway (ignore_expires=True) and a stale login is answered
+        worse than an anonymous request.
         """
         return self.is_usable and not self.missing_login_cookies
+
+    @property
+    def needs_update(self) -> bool:
+        """Whether the Settings UI should prompt to replace this jar.
+
+        True for "expired"/"invalid", and also for a structurally "valid" jar
+        that is missing its login cookies (present but not actually signed
+        in). Single source for this decision: the Settings page (server-
+        rendered) and its client-side re-render both read this field instead
+        of each re-deriving the same rule from status + is_authenticated.
+        """
+        return self.status in ("expired", "invalid") or (self.status == "valid" and not self.is_authenticated)
 
 
 def domain_matches(domain: str, allowed: tuple[str, ...]) -> bool:
@@ -133,14 +115,11 @@ def domain_matches(domain: str, allowed: tuple[str, ...]) -> bool:
 
 
 def _effective_expiry(cookie: http.cookiejar.Cookie) -> int | None:
-    """Return a cookie's expiry, or None when it is a session cookie.
+    """Return a cookie's expiry, or None for a session cookie.
 
-    The Netscape format has no dedicated marker for session cookies, so yt-dlp
-    writes 0 and maps a stored 0 back to "no expiry" when loading
-    (YoutubeDLCookieJar.load). MozillaCookieJar takes the same field literally
-    and yields the timestamp 0, i.e. 1970 - which would make every session
-    cookie in a jar look long expired. Mirroring yt-dlp here keeps the status
-    shown in Settings and the jar yt-dlp actually sees in agreement.
+    Netscape has no session marker, so yt-dlp writes 0 and reads 0 back as "no
+    expiry". MozillaCookieJar reads 0 as the 1970 timestamp, which would make
+    every session cookie look expired - mirror yt-dlp instead.
     """
     expires = cookie.expires
     if expires is None or expires == 0:
@@ -149,11 +128,8 @@ def _effective_expiry(cookie: http.cookiejar.Cookie) -> int | None:
 
 
 def missing_login_cookies(names: tuple[str, ...] | list[str], platform: str) -> tuple[str, ...]:
-    """Which login cookie is absent, one name per unsatisfied group.
-
-    Empty when the jar carries a usable session. The name returned for a group
-    is its first (canonical) member, which is what the user should go looking
-    for.
+    """The absent login cookies, one canonical name per unsatisfied group;
+    empty when the jar carries a usable session.
     """
     present = set(names)
     return tuple(
@@ -173,17 +149,10 @@ def _earliest_expiry(cookies: list[http.cookiejar.Cookie]) -> int | None:
 
 
 def _updated_at(path: Path) -> int | None:
-    """When the jar was last written, taken from the file itself.
-
-    That is the import for a fresh jar - but yt-dlp rewrites the cookie file
-    it was given at the end of every run (YoutubeDL.save_cookies, reached
-    through its context manager), so after the first download this is the
-    moment the platform last rotated these cookies. That makes it the more
-    useful of the two: an expiry date says when the cookies formally lapse,
-    while this says when the session was last demonstrably alive.
-
-    The rewrite truncates the existing file rather than recreating it, so the
-    owner-only permissions this app sets survive it.
+    """The jar's mtime. yt-dlp rewrites the cookie file after every run, so
+    after the first download this is when the session was last demonstrably
+    alive - more useful than the formal expiry date. (The rewrite truncates
+    in place, so owner-only permissions survive.)
     """
     try:
         return int(path.stat().st_mtime)
@@ -194,8 +163,7 @@ def _updated_at(path: Path) -> int | None:
 def analyze_cookie_file(path: Path, platform: str) -> CookieAnalysis:
     """Parse a Netscape cookie file and judge whether it looks usable.
 
-    Runs synchronously (http.cookiejar does blocking file I/O); async callers
-    use asyncio.to_thread() to keep this off the event loop.
+    Blocking I/O; async callers use asyncio.to_thread().
     """
     if not path.is_file():
         return CookieAnalysis(platform=platform, present=False, status="missing")
@@ -264,10 +232,8 @@ def analyze_cookie_file(path: Path, platform: str) -> CookieAnalysis:
 
 
 def cookie_file_is_usable(path: Path, platform: str) -> bool:
-    """Whether ``path`` holds cookies worth passing to yt-dlp for ``platform``.
-
-    Never raises: a jar that cannot be read at all is simply not usable, and
-    the download continues anonymously the same way it does without a file.
+    """Whether ``path`` holds cookies worth passing to yt-dlp. Never raises: an
+    unreadable jar is just not usable, and the download continues anonymously.
     """
     try:
         return analyze_cookie_file(path, platform).is_authenticated

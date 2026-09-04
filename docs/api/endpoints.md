@@ -39,7 +39,9 @@ See [API Authentication](authentication.md).
 
 ### `POST /api/submit`
 
-Form-encoded, CSRF-protected. 10/minute.
+Form-encoded, CSRF-protected. 10/minute. Like every other mutating route under
+`/api/*`, it requires the `X-CSRF-Token` header (or a `csrf_token` field) — see
+[API Authentication](authentication.md#csrf).
 
 | Field | Values |
 |---|---|
@@ -181,13 +183,17 @@ Every redeem failure returns the same `404` page. See
 |---|---|---|
 | `GET /api/settings` | 60/min | Current settings; secrets excluded |
 | `POST /api/settings` | 5/min | Write an allow-listed subset |
+| `GET /api/settings/watermark-logo` | 60/min | Whether a custom watermark logo is installed, and its size |
+| `GET /api/settings/watermark-logo/image` | 60/min | The stored logo as PNG (404 when none) |
+| `POST /api/settings/watermark-logo` | 10/min | Install a logo (multipart `file`, PNG, max 2 MB) |
+| `DELETE /api/settings/watermark-logo` | 10/min | Remove it; the bundled artwork applies again |
 
 Writable keys: `retention_days`, `enable_authentication`, `admin_username`,
 `admin_password`, `session_idle_minutes`, `download_concurrent_fragments`,
-`download_mp4_preset`, `video_watermark`, `lalalaai_duration_guard`,
+`download_compatible_output`, `video_watermark`, `lalalaai_duration_guard`,
 `share_link_max_uses`, `public_hostname`.
 
-- Unknown keys are rejected
+- Unknown keys are silently ignored, not rejected with an error
 - Values are parsed and range-checked server-side
 - `download_concurrent_fragments` accepts `0` for automatic host-based sizing
 - `admin_username` and `admin_password` must be sent as a **pair** — the salt is
@@ -195,6 +201,11 @@ Writable keys: `retention_days`, `enable_authentication`, `admin_username`,
 - Enabling authentication without stored credentials returns `400`
 - Internal keys (`admin_password_hash`, `session_version`, `statistics_reset_at`) are
   never writable
+- The watermark logo endpoint takes a **PNG**, never an SVG: the Settings page accepts
+  both, uploads a PNG unchanged and rasterizes a dropped SVG in the browser first. The
+  server re-derives format, size, aspect ratio and transparency from the uploaded bytes
+  and answers `400` with the reason when any of them fails — see
+  [Downloads](../features/downloads.md#your-own-logo)
 
 ## Statistics and system
 

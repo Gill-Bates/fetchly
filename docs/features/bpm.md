@@ -31,10 +31,11 @@ both fail, no tempo is recorded.
 
 ## Preprocessing
 
-Before detection, the audio is decoded to mono 44.1 kHz WAV with a highpass filter and
-loudness normalization, and truncated to the **first 120 seconds**. Tempo is a global
-property of most tracks, and two minutes is enough to establish it without paying for
-the whole file.
+Before detection, the audio is decoded to mono 44.1 kHz WAV with a highpass filter
+(`highpass=f=40`, removing sub-bass rumble that confuses beat detection) and truncated
+to the **first 120 seconds**. Loudness normalization is deliberately skipped — it can
+distort transients and harm beat detection. Tempo is a global property of most tracks,
+and two minutes is enough to establish it without paying for the whole file.
 
 ## Normalization
 
@@ -84,7 +85,7 @@ count. This is what the dashboard's tempo chart draws.
 |---|---|---|
 | BPM analysis track limit | 15 min | Longest audio accepted for analysis; `0` means unlimited |
 | BPM analysis timeout | 5 min | Per-analysis processing timeout |
-| `ANALYSIS_SEMAPHORE_LIMIT` | auto | Concurrent analyses (operator-level) |
+| `ANALYSIS_SEMAPHORE_LIMIT` | auto, capped at 2 | Concurrent analyses (operator-level); auto-sizing never exceeds 2 regardless of CPU count |
 
 Audio longer than the maximum is skipped rather than analysed at cost. See
 [Application Settings](../configuration/settings.md).

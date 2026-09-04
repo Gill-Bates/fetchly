@@ -67,9 +67,10 @@ The full list is in [Endpoints](endpoints.md).
 
 ### CSRF
 
-`/login`, `/logout`, and `/api/submit` are CSRF-protected with a double-submit cookie
-(`fetchly_csrf`). Send the token back either in the `X-CSRF-Token` header or, for form
-bodies, as a `csrf_token` field. A mismatch returns `403`.
+`/login`, `/logout`, and every state-changing route under `/api/*` are CSRF-protected
+with a double-submit cookie (`fetchly_csrf`) — not just `/api/submit`. Send the token
+back either in the `X-CSRF-Token` header or, for form bodies, as a `csrf_token` field.
+A mismatch returns `403`. Safe methods (`GET`, `HEAD`, `OPTIONS`) are never checked.
 
 ## Status codes
 

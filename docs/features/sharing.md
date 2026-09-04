@@ -94,10 +94,12 @@ See [Reverse Proxy](../configuration/reverse-proxy.md).
 
 ## Revoking
 
-There is no per-link revoke button. To invalidate links:
+There is no per-link revoke button, and no per-job delete action either. To invalidate
+links:
 
-- Delete the job — every link to it dies immediately
 - Let [retention](../configuration/storage.md) sweep the artifacts
+- Use **Settings → System → Remove all jobs** — every link dies immediately, but this
+  removes every job at once, not just one
 - Change the share-link use limit, then create a new link (the old token keeps working
   under its own snapshotted limit until exhausted)
 

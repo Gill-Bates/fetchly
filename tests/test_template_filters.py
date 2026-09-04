@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+#
+# tests/test_template_filters.py
+# Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
+#
 
 import unittest
 

@@ -6,12 +6,9 @@
 
 """Render CHANGELOG.md to sanitized HTML for the Settings → System tile.
 
-Ported from the About-page changelog card in the wirebuddy sister project: the
-Markdown is rendered with the stdlib-style ``markdown`` package and then passed
-through ``nh3.clean()`` with a tag/attribute allowlist and an http/https/mailto
-URL-scheme allowlist before it is handed to the template. Even though
-CHANGELOG.md is repository-controlled, sanitising keeps a stray raw-HTML block
-in the file from reaching the browser unchecked.
+Markdown -> ``nh3.clean()`` with tag/attribute and URL-scheme allowlists. The
+file is repo-controlled, but sanitising still stops a stray raw-HTML block
+from reaching the browser.
 """
 
 from __future__ import annotations
@@ -25,7 +22,6 @@ import nh3
 
 logger = logging.getLogger(__name__)
 
-# Pure path arithmetic - no I/O. app/utils/changelog.py -> repo root.
 _PROJECT_ROOT = Path(__file__).absolute().parent.parent.parent
 _CHANGELOG_PATH = _PROJECT_ROOT / "CHANGELOG.md"
 
@@ -50,12 +46,8 @@ _ERROR_HTML = "<p>Changelog could not be rendered.</p>"
 
 @lru_cache(maxsize=1)
 def render_changelog_html() -> str:
-    """Return the sanitized HTML for CHANGELOG.md, or a short placeholder.
-
-    Cached for the process lifetime: the file is baked into the image and only
-    changes with a new build. ``get_changelog_html()`` is the entry point that
-    swallows every failure so a missing or malformed changelog can never take
-    the Settings page down.
+    """Sanitized HTML for CHANGELOG.md, or a short placeholder. Cached for the
+    process lifetime (the file only changes with a new build).
     """
     try:
         raw = _CHANGELOG_PATH.read_text(encoding="utf-8")

@@ -15,13 +15,12 @@ import subprocess
 import tempfile
 import threading
 import time
-from collections.abc import Callable
-from datetime import UTC, datetime
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, Final, NamedTuple
 
 from .analysis_worker import SubmitResult, submit_analysis
-from .db import get_settings, update_job, update_job_if_status, utc_timestamp
+from .db import get_settings, now_iso, update_job, update_job_if_status, with_finished_at
 from .governor import governor
 from .utils.cookie_status import cookie_file_is_usable
 from .utils.cookies import default_cookie_file
@@ -66,13 +65,11 @@ def _resolve_cookie_file(platform: str) -> Path:
 
 
 def _cookies_args_for_url(url: str) -> list[str]:
-    """Return cookie arguments when a *usable* cookie file exists.
+    """Return cookie arguments only when a *usable* cookie file exists.
 
-    A jar whose session cookies have all expired is deliberately left out:
-    yt-dlp loads cookie files with ignore_expires=True, so it would send the
-    dead session anyway, and platforms answer a stale login with a harder
-    block than an anonymous request. Without the flag the download falls back
-    to exactly the anonymous path it takes when no cookies were ever stored.
+    An all-expired jar is left out on purpose: yt-dlp loads cookies with
+    ignore_expires=True and would send the dead session anyway, and platforms
+    block a stale login harder than an anonymous request.
     """
     platform = detect_platform(url)
     if not platform:
@@ -94,14 +91,12 @@ def _cookies_args_for_url(url: str) -> list[str]:
 
 
 
-# Queue maxsize managed by Governor for backpressure.
-# Use get_job_queue() to access the queue (lazy initialization).
+# Lazily initialized; access via get_job_queue(). maxsize comes from the Governor.
 _job_queue: queue.Queue[Job] | None = None
 _queue_lock = threading.Lock()
 
 
 def get_job_queue() -> queue.Queue[Job]:
-    """Get the job queue with Governor-managed maxsize for backpressure."""
     global _job_queue
     with _queue_lock:
         if _job_queue is None:
@@ -113,9 +108,8 @@ def get_job_queue() -> queue.Queue[Job]:
 
 
 # Ids of jobs that currently hold an in-memory queue slot. Persisted rows stay
-# ``queued`` until a worker picks them up, so this set is what tells the backlog
-# refill (app/main.py::_fill_download_queue) which of those rows are already in
-# flight and must not be enqueued a second time.
+# ``queued`` until a worker picks them up, so this set tells the backlog refill
+# (app/main.py::_fill_download_queue) which rows must not be enqueued twice.
 _queued_job_ids: set[str] = set()
 _queued_ids_lock = threading.Lock()
 
@@ -156,10 +150,9 @@ _active_processes: dict[str, subprocess.Popen[str]] = {}
 
 
 _COMMAND_POLL_INTERVAL: Final = 1.0
-# yt-dlp writes no machine-readable progress by default, so downloads used to
-# report nothing at all - the status pill sat on a placeholder for the whole
-# transfer. --newline plus this template makes it print one parseable line per
-# update on stdout; "NA" stands in for any value the extractor does not know.
+# yt-dlp emits no machine-readable progress by default. --newline plus this
+# template makes it print one parseable line per update on stdout; "NA" stands
+# in for any value the extractor does not know.
 _YTDLP_PROGRESS_MARKER: Final = "FETCHLY_DL"
 _YTDLP_PROGRESS_FIELDS: Final = 6
 _YTDLP_PROGRESS_TEMPLATE: Final = (
@@ -179,16 +172,39 @@ _AUTO_CONCURRENT_FRAGMENTS: Final = 0
 # Fallback for an unreadable setting or a failed host probe, not a UI default -
 # the stored default is "Automatic" (see app/db.py).
 _DEFAULT_CONCURRENT_FRAGMENTS: Final = 3
-# Mirrors the "download_mp4_preset" default in app/db.py.
-_DEFAULT_MP4_PRESET: Final = True
+# Mirrors the "download_compatible_output" default in app/db.py.
+_DEFAULT_COMPATIBLE_OUTPUT: Final = False
 # Mirrors the "video_watermark" default in app/db.py.
 _DEFAULT_VIDEO_WATERMARK: Final = True
-# Encoder settings for the watermark-only pass on "max" quality downloads.
-# Those are otherwise a pure download+remux, so this pass exists solely to burn
-# the badge in: "veryfast" keeps the cost as low as an x264 pass can be, and
-# CRF 20 stays visually transparent on the high-bitrate sources it runs on.
-_WATERMARK_X264_PRESET: Final = "veryfast"
-_WATERMARK_X264_CRF: Final = "20"
+# Watermark-only pass on "max" downloads (otherwise a pure download+remux).
+# This encode is the only place a "max" download can lose quality, so the CRF -
+# the quality lever, where the preset only trades speed for file size - scales
+# with the source. A flat CRF 20 is transparent on a high-bitrate source but
+# visibly softens a 240p/150 kbps upload, whose own compression artifacts get
+# re-quantized on the way through. Smaller frames are cheap to encode, so they
+# also get a slower preset; large ones stay fast to keep the pass affordable.
+# (max height, preset, crf), first match wins.
+_WATERMARK_X264_LADDER: Final[tuple[tuple[int, str, str], ...]] = (
+    (576, "medium", "16"),
+    (1080, "fast", "18"),
+)
+# The compatibility promise, in ffmpeg/ffprobe codec names: H.264 video and
+# AAC audio in MP4 is the one combination that plays on Safari and iOS, on
+# TVs and in editing software. yt-dlp is asked to pick such a rendition first
+# (_COMPATIBLE_FORMAT_SORT below), so the re-encode only ever runs for a source
+# that has none.
+_COMPATIBLE_VIDEO_CODECS: Final[frozenset[str]] = frozenset({"h264"})
+_COMPATIBLE_AUDIO_CODECS: Final[frozenset[str]] = frozenset({"aac"})
+_COMPATIBLE_AAC_BITRATE: Final = "192k"
+# vcodec before res: a 1080p H.264 rendition beats a 2160p AV1 one. Mirrors
+# yt-dlp's own "mp4" preset alias minus its format filter, which would fight
+# with the -f expression the caller already passes.
+_COMPATIBLE_FORMAT_SORT: Final = "vcodec:h264,lang,quality,res,fps,hdr:12,acodec:aac"
+
+# Beyond 1080p, and whenever the height cannot be read: those sources carry
+# enough bitrate of their own that CRF 20 stays transparent, and a 4K frame is
+# expensive enough that the cheapest preset is the only affordable one.
+_WATERMARK_X264_FALLBACK: Final[tuple[str, str]] = ("veryfast", "20")
 _DEFAULT_DOWNLOAD_TIMEOUT_MINUTES: Final = 60
 _DEFAULT_TRANSCODE_TIMEOUT_MINUTES: Final = 120
 _DEFAULT_DOWNLOAD_MAX_FILESIZE_GIB: Final = 4
@@ -277,11 +293,6 @@ def _download_runtime_limits() -> DownloadRuntimeLimits:
     )
 
 
-def _now_iso() -> str:
-    """Timestamp for status-event payloads (informational; not persisted)."""
-    return datetime.now(UTC).isoformat()
-
-
 def set_status_callback(callback: StatusCallback | None) -> None:
     global _status_callback
     _status_callback = callback
@@ -306,28 +317,24 @@ def cancel_job(job_id: str) -> None:
 def clear_cancellation(job_id: str) -> None:
     """Drop a cancel marker before a job id is put back to work.
 
-    A job cancelled while it was still queued keeps its marker until a worker
-    pops it off the queue. Retrying the same row in place would otherwise be
-    cancelled again by that stale marker.
+    A job cancelled while queued keeps its marker until a worker pops it off,
+    so an in-place retry would otherwise be cancelled by that stale marker.
     """
     with _cancel_lock:
         _cancelled_jobs.discard(job_id)
 
 
 def is_job_cancelled(job_id: str) -> bool:
-    """Check if a job has been marked for cancellation."""
     with _cancel_lock:
         return job_id in _cancelled_jobs
 
 
 def _check_cancellation(job_id: str) -> None:
-    """Raise if job was cancelled."""
     if is_job_cancelled(job_id):
         raise JobCancelledError(f"Job {job_id} was cancelled")
 
 
 def _check_shutdown() -> None:
-    """Raise if workers are shutting down."""
     if _shutdown_event.is_set():
         raise ShutdownError("Shutdown requested")
 
@@ -345,7 +352,7 @@ def _emit(job_id: str, status: str, message: str = "", **extra: Any) -> None:
         "id": job_id,
         "status": status,
         "message": message,
-        "timestamp": _now_iso(),
+        "timestamp": now_iso(),
     }
     payload.update(extra)
     try:
@@ -355,13 +362,21 @@ def _emit(job_id: str, status: str, message: str = "", **extra: Any) -> None:
 
 
 def _transition(job_id: str, status: str, message: str = "", **extra: Any) -> None:
-    """Persist a job state change and emit the matching status event."""
+    """Persist a job state change and emit the matching status event.
+
+    ``with_finished_at()`` adds ``finished_at`` when *status* is terminal (see
+    app/db.py::TERMINAL_JOB_STATUSES), so call sites do not each have to pass
+    it - the same helper analysis_worker.py uses, so both workers enforce the
+    invariant identically.
+    """
+    extra = with_finished_at(status, extra)
     update_job(job_id, status=status, message=message, **extra)
     _emit(job_id, status, message, **extra)
 
 
 def _transition_if_processing(job_id: str, status: str, message: str = "", **extra: Any) -> bool:
     """Persist a terminal update only if the job is still in a worker-owned state."""
+    extra = with_finished_at(status, extra)
     updated = update_job_if_status(
         job_id,
         ("processing", "downloading", "transcoding"),
@@ -398,26 +413,23 @@ def _transition_worker_status(job_id: str, status: str, message: str = "", **ext
 
 
 def _signal_process_group(proc: subprocess.Popen[str], sig: signal.Signals) -> None:
-    """Send a signal to a child process group created with start_new_session."""
+    """Signal the child's process group.
+
+    Every subprocess here is started with ``start_new_session=True``, which
+    makes the child a process-group leader - so the PGID *is* the child PID and
+    no os.getpgid() lookup is needed. Skipping it also closes the window where
+    the child exits between the lookup and the signal: Popen has not reaped it
+    yet, so its PID cannot have been reused.
+    """
     if proc.poll() is not None:
         return
 
     try:
-        pgid = os.getpgid(proc.pid)
+        os.killpg(proc.pid, sig)
     except ProcessLookupError:
         return
     except PermissionError:
-        pgid = None
-
-    try:
-        if pgid is not None:
-            os.killpg(pgid, sig)
-        else:
-            proc.send_signal(sig)
-    except ProcessLookupError:
-        return
-    except PermissionError:
-        logger.debug("Permission denied sending signal to subprocess pid=%s", proc.pid)
+        logger.debug("Permission denied signalling process group pgid=%s", proc.pid)
 
 
 def _terminate_process(proc: subprocess.Popen[str], *, grace_seconds: float = 2.0) -> None:
@@ -557,7 +569,9 @@ def _run_cmd(
         if _shutdown_event.is_set():
             raise ShutdownError("Shutdown requested") from exc
         logger.exception("Command failed: %s", " ".join(cmd))
-        raise RuntimeError("Command execution failed") from exc
+        # Named, not generic: this is what the user sees, and "ffmpeg not
+        # found" is a very different problem from "permission denied".
+        raise RuntimeError(f"Command execution failed: {exc}") from exc
     finally:
         if proc is not None and proc.poll() is None:
             _terminate_process(proc)
@@ -611,13 +625,23 @@ def _ffmpeg_out_seconds(progress_state: dict[str, str]) -> float | None:
     return None
 
 
+def _redact_urls(text: str) -> str:
+    """Strip query strings from URLs in text bound for the log or the UI.
+
+    yt-dlp and ffmpeg quote the failing media URL, and on a CDN that URL
+    carries signed access tokens. The path is what makes an error readable;
+    the credentials in the query string are not.
+    """
+    return re.sub(r"(https?://[^\s?]+)\?\S*", r"\1?<redacted>", text)
+
+
 def _stderr_tail(stderr_tmp: Any, *, limit: int = 800) -> str:
     """Return the tail of a subprocess' captured stderr for error messages."""
     if stderr_tmp is None:
         return ""
     try:
         stderr_tmp.seek(0)
-        return stderr_tmp.read()[-limit:].strip()
+        return _redact_urls(stderr_tmp.read()[-limit:].strip())
     except Exception:
         return ""
 
@@ -663,15 +687,11 @@ def _emit_ffmpeg_progress(
 class _DownloadProgress:
     """Turn yt-dlp's per-file counters into one job-wide percentage.
 
-    yt-dlp reports progress per downloaded file, and a video job usually pulls
-    two (separate video and audio streams, merged afterwards), each counting
-    from zero. The percentage is therefore derived from aggregate bytes: when a
-    file's counter restarts, the finished file's size is folded into a base
-    offset, so the number keeps climbing instead of resetting halfway through.
-
-    Sources that report no size at all (some fragmented HLS/DASH streams) fall
-    back to the fragment count, and emit nothing when even that is missing -
-    the status pill then shows a plain "DOWNLOADING" rather than a fake 0%.
+    A video job usually pulls two files (video + audio, merged afterwards),
+    each counting from zero, so the percentage is derived from aggregate bytes:
+    a finished file's size is folded into a base offset when the next counter
+    restarts. Sources that report no size (some fragmented HLS/DASH streams)
+    fall back to the fragment count, and emit nothing when even that is missing.
     """
 
     __slots__ = ("_base_bytes", "_current_bytes", "_job_id", "_last_pct", "_message")
@@ -782,14 +802,9 @@ def _run_cmd_streaming(
 ) -> None:
     """Run *cmd*, feeding every stdout line to *on_line* while it still runs.
 
-    Shared by the ffmpeg transcode and the yt-dlp download so both report live
-    progress under identical cancellation, shutdown and timeout handling. A
-    reader thread drains stdout because a full pipe would otherwise block the
-    child forever; stderr is captured to a temp file so its tail can be
-    surfaced in the error message without a second pipe to deadlock on.
-
-    Progress reporting is cosmetic, so a raising *on_line* is logged and
-    swallowed rather than allowed to abort the command mid-flight.
+    Shared by the ffmpeg transcode and the yt-dlp download. A reader thread
+    drains stdout so a full pipe cannot block the child; stderr goes to a temp
+    file so its tail can be surfaced without a second pipe to deadlock on.
     """
     logger.debug("Executing command with progress: %s", " ".join(cmd))
     _check_cancellation(job_id)
@@ -890,7 +905,9 @@ def _run_cmd_streaming(
         if _shutdown_event.is_set():
             raise ShutdownError("Shutdown requested") from exc
         logger.exception("Command failed: %s", " ".join(cmd))
-        raise RuntimeError("Command execution failed") from exc
+        # Named, not generic: this is what the user sees, and "ffmpeg not
+        # found" is a very different problem from "permission denied".
+        raise RuntimeError(f"Command execution failed: {exc}") from exc
     finally:
         if proc is not None and proc.poll() is None:
             _terminate_process(proc)
@@ -961,14 +978,26 @@ _WIN_RESERVED_NAMES = frozenset({
     *(f"LPT{i}" for i in range(1, 10)),
 })
 
+# Byte budget for the sanitized title. Linux caps a filename at 255 bytes;
+# the rest is headroom for the suffixes the stem picks up on the way to disk.
+_STEM_MAX_BYTES: Final[int] = 200
 
-def sanitize_filename(name: str, max_len: int = 120) -> str:
+
+def sanitize_filename(name: str, max_len: int = 120, max_bytes: int = _STEM_MAX_BYTES) -> str:
     # Strip control characters (0x00-0x1F, 0x7F) and Windows-reserved chars
     cleaned = re.sub(r"[\x00-\x1f\x7f\\/:*?\"<>|\[\]]", "_", (name or "").strip())
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" .")
     if not cleaned or cleaned.upper() in _WIN_RESERVED_NAMES:
         cleaned = "video"
-    return cleaned[:max_len].rstrip(" .") or "video"
+    cleaned = cleaned[:max_len]
+    # NAME_MAX is 255 *bytes* on Linux, so a 120-character CJK or Cyrillic
+    # title can be three times over the limit while looking short. Everything
+    # the callers append afterwards - " (maxQuality)", ".source",
+    # ".finalized", the extension - has to fit in the remainder, or the job
+    # fails with ENAMETOOLONG on a title the user cannot do anything about.
+    while len(cleaned.encode("utf-8")) > max_bytes:
+        cleaned = cleaned[:-1]
+    return cleaned.rstrip(" .") or "video"
 
 
 def _quality_label(quality: str) -> str:
@@ -978,7 +1007,21 @@ def _quality_label(quality: str) -> str:
 def _build_output_stem(job_id: str, url: str, quality: str, media_type: str) -> str:
     try:
         title_raw = _run_cmd(
-            ["yt-dlp", "--no-playlist", *_cookies_args_for_url(url), "--get-title", "--", url],
+            [
+                "yt-dlp",
+                "--no-playlist",
+                # Same fast-fail policy as the download itself (see
+                # _build_ytdlp_cmd): a blocked source must not hold a worker
+                # slot through yt-dlp's default ten-retry storm just to read a
+                # title the job can do without.
+                "--socket-timeout", "30",
+                "--retries", "3",
+                "--extractor-retries", "1",
+                *_cookies_args_for_url(url),
+                "--get-title",
+                "--",
+                url,
+            ],
             timeout=120,
             capture_stdout=True,
             job_id=job_id,
@@ -1006,11 +1049,9 @@ def _rename_thumbnail(job_dir: Path) -> None:
 def _resolve_concurrent_fragments(value: object) -> int:
     """Turn the stored --concurrent-fragments setting into a usable count.
 
-    A positive value is the user's own choice and is only clamped to the range
-    the settings API accepts. ``0`` (and anything below it, which only a direct
-    database write can produce) selects "Automatic": the count is resolved per
-    download from the host's CPU quota and free memory, so a small or currently
-    loaded host backs off on its own.
+    A positive value is the user's choice, clamped to the settings API range.
+    ``0`` or below selects "Automatic": resolved per download from the host's
+    CPU quota and free memory.
     """
     try:
         fragments = int(value)
@@ -1035,32 +1076,40 @@ def _resolve_concurrent_fragments(value: object) -> int:
     return automatic
 
 
-def _download_tuning() -> tuple[int, bool]:
-    """Read the user-configured yt-dlp download tuning from the settings store.
+def _compatible_output_required(settings: Mapping[str, Any]) -> bool:
+    """Whether the finished file must be H.264/AAC.
 
-    Returns ``(concurrent_fragments, mp4_preset)``. Both are set through
-    ``POST /api/settings``. A failing settings read must not abort an
-    otherwise valid download, so the documented defaults are used and the
-    failure is logged.
+    The watermark implies it: that pass runs libx264 either way, so taking the
+    compatible container along costs nothing. The user's own setting is never
+    written back from here - it stays whatever they chose, and turning the
+    watermark off restores it.
+    """
+    if bool(settings.get("video_watermark", _DEFAULT_VIDEO_WATERMARK)):
+        return True
+    return bool(settings.get("download_compatible_output", _DEFAULT_COMPATIBLE_OUTPUT))
+
+
+def _download_tuning() -> tuple[int, bool]:
+    """Return ``(concurrent_fragments, compatible_output)`` from the settings.
+
+    A failing read falls back to defaults rather than aborting the download.
     """
     try:
         settings = get_settings()
     except Exception:
         logger.warning("Could not read download settings; falling back to defaults", exc_info=True)
-        return _DEFAULT_CONCURRENT_FRAGMENTS, _DEFAULT_MP4_PRESET
+        return _DEFAULT_CONCURRENT_FRAGMENTS, _DEFAULT_VIDEO_WATERMARK
 
     fragments = _resolve_concurrent_fragments(
         settings.get("download_concurrent_fragments", _AUTO_CONCURRENT_FRAGMENTS)
     )
-    return fragments, bool(settings.get("download_mp4_preset", _DEFAULT_MP4_PRESET))
+    return fragments, _compatible_output_required(settings)
 
 
 def _watermark_config() -> tuple[bool, str]:
-    """Read the watermark switch and the public hostname from settings.
+    """Return ``(enabled, hostname)`` from settings.
 
-    Returns ``(enabled, hostname)``. A failing settings read falls back to the
-    documented defaults for the same reason ``_download_tuning`` does: it must
-    not abort an otherwise valid download.
+    A failing read falls back to defaults rather than aborting the download.
     """
     try:
         settings = get_settings()
@@ -1110,24 +1159,35 @@ def _scaled_size(source: tuple[int, int], target_height: int) -> tuple[int, int]
     return out_width, out_height
 
 
+def _watermark_x264_settings(height: int | None) -> tuple[str, str]:
+    """``(preset, crf)`` for the watermark-only pass on a source this tall."""
+    if height is not None:
+        for max_height, preset, crf in _WATERMARK_X264_LADDER:
+            if height <= max_height:
+                return preset, crf
+    return _WATERMARK_X264_FALLBACK
+
+
 def _resolve_watermark(
     source: Path,
     *,
     job_id: str,
     target_height: int | None = None,
+    size: tuple[int, int] | None = None,
 ) -> VideoWatermark | None:
-    """Badge for the video ``source`` is about to become, or ``None``.
+    """Badge sized for what ``source`` will become, or ``None``.
 
-    ``target_height`` is the cap the transcode applies; leave it out for a file
-    that is written at its source resolution. Returns ``None`` whenever the
-    watermark is switched off or the video size cannot be determined - a
-    download is never failed over a missing badge.
+    ``target_height`` is the transcode's cap; omit it for a source-resolution
+    file. ``size`` skips the probe when the caller has already read it. ``None``
+    when the watermark is off or the size cannot be read - a download is never
+    failed over a missing badge.
     """
     enabled, hostname = _watermark_config()
     if not enabled:
         return None
 
-    size = _probe_video_size(source, job_id=job_id)
+    if size is None:
+        size = _probe_video_size(source, job_id=job_id)
     if size is None:
         return None
     if target_height is not None:
@@ -1136,25 +1196,99 @@ def _resolve_watermark(
     return build_watermark(video_width=size[0], video_height=size[1], hostname=hostname)
 
 
-def _watermark_only_pass(job_id: str, video: Path) -> Path:
-    """Burn the watermark into an already-finished video file.
+def _stream_codecs(path: Path, *, job_id: str | None = None) -> tuple[str, str]:
+    """``(video_codec, audio_codec)`` of the first stream of each kind.
 
-    Only "max" quality reaches this: it downloads and remuxes without an
-    encoder, so unlike the capped qualities - which get the overlay for free
-    inside the transcode they already run - there is no existing pass to hook
-    into. Returns ``video`` unchanged when no watermark applies.
+    Empty strings where a stream is absent or unreadable; the callers treat
+    "unknown" as "not compatible", which costs a re-encode rather than
+    shipping a file that silently will not play.
     """
-    watermark = _resolve_watermark(video, job_id=job_id)
-    if watermark is None:
+    cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-show_entries",
+        "stream=codec_type,codec_name",
+        "-of",
+        "json",
+        str(path),
+    ]
+    try:
+        data = json.loads(_run_cmd(cmd, timeout=20, capture_stdout=True, job_id=job_id) or "{}")
+    except (JobCancelledError, ShutdownError):
+        raise
+    except Exception as exc:
+        logger.warning("Could not read stream codecs of %s: %s", path, exc)
+        return "", ""
+
+    codecs = {"video": "", "audio": ""}
+    for stream in data.get("streams", []):
+        kind = stream.get("codec_type")
+        if kind in codecs and not codecs[kind]:
+            codecs[kind] = str(stream.get("codec_name") or "")
+    return codecs["video"], codecs["audio"]
+
+
+def _finalize_video_download(
+    job_id: str,
+    video: Path,
+    *,
+    compatible_output: bool,
+    transcode_timeout_seconds: int,
+) -> Path:
+    """Apply the watermark and/or the compatibility promise to a "max" file.
+
+    "max" downloads and remuxes without an encoder, so this is the one pass
+    that can run afterwards - and the one place a max download can lose
+    quality. It therefore does the least work that satisfies both settings:
+
+    * nothing at all when the file already is what was asked for (the common
+      case: the H.264/AAC rendition was picked at download time),
+    * audio only (``-c:v copy``) when just the audio codec is incompatible,
+    * a video encode when the watermark has to be burned in or the video codec
+      is incompatible - never twice, the overlay rides along in that pass.
+
+    Returns the finished file, which may have a new suffix when the
+    compatibility promise forced the MP4 container.
+    """
+    size = _probe_video_size(video, job_id=job_id)
+    # Probed once here and handed to the badge (which sizes itself in output
+    # pixels) and the encoder ladder below.
+    watermark = _resolve_watermark(video, job_id=job_id, size=size)
+    video_codec, audio_codec = _stream_codecs(video, job_id=job_id)
+
+    needs_video_encode = watermark is not None or (
+        compatible_output and video_codec not in _COMPATIBLE_VIDEO_CODECS
+    )
+    # A file with no audio track needs no audio work either.
+    needs_audio_encode = bool(audio_codec) and compatible_output and (
+        audio_codec not in _COMPATIBLE_AUDIO_CODECS
+    )
+    if not needs_video_encode and not needs_audio_encode:
         return video
 
+    messages = []
+    if watermark is not None:
+        messages.append("watermark")
+    if (needs_video_encode and watermark is None) or needs_audio_encode:
+        messages.append("compatibility")
+    message = f"Applying {' and '.join(messages)}"
+
+    preset, crf = _watermark_x264_settings(size[1] if size else None)
     duration_seconds = _probe_media(video, "video", job_id=job_id)[2]
-    message = "Applying watermark"
     _transition_worker_status(job_id, "transcoding", "Waiting for transcode slot", progress=0, eta_seconds=None)
 
-    # Same suffix as the input: the audio is stream-copied, so the output
-    # container has to be the one those streams already live in.
-    marked = video.with_name(f"{video.stem}.watermarked{video.suffix}")
+    # MP4 whenever the promise is on; otherwise the streams stay in the
+    # container they already live in, because only the video is touched.
+    suffix = ".mp4" if compatible_output else video.suffix
+    out = video.with_name(f"{video.stem}.finalized{suffix}")
+    video_args = (
+        ["-c:v", "libx264", "-preset", preset, "-crf", crf]
+        if needs_video_encode
+        else ["-c:v", "copy"]
+    )
+    audio_args = ["-c:a", "aac", "-b:a", _COMPATIBLE_AAC_BITRATE] if needs_audio_encode else ["-c:a", "copy"]
+
     try:
         with governor.transcode_semaphore_sync:
             _check_cancellation(job_id)
@@ -1166,42 +1300,49 @@ def _watermark_only_pass(job_id: str, video: Path) -> Path:
                     "-y",
                     "-i",
                     str(video),
-                    "-i",
-                    str(watermark.path),
+                    *(["-i", str(watermark.path)] if watermark else []),
                     *video_filter_args(watermark),
-                    "-c:v",
-                    "libx264",
-                    "-preset",
-                    _WATERMARK_X264_PRESET,
-                    "-crf",
-                    _WATERMARK_X264_CRF,
-                    "-c:a",
-                    "copy",
+                    *video_args,
+                    *audio_args,
                     "-progress",
                     "pipe:1",
                     "-nostats",
-                    str(marked),
+                    str(out),
                 ],
-                timeout=_download_runtime_limits().transcode_timeout_seconds,
+                timeout=transcode_timeout_seconds,
                 job_id=job_id,
                 message=message,
                 duration_seconds=duration_seconds,
             )
         _check_cancellation(job_id)
-        marked.replace(video)
-        return video
+        # ffmpeg exiting 0 is not proof that it wrote a usable file, and the
+        # input here is a verified download: never replace it with something
+        # unchecked.
+        if not out.is_file() or out.stat().st_size == 0:
+            raise RuntimeError(f"Post-processing produced no usable output: {out}")
+        # Identical to `video` when the container did not change.
+        final = video.with_name(f"{video.stem}{suffix}")
+        # Rename into place first, drop the old container second: an
+        # interruption between the two leaves a usable file either way.
+        out.replace(final)
+        if final != video:
+            video.unlink(missing_ok=True)
+        return final
     except (JobCancelledError, ShutdownError):
         raise
     except Exception:
-        # A watermark is cosmetic; the downloaded video is not. Keep the
-        # unmarked file rather than failing a job that already has its media.
-        logger.warning("Could not watermark %s; keeping the unmarked download", video, exc_info=True)
+        # The watermark is cosmetic and the compatibility promise is a
+        # convenience; the downloaded media is neither. Keep the file rather
+        # than failing a job that already has what the user asked for.
+        logger.warning(
+            "Could not post-process %s (%s); keeping the untouched download", video, message, exc_info=True
+        )
         return video
     finally:
         try:
-            marked.unlink(missing_ok=True)
+            out.unlink(missing_ok=True)
         except OSError as exc:
-            logger.warning("Could not remove temp file %s: %s", marked, exc)
+            logger.warning("Could not remove temp file %s: %s", out, exc)
 
 
 def _build_ytdlp_cmd(
@@ -1214,14 +1355,10 @@ def _build_ytdlp_cmd(
 ) -> list[str]:
     """Build a yt-dlp command for the requested media type and quality.
 
-    Args:
-        url: Normalized video URL.
-        output_template: yt-dlp output template including ``%(ext)s``.
-        media_type: ``"audio"`` or ``"video"``.
-        quality: ``"max"`` for best quality, otherwise a capped transcode path.
-        lossless_audio: When True, download the source audio without re-encoding.
+    ``quality`` is ``"max"`` for best quality, otherwise a capped transcode
+    path. ``lossless_audio`` downloads the source audio without re-encoding.
     """
-    concurrent_fragments, mp4_preset = _download_tuning()
+    concurrent_fragments, compatible_output = _download_tuning()
     runtime_limits = _download_runtime_limits()
     cmd = [
         "yt-dlp",
@@ -1236,9 +1373,8 @@ def _build_ytdlp_cmd(
         # Parallel fragment downloads for DASH/HLS sources; ignored for
         # progressive single-file downloads.
         "--concurrent-fragments", str(concurrent_fragments),
-        # Fast-fail limits: keep a blocked/unavailable source (e.g. login-walled
-        # Instagram reel) from tying up a worker slot in yt-dlp's default retry
-        # storm (10 download + 10 fragment retries with backoff).
+        # Fast-fail: a blocked source must not tie up a worker slot in yt-dlp's
+        # default retry storm (10 download + 10 fragment retries with backoff).
         "--socket-timeout", "30",
         "--retries", "3",
         "--fragment-retries", "3",
@@ -1252,21 +1388,29 @@ def _build_ytdlp_cmd(
     ]
     if media_type == "audio":
         if lossless_audio:
-            # Download best audio without re-encoding - keeps original codec (opus/m4a/etc)
+            # Best audio, no re-encode - keeps the original codec.
             cmd.extend(["-f", "ba/b", "-x"])
         else:
             cmd.extend(["-f", "ba/b", "--extract-audio", "--audio-format", "mp3", "--audio-quality", "0"])
     elif quality == "max":
         cmd.extend(["-f", "bv*+ba/b"])
-        if mp4_preset:
-            # yt-dlp's `-t mp4` preset expands to --merge-output-format mp4
-            # --remux-video mp4 -S vcodec:h264,...,acodec:aac. Since vcodec
-            # sorts ahead of res, this prefers a 1080p H.264 rendition over a
-            # 2160p VP9/AV1 one - the trade the default makes for a file that
-            # plays in every browser and on every device (see db.py).
-            cmd.extend(["-t", "mp4"])
-        else:
-            cmd.extend(["--merge-output-format", "mp4"])
+        if compatible_output:
+            # The cheap half of the compatibility promise: sorting vcodec ahead
+            # of resolution picks the 1080p H.264 rendition over a 2160p
+            # VP9/AV1 one, so the file needs no encoder at all. Only a source
+            # with no H.264 rendition falls through to the transcode in
+            # _finalize_video_download().
+            cmd.extend([
+                "-S", _COMPATIBLE_FORMAT_SORT,
+                "--merge-output-format", "mp4",
+                # Lossless: rewraps into MP4 only if the merge picked another
+                # container, and is a no-op when it did not.
+                "--remux-video", "mp4",
+            ])
+        # Without the promise there is deliberately no --merge-output-format:
+        # yt-dlp then keeps the streams in the container they belong in
+        # (.webm for VP9/Opus, .mkv for AV1), so the download stays a pure
+        # remux and the extension does not lie about what is inside.
     else:
         cmd.extend(["-f", "bv*[height<=720]+ba/b", "--merge-output-format", "mp4"])
     cmd.append("--")
@@ -1275,17 +1419,11 @@ def _build_ytdlp_cmd(
 
 
 def _find_audio_source(job_dir: Path, stem: str) -> Path | None:
-    """Find the lossless audio source file in the job directory.
-
-    yt-dlp outputs audio in various formats (opus, m4a, webm, etc.) depending on source.
-    This function finds the actual downloaded file matching the stem pattern.
-    """
-    # Common audio extensions from YouTube
+    """Find the lossless audio source; its extension depends on the source."""
     for ext in AUDIO_SOURCE_EXTENSIONS:
         source = job_dir / f"{stem}.source{ext}"
         if source.is_file():
             return source
-    # Fallback: search for any .source.* audio file
     for candidate in job_dir.glob(f"{stem}.source.*"):
         if candidate.suffix.lower() in AUDIO_SOURCE_EXTENSIONS:
             return candidate
@@ -1308,11 +1446,9 @@ def _download_media(job_id: str, url: str, *, quality: str, media_type: str) -> 
     job_dir = _get_base_dir() / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
 
-    # Normalize URL to strip playlist params that cause issues
     clean_url = normalize_info_url(url)
     stem = _build_output_stem(job_id, clean_url, quality, media_type)
     if media_type == "audio":
-        # Download lossless audio (no transcode) - we'll convert to MP3 on download
         audio_message = "Downloading audio (lossless)"
         _transition_worker_status(job_id, "downloading", audio_message)
         cmd = _build_ytdlp_cmd(
@@ -1327,7 +1463,6 @@ def _download_media(job_id: str, url: str, *, quality: str, media_type: str) -> 
         _check_cancellation(job_id)
         _rename_thumbnail(job_dir)
 
-        # Find the actual downloaded file (extension varies by source)
         source_file = _find_audio_source(job_dir, stem)
         if source_file is None:
             raise RuntimeError(f"Audio source file not found in {job_dir}")
@@ -1335,6 +1470,11 @@ def _download_media(job_id: str, url: str, *, quality: str, media_type: str) -> 
         return source_file
 
     if quality == "max":
+        # Read once for the whole job: the format selection and the
+        # post-processing pass must agree on the promise, and a setting changed
+        # mid-download must not give the two halves different orders.
+        _, compatible_output = _download_tuning()
+        transcode_timeout = _download_runtime_limits().transcode_timeout_seconds
         max_message = "Downloading best video+audio"
         _transition_worker_status(job_id, "downloading", max_message)
         cmd = _build_ytdlp_cmd(
@@ -1348,14 +1488,21 @@ def _download_media(job_id: str, url: str, *, quality: str, media_type: str) -> 
         _check_cancellation(job_id)
         _rename_thumbnail(job_dir)
 
-        expected_out = job_dir / f"{stem}.mp4"
-        if expected_out.is_file():
-            return _watermark_only_pass(job_id, expected_out)
+        downloaded = job_dir / f"{stem}.mp4"
+        if not downloaded.is_file():
+            # Without the compatibility promise the container is whatever the
+            # streams belong in (.webm, .mkv), so the name is not known ahead.
+            found_out = _find_video_source(job_dir, stem)
+            if found_out is None:
+                raise RuntimeError(f"Downloaded video file not found in {job_dir}")
+            downloaded = found_out
 
-        found_out = _find_video_source(job_dir, stem)
-        if found_out is None:
-            raise RuntimeError(f"Downloaded video file not found in {job_dir}")
-        return _watermark_only_pass(job_id, found_out)
+        return _finalize_video_download(
+            job_id,
+            downloaded,
+            compatible_output=compatible_output,
+            transcode_timeout_seconds=transcode_timeout,
+        )
 
     out = job_dir / f"{stem}.mp4"
 
@@ -1380,14 +1527,11 @@ def _download_media(job_id: str, url: str, *, quality: str, media_type: str) -> 
 
     _check_cancellation(job_id)
     _check_shutdown()
-    # Cap resolution without upscaling: min(target, input_height)
     target_height = 720 if quality == "medium" else 480
-    scale = f"scale=-2:'min({target_height},ih)'"
+    scale = f"scale=-2:'min({target_height},ih)'"  # cap height, never upscale
     transcode_message = f"Transcoding to {quality}"
     _, _, source_duration_seconds = _probe_media(source_video, media_type, job_id=job_id)
-    # Folded into the pass below rather than run as one of its own: the badge is
-    # a still image, so ffmpeg scales it once and the encode does one alpha
-    # blend per frame over a corner of the picture.
+    # Folded into the transcode below rather than a pass of its own.
     watermark = _resolve_watermark(source_video, job_id=job_id, target_height=target_height)
     _transition_worker_status(
         job_id,
@@ -1398,7 +1542,6 @@ def _download_media(job_id: str, url: str, *, quality: str, media_type: str) -> 
     )
 
     try:
-        # Use Governor semaphore to limit concurrent transcoding (CPU/memory protection)
         with governor.transcode_semaphore_sync:
             _check_cancellation(job_id)
             _check_shutdown()
@@ -1524,16 +1667,14 @@ def process_job(job: Job) -> None:
     try:
         _check_cancellation(job_id)
         _check_shutdown()
-        # _download_media() owns the "downloading" transition for every path
-        # now, so the message matches the phase its progress events report.
+        # _download_media() owns the "downloading" transition for every path.
         out_path = _download_media(job_id, url, quality=quality, media_type=type_)
 
         filesize_bytes = _get_filesize(out_path)
         codec, bitrate_kbps, duration_seconds = _probe_media(out_path, type_, job_id=job_id)
         video_title = _title_from_output_name(out_path)
-        # ffprobe measures the finished file and wins whenever it has a
-        # reading, but a probe that came back empty must not erase the runtime
-        # the source reported at submit time (see db.py::insert_job).
+        # An empty probe must not erase the runtime the source reported at
+        # submit time (see db.py::insert_job).
         measured: dict[str, Any] = {}
         if duration_seconds is not None:
             measured["duration_seconds"] = duration_seconds
@@ -1575,7 +1716,6 @@ def process_job(job: Job) -> None:
             status,
             message,
             filename=str(out_path),
-            finished_at=utc_timestamp(),
             filesize_bytes=filesize_bytes,
             codec=codec,
             bitrate_kbps=bitrate_kbps,
@@ -1585,7 +1725,7 @@ def process_job(job: Job) -> None:
 
     except JobCancelledError:
         logger.info("Job %s was cancelled", job_id)
-        _transition(job_id, "cancelled", "Job was cancelled by user", finished_at=utc_timestamp())
+        _transition(job_id, "cancelled", "Job was cancelled by user")
     except ShutdownError:
         # Graceful shutdown - keep the job queued for the next startup.
         logger.info("Job %s interrupted by shutdown", job_id)
@@ -1594,7 +1734,7 @@ def process_job(job: Job) -> None:
     except Exception as exc:
         err_msg = _user_facing_error(url, exc)
         logger.exception("Job %s failed", job_id)
-        _transition_if_processing(job_id, "error", err_msg, finished_at=utc_timestamp())
+        _transition_if_processing(job_id, "error", err_msg)
     finally:
         with _cancel_lock:
             _cancelled_jobs.discard(job_id)
@@ -1623,7 +1763,7 @@ def worker() -> None:
                 return
 
             if is_job_cancelled(job_id):
-                _transition(job_id, "cancelled", "Job was cancelled by user", finished_at=utc_timestamp())
+                _transition(job_id, "cancelled", "Job was cancelled by user")
                 continue
             if not update_job_if_status(job_id, ("queued",), status="processing"):
                 logger.info("Skipping job %s because its state changed before worker pickup", job_id)
@@ -1636,7 +1776,7 @@ def worker() -> None:
         except Exception:
             logger.exception("Unhandled worker error for job %s", job_id)
             try:
-                _transition(job_id, "error", "Internal worker error", finished_at=utc_timestamp())
+                _transition(job_id, "error", "Internal worker error")
             except Exception:
                 logger.exception("Failed to persist internal error state for job %s", job_id)
         finally:
@@ -1646,14 +1786,9 @@ def worker() -> None:
 
 
 def start_workers(n: int | None = None) -> None:
-    """Start the background worker threads.
-
-    Args:
-        n: Number of workers. If None, auto-detect via Governor.
-    """
+    """Start the background worker threads (count auto-detected via Governor)."""
     global _workers_started
 
-    # Initialize queue and get worker count from Governor
     get_job_queue()
     if n is None:
         n = governor.worker_count
@@ -1673,7 +1808,6 @@ def start_workers(n: int | None = None) -> None:
 
         logger.info("Started %d worker threads (effective CPUs: %.2f)", n, governor.effective_cpus)
 
-        # Log cookie file availability at startup for operational visibility.
         for platform, filename in PLATFORM_COOKIE_FILENAMES.items():
             resolved = _resolve_cookie_file(platform)
             if resolved.is_file():
@@ -1692,9 +1826,8 @@ def stop_workers(timeout: float = 5.0) -> None:
     with _worker_lock:
         threads = list(_worker_threads)
 
-    # One shared deadline instead of a per-thread slice: all threads observe the
-    # same shutdown event, so waiting on the first one already covers the rest.
-    # This keeps the total stop time at O(timeout) rather than O(n * timeout).
+    # One shared deadline, not a per-thread slice: all threads watch the same
+    # shutdown event, so total stop time stays O(timeout), not O(n * timeout).
     deadline = time.monotonic() + max(0.0, timeout)
     for t in threads:
         t.join(timeout=max(0.0, deadline - time.monotonic()))
@@ -1702,5 +1835,10 @@ def stop_workers(timeout: float = 5.0) -> None:
             logger.warning("Worker thread %s did not stop cleanly", t.name)
 
     with _worker_lock:
-        _worker_threads.clear()
-        _workers_started = False
+        # Threads that outlived the join are still running and still watching
+        # _shutdown_event. Dropping them here would hide them from
+        # start_workers(), which would then clear that event and start a second
+        # set alongside them - two workers on one job directory. Keeping them
+        # makes the existing "already started" early return do its job.
+        _worker_threads[:] = [thread for thread in _worker_threads if thread.is_alive()]
+        _workers_started = bool(_worker_threads)

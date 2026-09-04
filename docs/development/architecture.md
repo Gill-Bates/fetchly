@@ -94,8 +94,9 @@ The FastAPI `lifespan` context does, in order:
    `init_*` call instead of importing global state)
 6. Start the download worker threads and the analysis process pool
 7. Requeue jobs that were `queued` on disk but lost from the in-memory queue on restart
-8. Start four background `asyncio` tasks: the event broadcaster, the hourly
-   housekeeping sweep, a backlog scanner for analysis, and a settings-cache refresher
+8. Start five background `asyncio` tasks: the event broadcaster, the hourly
+   housekeeping sweep, a backlog scanner for analysis, a backlog scanner for
+   downloads, and a settings-cache refresher
 
 Shutdown reverses this: stop accepting new SSE connections, cancel background tasks,
 stop the analysis pool and worker threads (with a grace period each), then close the
@@ -145,7 +146,7 @@ what keeps `TestClient(app)` usable without a full app boot in most tests.
 ## Middleware
 
 - `CSRFMiddleware` (`middleware/csrf.py`) — double-submit cookie on `/login`,
-  `/logout`, `/api/submit`
+  `/logout`, and every state-changing route under the `/api` prefix
 - `ProxyHeadersMiddleware` (Uvicorn) — trusts `X-Forwarded-*` only from
   `FORWARDED_ALLOW_IPS`
 - SlowAPI's limiter — per-route rate limits keyed on client IP

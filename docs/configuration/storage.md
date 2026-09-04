@@ -17,6 +17,7 @@ $DATA_DIR/
 │   ├── trim_<start>_<end>.wav
 │   └── trim_<...>_vocals.mp3
 ├── cookies/              # Per-platform Netscape jars, mode 0600
+├── logo/                 # Your uploaded watermark logo, if any
 ├── thumb-cache/          # Cached remote thumbnails
 ├── watermark-cache/      # Rendered video watermark badges
 ├── update_check.json     # Cached upstream release check
@@ -55,12 +56,15 @@ A background task runs **every hour** and, in one pass:
 
 | Action | Where | Effect |
 |---|---|---|
-| Delete a job | Job list | Removes the row and its directory |
 | Remove all jobs | Settings → System | Removes every row and every directory |
 | Delete a trim | Job page | Removes trim outputs, keeps the source |
 
-!!! warning "Deleting a job breaks its share links"
-    Links to a deleted job return the standard "link unavailable" page immediately.
+There is no per-job delete action in the UI or API — only the bulk
+**Remove all jobs** action and the automatic retention sweep remove job rows and their
+directories.
+
+!!! warning "Removing jobs breaks their share links"
+    Links to a removed job return the standard "link unavailable" page immediately.
 
 ## Disk usage
 

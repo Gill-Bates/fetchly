@@ -6,11 +6,9 @@
 
 """Location of the platform cookie files.
 
-Cookie files are managed entirely through Settings -> Integrations (see
-app/routes/cookies.py): they are uploaded per platform and always stored in a
-dedicated ``cookies`` subdirectory of the persistent data volume, kept separate
-from the rest of DATA_DIR so operators can mount/back up/inspect them (they
-carry live login sessions) without wading through job artifacts.
+Managed through Settings -> Integrations and stored per platform in a
+dedicated ``cookies`` subdirectory of the data volume, kept apart from job
+artifacts so operators can mount/back up/inspect these live-login files.
 """
 
 import logging
@@ -23,12 +21,9 @@ logger = logging.getLogger(__name__)
 
 _DATA_COOKIES_DIR: Final[Path] = get_data_dir() / "cookies"
 
-# Owner-only. The jars inside are published at 0600 (see app/routes/cookies.py)
-# because they hold live logins; a group/world-readable directory around them
-# still hands every local account the file listing - which platforms are signed
-# in, and when the session was last refreshed. This matches what the container
-# entrypoint already applies to DATA_DIR's subdirectories ("chmod u=rwX,go-rwx"
-# in docker/entrypoint.sh), so it only changes bare-metal installs.
+# Owner-only. The jars are 0600, but a readable directory still leaks the
+# listing (which platforms are signed in, last refresh). Matches the container
+# entrypoint's chmod; only affects bare-metal installs.
 _DIR_MODE: Final[int] = 0o700
 
 
@@ -46,17 +41,11 @@ def default_cookie_file(filename: str) -> Path:
 
 
 def ensure_data_cookies_dir() -> None:
-    """Create the dedicated data-volume cookies directory if it is missing.
+    """Create the cookies directory if missing (called once at startup).
 
-    Called once at application startup (see app/main.py's lifespan) so the
-    directory exists from the first run, the same way DATA_DIR itself and
-    DATA_DIR/downloads are created. Idempotent and safe to call repeatedly.
-
-    Permissions are re-stated on every call rather than left to mkdir: its
-    ``mode`` only applies when the directory is actually created, so an
-    install that first ran under a permissive umask would keep a
-    world-readable directory forever. Tightening only ever removes access, so
-    repeating it is safe.
+    Permissions are re-asserted every call: mkdir's ``mode`` only applies on
+    creation, so an install first run under a permissive umask would else keep
+    a world-readable directory. Tightening only removes access, so it is safe.
     """
     _DATA_COOKIES_DIR.mkdir(parents=True, exist_ok=True, mode=_DIR_MODE)
 
@@ -65,7 +54,6 @@ def ensure_data_cookies_dir() -> None:
             _DATA_COOKIES_DIR.chmod(_DIR_MODE)
             logger.info("Restricted cookie directory %s to 0700", _DATA_COOKIES_DIR)
     except OSError as exc:
-        # A data volume owned by another account: chmod is not ours to make.
-        # The jars themselves are still written 0600, so this is worth a
-        # warning rather than a refused startup.
+        # Volume owned by another account: warn, don't refuse startup - the
+        # jars are still written 0600.
         logger.warning("Could not restrict permissions of %s: %s", _DATA_COOKIES_DIR, exc)

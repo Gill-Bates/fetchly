@@ -23,29 +23,22 @@ __all__ = [
     "get_data_dir",
     "get_json_body",
     "path_is_file",
+    "resolve_within_root",
 ]
 
-# Extensions yt-dlp may hand back for the pre-transcode source audio. Not all
-# lossless (.opus, .aac are lossy; .m4a/.ogg/.webm are containers that can
-# hold either) - named for what they're used for, not for a codec guarantee.
+# Extensions yt-dlp may return for pre-transcode source audio; named for the
+# use, not a codec guarantee (some are lossy, some are containers).
 AUDIO_SOURCE_EXTENSIONS: Final[frozenset[str]] = frozenset({
     ".opus", ".m4a", ".webm", ".ogg", ".aac", ".flac", ".wav",
 })
 
-# ASCII digits only - trim IDs are always generated as f"{int(...)}_{int(...)}"
-# (see app/routes/trim.py), so a Unicode digit here could only be an input the
-# app itself never produced. Deliberately unanchored: every call site uses
-# fullmatch(), which already requires the whole string to match and - unlike
-# match() with a trailing "$" - rejects a trailing newline.
+# ASCII digits only (trim IDs are f"{int}_{int}"). Unanchored: call sites use
+# fullmatch(), which also rejects a trailing newline (unlike match() + "$").
 TRIM_ID_RE: Final[re.Pattern[str]] = re.compile(r"[0-9]+_[0-9]+")
 
 
 def get_data_dir() -> Path:
-    """Return the configured application data directory.
-
-    ``DATA_DIR`` is the single canonical setting; it is set by the container
-    entrypoint and may be overridden for local runs.
-    """
+    """The application data directory (the ``DATA_DIR`` env var, else ./data)."""
     configured = os.environ.get("DATA_DIR", "").strip()
     if configured:
         return Path(configured).resolve()
@@ -57,9 +50,42 @@ async def path_is_file(path: Path) -> bool:
     return await asyncio.to_thread(path.is_file)
 
 
-# Every current caller sends a small settings/auth payload; Caddy's own
-# request_body limit (100MB, see Caddyfile) is sized for uploads elsewhere and
-# is not a substitute for a boundary sized to what this helper actually parses.
+def resolve_within_root(candidate: Path, root: Path, *, allow_symlink: bool = True) -> Path:
+    """Resolve ``candidate`` against ``root`` and verify it stays inside it.
+
+    ``candidate`` is joined onto ``root`` when relative, or used as-is when
+    absolute. ``root`` is resolved first; the final resolved path must sit
+    inside it or a ``ValueError`` is raised (traversal / escape attempt).
+
+    When ``allow_symlink`` is False, ``candidate`` is rejected *before* being
+    resolved if it is itself a symlink. This matters for callers about to
+    delete or overwrite the path: a dangling symlink makes ``exists()``
+    report False (it follows the link and finds nothing), which would
+    otherwise look like "already gone" without the link itself ever being
+    removed.
+
+    Raises ``OSError`` if resolving hits an unexpected filesystem error, and
+    ``ValueError`` if the candidate is unsafe (escapes root, or is a
+    disallowed symlink).
+    """
+    root_resolved = root.resolve()
+    path = candidate if candidate.is_absolute() else root_resolved / candidate
+
+    if not allow_symlink and path.is_symlink():
+        raise ValueError(f"path is a symlink, refusing: {path}")
+
+    resolved = path.resolve()
+
+    try:
+        resolved.relative_to(root_resolved)
+    except ValueError:
+        raise ValueError(f"path escapes root: {resolved} not inside {root_resolved}") from None
+
+    return resolved
+
+
+# Callers send small settings/auth payloads; Caddy's 100MB body limit is for
+# uploads elsewhere, not a bound on what this helper parses.
 _MAX_JSON_BODY_BYTES: Final = 64 * 1024
 
 

@@ -99,11 +99,14 @@ working for the recipient.
 
 ## Recommended
 
-### 10. Harden the container
+### 10. Harden the container further
+
+`no-new-privileges:true` already ships in `docker/docker-compose.yml`; you only need
+to add the read-only root filesystem yourself:
 
 ```yaml
 security_opt:
-  - no-new-privileges:true
+  - no-new-privileges:true   # already in the shipped compose file
 read_only: true
 tmpfs:
   - /tmp

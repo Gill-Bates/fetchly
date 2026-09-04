@@ -18,12 +18,7 @@
  * Prefer {@link isValidYouTubeUrl} and {@link extractYouTubeVideoId} for app logic.
  */
 
-// Canonical placeholder for missing/invalid values
-export const EMPTY_VALUE = "–";  // U+2013 EN DASH
-
-// ---------------------------------------------------------------------------
-// Time utilities (shared with trim UI)
-// ---------------------------------------------------------------------------
+export const EMPTY_VALUE = "–";  // U+2013 EN DASH, placeholder for missing values
 
 export const SNAP_INTERVAL_SECONDS = 0.5;
 
@@ -274,17 +269,31 @@ function readCookie(name) {
 }
 
 /**
+ * Parse `url` against the current origin and return it only when the
+ * resolved origin matches; null for anything unparseable or cross-origin.
+ * Shared origin check backing both {@link isSafeSameOriginRedirect} and
+ * {@link isSafeRedirect} so "same-origin" has one definition.
+ * @param {unknown} url
+ * @returns {URL | null}
+ * @private
+ */
+function parseSameOriginUrl(url) {
+    if (typeof url !== "string" || !url) return null;
+    try {
+        const parsed = new URL(url, window.location.origin);
+        return parsed.origin === window.location.origin ? parsed : null;
+    } catch {
+        return null;
+    }
+}
+
+/**
  * Return whether a navigation target resolves to the current origin.
  * @param {unknown} url
  * @returns {boolean}
  */
 export function isSafeSameOriginRedirect(url) {
-    if (typeof url !== "string" || !url) return false;
-    try {
-        return new URL(url, window.location.origin).origin === window.location.origin;
-    } catch {
-        return false;
-    }
+    return parseSameOriginUrl(url) !== null;
 }
 
 // Shared regex (avoid reallocation)
@@ -537,17 +546,12 @@ export function extractYouTubeVideoId(url) {
  * @returns {boolean}
  */
 export function isSafeRedirect(url) {
-    if (typeof url !== "string") return false;
-    try {
-        const parsed = new URL(url, window.location.href);
-        if (parsed.origin !== window.location.origin) return false;
+    const parsed = parseSameOriginUrl(url);
+    if (!parsed) return false;
 
-        // restrict to download-only endpoints (avoid action endpoints)
-        return parsed.pathname.startsWith("/download/")
-            || parsed.pathname.startsWith("/api/lalal/download/");
-    } catch {
-        return false;
-    }
+    // restrict to download-only endpoints (avoid action endpoints)
+    return parsed.pathname.startsWith("/download/")
+        || parsed.pathname.startsWith("/api/lalal/download/");
 }
 
 /**

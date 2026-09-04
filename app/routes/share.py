@@ -41,18 +41,13 @@ _templates: Jinja2Templates | None = None
 
 
 def init_share(templates: Jinja2Templates) -> None:
-    """Initialize the share module with the shared template environment."""
     global _templates
     _templates = templates
 
 
 def _unavailable(request: Request) -> Response:
-    """Render the public "link unavailable" page.
-
-    Deliberately one page for every failure mode - unknown token, malformed
-    token, exhausted use limit, artifacts removed by housekeeping. Naming the
-    actual reason would tell an anonymous visitor whether a token exists, so
-    the copy covers all of them at once.
+    """Render the public "link unavailable" page (one page for every failure
+    mode, so an anonymous visitor cannot tell whether a token exists).
     """
     if _templates is None:
         raise HTTPException(status_code=404, detail="Not found")
@@ -81,8 +76,7 @@ async def create_share(
     _user: str = Depends(require_user_json),
 ) -> Response:
     """Create (or reuse) a share link for a finished job."""
-    # Resolving the file first means a job that is not downloadable never gets
-    # a link handed out for it.
+    # Resolve the file first: a job that is not downloadable gets no link.
     probe = await build_job_file_response(job_id)
     if isinstance(probe, JSONResponse):
         return probe

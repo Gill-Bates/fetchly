@@ -26,12 +26,7 @@ _RAW_CLIENT_SCOPE_KEY: Final = "fetchly.original_client"
 
 
 def get_trusted_proxy_hosts() -> str:
-    """Return the raw trusted-proxy configuration for this process.
-
-    ``FORWARDED_ALLOW_IPS`` is shared with the Uvicorn-compatible proxy
-    middleware. Call :func:`validate_trusted_proxy_hosts` before starting the
-    app and use :func:`_trusted_proxy_specs` for the cached rate-limit view.
-    """
+    """Raw ``FORWARDED_ALLOW_IPS`` (shared with the proxy middleware)."""
     value = str(os.environ.get("FORWARDED_ALLOW_IPS", _DEFAULT_TRUSTED_PROXY_IPS)).strip()
     return value or _DEFAULT_TRUSTED_PROXY_IPS
 
@@ -115,8 +110,8 @@ def _forwarded_client_ip(request: Request) -> str | None:
         for raw_part in forwarded_for.split(","):
             normalized = _normalize_ip(raw_part)
             if normalized is None:
-                # Do not let malformed entries turn into attacker-controlled
-                # rate-limit keys. The caller falls back to the socket peer.
+                # A malformed entry must not become an attacker-controlled
+                # rate-limit key; the caller falls back to the socket peer.
                 return None
             normalized_parts.append(normalized)
 

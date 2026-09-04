@@ -4,61 +4,17 @@
 # Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 #
 
-import os
-import tempfile
 import unittest
-from pathlib import Path
 from unittest.mock import patch
-
-os.environ.setdefault("FETCHLY_SECRET_KEY", "test-runtime-settings-secret")
-
-from fastapi.testclient import TestClient
 
 from app import analysis_worker, db, lalal, worker
 from app.governor import _auto_concurrent_fragments, governor
-from app.main import _governor_config_from_settings, app, templates
-from app.routes.api import init_api
-from app.session import refresh_session_settings_cache
+from app.main import _governor_config_from_settings
 from app.utils.template_filters import public_settings
+from tests._support import WebAppTestCase
 
 
-class RuntimeSettingsTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-
-        patcher = patch.object(db, "DB_PATH", Path(self._tmp.name) / "jobs.db")
-        patcher.start()
-        self.addCleanup(patcher.stop)
-        db._database_path_prepared = None
-        self.addCleanup(setattr, db, "_database_path_prepared", None)
-        self.addCleanup(db.close_db)
-        db.init_db()
-
-        init_api(templates)
-        refresh_session_settings_cache()
-
-        from app.common.rate_limit import limiter
-
-        limiter.reset()
-        self.addCleanup(limiter.reset)
-
-        self.client = TestClient(app, follow_redirects=False)
-        self.addCleanup(self.client.close)
-
-    def _csrf(self) -> str:
-        self.client.get("/login")
-        token = self.client.cookies.get("fetchly_csrf")
-        self.assertTrue(token)
-        return str(token)
-
-    def _post_settings(self, body: dict[str, object]):
-        return self.client.post(
-            "/api/settings",
-            json=body,
-            headers={"X-CSRF-Token": self._csrf()},
-        )
-
+class RuntimeSettingsTests(WebAppTestCase):
     def test_defaults_are_present_and_public(self) -> None:
         settings = db.get_settings()
         expected = {

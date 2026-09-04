@@ -4,14 +4,11 @@
 # Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 #
 
-import os
 import tempfile
 import unittest
 from pathlib import Path
 from time import time
 from unittest.mock import patch
-
-os.environ.setdefault("FETCHLY_SECRET_KEY", "test-cookie-status-secret")
 
 from app.utils import cookies
 from app.utils.cookie_status import analyze_cookie_file, cookie_file_is_usable
@@ -48,10 +45,26 @@ class AnalyzeCookieFileTests(unittest.TestCase):
         self.assertEqual(
             consent_only.missing_login_cookies, ("LOGIN_INFO", "SAPISID")
         )
+        # "valid" but not authenticated is the one case needs_update diverges
+        # from a plain expired/invalid check (see the Settings-tile drift
+        # this guards against).
+        self.assertTrue(consent_only.needs_update)
 
         complete = self.analyze(jar(row("LOGIN_INFO"), row("__Secure-3PAPISID")))
         self.assertTrue(complete.is_authenticated)
         self.assertEqual(complete.missing_login_cookies, ())
+        self.assertFalse(complete.needs_update)
+
+    def test_needs_update_covers_every_status(self) -> None:
+        self.assertTrue(self.analyze(jar(row("SID", expires=PAST))).needs_update)  # expired
+        self.assertTrue(self.analyze(jar()).needs_update)  # invalid (no cookies)
+        self.assertFalse(self.analyze(jar(row("LOGIN_INFO"), row("__Secure-3PAPISID"))).needs_update)
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            absent = Path(temp_dir) / "nope.txt"
+            missing = analyze_cookie_file(absent, "youtube")
+            # "missing" is its own UI state ("Not set up"), not "Needs update".
+            self.assertFalse(missing.needs_update)
 
     def test_zero_expiry_is_a_session_cookie_not_an_expired_one(self) -> None:
         # yt-dlp writes 0 for session cookies and reads it back as "no expiry";

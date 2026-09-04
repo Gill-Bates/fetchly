@@ -35,21 +35,13 @@ from .fs import get_data_dir
 logger = logging.getLogger(__name__)
 
 CACHE_FILENAME = "update_check.json"
-# Bumped when the cache layout changes; files written by another layout are
-# discarded rather than migrated - it is a cache, refetching costs one request.
-# 4: fetchly checks Git tags rather than GitHub Releases, so a newly pushed
-# release tag is visible immediately even before a GitHub Release is created.
+# Bumped on layout change; mismatched files are discarded, not migrated.
 CACHE_SCHEMA = 4
-# Successful check: do not ask GitHub again for 24 hours.
-CACHE_TTL_SECONDS = 24 * 60 * 60
-# Failed check: retry sooner, but never on every page load.
-RETRY_TTL_SECONDS = 60 * 60
-# httpx's own timeout bounds each connect/read/write/pool phase separately,
-# not the request as a whole - with redirects (max_redirects=3) each hop gets
-# its own budget, so one slow upstream could otherwise stretch well past
-# _REQUEST_TIMEOUT. This is the hard ceiling on the whole fetch-all round
-# (all components, run concurrently), which every /api/updates request can
-# end up waiting on via _lock while a refresh is in flight.
+CACHE_TTL_SECONDS = 24 * 60 * 60  # after a successful check
+RETRY_TTL_SECONDS = 60 * 60       # after a failed one
+# Hard ceiling on the whole concurrent fetch-all round. httpx's per-phase
+# timeout does not bound a redirect chain, so this is the real deadline every
+# /api/updates request can wait on via _lock.
 _TOTAL_FETCH_TIMEOUT = 20.0
 
 _REQUEST_TIMEOUT = 6.0
@@ -79,8 +71,8 @@ class _Component:
 
     label: str
     repo: str
-    # "releases" uses the GitHub releases API, "tags" uses the Git tags API,
-    # and "ffmpeg-builds" reads the rolling BtbN release's asset list.
+    # releases: GitHub releases API. tags: Git tags API. ffmpeg-builds: the
+    # rolling BtbN release's asset list.
     source: Literal["releases", "tags", "ffmpeg-builds"]
 
 
@@ -108,15 +100,11 @@ def _parse_version(value: str | None) -> tuple[int, ...] | None:
 
 
 def _is_prerelease_tag(tag: str) -> bool:
-    """True for versions carrying a prerelease marker such as '8.0.0-beta.3'.
+    """True for a prerelease marker like '8.0.0-beta.3'.
 
-    Deliberately narrow: build metadata like ffmpeg's git-describe suffix
-    ("n9.0-4-gabc1234") or a Debian revision ("7.1.5-0+deb13u1") is not a
-    prerelease and must not be treated as one.
+    Narrow on purpose: build metadata ("n9.0-4-gabc1234", "7.1.5-0+deb13u1")
+    is not a prerelease. Only "-"/"_"/"." + an alpha/beta/rc/... token count.
     """
-    # "-" leads a prerelease per SemVer; "+" leads build metadata, which does
-    # NOT make a version a prerelease ("1.2.3+deb13u1" == "1.2.3" in precedence)
-    # - so only "-", "_", "." trigger here, matching the docstring above.
     return bool(re.search(r"[-_.](?:alpha|beta|rc|dev|pre|a|b)\d*(?:[-+_.]|$)", tag, re.IGNORECASE))
 
 
@@ -133,24 +121,16 @@ def _is_newer(latest: str | None, current: str | None) -> bool:
     if padded_latest != padded_current:
         return padded_latest > padded_current
 
-    # Same numbers: the stable release supersedes a prerelease of itself
-    # ("8.0.0" beats "8.0.0-rc1"), while build metadata does not make the
-    # installed build outdated ("n9.0" must not beat "n9.0-4-gabc1234").
+    # Same numbers: a stable release beats a prerelease of itself, but build
+    # metadata does not ("n9.0" must not beat "n9.0-4-gabc1234").
     return _is_prerelease_tag(current or "") and not _is_prerelease_tag(latest or "")
 
 
-# Hard cap on pages walked per component so one release-happy repo cannot
-# blow out the total request budget in _get_latest_versions (see the
-# asyncio.timeout there). Shared by both walkers, which use different page
-# sizes: 3 x 50 = 150 releases (_fetch_latest_release) and 3 x 100 = 300 tags
-# (_fetch_latest_tag) - comfortably more than any configured repo has published.
+# Cap pages per component so a release-happy repo cannot blow the fetch
+# budget: 3 x 50 releases / 3 x 100 tags is more than any configured repo has.
 _MAX_RELEASE_PAGES = 3
-# GitHub's release and tag lists are normally only a few KiB. The limit leaves
-# generous room for valid metadata while keeping an upstream response from
-# consuming unbounded memory.
+# Bound an upstream response's memory (lists are normally a few KiB).
 _MAX_API_RESPONSE_BYTES = 1024 * 1024
-# The checksum manifest is far smaller in normal operation; use the same
-# practical ceiling because it is downloaded through a redirect.
 _MAX_FFMPEG_CHECKSUM_BYTES = 1024 * 1024
 
 
@@ -180,15 +160,9 @@ async def _read_response_bytes(
 async def _fetch_latest_release(client: httpx.AsyncClient, repo: str) -> str | None:
     """Return the highest published, non-prerelease release tag of *repo*.
 
-    Not ``/releases/latest``: that endpoint honours only the repository's
-    prerelease flag, and katspaugh/wavesurfer.js publishes betas (currently
-    "8.0.0-beta.3") without setting it - so it would hand out a beta as the
-    version to compare against. The list is filtered on both the flag and the
-    tag name, and the highest version wins rather than the most recently
-    published one, so a hotfix released later on an older branch cannot
-    masquerade as the newest version. Bounded to _MAX_RELEASE_PAGES pages: a
-    real "highest ever published" would mean following GitHub's Link-header
-    pagination to the end, which is unbounded for a repo with many releases.
+    Not ``/releases/latest``: that honours only the prerelease flag, which
+    some repos leave unset on betas. Filters on flag *and* tag name, takes the
+    highest version (not the most recent), bounded to _MAX_RELEASE_PAGES.
     """
     best_tag: str | None = None
     best_parts: tuple[int, ...] = ()
@@ -222,11 +196,10 @@ async def _fetch_latest_release(client: httpx.AsyncClient, repo: str) -> str | N
 
 
 async def _fetch_latest_tag(client: httpx.AsyncClient, repo: str) -> str | None:
-    """Return the highest stable version tag from a repository.
+    """Return the highest stable version tag of a repo.
 
-    fetchly publishes images from Git tags. A GitHub Release may be created
-    later or not at all, so the tag list is the authoritative self-update
-    source and avoids a stale "unavailable" result after a new deployment.
+    fetchly ships from Git tags (a GitHub Release may lag or never appear), so
+    the tag list is the authoritative self-update source.
     """
     best_tag: str | None = None
     best_parts: tuple[int, ...] = ()
@@ -260,13 +233,9 @@ async def _fetch_latest_tag(client: httpx.AsyncClient, repo: str) -> str | None:
 async def _fetch_latest_ffmpeg_build(client: httpx.AsyncClient) -> str | None:
     """Return the newest stable ffmpeg series offered by the BtbN builds.
 
-    The image does not use the distro package: docker/Dockerfile pulls a static
-    upstream build from the rolling BtbN "latest" release and, when
-    FFMPEG_SERIES is left unset, picks the highest stable ``nX.Y`` series
-    present - which is exactly what this returns. If a deployment pins
-    FFMPEG_SERIES to an older line, this still reports the newest series BtbN
-    publishes, not the one an unmodified rebuild would actually produce; there
-    is no build-time record of that pin for this runtime check to read.
+    Matches what docker/Dockerfile installs when FFMPEG_SERIES is unset. If a
+    deployment pins an older series, this still reports the newest - there is
+    no build-time record of the pin to read.
     """
     _, body = await _read_response_bytes(
         client, FFMPEG_CHECKSUMS_URL, max_bytes=_MAX_FFMPEG_CHECKSUM_BYTES
@@ -294,13 +263,9 @@ async def _fetch_component(
 ) -> tuple[str, str | None, bool]:
     """Fetch the newest upstream version of one component.
 
-    Returns ``(key, tag, retry)``. ``tag`` is None when no upstream version
-    could be determined. ``retry`` is True only for failures worth retrying
-    soon - a network blip, a timeout, a rate-limit response - and False when
-    the source simply had nothing to offer, most notably a 404 for a repo that
-    is still private. That distinction keeps one unresolvable component (such
-    as fetchly's own repo before it is published) from dragging the whole
-    batch onto the short RETRY_TTL_SECONDS cadence.
+    Returns ``(key, tag, retry)``. ``retry`` is True only for transient
+    failures (blip, timeout, rate limit) - a 404 is False, so a still-private
+    repo does not drag the whole batch onto the short RETRY_TTL cadence.
     """
     try:
         if component.source == "ffmpeg-builds":
@@ -310,9 +275,8 @@ async def _fetch_component(
         else:
             tag = await _fetch_latest_release(client, component.repo)
     except httpx.HTTPStatusError as exc:
-        # 404 -> the repo/asset is not reachable (private, renamed, removed);
-        # retrying in an hour will not change that. Anything else (403 rate
-        # limit, 5xx) is transient and does warrant a sooner retry.
+        # 404 = not reachable (private/renamed/removed); anything else (403, 5xx)
+        # is transient and worth a sooner retry.
         retry = exc.response.status_code != 404
         logger.log(
             logging.WARNING if retry else logging.INFO,
@@ -330,15 +294,11 @@ async def _fetch_component(
 async def _fetch_all(
     previous: dict[str, dict[str, Any]], attempted_at: float
 ) -> tuple[dict[str, dict[str, Any]], bool]:
-    """Query every upstream source once. Returns (versions, all_succeeded).
+    """Query every upstream source once. Returns ``(versions, all_succeeded)``.
 
-    A component that hits a transient failure keeps its previously known
-    version - with its own older ``checked_at``, so the result stays honest
-    about what was actually confirmed just now - and marks the round
-    incomplete so it is retried sooner. A component whose source resolved with
-    nothing to compare against (a 404) has any stale entry dropped and does
-    not hold back the round. Entries for components that no longer exist are
-    dropped instead of lingering in the cache file forever.
+    A transient failure keeps the component's last known version (with its own
+    older ``checked_at``) and marks the round incomplete. A 404 drops any
+    stale entry without holding back the round. Unknown components are dropped.
     """
     async with httpx.AsyncClient(
         timeout=_REQUEST_TIMEOUT,
@@ -354,14 +314,11 @@ async def _fetch_all(
     complete = True
     for key, tag, retry in results:
         if tag:
-            # Stamped with the attempt's own timestamp, so a component that
-            # answered is not accidentally older than the attempt itself.
             versions[key] = {"version": tag, "checked_at": attempted_at}
         elif retry:
             complete = False
         else:
-            # Source resolved with nothing to offer (e.g. a still-private
-            # repo). Drop any stale entry and let the normal 24h TTL apply.
+            # Resolved with nothing (e.g. still-private repo): drop stale entry.
             versions.pop(key, None)
     return versions, complete
 
@@ -371,11 +328,8 @@ def _cache_path() -> Path:
 
 
 def _parse_timestamp(value: Any) -> float:
-    """Coerce a cached timestamp to a sane float; 0.0 for anything unusable.
-
-    Guards against a hand-edited or truncated cache file: a non-numeric value
-    would otherwise raise out of the settings request, and "Infinity" would
-    parse fine and then never expire.
+    """Coerce a cached timestamp to a finite non-negative float; 0.0 otherwise
+    (a hand-edited "Infinity" would else never expire).
     """
     try:
         timestamp = float(value or 0.0)
@@ -393,9 +347,8 @@ def _read_cache_file() -> dict[str, Any] | None:
     """Load the on-disk cache; None when missing, stale-schema, or unusable."""
     path = _cache_path()
     try:
-        # A valid cache is only a few hundred bytes. Read at most one extra byte
-        # after the stat check too, so a concurrent external writer cannot turn
-        # this best-effort cache into an unbounded allocation.
+        # Bounded read (stat + one extra byte) so a concurrent external writer
+        # cannot turn this best-effort cache into an unbounded allocation.
         if path.stat().st_size > _MAX_CACHE_BYTES:
             logger.debug("Discarding oversized update cache at %s", path)
             return None
@@ -428,9 +381,8 @@ def _read_cache_file() -> dict[str, Any] | None:
                 "checked_at": _parse_timestamp(entry.get("checked_at")),
             }
 
-    # A hand-edited or corrupted expires_at far in the future would otherwise
-    # disable update checks indefinitely; clamp it to what a legitimate write
-    # could ever have produced (see _get_latest_versions below).
+    # Clamp a corrupted far-future expires_at to what a real write could produce,
+    # or update checks would be disabled indefinitely.
     max_expiry = time.time() + CACHE_TTL_SECONDS
     expires_at = _parse_timestamp(payload.get("expires_at"))
     if expires_at > max_expiry:
@@ -447,12 +399,8 @@ def _read_cache_file() -> dict[str, Any] | None:
 
 
 def _write_cache_file(entry: dict[str, Any]) -> None:
-    """Persist the cache so restarts and reloads keep the 24h window.
-
-    Written to a temporary file in the same directory and moved into place, so
-    a crash mid-write cannot leave a truncated cache behind. Single-process by
-    design (the image runs WORKERS=1, see docker/Dockerfile), so no
-    cross-process lock is involved.
+    """Persist the cache (temp file + atomic rename) so restarts keep the 24h
+    window. Single-process (WORKERS=1), so no cross-process lock.
     """
     path = _cache_path()
     try:
@@ -501,9 +449,7 @@ async def _get_latest_versions(force: bool = False) -> dict[str, Any]:
 
         entry = {
             "schema": CACHE_SCHEMA,
-            # Only a fully successful round counts as "checked": a partial or
-            # total failure keeps serving known versions, but must not claim
-            # they were confirmed just now.
+            # Only a fully successful round advances "checked_at".
             "checked_at": attempted_at if complete else previous_checked_at,
             "last_attempt_at": attempted_at,
             "complete": complete,
@@ -516,10 +462,8 @@ async def _get_latest_versions(force: bool = False) -> dict[str, Any]:
 
 
 def _release_url(component: _Component, tag: str | None) -> str:
-    """Link to the concrete release page for *tag*.
-
-    ffmpeg is the exception: its builds come from a rolling release tag, so
-    there is no per-version page and the link always points at that release.
+    """Link to the release page for *tag* (ffmpeg always points at its rolling
+    "latest" release, which has no per-version page).
     """
     if component.source == "ffmpeg-builds":
         return f"https://github.com/{component.repo}/releases/tag/latest"

@@ -1584,10 +1584,7 @@ async function collectMetrics(page, view) {
                 return isScrollable && el.scrollHeight > el.clientHeight + 2;
             });
 
-        // ─────────────────────────────────────────────────────────────
         // iOS Scroll Blocking / Layout Bug Detection
-        // ─────────────────────────────────────────────────────────────
-
         // 1. Parent with overflow:hidden blocking scrollable child
         const overflowHiddenScrollBlockers = [];
         const overflowHiddenSeen = new Set();
@@ -2424,7 +2421,7 @@ async function collectMetrics(page, view) {
             return misaligned.length;
         })();
 
-        // ─── NEW CSS REVIEW CHECKS ────────────────────────────────────────────────
+        // CSS review checks
 
         // 1. Undefined CSS Custom Properties
         const undefinedCustomProperties = (() => {
@@ -2984,7 +2981,7 @@ async function collectMetrics(page, view) {
             return issues;
         })();
 
-        // ─── iOS / Rendering Stability Checks ────────────────────────────────────
+        // iOS / rendering stability checks
 
         // 1. Broken or zero-size icons (SVG / IMG)
         const brokenImages = Array.from(document.images)
@@ -3140,7 +3137,7 @@ async function collectMetrics(page, view) {
             return style.alignItems !== 'center';
         })();
 
-        // ─── LAYOUT STABILITY CHECKS (2026-04-28) ─────────────────────────────────
+        // Layout stability checks
 
         const isDashboardViewportLayout = Boolean(
             document.body.classList.contains('app-root--dashboard')

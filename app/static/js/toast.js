@@ -5,10 +5,7 @@
 
 /**
  * @module toast
- *
- * Central toast notification system for fetchly.
- * Provides accessible, dismissible notifications with a single
- * container attached to document.body.
+ * Accessible, dismissible toast notifications from one container on document.body.
  */
 
 const TOAST_ICONS = {
@@ -29,10 +26,7 @@ const toastState = new WeakMap();
 /** @type {HTMLDivElement | null} */
 let container = null;
 
-/**
- * Ensure toast container exists in DOM.
- * @returns {HTMLDivElement}
- */
+/** @returns {HTMLDivElement} the toast container, created if needed */
 function getContainer() {
     if (container && document.body.contains(container)) {
         return container;
@@ -48,10 +42,7 @@ function getContainer() {
     return container;
 }
 
-/**
- * Get or initialize bookkeeping for a toast element.
- * @param {HTMLDivElement} toast
- */
+/** @param {HTMLDivElement} toast */
 function getToastState(toast) {
     let state = toastState.get(toast);
     if (!state) {
@@ -88,11 +79,7 @@ function removeToast(toast, state) {
     toast.remove();
 }
 
-/**
- * Create a Material Symbols icon span.
- * @param {string} name
- * @returns {HTMLSpanElement}
- */
+/** @param {string} name @returns {HTMLSpanElement} a Material Symbols icon span */
 function icon(name) {
     const span = document.createElement("span");
     span.className = "material-symbols-outlined fx-toast__icon";
@@ -102,8 +89,7 @@ function icon(name) {
 }
 
 /**
- * Find a currently visible (non-dismissing) toast with the same type and
- * message text.
+ * A visible (non-dismissing) toast with the same type and text, or null.
  * @param {HTMLDivElement} wrapper
  * @param {string} resolvedType
  * @param {string} text
@@ -125,15 +111,13 @@ function findActiveToast(wrapper, resolvedType, text) {
 /**
  * Show a toast notification.
  *
- * A repeat call with the same type and message while an identical toast is
- * still showing does not stack a duplicate - it restarts that toast's
- * auto-dismiss timer instead. This is what keeps a repeating failure (e.g. an
- * infinite-scroll page load that keeps failing while the sentinel stays in
- * view) from flooding the toast container with copies of the same message.
- * @param {string} message - The message to display
- * @param {"success" | "danger" | "warning" | "info" | "error"} [type="info"] - Toast type
- * @param {number} [duration=3000] - Duration in ms before auto-dismiss
- * @returns {HTMLDivElement} The toast element
+ * A repeat call with the same type and message while that toast still shows
+ * restarts its auto-dismiss timer instead of stacking a duplicate, so a
+ * repeating failure cannot flood the container.
+ * @param {string} message
+ * @param {"success" | "danger" | "warning" | "info" | "error"} [type="info"]
+ * @param {number} [duration=3000] - ms before auto-dismiss
+ * @returns {HTMLDivElement}
  */
 export function showToast(message, type = "info", duration = TOAST_DURATION) {
     const wrapper = getContainer();
@@ -190,10 +174,7 @@ export function showToast(message, type = "info", duration = TOAST_DURATION) {
     return toast;
 }
 
-/**
- * Dismiss a toast with animation.
- * @param {HTMLDivElement} toast
- */
+/** @param {HTMLDivElement} toast - dismissed with a hide animation */
 function dismissToast(toast) {
     if (!toast || !toast.parentNode) return;
 
@@ -227,11 +208,7 @@ function dismissToast(toast) {
     state.fallbackTimerId = window.setTimeout(doRemove, TOAST_DISMISS_TIMEOUT);
 }
 
-/**
- * Dismiss all active toasts.
- * Pending auto-dismiss timers are cancelled with each toast.
- * @returns {void}
- */
+/** Dismiss every active toast (cancelling its pending timers). */
 export function clearToasts() {
     if (!container || !document.body.contains(container)) {
         return;
@@ -241,7 +218,6 @@ export function clearToasts() {
     wrapper.querySelectorAll(".fx-toast").forEach((t) => dismissToast(t));
 }
 
-// Convenience aliases
 export const toast = {
     success: (msg, duration) => showToast(msg, "success", duration),
     error: (msg, duration) => showToast(msg, "danger", duration),

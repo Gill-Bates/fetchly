@@ -47,6 +47,11 @@ reconnects and re-reads the current state from `GET /api/jobs`.
 *downloadable*, so an audio file can be fetched while its tempo analysis is still
 running.
 
+A completed video whose file is VP9 or AV1 (see
+[Universally playable output](downloads.md#universally-playable-output)) carries a
+**Limited playback** marker in the job list and the details dialog — it will not open
+on Safari, iOS, or most TVs.
+
 ## Job actions
 
 | Action | Availability |
@@ -58,7 +63,11 @@ running.
 | Trim | Audio jobs, downloadable — [Audio Trimming](trimming.md) |
 | Stems | Audio jobs, Lalal.ai connected — [Stem Separation](stems.md) |
 | Share | Completed jobs — [Share Links](sharing.md) |
-| Delete | Any job; removes the row and its artifacts |
+
+There is no per-job delete action. Jobs are removed either by
+[retention](../configuration/storage.md) sweeping expired artifacts, or by
+**Settings → System → Remove all jobs**, which clears every job at once (see
+[Bulk cleanup](#bulk-cleanup) below).
 
 ## Track length
 

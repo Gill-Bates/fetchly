@@ -1,6 +1,4 @@
-/* ============================================================================
-   fetchly - Dark UI
-   ============================================================================ */
+/* fetchly - Dark UI */
 
 /* Roboto Flex Font */
 @font-face {
@@ -22,8 +20,7 @@
     font-display: block;
 }
 
-/* ─── Logo ──────────────────────────────────────────────────────────────────
-     App UI is dark-only; fetchly_logo.svg already ships white. */
+/* Logo. App UI is dark-only; fetchly_logo.svg already ships white. */
 .logo {
     width: 180px;
     height: auto;
@@ -42,6 +39,16 @@
     }
 }
 
+/* Touch counterpart to the rule above: devices without hover never fire
+   :hover, so a tap on the logo used to do nothing at all. navbar-logo.js adds
+   this class on exactly those devices; the pulse plays once (~0.9s) and wears
+   itself out, so a missed cleanup cannot leave the logo pulsing. */
+@media (prefers-reduced-motion: no-preference) {
+    .top-navbar .navbar-brand .logo.logo-easter-tap {
+        animation: logo-easter-pulse 0.9s ease-in-out 1;
+    }
+}
+
 @keyframes logo-easter-pulse {
 
     0%,
@@ -56,10 +63,7 @@
     }
 }
 
-/* ─────────────────────────────────────────────
-   Fix: Ghost scrollbars in tables
-   ───────────────────────────────────────────── */
-
+/* Ghost scrollbars in tables */
 .table-responsive {
     overflow: auto hidden;
     /* Prevent a vertical ghost scrollbar while retaining horizontal scroll. */
@@ -70,12 +74,12 @@
     /* iOS momentum scrolling */
 }
 
-/* verhindert Subpixel overflow durch Tabellenberechnung */
+/* Prevent subpixel overflow from table layout calculation */
 .table-responsive>table {
     min-width: 0;
 }
 
-/* Optional: cleaner scrollbar styling */
+/* Scrollbar styling */
 .table-responsive::-webkit-scrollbar {
     height: 8px;
     width: 8px;
@@ -321,7 +325,7 @@ body {
     overflow: visible;
 }
 
-/* ── Footer ──────────────────────────────────────────────────────────────── */
+/* Footer */
 
 /* Flex sticky footer: it stays at the viewport bottom when the page is short,
    but remains in normal flow when the content grows past the viewport. */
@@ -402,7 +406,7 @@ body {
     }
 }
 
-/* ── Top Navbar ───────────────────────────────────────────────────────────── */
+/* Top Navbar */
 
 .top-navbar {
     height: var(--nav-height);
@@ -464,7 +468,7 @@ body {
     color: var(--text-muted);
 }
 
-/* ── Hero ─────────────────────────────────────────────────────────────────── */
+/* Hero */
 
 .hero {
     text-align: left;
@@ -499,7 +503,7 @@ body {
     width: 0%;
 }
 
-/* ─── Stats ───────────────────────────────────────────────────────────────── */
+/* Stats */
 
 .stats-row {
     margin-top: -10px;
@@ -560,7 +564,7 @@ body {
     align-self: baseline;
 }
 
-/* ── Surfaces ─────────────────────────────────────────────────────────────── */
+/* Surfaces */
 
 /* Consistent motion */
 .btn {
@@ -572,7 +576,7 @@ body {
     transition: border-color 0.18s ease, box-shadow 0.18s ease, background-color 0.18s ease;
 }
 
-/* ── Unified Button System ───────────────────────────────────────────────── */
+/* Unified Button System */
 
 .btn {
     border-radius: var(--radius-sm);
@@ -795,7 +799,7 @@ button .material-symbols-outlined,
     color: #fff;
 }
 
-/* ── Input with leading icon ────────────────────────────────────────────── */
+/* Input with leading icon */
 
 .input-icon {
     position: relative;
@@ -878,7 +882,7 @@ button .material-symbols-outlined,
     white-space: nowrap;
 }
 
-/* ── Form ────────────────────────────────────────────────────────────────── */
+/* Form */
 
 .form-label {
     color: var(--text);
@@ -1071,7 +1075,7 @@ html body .text-muted {
     border-color: var(--primary);
 }
 
-/* ── Settings Page ──────────────────────────────────────────────────────── */
+/* Settings Page */
 
 .settings-form-layout {
     /* No bottom margin here: .app-main already contributes padding-bottom.
@@ -1279,7 +1283,7 @@ html body .text-muted {
     max-width: 100%;
 }
 
-/* ── Fetchly self-update card (Settings → System) ─────────────────────── */
+/* Fetchly self-update card (Settings → System) */
 .settings-update-card {
     padding: 0;
 }
@@ -1287,8 +1291,18 @@ html body .text-muted {
 .settings-update-card-header {
     display: flex;
     align-items: center;
+    flex-wrap: wrap;
     justify-content: space-between;
     gap: var(--space-3);
+}
+
+.settings-update-card-header>.d-flex {
+    min-width: 0;
+    flex: 1 1 auto;
+}
+
+.settings-update-card-header button {
+    flex-shrink: 0;
 }
 
 .settings-update-card-header .icon-inline {
@@ -1354,7 +1368,7 @@ html body .text-muted {
     height: 100%;
 }
 
-/* ── Settings Grid: stable 2-column layout ─────────────────────────────── */
+/* Settings Grid: stable 2-column layout */
 .settings-grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(min(380px, 100%), 1fr));
@@ -1542,8 +1556,10 @@ html body .text-muted {
 .settings-range-tick {
     grid-row: 1;
     justify-self: start;
-    /* Same diameter as the range thumb (Bootstrap's .form-range thumb is
-       1rem square), so an inactive tick reads as the bubble's empty slot. */
+    /* Same diameter as the range thumb (Bootstrap's .form-range thumb is 1rem
+       square), so an inactive tick reads as the bubble's empty slot rather
+       than as a dot next to the track. Shrinking it to a faint marker was
+       tried and read as noise at the far end of the scale. */
     width: 1rem;
     height: 1rem;
     border: 1px solid color-mix(in srgb, var(--text-muted) 38%, var(--surface));
@@ -1606,6 +1622,11 @@ html body .text-muted {
 }
 
 .settings-range-labels span {
+    /* Without this, auto-placement bites: the last label explicitly claims
+       row 1/column 6 (see :nth-child(7) below), and since it's placed before
+       the second-to-last label in the auto-placement pass, that one finds its
+       column already taken on row 1 and gets pushed down to row 2 instead. */
+    grid-row: 1;
     justify-self: start;
 }
 
@@ -1631,10 +1652,16 @@ html body .text-muted {
 
 .settings-range-labels span:nth-child(6) {
     grid-column: 6;
+    /* Pinned to row 1 like the ticks: the 7th label explicitly claims
+       column 6 / row 1, so without this the auto-placer bumps the 6th label
+       (180d, 5k) down to a second row. Overlap between the two is fine - they
+       resolve to different points on the track via the transforms below. */
+    grid-row: 1;
 }
 
 .settings-range-labels span:nth-child(7) {
     grid-column: 6;
+    grid-row: 1;
     justify-self: end;
     transform: translateX(50%);
 }
@@ -1813,7 +1840,7 @@ html body .text-muted {
     }
 }
 
-/* ── Cookie tiles (Settings → Integrations) ────────────────────────────── */
+/* Cookie tiles (Settings → Integrations) */
 .cookie-tile-section {
     border-top: none;
     margin-top: 0;
@@ -2271,6 +2298,16 @@ html body .text-muted {
     }
 }
 
+/* Flex + baseline keeps the account pill, the middot and the minutes on one
+   optical line: the pill is taller than the surrounding text, so inline flow
+   left the separator floating above the pill's centre. */
+#lalalStatusLine {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: 0.15rem 0.4rem;
+}
+
 .lalal-status-email {
     display: inline-block;
     font-size: 0.85em;
@@ -2283,12 +2320,16 @@ html body .text-muted {
     line-height: 1.2;
 }
 
+.lalal-status-sep {
+    opacity: 0.45;
+}
+
 .lalal-status-minutes {
     opacity: 0.75;
     font-size: 0.82em;
 }
 
-/* ── Video Preview Grid ──────────────────────────────────────────────────── */
+/* Video Preview Grid */
 
 .video-preview-grid {
     display: grid;
@@ -2311,7 +2352,7 @@ html body .text-muted {
     margin-top: 0 !important;
 }
 
-/* ── Submit Form Card ────────────────────────────────────────────────────── */
+/* Submit Form Card */
 
 /* The identified submit card and its wrapper should shrink to their content. */
 #submitCard {
@@ -2514,10 +2555,8 @@ html body .text-muted {
     background: rgba(255, 255, 255, 0.04);
 }
 
-/* Platform pill — shown before the title; platform is derived from the URL. */
-/* Icon-only badge: every call site (jobs list, detail modal, job.html) renders
-   a single masked icon span and no text, so the box is a circle. `color` is
-   load-bearing - the icon paints itself with currentColor. */
+/* Platform pill: an icon-only circular badge shown before the title. `color`
+   is load-bearing - the masked icon paints with currentColor. */
 .platform-pill {
     display: inline-flex;
     align-items: center;
@@ -2665,7 +2704,7 @@ html body .text-muted {
     }
 }
 
-/* ── Table ───────────────────────────────────────────────────────────────── */
+/* Table */
 
 .table {
     margin: 0;
@@ -2755,7 +2794,7 @@ td[data-label="Title"] {
     letter-spacing: -0.01em;
 }
 
-/* ── Truncation Anchor + Global Title Popover ───────────────────────────── */
+/* Truncation Anchor + Global Title Popover */
 
 .job-title-cell {
     position: relative;
@@ -2860,6 +2899,10 @@ td[data-label="Title"] {
     box-shadow: inset 3px 0 0 var(--danger);
 }
 
+.table tbody tr.row-cancelled>td:first-child {
+    box-shadow: inset 3px 0 0 var(--text-muted);
+}
+
 /* Bootstrap's table-hover paints every cell on hover. Keep that state
    transparent so the row owns one continuous background without seams. */
 .jobs-table.table-hover>tbody>tr:hover>* {
@@ -2867,7 +2910,7 @@ td[data-label="Title"] {
     background-color: transparent;
 }
 
-/* ── Jobs Card Bounds ───────────────────────────────────────────────────── */
+/* Jobs Card Bounds */
 
 #jobsCard {
     display: flex;
@@ -2955,6 +2998,131 @@ td[data-label="Title"] {
 .job-media-icon {
     font-size: 16px;
     color: var(--text-muted);
+}
+
+/* Drop zone for a custom watermark logo (Settings -> Processing -> Watermark). */
+.logo-dropzone {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.35rem;
+    min-height: 120px;
+    padding: 1rem;
+    border: 1px dashed var(--border-color, rgb(255 255 255 / 18%));
+    border-radius: 0.75rem;
+    background: rgb(255 255 255 / 2%);
+    text-align: center;
+    cursor: pointer;
+    transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+
+.logo-dropzone:hover,
+.logo-dropzone:focus-visible {
+    border-color: var(--accent, #6c63ff);
+    background: rgb(108 99 255 / 8%);
+}
+
+.logo-dropzone--over {
+    border-style: solid;
+    border-color: var(--accent, #6c63ff);
+    background: rgb(108 99 255 / 14%);
+}
+
+.logo-dropzone--busy {
+    pointer-events: none;
+    opacity: 0.6;
+}
+
+.logo-dropzone__icon {
+    font-size: 24px;
+    color: var(--text-muted);
+}
+
+.logo-dropzone__label {
+    font-size: 0.82rem;
+    font-weight: 600;
+}
+
+/* The logo in use, kept on screen under the drop zone: a small preview, what
+   it is, and the trash button that puts the built-in artwork back. */
+.logo-current {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    margin-top: 0.5rem;
+    padding: 0.45rem 0.55rem;
+    border: 1px solid var(--border-color, rgb(255 255 255 / 12%));
+    border-radius: 0.6rem;
+}
+
+/* The preview sits on a checkerboard so a transparent logo reads as
+   transparent rather than as the panel background. */
+.logo-current__preview {
+    display: flex;
+    flex: 0 0 auto;
+    align-items: center;
+    justify-content: center;
+    width: 84px;
+    height: 44px;
+    padding: 0.25rem;
+    border-radius: 0.4rem;
+    background-color: rgb(255 255 255 / 6%);
+    background-image:
+        linear-gradient(45deg, rgb(0 0 0 / 22%) 25%, transparent 25%),
+        linear-gradient(-45deg, rgb(0 0 0 / 22%) 25%, transparent 25%),
+        linear-gradient(45deg, transparent 75%, rgb(0 0 0 / 22%) 75%),
+        linear-gradient(-45deg, transparent 75%, rgb(0 0 0 / 22%) 75%);
+    background-position: 0 0, 0 5px, 5px -5px, -5px 0;
+    background-size: 10px 10px;
+}
+
+.logo-current__preview img {
+    max-width: 100%;
+    max-height: 100%;
+    object-fit: contain;
+}
+
+.logo-current__text {
+    display: flex;
+    flex: 1 1 auto;
+    flex-direction: column;
+    min-width: 0;
+    gap: 0.1rem;
+}
+
+.logo-current__title {
+    font-size: 0.82rem;
+    font-weight: 600;
+}
+
+.logo-current__meta {
+    font-size: 0.7rem;
+    color: var(--text-muted);
+}
+
+.logo-current__remove {
+    flex: 0 0 auto;
+}
+
+/* Marks a download that is not H.264/AAC in MP4: playable here, but not on
+   Safari, iOS or most TVs. A cue, not an error - the user chose it. */
+.job-playback-warning {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.2rem;
+    font-size: 0.62rem;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    padding: 0.1rem 0.35rem;
+    border-radius: 999px;
+    color: var(--bs-warning-text-emphasis, #ffc107);
+    background: rgb(255 193 7 / 12%);
+    white-space: nowrap;
+}
+
+.job-playback-warning .material-symbols-outlined {
+    font-size: 13px;
 }
 
 /* Sub-label for codec under format */
@@ -3377,7 +3545,8 @@ td[data-label="Title"] {
 }
 
 .job-item.row-done,
-.job-item.row-error {
+.job-item.row-error,
+.job-item.row-cancelled {
     border-color: var(--border);
 }
 
@@ -3392,6 +3561,13 @@ td[data-label="Title"] {
     background: var(--surface-elevated);
     box-shadow:
         inset 3px 0 0 var(--danger),
+        0 14px 34px rgba(2, 6, 23, 0.16);
+}
+
+.job-item.row-cancelled {
+    background: var(--surface-elevated);
+    box-shadow:
+        inset 3px 0 0 var(--text-muted),
         0 14px 34px rgba(2, 6, 23, 0.16);
 }
 
@@ -3424,6 +3600,33 @@ td[data-label="Title"] {
 
 .job-item__actions .action-buttons {
     width: auto;
+}
+
+/* Current job card */
+
+/* Sits between the submit form and the jobs list and holds a single job, so a
+   download started in this session stays visible while Show Job History is
+   off. A bare wrapper - the job item inside brings its own card styling.
+   Mobile and tablet only - see the @media (max-width: 1024px) block, which
+   turns it back on and matches jobs.js's MOBILE_BREAKPOINT. On desktop the
+   jobs table is always open and already shows the job as its first row.
+
+   Must stay below the .job-item block: the margin reset below matches its
+   specificity, so source order is what decides. */
+.current-job-card {
+    display: none;
+}
+
+.current-job-item {
+    /* The list stacks its items with a top margin; the lone item here is
+       spaced by the wrapper's own margin instead. */
+    margin-top: 0;
+}
+
+/* Nothing shares the title row here, so the trailing column the list reserves
+   would only add dead space. */
+.current-job-item .job-item__title-row {
+    grid-template-columns: minmax(0, 1fr);
 }
 
 @keyframes job-card-shimmer {
@@ -3726,7 +3929,7 @@ td[data-label="Title"] {
     opacity: 0.6;
 }
 
-/* ── Action Cell ─────────────────────────────────────────────────────────── */
+/* Action Cell */
 
 .action-cell-wrap {
     display: flex;
@@ -3742,7 +3945,7 @@ td[data-label="Title"] {
     z-index: var(--z-popover);
 }
 
-/* ── Status ──────────────────────────────────────────────────────────────── */
+/* Status */
 
 /* Status Page Grid Layout */
 .status-grid {
@@ -3855,7 +4058,7 @@ td[data-label="Title"] {
     color: #86efac;
 }
 
-/* ── Non-status badges ──────────────────────────────────────────────────
+/* Non-status badges
    One definition for every badge that carries information rather than
    state: slider values, version chips, cookie detail chips, step markers,
    and the empty states of the cookie and Lalal.ai tiles.
@@ -4003,7 +4206,7 @@ td:last-child {
     filter: grayscale(1);
 }
 
-/* ── Modal ───────────────────────────────────────────────────────────────── */
+/* Modal */
 
 .modal-backdrop.show {
     opacity: 1;
@@ -4102,12 +4305,10 @@ td:last-child {
     border-color: var(--border);
 }
 
-/* ── Trim Modal Waveform ─────────────────────────────────────────────────── */
+/* Trim Modal Waveform */
 
-/* The loader is an overlay, not a sibling that swaps places with the waveform:
-   WaveSurfer reads its container's width when it is created and seeds its
-   ResizeObserver from it, so a display:none #trimWave produces a zero-width
-   first render plus a delayed re-render on top of the finished waveform. */
+/* The loader is an overlay, not a sibling: a display:none #trimWave makes
+   WaveSurfer seed from zero width and re-render late over the finished wave. */
 .trim-wave-stage {
     position: relative;
 }
@@ -4373,7 +4574,7 @@ td:last-child {
     opacity: 0.75;
 }
 
-/* ── Empty State ─────────────────────────────────────────────────────────── */
+/* Empty State */
 
 .empty-state {
     text-align: center;
@@ -4387,7 +4588,7 @@ td:last-child {
     opacity: 0.5;
 }
 
-/* ── Spinner ─────────────────────────────────────────────────────────────── */
+/* Spinner */
 
 .spinner-border-sm {
     width: 1rem;
@@ -4395,7 +4596,7 @@ td:last-child {
     border-width: 2px;
 }
 
-/* ── Responsive ──────────────────────────────────────────────────────────── */
+/* Responsive */
 
 @media (max-width: 767.98px) {
     .app-main {
@@ -4629,12 +4830,8 @@ td:last-child {
         max-width: none;
     }
 
-    .cookie-tile-actions {
-        flex-direction: column;
-    }
-
     .cookie-tile-actions .btn {
-        width: 100%;
+        flex: 1 1 0;
     }
 }
 
@@ -4924,7 +5121,7 @@ td:last-child {
     }
 }
 
-/* ── Jobs feed and tablet fallback ───────────────────────────────────────── */
+/* Jobs feed and tablet fallback */
 
 @media (max-width: 1024px) {
     .jobs-mobile-list {
@@ -4945,6 +5142,21 @@ td:last-child {
 
     html.mobile-job-history-enabled #jobsCard {
         display: flex;
+    }
+
+    /* .d-none is what keeps this hidden until current-job.js mounts a job;
+       it is !important, so it still wins over this rule. flex-basis pins it to
+       its content height inside the column-flex dashboard layout. */
+    .current-job-card {
+        display: block;
+        flex: 0 0 auto;
+        /* .mobile-job-history-option below pulls itself up by 0.5rem to
+           tighten the gap for the common case where this card is empty
+           (submitCard's mb-4 then abuts it directly). When a job is mounted
+           here, that same pull-up would shrink only the gap below this card,
+           leaving it uneven against the untouched gap above. Adding the
+           0.5rem back on this side keeps both gaps at 1.5rem. */
+        margin-bottom: 2rem;
     }
 
     .mobile-job-history-option {
@@ -5061,6 +5273,14 @@ td:last-child {
         box-shadow: 0 0 0 2px color-mix(in srgb, var(--danger) 14%, transparent);
     }
 
+    .job-item.row-cancelled {
+        border-color: color-mix(in srgb, var(--text-muted) 42%, var(--border));
+    }
+
+    .job-item.row-cancelled .job-item__status .status-pill-secondary {
+        box-shadow: 0 0 0 2px color-mix(in srgb, var(--text-muted) 14%, transparent);
+    }
+
     .job-item.row-done .job-item__status .status-pill-success {
         background:
             linear-gradient(180deg, rgba(255, 255, 255, 0.1), transparent 58%),
@@ -5123,7 +5343,7 @@ td:last-child {
     }
 }
 
-/* ── Touch device overrides (iOS Safari in particular) ───────────────────
+/* Touch device overrides (iOS Safari in particular)
    These were previously gated on
    `@supports (-webkit-touch-callout: none) and (hover: none)`, which never
    matched anywhere: @supports evaluates declarations, so "(hover: none)" was
@@ -5205,7 +5425,7 @@ td:last-child {
 
 }
 
-/* ── Mobile-specific refinements ──────────────────────────────────────────
+/* Mobile-specific refinements
    Base rules already allow vertical scroll; these are additional mobile tweaks. */
 @media (max-width: 767.98px) {
 
@@ -5237,6 +5457,31 @@ td:last-child {
     .detail-modal__body,
     .jobs-list-shell {
         -webkit-overflow-scrolling: touch;
+    }
+
+    /* Fade the settings tab strip out at both edges so it's clear there's
+       more to scroll to, instead of abruptly clipping a tab mid-label.
+       When already scrolled fully to an edge (.is-at-start / .is-at-end,
+       toggled from JS), skip the fade on that side so the first/last pill
+       stays fully visible instead of looking dimmed for no reason. */
+    .settings-tabs {
+        mask-image: linear-gradient(to right, transparent, black 20px, black calc(100% - 20px), transparent);
+        -webkit-mask-image: linear-gradient(to right, transparent, black 20px, black calc(100% - 20px), transparent);
+    }
+
+    .settings-tabs.is-at-start {
+        mask-image: linear-gradient(to right, black, black calc(100% - 20px), transparent);
+        -webkit-mask-image: linear-gradient(to right, black, black calc(100% - 20px), transparent);
+    }
+
+    .settings-tabs.is-at-end {
+        mask-image: linear-gradient(to right, transparent, black 20px, black);
+        -webkit-mask-image: linear-gradient(to right, transparent, black 20px, black);
+    }
+
+    .settings-tabs.is-at-start.is-at-end {
+        mask-image: none;
+        -webkit-mask-image: none;
     }
 
     .wb-footer-link {
@@ -5288,7 +5533,7 @@ td:last-child {
     }
 }
 
-/* ── Share "Lost in Space" page ─────────────────────────────────────────── */
+/* Share "Lost in Space" page */
 /* Public 404 for an unusable share link. Standalone chrome (no navbar), so it
    carries its own full-bleed backdrop instead of the app shell's. */
 
@@ -5323,7 +5568,7 @@ td:last-child {
     overflow: hidden;
 }
 
-/* --- starfield ------------------------------------------------------------ */
+/* starfield */
 
 .lost-sky {
     position: absolute;
@@ -5400,7 +5645,7 @@ td:last-child {
     }
 }
 
-/* --- astronaut ------------------------------------------------------------ */
+/* astronaut */
 
 .lost-astronaut {
     position: relative;
@@ -5481,7 +5726,7 @@ td:last-child {
     }
 }
 
-/* --- message card --------------------------------------------------------- */
+/* message card */
 
 .lost-card {
     position: relative;
@@ -5563,11 +5808,8 @@ td:last-child {
     }
 }
 
-/* ---------------------------------------------------------------------------
-   Settings -> System: Changelog card
-   Renders the sanitized HTML from app/utils/changelog.py. Ported from the
-   About-page changelog card in the wirebuddy sister project.
-   --------------------------------------------------------------------------- */
+/* Settings -> System: Changelog card. Styles the sanitized HTML from
+   app/utils/changelog.py. */
 .settings-changelog {
     margin-top: var(--space-4);
 }

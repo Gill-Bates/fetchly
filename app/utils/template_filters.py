@@ -42,11 +42,8 @@ logger = logging.getLogger(__name__)
 
 
 def _resolve_local_tz() -> ZoneInfo:
-    """Resolve the local timezone from the ``TZ`` environment variable.
-
-    An unset ``TZ`` means UTC. A configured but unusable ``TZ`` still falls back
-    to UTC, but is logged: silently showing UTC timestamps as local time makes
-    every displayed time wrong without any visible symptom.
+    """Local timezone from ``TZ`` (unset or unusable -> UTC; unusable is logged
+    because a silent UTC fallback makes every displayed time wrong).
     """
     tz_name = os.environ.get("TZ", "").strip()
     if not tz_name:
@@ -65,10 +62,8 @@ _STATUS_CLASS_MAP: dict[str, str] = {
     "cancelled": "secondary",
     "error": "danger",
 }
-# Human-readable phase names for the status pill. Raw status values leak
-# implementation wording ("processing") and the previous client-side collapse of
-# every in-flight status into "Running" hid which phase a job was actually in.
-# Keep in sync with STATUS_META in app/static/js/ui.js.
+# Phase names for the status pill. Keep in sync with STATUS_META in
+# app/static/js/ui.js.
 _STATUS_LABEL_MAP: dict[str, str] = {
     "queued": "Queued",
     "processing": "Preparing",
@@ -96,10 +91,8 @@ _FILESIZE_UNITS: tuple[tuple[str, int], ...] = (
     ("KiB", 1_024),
 )
 
-# Explicit allowlist rather than a denylist copy-then-mask: a setting added to
-# _SETTINGS_DEFAULTS (app/db.py) without a matching entry here simply never
-# reaches a template or the JSON /api/settings response, instead of relying on
-# every future secret's name containing "key"/"secret"/"password"/"token".
+# Allowlist, not a denylist: a new setting is invisible to templates and
+# /api/settings until it is added here - no reliance on secret-y key names.
 _PUBLIC_SETTING_KEYS: frozenset[str] = frozenset({
     "retention_days",
     "login_required",
@@ -110,7 +103,7 @@ _PUBLIC_SETTING_KEYS: frozenset[str] = frozenset({
     "download_timeout_minutes",
     "transcode_timeout_minutes",
     "download_max_filesize_gib",
-    "download_mp4_preset",
+    "download_compatible_output",
     "video_watermark",
     "audio_analysis_max_minutes",
     "audio_analysis_timeout_minutes",
@@ -168,31 +161,29 @@ def localtime(value: str | None) -> Markup:
 
 
 def filesize(value: int | None) -> FileSize:
-    """Convert bytes to a structured human-readable filesize."""
     return _format_filesize(value)
 
 
 def duration(value: Any) -> str:
-    """Render a stored duration as a clock time for a template."""
     return format_clock(value)
 
 
 def status_class(status: str | None) -> str:
-    """Get Bootstrap class for job status."""
+    """Bootstrap contextual class for a job status."""
     if status in _SUCCESS_STATUSES:
         return "success"
     return _STATUS_CLASS_MAP.get(status, "primary")
 
 
 def status_label(status: str | None) -> str:
-    """Get the human-readable phase label for a job status."""
+    """Human-readable phase label for a job status."""
     if not status:
         return _STATUS_LABEL_MAP["queued"]
     return _STATUS_LABEL_MAP.get(status, str(status).replace("_", " ").title())
 
 
 def status_icon(status: str | None) -> str:
-    """Get Material icon name for job status."""
+    """Material icon name for a job status."""
     if status in _SUCCESS_STATUSES:
         return "check_circle"
     return _STATUS_ICON_MAP.get(status, "schedule")
@@ -209,11 +200,8 @@ def platform_id(url: str | None) -> str:
 
 
 def public_settings(settings: dict[str, Any]) -> dict[str, Any]:
-    """Build the public-safe view of settings for templates and /api/settings.
-
-    Allowlisted keys only - credentials such as lalalaai_auth_key are never
-    included, not even partially. Callers that need to know whether Lalal.ai
-    is configured get the boolean flag instead of any part of the key.
+    """The public-safe view of settings for templates and /api/settings:
+    allowlisted keys plus a ``lalalaai_configured`` boolean, never the key.
     """
     public = {key: settings[key] for key in _PUBLIC_SETTING_KEYS if key in settings}
     public["lalalaai_configured"] = is_lalala_configured(settings)
@@ -221,7 +209,7 @@ def public_settings(settings: dict[str, Any]) -> dict[str, Any]:
 
 
 def is_lalala_configured(settings: dict[str, Any]) -> bool:
-    """Check if Lalal.ai credentials are present."""
+    """Whether both Lalal.ai credentials (email + auth key) are present."""
     email = settings.get("lalalaai_email")
     auth_key = settings.get("lalalaai_auth_key")
     return (
@@ -233,7 +221,6 @@ def is_lalala_configured(settings: dict[str, Any]) -> bool:
 
 
 def register_filters(templates: Jinja2Templates) -> None:
-    """Register all template filters with a Jinja2Templates instance."""
     templates.env.filters["localtime"] = localtime
     templates.env.filters["filesize"] = filesize
     templates.env.filters["duration"] = duration

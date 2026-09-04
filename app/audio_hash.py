@@ -16,14 +16,8 @@ _HASH_CHUNK_SIZE: Final[int] = 1024 * 1024
 
 
 def compute_audio_hash(path: Path) -> str:
-    """Compute a fast, stable cache key for an audio file.
-
-    The digest covers the complete file content in bounded chunks. This makes
-    the cache key a reliable content hash rather than a boundary sample.
-
-    Raises:
-        FileNotFoundError: If *path* does not point to a regular file.
-        OSError: If the file cannot be read (permission error, I/O error, etc.).
+    """SHA-256 over the whole file, read in bounded chunks - a stable content
+    cache key. Raises FileNotFoundError / OSError if the file can't be read.
     """
     if not path.is_file():
         raise FileNotFoundError(f"Cannot hash non-existent file: {path}")

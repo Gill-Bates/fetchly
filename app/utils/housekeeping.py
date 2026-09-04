@@ -4,10 +4,7 @@
 # Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 #
 
-"""Centralized housekeeping utilities for fetchly.
-
-This module provides functions for cleaning up job artifacts on the filesystem.
-"""
+"""Cleanup of job artifacts on the filesystem."""
 
 import logging
 import re
@@ -15,6 +12,8 @@ import shutil
 from collections.abc import Callable
 from pathlib import Path
 from time import time
+
+from .fs import resolve_within_root
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +31,6 @@ _THUMBNAIL_CACHE_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
 
 
 def _is_job_uuid(name: str) -> bool:
-    """Return True if the directory name uses canonical UUID formatting."""
     return _UUID_RE.fullmatch(name) is not None
 
 
@@ -66,43 +64,22 @@ def cleanup_thumbnail_cache(cache_dir: Path, *, now: float | None = None) -> int
 
 
 def cleanup_job_directory(job_id: str, data_dir: Path) -> bool:
-    """Delete a job's download directory and all its artifacts.
+    """Delete a job's download directory.
 
-    Args:
-        job_id: The job UUID.
-        data_dir: Base data directory containing job folders.
-
-    Returns:
-        True if the directory was deleted or already absent.
-        False if the job_id is invalid, the path is unsafe, or deletion fails.
+    True when it was deleted or already absent; False when ``job_id`` is
+    invalid, the path is unsafe, or deletion fails.
     """
     if not _is_job_uuid(job_id):
         logger.error("Refusing to delete invalid job_id: %r", job_id)
         return False
 
     try:
-        data_dir_resolved = data_dir.resolve()
+        job_dir = resolve_within_root(Path(job_id), data_dir, allow_symlink=False)
     except OSError as exc:
         logger.warning("Failed to resolve data directory %s: %s", data_dir, exc)
         return False
-
-    job_dir = data_dir_resolved / job_id
-
-    try:
-        job_dir.relative_to(data_dir_resolved)
-    except ValueError:
-        logger.error(
-            "Refusing to delete %s because it escapes data directory %s",
-            job_dir,
-            data_dir_resolved,
-        )
-        return False
-
-    # Checked before exists(): a dangling symlink makes exists() report False
-    # (it follows the link and finds nothing), which would return success here
-    # without ever removing the symlink itself.
-    if job_dir.is_symlink():
-        logger.warning("Refusing to delete symlinked job path: %s", job_dir)
+    except ValueError as exc:
+        logger.error("Refusing to delete unsafe job path for %r: %s", job_id, exc)
         return False
 
     if not job_dir.exists():
@@ -128,21 +105,9 @@ def cleanup_expired_jobs(
 ) -> tuple[int, int]:
     """Clean filesystem artifacts for expired jobs without deleting DB rows.
 
-    Args:
-        keep_days: Number of days to retain completed jobs.
-        data_dir: Base data directory containing job folders.
-        expired_job_ids_func: Callable that returns expired IDs without changing
-            the database.
-
-    Returns:
-        Tuple of `(expired_jobs_found, filesystem_cleanup_ok)`. The first count
-        is every expired ID returned by the selector. The second count includes
-        job IDs for which `cleanup_job_directory()` returned True, including
-        directories that were already absent.
-
-    Raises:
-        TypeError: If keep_days is not an integer.
-        ValueError: If keep_days is negative.
+    Returns ``(expired_jobs_found, filesystem_cleanup_ok)`` - the second count
+    includes directories that were already absent. Raises TypeError/ValueError
+    for a non-int or negative ``keep_days``.
     """
     if isinstance(keep_days, bool) or not isinstance(keep_days, int):
         raise TypeError("keep_days must be a non-negative integer")
@@ -170,7 +135,6 @@ def cleanup_expired_jobs(
         logger.warning("Failed to resolve data directory %s: %s", data_dir, exc)
         return (expired_jobs_found, 0)
 
-    # Clean up filesystem artifacts
     dirs_ok = 0
     for job_id in valid_ids:
         if cleanup_job_directory(job_id, data_dir_resolved):
@@ -192,18 +156,8 @@ def cleanup_orphaned_directories(
     *,
     dry_run: bool = False,
 ) -> list[str]:
-    """Find orphaned job directories without matching DB records.
-
-    Args:
-        data_dir: Base data directory containing job folders.
-        job_exists_func: Function that checks if a job_id exists in DB.
-        dry_run: If True, only report orphans without deleting them.
-
-    Returns:
-        Names of all UUID directories without a matching DB record.
-        Returned regardless of whether deletion succeeded or was skipped via
-        `dry_run=True`. Callers cannot distinguish deleted from failed entries
-        from the return value alone.
+    """Delete (or, with ``dry_run``, just report) UUID directories with no
+    matching DB record. Returns every such name found, deleted or not.
     """
     orphans: list[str] = []
     cleaned = 0

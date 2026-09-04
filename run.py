@@ -48,14 +48,12 @@ def _env_truthy(value: str | None) -> bool:
 
 
 def _env_str(name: str, default: str) -> str:
-    """Read and normalize a comma-separated environment variable."""
     raw = os.environ.get(name, default)
     values = [part.strip() for part in raw.split(",") if part.strip()]
     return ",".join(values) if values else default
 
 
 def _env_paths(name: str, default: list[str]) -> list[str]:
-    """Read a comma-separated list of filesystem paths from the environment."""
     raw = os.environ.get(name)
     if raw is None:
         return default
@@ -64,7 +62,6 @@ def _env_paths(name: str, default: list[str]) -> list[str]:
 
 
 def _env_int(name: str, default: int) -> int:
-    """Read an integer environment variable with validation."""
     raw = os.environ.get(name)
     if raw is None:
         return default
@@ -75,7 +72,6 @@ def _env_int(name: str, default: int) -> int:
 
 
 def _env_float(name: str, default: float) -> float:
-    """Read a float environment variable with validation."""
     raw = os.environ.get(name)
     if raw is None:
         return default
@@ -86,7 +82,6 @@ def _env_float(name: str, default: float) -> float:
 
 
 def _env_log_level(name: str, default: str = "INFO") -> str:
-    """Read and validate a log level environment variable."""
     value = os.environ.get(name, default).strip().upper()
     if value not in _VALID_LOG_LEVELS:
         raise ValueError(f"Invalid {name}: {value!r} (valid: {', '.join(sorted(_VALID_LOG_LEVELS))})")
@@ -147,7 +142,6 @@ class ColoredRedactingFormatter(RedactingFormatter):
 
 
 def _build_log_config(*, log_level: str, use_colors: bool) -> dict[str, object]:
-    """Build uvicorn log configuration dictionary."""
     stream_handler = {
         "class": "logging.StreamHandler",
         "stream": "ext://sys.stdout",
@@ -155,8 +149,8 @@ def _build_log_config(*, log_level: str, use_colors: bool) -> dict[str, object]:
     }
     return {
         "version": 1,
-        # NOTE: False allows app loggers configured before uvicorn.run() to keep their handlers.
-        # This means pre-existing handlers may log secrets unredacted. Set True for full control.
+        # False lets app loggers set up before uvicorn.run() keep their handlers
+        # - which may then log unredacted; True would take full control.
         "disable_existing_loggers": False,
         "formatters": {
             "redacted": {
@@ -180,7 +174,6 @@ def _build_log_config(*, log_level: str, use_colors: bool) -> dict[str, object]:
 
 
 def main() -> None:
-    """Application entry point."""
     print_banner_once()
 
     log_level = _env_log_level("LOG_LEVEL", "INFO")
@@ -192,13 +185,10 @@ def main() -> None:
             "UVICORN_RELOAD_EXCLUDES",
             [str(get_data_dir()), str(Path(__file__).resolve().parent / ".git")],
         )
-        # uvicorn/watchfiles watches Path.cwd() when reload_dirs is unset, and
-        # reload_excludes can only drop a watched dir that equals or contains
-        # an excluded path - it cannot carve a subdirectory (like data/) back
-        # out of a single top-level watch. Watching only the source dirs keeps
-        # data/ and .git/ off the raw watcher instead of merely off the
-        # post-filter, which is what actually stops the DEBUG log noise from
-        # every job DB write.
+        # watchfiles watches cwd when reload_dirs is unset, and reload_excludes
+        # cannot carve data/ back out of a top-level watch. Watching only the
+        # source dirs keeps data/ and .git/ off the raw watcher (which is what
+        # actually silences the DEBUG noise from every job DB write).
         app_root = Path(__file__).resolve().parent
         reload_dirs = _env_paths(
             "UVICORN_RELOAD_DIRS",
@@ -221,9 +211,8 @@ def main() -> None:
         reload=reload_enabled,
         reload_dirs=reload_dirs,
         reload_excludes=reload_excludes,
-        # The application installs the single validated proxy-header middleware
-        # itself. Keeping Uvicorn's duplicate middleware disabled preserves the
-        # actual socket peer for the rate-limit trust decision.
+        # The app installs its own validated proxy-header middleware; Uvicorn's
+        # stays off so the real socket peer survives for the rate-limit check.
         proxy_headers=False,
         forwarded_allow_ips=forwarded_allow_ips,
         timeout_graceful_shutdown=graceful_shutdown_timeout,

@@ -191,9 +191,10 @@ finite. The 24-hour hard limit is not configurable and applies regardless.
 
 ### `403` on a POST from a script
 
-`/login`, `/logout`, and `/api/submit` are CSRF-protected. Fetch `/login` first to get
-the `fetchly_csrf` cookie, then echo it back via the `X-CSRF-Token` header or a
-`csrf_token` form field. See [API Authentication](api/authentication.md).
+`/login`, `/logout`, and every state-changing route under `/api/*` are CSRF-protected.
+Fetch `/login` first to get the `fetchly_csrf` cookie, then echo it back via the
+`X-CSRF-Token` header or a `csrf_token` form field. See
+[API Authentication](api/authentication.md).
 
 ## Performance
 

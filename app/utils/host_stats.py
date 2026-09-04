@@ -6,10 +6,8 @@
 
 """Lightweight host resource sampling for the Settings -> System panel.
 
-Everything here is best-effort and Linux-first: fetchly ships as a Linux
-container, so each metric reads straight from ``/proc`` (host-wide values,
-which is what "Host resources" in the UI means) and degrades to ``None``
-when the file or syscall is unavailable rather than raising.
+Best-effort and Linux-first: each metric reads host-wide values from ``/proc``
+and degrades to ``None`` rather than raising.
 """
 
 from __future__ import annotations
@@ -25,10 +23,9 @@ from typing import TypedDict
 
 logger = logging.getLogger(__name__)
 
-# The short reading taken when there is no usable previous CPU sample.
+# Inline reading length when there is no usable previous CPU sample.
 _CPU_SAMPLE_INTERVAL_SECONDS = 0.15
-# A stored sample older than this is treated as stale: dividing a spike into a
-# multi-minute window would flatten it into nothing, so take a fresh reading.
+# Older stored samples are stale - dividing a spike over minutes flattens it.
 _CPU_SAMPLE_MAX_AGE_SECONDS = 60.0
 
 _cpu_lock = threading.Lock()
@@ -67,17 +64,12 @@ class HostStats(TypedDict):
     uptime: UptimeStats | None
 
 
-# ---------------------------------------------------------------------------
-# Storage
-# ---------------------------------------------------------------------------
-
 
 def _storage_usage(path: Path) -> StorageStats | None:
     """Return disk usage for the filesystem holding the download directory."""
     probe = path
-    # The data dir is created at startup, but fall back to the nearest existing
-    # parent so a call during a brief window (or a misconfigured mount) still
-    # reports the volume rather than nothing.
+    # Fall back to the nearest existing parent so a misconfigured mount still
+    # reports a volume.
     while not probe.exists() and probe != probe.parent:
         probe = probe.parent
 
@@ -95,10 +87,6 @@ def _storage_usage(path: Path) -> StorageStats | None:
         "percent": percent,
     }
 
-
-# ---------------------------------------------------------------------------
-# CPU
-# ---------------------------------------------------------------------------
 
 
 def _read_cpu_jiffies() -> tuple[int, int] | None:
@@ -122,12 +110,9 @@ def _read_cpu_jiffies() -> tuple[int, int] | None:
 
     # Fields: user nice system idle iowait irq softirq steal guest guest_nice.
     idle = values[3] + (values[4] if len(values) > 4 else 0)
-    # guest is already accounted into user, and guest_nice into nice, by the
-    # kernel (account_guest_time() in kernel/sched/cputime.c) - /proc/stat only
-    # reports them separately on top. Summing every field therefore counts that
-    # time twice, inflating the total and understating busy% on a host running
-    # KVM guests. htop and psutil subtract them for the same reason. The slice
-    # yields nothing on pre-2.6.24/pre-3.2 kernels that omit the fields.
+    # The kernel already folds guest/guest_nice into user/nice, so summing every
+    # field double-counts them and understates busy% on a KVM host. Subtract
+    # them like htop/psutil do (empty slice on kernels that omit the fields).
     guest = sum(values[8:10])
     return idle, sum(values) - guest
 
@@ -142,11 +127,10 @@ def _cpu_percent_between(prev: tuple[int, int], curr: tuple[int, int]) -> float 
 
 
 async def _sample_cpu_percent() -> float | None:
-    """Busy-CPU percentage since the previous call, cgroup-agnostic (host-wide).
+    """Host-wide busy-CPU % since the previous call.
 
-    Warm path (a recent stored sample exists): returns immediately with the
-    delta over the real gap between calls. Cold/stale path: takes one short
-    inline reading.
+    Warm (a recent stored sample): returns the delta immediately. Cold/stale:
+    one short inline reading.
     """
     global _last_cpu_sample
 
@@ -175,10 +159,6 @@ async def _sample_cpu_percent() -> float | None:
         _last_cpu_sample = (monotonic(), second[0], second[1])
     return _cpu_percent_between(current, second)
 
-
-# ---------------------------------------------------------------------------
-# Memory
-# ---------------------------------------------------------------------------
 
 
 def _read_meminfo() -> dict[str, int]:
@@ -221,10 +201,6 @@ def _memory_usage() -> MemoryStats | None:
     }
 
 
-# ---------------------------------------------------------------------------
-# Uptime
-# ---------------------------------------------------------------------------
-
 
 def _read_uptime_seconds() -> float | None:
     try:
@@ -256,10 +232,6 @@ def _format_uptime(seconds: float) -> str:
         return f"{minutes}m"
     return "<1m"
 
-
-# ---------------------------------------------------------------------------
-# Aggregate
-# ---------------------------------------------------------------------------
 
 
 async def get_host_stats(data_dir: Path) -> HostStats:

@@ -6,28 +6,18 @@
 
 """Burned-in fetchly watermark for downloaded videos.
 
-A watermark can only be burned in by re-encoding, so the expensive part is the
-encoder - not the drawing. Everything here is built around keeping the
-per-frame cost at zero:
+Built to keep the per-frame cost at zero:
 
-* The logo ships as a pre-rendered PNG (``app/static/img/fetchly_watermark.png``,
-  rasterized from ``fetchly_logo.svg``). The runtime ffmpeg is a static upstream
-  build and is not assumed to carry an SVG decoder.
-* Logo, drop shadow and the instance hostname are composited into **one** RGBA
-  badge, sized in exact output pixels, by a single ffmpeg call. The result is
-  cached on disk, keyed by hostname and size, so a given deployment renders it
-  once and every later download reuses the file.
-* The transcode then only does ``overlay`` of a still image. ffmpeg decodes and
-  scales that image once and reuses the frame, so the added work per video frame
-  is one alpha blend over a few thousand pixels in the corner.
+* Logo ships as a pre-rendered PNG (static ffmpeg has no SVG decoder).
+* Logo, drop shadow and hostname are composited into one RGBA badge, sized in
+  output pixels, by a single ffmpeg call, then cached on disk keyed by
+  hostname and size.
+* The transcode then only ``overlay``s that still image - one alpha blend per
+  frame over a corner.
 
-Where an encode already happens (the 480p/720p transcode) the watermark
-therefore costs nothing measurable; only ``max`` quality, which is otherwise a
-pure download+remux, pays for an encoder pass.
-
-The hostname line is drawn only when a "Public hostname" is configured in
-Settings - without one there is no address worth stamping on the video, so just
-the logo goes on.
+So on the capped qualities (which already encode) the watermark is free; only
+``max`` pays for an encoder pass. The hostname line is drawn only when a
+"Public hostname" is configured.
 """
 
 from __future__ import annotations
@@ -42,6 +32,7 @@ from typing import Final
 
 from .fs import get_data_dir
 from .public_url import normalize_public_hostname
+from .watermark_logo import custom_logo_path, logo_status
 
 logger = logging.getLogger(__name__)
 
@@ -52,14 +43,14 @@ __all__ = [
     "video_filter_args",
 ]
 
-# Pre-rendered logo artwork. 557x160 RGBA, white on transparent.
+# Pre-rendered logo artwork. 557x160 RGBA, white on transparent. Replaced by a
+# user-supplied logo when one is stored (see watermark_logo.py); the bundled
+# file is never overwritten, so removing the custom one restores it.
 _LOGO_PNG: Final[Path] = Path(__file__).parent.parent / "static" / "img" / "fetchly_watermark.png"
 
-# The UI uses Roboto Flex as WOFF2, but static ffmpeg builds do not always
-# enable FreeType's WOFF2 decoder. Use the same font in its TrueType container
-# for the hostname line so the Docker image needs neither fontconfig nor a
-# fallback system font. drawtext rasterizes its default instance (wght 400,
-# wdth 100, opsz 14) because it does not request a variation.
+# Roboto Flex as TrueType (not the UI's WOFF2, which static ffmpeg's FreeType
+# may not decode), so the image needs no fontconfig or system font. drawtext
+# rasterizes the default instance (wght 400, wdth 100, opsz 14).
 _FONT_TTF: Final[Path] = Path(__file__).parent.parent / "static" / "fonts" / "roboto-flex.ttf"
 
 # Cached badges live outside the per-job directories: housekeeping only sweeps
@@ -71,13 +62,12 @@ _CACHE_DIRNAME: Final[str] = "watermark-cache"
 # instead of serving a stale cache entry.
 _BADGE_REVISION: Final[str] = "4"
 
-# Logo aspect ratio, straight from the SVG viewBox.
+# Aspect ratio of the bundled logo, straight from the SVG viewBox. A custom
+# logo brings its own, measured from the stored PNG.
 _LOGO_ASPECT: Final[float] = 203.56738 / 58.475399
 
-# Badge size as a fraction of the video width. The clamps only guard genuinely
-# degenerate inputs - a thumbnail-sized source or an exotic beyond-8K one -
-# so the badge stays at the same 12% of frame width from SD up through 8K
-# instead of ballooning on small downloads or shrinking on large ones.
+# Badge width as a fraction of the video width; the clamps only guard
+# degenerate inputs (thumbnail-sized or beyond-8K).
 _WIDTH_FRACTION: Final[float] = 0.12
 _MIN_LOGO_WIDTH: Final[int] = 32
 _MAX_LOGO_WIDTH: Final[int] = 960
@@ -88,41 +78,28 @@ _WIDTH_STEP: Final[int] = 8
 _MARGIN_FRACTION: Final[float] = 0.025
 _MIN_MARGIN: Final[int] = 8
 
-# The logo's own drop shadow: a blurred, blackened copy of its silhouette,
-# offset down-right. Both scale with the logo so it stays "light" (subtle)
-# whether the badge is a small 480p corner mark or a 4K one; the diagonal
-# offset and the blur are proportioned relative to each other so the shadow
-# reads as soft rather than a second outline.
+# The logo's drop shadow: a blurred, blackened, offset copy of its silhouette.
+# All three scale with the logo so it stays subtle at any size.
 _SHADOW_OFFSET_FACTOR: Final[float] = 0.09
 _MIN_SHADOW_OFFSET: Final[int] = 2
 _SHADOW_BLUR_FACTOR: Final[float] = 0.055
 _MIN_SHADOW_BLUR: Final[float] = 1.0
-# Faint on purpose: this is a soft cue that the badge sits above the frame,
-# not a second, darker outline competing with the logo itself.
-_SHADOW_ALPHA: Final[float] = 0.35
+_SHADOW_ALPHA: Final[float] = 0.35  # faint: a cue, not a second outline
 
-# The logo mark itself is drawn translucent, like a broadcaster's on-screen
-# bug, so it reads as a brand mark rather than an opaque sticker over the
-# video. The hostname line is unaffected - it is information, not branding,
-# and stays fully legible (see fontcolor below).
+# The logo is translucent like a broadcaster's on-screen bug; the hostname
+# line stays fully legible (see fontcolor below).
 _LOGO_ALPHA: Final[float] = 0.55
 
-# Mean glyph advance of Roboto Flex (default instance: wght 400, wdth 100,
-# opsz 14) in em, used to pick a font size that keeps the hostname from
-# growing much wider than the logo. Deliberately generous: overestimating
-# only leaves transparent padding, underestimating would clip.
+# Mean glyph advance of Roboto Flex (em), used to size the hostname so it does
+# not grow much wider than the logo. Generous on purpose: overestimating only
+# pads, underestimating clips.
 _MEAN_ADVANCE_EM: Final[float] = 0.52
 _MAX_TEXT_WIDTH_FACTOR: Final[float] = 1.6
 _MIN_FONT_SIZE: Final[int] = 8
 
-# Roboto Flex's rendered ink (ascent+descent, plus the drawtext shadow/border
-# added below) measures ~0.99-1.25x the requested font size - measured via
-# ffmpeg drawtext against a transparent canvas across font sizes 12-150 and
-# both ascender/descender-heavy strings; the ratio is largest at the smallest
-# sizes because the 1px border and shadow stop shrinking with the glyphs.
-# 1.3x covers that worst case with a couple of px to spare, without padding
-# the canvas enough to reopen the gap this is meant to close: the badge's
-# bottom margin has to match its right margin.
+# Rendered text ink (glyphs + drawtext border/shadow) measures ~1.0-1.25x the
+# font size, worst at small sizes where the 1px border does not shrink. 1.3x
+# covers it so the badge's bottom margin matches its right margin.
 _TEXT_INK_FACTOR: Final[float] = 1.3
 
 _BADGE_TIMEOUT_SECONDS: Final[int] = 30
@@ -166,31 +143,34 @@ def _font_file() -> str:
 
 
 def _escape_drawtext(value: str) -> str:
-    """Escape a literal for use as a drawtext ``text=`` value.
+    """Escape a literal for a drawtext ``text=`` value.
 
-    Hostnames are already restricted to letters, digits, dots, hyphens and (for
-    IPv6) colons by ``normalize_public_hostname``; the colon is the one
-    character that would otherwise end the filter argument. The rest is
-    defensive - a filtergraph built from stored settings should never be able to
-    grow an extra option.
+    Hostnames are already restricted by normalize_public_hostname (the colon is
+    the one meaningful case); the rest is defensive.
     """
     for char in ("\\", ":", "'", "%", ",", "[", "]", ";"):
         value = value.replace(char, f"\\{char}")
     return value
 
 
-def badge_geometry(video_width: int, video_height: int, text: str) -> _Geometry:
+def badge_geometry(
+    video_width: int,
+    video_height: int,
+    text: str,
+    logo_aspect: float = _LOGO_ASPECT,
+) -> _Geometry:
     """Lay out the badge for a given output size.
 
     Pure arithmetic, no I/O - the cache key and the ffmpeg filtergraph are both
-    derived from the result.
+    derived from the result. ``logo_aspect`` is width/height of the artwork, so
+    a custom logo keeps its proportions instead of being squeezed into the
+    bundled one's.
     """
-    # Quantized to _WIDTH_STEP: source resolutions are arbitrary, and an exact
-    # fit would give the cache a badge per distinct video width. Snapping keeps
-    # it to a few dozen entries at a size difference nobody can see.
+    # Quantized to _WIDTH_STEP so the cache holds a few dozen sizes, not one
+    # per distinct video width.
     scaled = round(video_width * _WIDTH_FRACTION / _WIDTH_STEP) * _WIDTH_STEP
     logo_width = min(_MAX_LOGO_WIDTH, max(_MIN_LOGO_WIDTH, scaled))
-    logo_height = max(1, round(logo_width / _LOGO_ASPECT))
+    logo_height = max(1, round(logo_width / max(0.01, logo_aspect)))
     shadow_offset = max(_MIN_SHADOW_OFFSET, round(logo_height * _SHADOW_OFFSET_FACTOR))
     shadow_blur = max(_MIN_SHADOW_BLUR, logo_height * _SHADOW_BLUR_FACTOR)
     text_shadow_offset = max(1, round(shadow_offset / 2))
@@ -224,18 +204,13 @@ def badge_geometry(video_width: int, video_height: int, text: str) -> _Geometry:
     canvas_width = max(logo_width, text_width) + shadow_offset
     return _Geometry(
         canvas_width=canvas_width,
-        # No trailing "+ shadow_offset" here: that term exists in the no-text
-        # canvas above to clear the logo's own drop shadow, which is the last
-        # thing drawn in that case. With a hostname line, the last thing drawn
-        # is the text row, whose own ink (including its border/shadow) is
-        # already sized into text_height via _TEXT_INK_FACTOR. Adding the
-        # logo's shadow_offset on top left a bottom margin bigger than the
-        # right one - most visible on large badges, where shadow_offset grows
-        # with the logo but has nothing left to clear down here.
+        # No trailing "+ shadow_offset": the text row is drawn last and its ink
+        # (border/shadow included) is already in text_height. Adding the logo's
+        # shadow_offset here made the bottom margin exceed the right one.
         canvas_height=logo_height + gap + text_height,
         logo_width=logo_width,
         logo_height=logo_height,
-        # Logo and hostname are both flush right, matching the corner they sit in.
+        # Logo and hostname both flush right, matching their corner.
         logo_x=canvas_width - shadow_offset - logo_width,
         font_size=font_size,
         text_y=logo_height + gap,
@@ -249,20 +224,15 @@ def badge_geometry(video_width: int, video_height: int, text: str) -> _Geometry:
 def _badge_filtergraph(geometry: _Geometry, text: str, font_file: str) -> str:
     """Composite logo, drop shadow and hostname onto a transparent canvas.
 
-    ``font_file`` is resolved once by the caller rather than looked up here:
-    build_watermark() already had to check it to decide whether to draw *text*
-    at all, and a second _font_file() call could disagree with the first (and
-    would log the "font missing" warning twice), emitting an empty
-    ``fontfile=`` that ffmpeg rejects.
+    ``font_file`` is passed in, not looked up here: a second _font_file() call
+    could disagree and emit an empty ``fontfile=`` that ffmpeg rejects.
     """
     offset = geometry.shadow_offset
     chain = [
         (f"[1:v]scale={geometry.logo_width}:{geometry.logo_height}:flags=lanczos,"
         "format=rgba,split=2[lg][sh]"),
-        # The shadow is the logo's own alpha, blacked out and softened with a
-        # Gaussian blur - a plain offset silhouette reads as a second outline
-        # rather than a shadow, the blur is what makes it look "light" instead
-        # of stamped on.
+        # Shadow = the logo alpha, blacked out and Gaussian-blurred so it reads
+        # as soft, not as a second outline.
         (f"[sh]colorchannelmixer=rr=0:gg=0:bb=0:aa={_SHADOW_ALPHA},"
         f"gblur=sigma={geometry.shadow_blur:.2f}:steps=1[shadow]"),
         f"[lg]colorchannelmixer=aa={_LOGO_ALPHA}[logo]",
@@ -276,10 +246,8 @@ def _badge_filtergraph(geometry: _Geometry, text: str, font_file: str) -> str:
             f"fontfile={font_file}:"
             f"text='{_escape_drawtext(text)}':"
             f"fontsize={geometry.font_size}:"
-            # Fully opaque, plus a thin dark border rather than just a corner
-            # shadow: the logo above is deliberately translucent, but the
-            # hostname is information a viewer may need to read off, so it
-            # gets its own full-contrast treatment against any footage.
+            # Opaque with a dark border: the hostname is information to read
+            # off, so full contrast against any footage (unlike the logo).
             "fontcolor=white:"
             "borderw=1:bordercolor=black@0.6:"
             "shadowcolor=black@0.6:"
@@ -289,12 +257,49 @@ def _badge_filtergraph(geometry: _Geometry, text: str, font_file: str) -> str:
     return ";".join(chain)
 
 
-def _cache_key(hostname: str, geometry: _Geometry) -> str:
-    raw = f"{_BADGE_REVISION}|{hostname}|{geometry.canvas_width}x{geometry.canvas_height}|{geometry.font_size}"
+@dataclass(frozen=True, slots=True)
+class _Logo:
+    """The artwork the badge is built from."""
+
+    path: Path
+    aspect: float
+    # Distinguishes one logo from another in the badge cache key. Empty for the
+    # bundled artwork, which only changes when the application does.
+    fingerprint: str
+
+
+def _resolve_logo() -> _Logo | None:
+    """The custom logo when one is stored and readable, else the bundled one.
+
+    A custom logo that has gone missing or unreadable since it was uploaded
+    falls back rather than failing: a watermark is cosmetic, and the bundled
+    artwork is always there.
+    """
+    status = logo_status()
+    if status.custom and status.height > 0:
+        return _Logo(
+            path=custom_logo_path(),
+            aspect=status.width / status.height,
+            fingerprint=status.fingerprint,
+        )
+
+    if not _LOGO_PNG.is_file():
+        logger.warning("Watermark artwork missing at %s; skipping watermark", _LOGO_PNG)
+        return None
+    return _Logo(path=_LOGO_PNG, aspect=_LOGO_ASPECT, fingerprint="")
+
+
+def _cache_key(hostname: str, geometry: _Geometry, logo_fingerprint: str) -> str:
+    # The fingerprint is part of the key, not a reason to sweep the cache:
+    # swapping logos back and forth reuses both sets of badges.
+    raw = (
+        f"{_BADGE_REVISION}|{hostname}|{geometry.canvas_width}x{geometry.canvas_height}"
+        f"|{geometry.font_size}|{logo_fingerprint}"
+    )
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:20]
 
 
-def _render_badge(target: Path, geometry: _Geometry, text: str, font_file: str) -> None:
+def _render_badge(target: Path, geometry: _Geometry, text: str, font_file: str, logo: Path) -> None:
     """Render the badge PNG to ``target`` via a temporary file."""
     cmd = [
         "ffmpeg",
@@ -306,7 +311,7 @@ def _render_badge(target: Path, geometry: _Geometry, text: str, font_file: str) 
         "-i",
         f"color=c=black@0.0:s={geometry.canvas_width}x{geometry.canvas_height}:d=1,format=rgba",
         "-i",
-        str(_LOGO_PNG),
+        str(logo),
         "-filter_complex",
         _badge_filtergraph(geometry, text, font_file),
         "-frames:v",
@@ -339,31 +344,29 @@ def build_watermark(
     """
     if video_width <= 0 or video_height <= 0:
         return None
-    if not _LOGO_PNG.is_file():
-        logger.warning("Watermark artwork missing at %s; skipping watermark", _LOGO_PNG)
+
+    logo = _resolve_logo()
+    if logo is None:
         return None
 
-    # Resolved once and threaded through to the filtergraph: a second lookup
-    # could disagree with this one and yield an empty fontfile= (see
-    # _badge_filtergraph).
+    # Resolved once and threaded through (see _badge_filtergraph).
     font_file = _font_file()
 
     try:
         text = normalize_public_hostname(hostname) if font_file else ""
     except ValueError:
-        # A hostname that fails validation here was stored before the rules
-        # tightened; the logo alone is still a valid watermark.
+        # Hostname stored before the rules tightened; the logo alone still works.
         logger.warning("Stored public hostname is not usable for the watermark; drawing the logo only")
         text = ""
 
-    geometry = badge_geometry(video_width, video_height, text)
+    geometry = badge_geometry(video_width, video_height, text, logo.aspect)
     directory = cache_dir if cache_dir is not None else get_data_dir() / _CACHE_DIRNAME
-    badge = directory / f"{_cache_key(text, geometry)}.png"
+    badge = directory / f"{_cache_key(text, geometry, logo.fingerprint)}.png"
 
     if not badge.is_file():
         try:
             directory.mkdir(parents=True, exist_ok=True)
-            _render_badge(badge, geometry, text, font_file)
+            _render_badge(badge, geometry, text, font_file, logo.path)
         except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
             stderr = getattr(exc, "stderr", b"") or b""
             logger.warning(
@@ -382,12 +385,10 @@ def build_watermark(
 
 
 def video_filter_args(watermark: VideoWatermark | None, *, scale: str = "") -> list[str]:
-    """ffmpeg arguments that apply ``scale`` and/or the watermark to input 0.
+    """ffmpeg args that apply ``scale`` and/or the watermark to input 0.
 
-    Without a watermark this is the plain ``-vf`` the transcode always used.
-    With one, the badge comes in as input 1 and the graph has to be explicit
-    about stream mapping - ffmpeg's automatic selection would otherwise pick the
-    still image as the output video stream.
+    With a watermark the badge is input 1 and the graph maps streams
+    explicitly, or ffmpeg would pick the still image as the output video.
     """
     if watermark is None:
         return ["-vf", scale] if scale else []
@@ -398,8 +399,8 @@ def video_filter_args(watermark: VideoWatermark | None, *, scale: str = "") -> l
         main = "[base]"
     else:
         main = "[0:v]"
-    # format=yuv420p after the blend: the badge is RGBA, and the alpha would
-    # otherwise reach the encoder and produce a file some players reject.
+    # format=yuv420p after the blend: the badge's RGBA alpha would otherwise
+    # reach the encoder and produce a file some players reject.
     stages.append(
         f"{main}[1:v]overlay=W-w-{watermark.margin}:H-h-{watermark.margin}:format=auto,"
         "format=yuv420p[v]"

@@ -25,21 +25,56 @@ to yt-dlp. URLs that match no known platform are rejected at submit time.
 | `video` | `small` | Capped at 480p |
 | `audio` | any | Audio extracted, encoded to MP3 |
 
-### The MP4 preset
+### Universally playable output
 
-**Settings → General → Downloads → Prefer H.264/AAC for max quality** (on by default)
+**Settings → Processing → Downloads → Universally playable output (H.264/AAC)**
+(off by default; the watermark turns it on)
 
-With the preset on, video jobs prefer an H.264/AAC MP4 rendition. That is the only
-combination that plays in every browser — VP9 and AV1 renditions do not play in
-Safari/iOS, and the job page's player, waveform, and trim view all rely on in-browser
-playback.
+This is the one setting that decides what `max` quality actually means: *the highest
+resolution the source has*, or *a file that plays on every device*. On YouTube you
+cannot have both, because YouTube only encodes H.264 up to 1080p — 1440p and 2160p
+exist exclusively as VP9 or AV1.
 
-Turn it off if you want the highest available resolution and are willing to lose
-universal playback.
+**Off** — `max` is a pure download and remux. yt-dlp picks the best rendition by
+resolution, and the streams are muxed into the container they belong in: `.mp4` when
+the source is H.264/AAC anyway, `.webm` for VP9/Opus, `.mkv` for AV1. No encoder runs,
+so the file is bit-for-bit what the platform serves, at the highest resolution
+available, in the smallest file the codec can manage. The cost is reach: Safari,
+iOS, most smart TVs and a good deal of editing software cannot open VP9 or AV1. Jobs
+whose result falls into that category are marked **Limited playback** in the job list
+and in the details dialog, so a file that will not open on your phone is visible here
+rather than a surprise there.
+
+**On** — the finished file is guaranteed to be H.264/AAC in MP4. fetchly keeps that
+promise as cheaply as it can, in two steps:
+
+1. **At format selection**, yt-dlp is told to sort `vcodec:h264` ahead of resolution
+   (`-S vcodec:h264,lang,quality,res,fps,hdr:12,acodec:aac`). Where a compatible
+   rendition exists — which on YouTube is nearly always — it is simply downloaded and
+   remuxed. **No encoder runs, and no quality is lost**; you only give up the
+   resolutions that exist solely in VP9/AV1.
+2. **Only if that fails** — a source that has no H.264 rendition at all — the file is
+   re-encoded afterwards, and then only as far as necessary: if just the audio codec is
+   wrong the video is stream-copied (`-c:v copy`) and only the audio becomes AAC.
+
+Note the asymmetry: turning the switch **on** costs resolution but almost never CPU;
+turning it **off** costs reach but nothing else. There is no setting that spends CPU
+to give you 4K H.264, because transcoding a 2160p AV1 source to H.264 would take
+longer than the download, produce a much larger file, and still look worse than the
+source it came from.
+
+The capped qualities (`medium`, `small`) are unaffected: they always re-encode to
+H.264/AAC in MP4 and are therefore universally playable regardless of this switch.
+
+!!! note "The watermark requires it"
+    Burning in the watermark means running libx264 over the video anyway, so the
+    compatible container comes along for free and the switch is forced on and locked
+    while the watermark is active. Your own choice is stored untouched and applies
+    again as soon as you turn the watermark off.
 
 ### Concurrent fragments
 
-**Settings → General → Downloads → Parallel fragments per download** (`Automatic` or
+**Settings → Processing → Downloads → Parallel fragments per download** (`Automatic` or
 `1`–`16`, default `Automatic`)
 
 Parallel fragment downloads for DASH/HLS sources. Progressive single-file downloads
@@ -52,7 +87,7 @@ host. The setting hint names the value it resolves to right now. See
 
 ### Video watermark
 
-**Settings → General → Watermark → Show fetchly watermark** (on by default)
+**Settings → Processing → Watermark → Show fetchly watermark** (on by default)
 
 Burns the fetchly logo into the bottom-right corner of every downloaded **video**, with
 the [public hostname](../configuration/settings.md#general) on a second line once one is
@@ -62,13 +97,68 @@ The badge is composited once per hostname and output size and cached under
 `data/watermark-cache/`, so each encode only alpha-blends a still image into the corner.
 On `medium` and `small` quality it rides along in the transcode fetchly already runs and
 costs nothing measurable. `max` quality is otherwise a pure download and remux, so it
-gains an x264 pass (`-preset veryfast -crf 20`, audio stream-copied) that a 4K download
-will feel — turn the switch off to leave `max` downloads untouched.
+gains an x264 pass that a 4K download will feel — turn the switch off to leave `max`
+downloads untouched. That pass picks its preset and CRF from the source resolution
+(`medium`/CRF 16 up to 576p, `fast`/CRF 18 up to 1080p, `veryfast`/CRF 20 above), because
+a small low-bitrate source is re-quantized much more visibly than a high-bitrate 4K one.
+Audio is stream-copied unless the compatibility promise needs it re-encoded.
 
 The hostname line uses the Roboto Flex font shipped with the app UI
 (`app/static/fonts/`); no system font package is required. If that file is missing, the
 logo is drawn alone and a warning is logged. See
-[Application Settings](../configuration/settings.md#general) for the full note.
+[Application Settings](../configuration/settings.md#processing) for the full note.
+
+#### Your own logo
+
+**Settings → Processing → Watermark → Custom logo**
+
+Drop an SVG or a PNG on the zone (or click it to pick a file) to replace the fetchly
+logo with your own. The logo in use — yours or the built-in one — stays on screen
+underneath as a small preview on a checkerboard, so transparency reads as
+transparency; the trash button beside it puts the built-in artwork back. The bundled
+file is never overwritten, so this is always reversible.
+
+A **PNG** is uploaded byte for byte. It is already what fetchly stores, so there is
+nothing to convert and no re-encode to cost you quality. It needs an alpha channel:
+a logo with no transparency is a box over the video, not artwork on it.
+
+An **SVG** is rasterized **in your browser**, and only the resulting PNG is uploaded.
+That is deliberate, and worth knowing about:
+
+* The static ffmpeg builds in the Docker image have no SVG decoder, so the server
+  could not render your file even if it wanted to.
+* An SVG is a document that can carry scripts. Storing one and serving it back from
+  fetchly's own origin would be a stored-XSS primitive. Keeping only flat pixels
+  removes that class of problem entirely. (Drawing an SVG through an `<img>`, which
+  is what the drop zone does, puts it in the browser's secure static mode: no
+  scripts run and no external references load.)
+
+Either way, one PNG ends up at `data/logo/watermark-logo.png` — a single file in its
+own directory on the data volume, replaced on each upload and deleted when you restore
+the built-in logo.
+
+Both sides validate, but only one of them is a boundary. The browser checks the file
+before uploading it: an SVG has to parse, carry no `<script>`, `<foreignObject>` or
+`on…` handlers, reference nothing outside itself, and have a determinable size from
+`viewBox` or `width`/`height`; a PNG has to decode and land inside the size and shape
+bounds. The server then re-derives everything from the uploaded bytes and refuses the
+file unless all of it holds:
+
+| Check | Requirement |
+|---|---|
+| Format | Decodes as PNG (ffprobe), non-zero size |
+| Size | 32–4096 px per side, at most 2 MB |
+| Shape | Aspect ratio between 1:10 and 20:1 — a wide logo is normal, a tall sliver is not |
+| Transparency | An alpha channel, **and** at least one non-opaque pixel |
+
+The transparency rule is the one that is about suitability rather than validity: a
+logo with no transparency is not artwork on the video, it is a box over it, so it is
+refused with that explanation rather than silently accepted.
+
+A custom logo keeps its own proportions — the badge is laid out from the uploaded
+image's aspect ratio, not the bundled logo's — and gets its own entries in the badge
+cache, so replacing it can never leave the previous artwork on a video.
+
 
 ## The pipeline
 

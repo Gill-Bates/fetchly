@@ -10,53 +10,12 @@ Walks the path a fresh install actually takes: open, refuse to switch the login
 on without an account, create the account, get bounced to /login, sign in.
 """
 
-import os
-import tempfile
-import unittest
-from pathlib import Path
-from unittest.mock import patch
-
-os.environ.setdefault("FETCHLY_SECRET_KEY", "test-auth-flow-secret")
-
-from fastapi.testclient import TestClient
-
 from app import db
 from app.routes import auth
+from tests._support import WebAppTestCase
 
 
-class AuthFlowTests(unittest.TestCase):
-    def setUp(self):
-        self._tmp = tempfile.TemporaryDirectory()
-        self.addCleanup(self._tmp.cleanup)
-
-        patcher = patch.object(db, "DB_PATH", Path(self._tmp.name) / "jobs.db")
-        patcher.start()
-        self.addCleanup(patcher.stop)
-        db._database_path_prepared = None
-        self.addCleanup(setattr, db, "_database_path_prepared", None)
-        self.addCleanup(db.close_db)
-        db.init_db()
-
-        from app.main import app, templates
-        from app.routes.api import init_api
-        from app.session import refresh_session_settings_cache
-
-        # Both normally happen in the lifespan handler, which TestClient does
-        # not run here.
-        init_api(templates)
-        refresh_session_settings_cache()
-
-        # /api/settings is capped at 5/minute and the limiter is process-wide,
-        # so without this the later tests in this class get 429s from the
-        # earlier ones.
-        from app.common.rate_limit import limiter
-
-        limiter.reset()
-        self.addCleanup(limiter.reset)
-
-        self.client = TestClient(app, follow_redirects=False)
-        self.addCleanup(self.client.close)
-
+class AuthFlowTests(WebAppTestCase):
     def _sign_in_as(self, username: str) -> None:
         """Attach a valid session cookie without going through the login form.
 
@@ -67,20 +26,6 @@ class AuthFlowTests(unittest.TestCase):
         from app.session import SESSION_COOKIE, create_session
 
         self.client.cookies.set(SESSION_COOKIE, create_session(username))
-
-    def _csrf(self) -> str:
-        """Prime the CSRF cookie by loading a page, then return its value."""
-        self.client.get("/login")
-        token = self.client.cookies.get("fetchly_csrf")
-        self.assertTrue(token, "CSRF cookie was not issued")
-        return token
-
-    def _post_settings(self, body: dict):
-        return self.client.post(
-            "/api/settings",
-            json=body,
-            headers={"X-CSRF-Token": self._csrf()},
-        )
 
     def test_fresh_install_needs_no_login(self):
         self.assertFalse(auth.is_authentication_enabled())
@@ -159,7 +104,3 @@ class AuthFlowTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 400)
         self.assertIn("at least 8", response.json()["detail"])
-
-
-if __name__ == "__main__":
-    unittest.main()

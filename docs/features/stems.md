@@ -98,9 +98,15 @@ your cost. Trimming first is the reliable path.
 
 ## Download size cap
 
-Stem files fetched back from Lalal.ai are capped at **4 GiB** by default. Change the
-cap in **Settings → Integrations → Lalal.ai**; it exists so a malformed or hostile
-response cannot fill your volume.
+Stem files fetched back from Lalal.ai are capped at **4 GiB** by default (range 1–100
+GiB). Change the cap in **Settings → Integrations → Lalal.ai**; it exists so a
+malformed or hostile response cannot fill your volume.
+
+## Concurrency limit
+
+At most **2 splits run at once**, server-wide, regardless of how many audio jobs are
+finished or how many users can reach the instance. A third concurrent request receives
+`503` with `Retry-After: 5` instead of queuing indefinitely; retry after the delay.
 
 ## Downloading stems
 

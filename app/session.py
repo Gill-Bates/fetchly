@@ -5,7 +5,6 @@
 #
 
 # Sliding-window session management with idle timeout and hard expiry.
-#
 
 import base64
 import binascii
@@ -23,9 +22,6 @@ from fastapi import Request, Response
 
 from .db import get_settings
 
-# --------------------------------------------------------------------------- #
-# Configuration
-# --------------------------------------------------------------------------- #
 SESSION_COOKIE: Final = "fetchly_session"
 
 # Hard session limit: 24 hours from login (non-configurable)
@@ -54,9 +50,6 @@ _SESSION_SETTINGS_LOCK = threading.Lock()
 logger = logging.getLogger(__name__)
 
 
-# --------------------------------------------------------------------------- #
-# Session Token Structure
-# --------------------------------------------------------------------------- #
 @dataclass(frozen=True, slots=True)
 class SessionData:
     """Parsed session token data."""
@@ -148,7 +141,6 @@ def get_cached_authentication_enabled() -> bool:
 
 
 def _sign_payload(payload: str) -> str:
-    """Create HMAC signature for payload."""
     return hmac.digest(_SECRET_KEY_BYTES, payload.encode("utf-8"), "sha256").hex()
 
 
@@ -214,14 +206,10 @@ def parse_session(token: str | None) -> SessionData | None:
 
 
 def validate_session(token: str | None) -> str | None:
-    """Validate session and return username if valid.
+    """Return the username for a valid session, else None.
 
-    Session is valid if:
-    1. Token signature is valid
-    2. issued_at is within 24 hours (hard limit)
-    3. last_activity is within idle timeout (sliding window)
-
-    Returns username if valid, None otherwise.
+    Valid means: signature checks out, issued_at within the 24h hard limit,
+    and last_activity within the sliding idle timeout.
     """
     session = parse_session(token)
     if not session:
@@ -235,10 +223,8 @@ def validate_session(token: str | None) -> str | None:
 
 
 def renew_session(token: str | None) -> str | None:
-    """Renew session by updating last_activity timestamp.
-
-    Returns new token if session is still valid, None if expired.
-    This extends the sliding window while preserving the original issued_at.
+    """Return a fresh token with last_activity bumped to now (issued_at kept),
+    or None if the session is no longer valid.
     """
     session = parse_session(token)
     if not session:
@@ -291,7 +277,6 @@ def _get_cookie_max_age(token: str) -> int:
 
 
 def set_session_cookie(response: Response, token: str, request: Request) -> None:
-    """Set session cookie on response with appropriate security flags."""
     max_age = _get_cookie_max_age(token)
     response.set_cookie(
         key=SESSION_COOKIE,
@@ -324,7 +309,6 @@ def delete_session_cookie(
     *,
     secure: bool | None = None,
 ) -> None:
-    """Delete session cookie from response."""
     response.delete_cookie(
         SESSION_COOKIE,
         path="/",

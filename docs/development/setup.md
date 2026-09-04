@@ -91,12 +91,15 @@ From the repository root:
 
 ```bash
 npm install
+npm ci --prefix tools/ui-lint   # once — pulls in Playwright, used by one of the tests
 npm test
 ```
 
 `tests/js/*.test.mjs` covers front-end contracts — the CSRF token helper, the
 confirmation modal, the cookie-paste dialog, safe-redirect handling — as plain Node
-tests, no browser required.
+tests, no browser required. `tests/js/ui-lint-devices.test.mjs` is the exception: it
+imports `tools/ui-lint/run-ui-lint.mjs`, which depends on Playwright, so `npm test`
+fails with `ERR_MODULE_NOT_FOUND` until the `tools/ui-lint` dependencies are installed.
 
 Note the glob: `node --test tests/js/` (the directory form) needs Node 24, so the
 `npm test` script spells out `node --test "tests/js/*.test.mjs"` instead.
