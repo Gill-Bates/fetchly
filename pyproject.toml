@@ -47,36 +47,34 @@ classifiers = [
 # dependency versions' step in .github/workflows/docker-build.yml;
 # tests/test_version_source.py rejects any '==' that creeps back in.
 #
-# The '# pinned' marker on each line is not a version pin. It tells the external
-# .utils/check_requirements.py maintenance script to leave the line untouched,
-# so a routine dependency sweep cannot rewrite these into '==' pins.
-#
-# essentia is compiled from source in docker/Dockerfile on every architecture,
-# because upstream publishes no linux/aarch64 wheel at all. The builder stage
+# essentia carries a '# pinned' marker - not a version pin, but a signal to the
+# external .utils/check_requirements.py maintenance script to leave the line
+# alone. It is compiled from source in docker/Dockerfile on every architecture
+# because upstream publishes no linux/aarch64 wheel at all; the builder stage
 # drops the essentia line before pip runs, so no wheel is resolved over the
-# local build; outside the image pip picks whatever wheel fits the interpreter.
+# local build. Outside the image pip picks whatever wheel fits the interpreter.
 #
 # beat-this pulls in torch. Install with the CPU wheel index to avoid dragging
 # in the CUDA build:
 #   pip install --extra-index-url https://download.pytorch.org/whl/cpu -e .
 dependencies = [
-    "beat-this>=1.1.0",  # pinned
+    "beat-this>=1.1.0",
     "essentia",  # pinned
-    "fastapi",  # pinned
-    "gunicorn",  # pinned
-    "httpx",  # pinned
-    "jinja2",  # pinned
-    "markdown",  # pinned
-    "markupsafe",  # pinned
-    "nh3",  # pinned
-    "numpy",  # pinned
-    "pydantic",  # pinned
-    "python-multipart",  # pinned
-    "slowapi",  # pinned
-    "starlette",  # pinned
-    "torch",  # pinned
-    "uvicorn[standard]",  # pinned
-    "uvicorn-worker",  # pinned
+    "fastapi",
+    "gunicorn",
+    "httpx",
+    "jinja2",
+    "markdown",
+    "markupsafe",
+    "nh3",
+    "numpy",
+    "pydantic",
+    "python-multipart",
+    "slowapi",
+    "starlette",
+    "torch",
+    "uvicorn[standard]",
+    "uvicorn-worker",
 ]
 
 # The one place pins remain. None of this tooling enters a published image, so
