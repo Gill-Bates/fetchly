@@ -15,6 +15,10 @@
 {% block main_shell %}
 <main class="login-shell" role="main">
     <section class="login-card">
+        {# This template replaces base.html's main_shell wholesale, so it does
+           not inherit the page_heading block and needs its own h1. The logo
+           carries the app name visually; the heading names the task. #}
+        <h1 class="visually-hidden">Sign in to fetchly</h1>
         <div class="login-header text-center">
             <img src="/static/img/fetchly_logo.svg" alt="fetchly" class="logo mb-3">
             <p class="login-kicker">Multi-Platform Video Downloader</p>

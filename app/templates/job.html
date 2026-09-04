@@ -7,12 +7,17 @@
 {{ navbar(show_back=True, show_settings=False, show_logout=auth_enabled, csrf_token=csrf_token) }}
 {% endblock %}
 
+{# This page does have a visible title, so it becomes the h1 rather than
+   sitting under a hidden one. Only the tag changes; .h2 keeps the type scale. #}
+{% block page_heading %}
+<h1 class="h2 m-0 d-flex align-items-center gap-2 fw-semibold mb-4">
+    <span class="material-symbols-outlined" aria-hidden="true">monitoring</span>
+    Job Status
+</h1>
+{% endblock %}
+
 {% block content %}
 <div>
-    <h2 class="m-0 d-flex align-items-center gap-2 fw-semibold mb-4">
-        <span class="material-symbols-outlined" aria-hidden="true">monitoring</span>
-        Job Status
-    </h2>
 
     {% if not job %}
     <div class="alert alert-warning" role="alert">Job not found.</div>

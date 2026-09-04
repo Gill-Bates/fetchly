@@ -9,6 +9,8 @@
 {{ navbar(show_back=True, show_settings=False, show_logout=settings.enable_authentication, csrf_token=csrf_token) }}
 {% endblock %}
 
+{% block page_heading_text %}Settings{% endblock %}
+
 {% block content %}
 
 {% from "macros/stats.html" import dashboard_stats_row %}

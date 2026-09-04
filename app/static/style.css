@@ -139,6 +139,12 @@
     /* Colors */
     --primary: #5b5fdc;
     --primary-hover: #4f46e5;
+    /* Primary as *foreground* on a dark surface. --primary itself carries only
+       3.5:1 against --surface and fails WCAG AA for text; it cannot simply be
+       lightened, because it is also a button fill where white sits on top and
+       lightening it would break that pair instead (5.1:1 today, 3.0:1 at this
+       value). Two tokens, one for each direction. 6.0:1 on --surface. */
+    --primary-text: #818cf8;
     --focus-ring: #818cf8;
     --success: #22c55e;
     --danger: #ef4444;
@@ -146,6 +152,13 @@
 
     --bg-gradient: radial-gradient(circle at 20% 20%, #20384f 0%, #0f172a 50%, #0b1222 100%);
     --border: rgb(255 255 255 / 0.08);
+    /* Two heavier border weights. They were previously written inline as
+       fallbacks to --border-color, a token that was never defined, so the
+       fallback was always what rendered - the values below are exactly that,
+       now declared rather than implied. A drop zone has to read as a target,
+       which --border at 8% is too faint to do. */
+    --border-strong: rgb(255 255 255 / 0.12);
+    --border-dashed: rgb(255 255 255 / 0.18);
     /* Canonical text token (--text-default is the source of truth) */
     --text-default: #e5e7eb;
     --text: var(--text-default);
@@ -1340,7 +1353,7 @@ html body .text-muted {
 }
 
 .settings-app-update[data-app-update-state="prerelease"] .settings-app-update-status {
-    color: var(--primary);
+    color: var(--primary-text);
 }
 
 .settings-app-update-link[hidden] {
@@ -3009,7 +3022,7 @@ td[data-label="Title"] {
     gap: 0.35rem;
     min-height: 120px;
     padding: 1rem;
-    border: 1px dashed var(--border-color, rgb(255 255 255 / 18%));
+    border: 1px dashed var(--border-dashed);
     border-radius: 0.75rem;
     background: rgb(255 255 255 / 2%);
     text-align: center;
@@ -3019,14 +3032,14 @@ td[data-label="Title"] {
 
 .logo-dropzone:hover,
 .logo-dropzone:focus-visible {
-    border-color: var(--accent, #6c63ff);
-    background: rgb(108 99 255 / 8%);
+    border-color: var(--primary);
+    background: color-mix(in srgb, var(--primary) 8%, transparent);
 }
 
 .logo-dropzone--over {
     border-style: solid;
-    border-color: var(--accent, #6c63ff);
-    background: rgb(108 99 255 / 14%);
+    border-color: var(--primary);
+    background: color-mix(in srgb, var(--primary) 14%, transparent);
 }
 
 .logo-dropzone--busy {
@@ -3052,7 +3065,7 @@ td[data-label="Title"] {
     gap: 0.6rem;
     margin-top: 0.5rem;
     padding: 0.45rem 0.55rem;
-    border: 1px solid var(--border-color, rgb(255 255 255 / 12%));
+    border: 1px solid var(--border-strong);
     border-radius: 0.6rem;
 }
 
@@ -5902,7 +5915,7 @@ td:last-child {
 }
 
 .changelog-content a {
-    color: var(--primary);
+    color: var(--primary-text);
     text-decoration: underline;
 }
 

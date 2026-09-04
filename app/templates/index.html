@@ -13,6 +13,8 @@
 {{ navbar(show_back=False, show_settings=True, show_logout=auth_enabled, csrf_token=csrf_token) }}
 {% endblock %}
 
+{% block page_heading_text %}Dashboard{% endblock %}
+
 {% block content %}
 
 {% from "macros/stats.html" import dashboard_stats_row %}

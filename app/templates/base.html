@@ -32,6 +32,15 @@
 
         {% block main_shell %}
         <main class="app-main app-shell-container" role="main">
+            {# Every page needs a level-one heading naming it: it is the first
+               landmark a screen reader announces and what "jump to heading"
+               lands on. The visual design carries no page title - the app name
+               lives in the navbar as a link, not a heading - so the default is
+               hidden rather than invented into the layout. A page whose design
+               does have a visible title overrides this block with it. #}
+            {% block page_heading %}
+            <h1 class="visually-hidden">{% block page_heading_text %}fetchly{% endblock %}</h1>
+            {% endblock %}
             {% block content %}{% endblock %}
         </main>
         {% endblock %}
