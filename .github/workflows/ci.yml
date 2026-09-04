@@ -3,8 +3,9 @@
 # Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 #
 # The PR gate. docker-build.yml only runs on release tags, so this is the only
-# workflow standing between a broken commit and main. Gates on linting, pytest,
-# npm test, and the single-manifest invariant.
+# workflow standing between a broken commit and main. Gates on linting, the
+# source-level UI contracts, pytest, npm test, and the single-manifest
+# invariant.
 #
 
 name: CI
@@ -75,7 +76,7 @@ jobs:
         run: pytest -q
 
   frontend:
-    name: ESLint + Stylelint + node --test
+    name: ESLint + Stylelint + contracts + node --test
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -120,6 +121,23 @@ jobs:
 
       - name: Stylelint
         run: npm run lint:css
+
+      # The browser-free half of the ui-lint audit: regexes over
+      # app/static/js/{main,jobs,ui,settings}.js, app/templates/settings.html
+      # and app/static/style.css that assert the paging offset stays monotonic,
+      # infinite scroll stays bound to the local scroller, the mobile job row
+      # keeps the shared Download/Share menu and settings hints stay the icon
+      # component. No server, no database, no login, no browser - so unlike the
+      # visual and layout-stability passes it is deterministic and belongs in
+      # the PR gate. Runs on the root install alone; the ui-lint step above is
+      # not a prerequisite.
+      #
+      # The rest of the audit stays out of CI on purpose: it is timing-sensitive
+      # enough to go intermittently red on a shared runner, wants ~500MB of
+      # browsers, and skips its job-detail and trim views against an empty
+      # database. It is a manual run - see setup.conf.
+      - name: Source contracts
+        run: npm run lint:contracts
 
       - name: node --test
         run: npm test

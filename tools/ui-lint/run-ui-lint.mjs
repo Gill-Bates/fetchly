@@ -3,7 +3,7 @@
 // Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 //
 
-import { readFile, writeFile } from 'node:fs/promises';
+import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -25,6 +25,15 @@ import {
     installLayoutShiftObserver,
     LAYOUT_SHIFT_POOR,
 } from './lib/layout-shift.mjs';
+import {
+    getJobsSourceContractMetrics,
+    getSettingsSourceContractMetrics,
+    JOBS_SOURCE_CONTRACT_DEFAULTS,
+    JOBS_SOURCE_CONTRACT_KEYS,
+    SETTINGS_SOURCE_CONTRACT_DEFAULTS,
+    SETTINGS_SOURCE_CONTRACT_KEYS,
+    sourceContractViolations,
+} from './lib/source-contracts.mjs';
 import { buildUIHealthReport, summarizeHealthReports } from './lib/ui-health.mjs';
 
 const BASE_URL = process.env.UI_LINT_BASE_URL || 'http://127.0.0.1:8000';
@@ -35,141 +44,17 @@ const SESSION_ID = Date.now();
 const OUTPUT_DIR = process.env.UI_LINT_OUTPUT_DIR || `/tmp/fetchly-ui-lint-${SESSION_ID}`;
 const SCREENSHOT_DIR = path.join(OUTPUT_DIR, 'screenshots');
 const RESULTS_PATH = path.join(OUTPUT_DIR, 'results.json');
-const MAIN_JS_PATH = new URL('../../app/static/js/main.js', import.meta.url);
-const JOBS_JS_PATH = new URL('../../app/static/js/jobs.js', import.meta.url);
-const UI_JS_PATH = new URL('../../app/static/js/ui.js', import.meta.url);
-const SETTINGS_JS_PATH = new URL('../../app/static/js/settings.js', import.meta.url);
-const SETTINGS_TEMPLATE_PATH = new URL('../../app/templates/settings.html', import.meta.url);
-const SETTINGS_STYLE_PATH = new URL('../../app/static/style.css', import.meta.url);
 
-let jobsSourceContractMetricsPromise;
-let settingsSourceContractMetricsPromise;
-
+// The source-level contracts themselves live in lib/source-contracts.mjs so
+// they can also run as a browser-free lint step in CI. Only the per-view
+// scoping below stays here: which view is expected to render the jobs list or
+// the settings form is the runner's business.
 function viewAuditsJobsList(view) {
     return Array.isArray(view?.requiredSelectors) && view.requiredSelectors.includes('#jobsRenderRoot');
 }
 
 function viewAuditsSettings(view) {
     return Array.isArray(view?.requiredSelectors) && view.requiredSelectors.includes('#settingsForm');
-}
-
-async function getJobsSourceContractMetrics() {
-    if (!jobsSourceContractMetricsPromise) {
-        jobsSourceContractMetricsPromise = (async () => {
-            const [mainJsSource, jobsJsSource, uiJsSource] = await Promise.all([
-                readFile(MAIN_JS_PATH, 'utf8'),
-                readFile(JOBS_JS_PATH, 'utf8'),
-                readFile(UI_JS_PATH, 'utf8'),
-            ]);
-
-            const observerBoundToScroller = /new IntersectionObserver\([\s\S]*?root:\s*jobsScrollContainer[\s\S]*?observer\.observe\(jobsSentinel\)/.test(mainJsSource);
-            const localScrollFallback = /jobsScrollContainer\.addEventListener\(\s*['"]scroll['"]\s*,\s*onScroll/.test(mainJsSource);
-            const windowScrollLoadsMore = /window\.addEventListener\(\s*['"]scroll['"][\s\S]{0,400}?maybeLoadMoreJobs/.test(mainJsSource);
-
-            const storeLengthAssignments = [...jobsJsSource.matchAll(/state\.nextOffset\s*=\s*state\.jobs\.length/g)].length;
-            const initSeedsFromStoreLength = /function init\(\)\s*\{[\s\S]*?state\.nextOffset\s*=\s*state\.jobs\.length/.test(jobsJsSource);
-            const usesLegacyDomSyncHelper = /function\s+syncNextOffset\s*\(/.test(jobsJsSource)
-                || /\bsyncNextOffset\(\)/.test(jobsJsSource);
-
-            const tracksMonotonicOffset = /nextOffset:\s*0/.test(jobsJsSource)
-                && /const currentOffset = state\.nextOffset/.test(jobsJsSource)
-                && /await fetchFn\(currentOffset\)/.test(jobsJsSource)
-                && /state\.nextOffset\s*=\s*currentOffset\s*\+\s*jobs\.length/.test(jobsJsSource);
-            const usesRenderedCountAsFetchOffset = /fetchFn\(\s*(?:getRenderedJobCount\(|tbody\s*\.\s*querySelectorAll\(|document\s*\.\s*querySelectorAll\()[\s\S]*?\)/.test(jobsJsSource);
-            const hasUnexpectedStoreLengthResync = storeLengthAssignments > (initSeedsFromStoreLength ? 1 : 0);
-
-            const desktopMediaSecondarySource = jobsJsSource.match(
-                /function formatDesktopMediaSecondary\(job\)\s*\{([\s\S]*?)\n\}/,
-            )?.[1] || '';
-            const desktopMediaDetailUsesSharedText = (
-                /humanSize\(job\?\.filesize_bytes\)/.test(desktopMediaSecondarySource)
-                && /mediaDetail\.className\s*=\s*["']meta-sub job-media-detail["'];[\s\S]{0,200}?mediaDetail\.textContent\s*=\s*formatDesktopMediaSecondary\(job\)/.test(jobsJsSource)
-            );
-            const desktopStatusWithoutSizeCalls = [
-                ...jobsJsSource.matchAll(/renderJobStatus\(job,\s*\{\s*showSize:\s*false\s*\}\)/g),
-            ].length;
-            const mobileDownloadActionSource = uiJsSource.match(
-                /function createMobileDownloadAction\(job\)\s*\{([\s\S]*?)\n\}/,
-            )?.[1] || '';
-            const mobileSharesDesktopDownloadMenu = (
-                /createDownloadOptionsMenu\(job,\s*downloadBtn\.href\)/.test(mobileDownloadActionSource)
-                && /function createDownloadOptionsMenu\(job,\s*downloadHref\)[\s\S]*?["']share["'][\s\S]*?action:\s*["']share-job["']/.test(uiJsSource)
-                && /return createMobileDownloadAction\(action\.job\)/.test(uiJsSource)
-            );
-
-            return {
-                jobsInfiniteScrollNotObserverBased: !(observerBoundToScroller && localScrollFallback) || windowScrollLoadsMore,
-                jobsPagingOffsetContractBroken: !tracksMonotonicOffset || usesRenderedCountAsFetchOffset || usesLegacyDomSyncHelper || hasUnexpectedStoreLengthResync,
-                jobsDesktopFileSizePlacementBroken: !desktopMediaDetailUsesSharedText
-                    || desktopStatusWithoutSizeCalls < 2,
-                jobsMobileShareActionMissing: !mobileSharesDesktopDownloadMenu,
-            };
-        })();
-    }
-
-    return jobsSourceContractMetricsPromise;
-}
-
-async function getSettingsSourceContractMetrics() {
-    if (!settingsSourceContractMetricsPromise) {
-        settingsSourceContractMetricsPromise = (async () => {
-            const [settingsJsSource, settingsTemplateSource, settingsStyleSource] = await Promise.all([
-                readFile(SETTINGS_JS_PATH, 'utf8'),
-                readFile(SETTINGS_TEMPLATE_PATH, 'utf8'),
-                readFile(SETTINGS_STYLE_PATH, 'utf8'),
-            ]);
-
-            const validationUsesToast = /showToast\(\s*validation\.error\s*,\s*["']danger["']\s*\)/.test(settingsJsSource);
-            const autosaveSuccessToast = /showToast\(\s*payload\.message\s*\|\|\s*["']Settings updated["']\s*,\s*["']success["']\s*\)/.test(settingsJsSource);
-            const jsUsesInlineSaveStatus = /\b(?:AUTO_SAVE_STATE|setAutoSaveState|autoSaveIndicator|settingsSaveBtn|settingsAlert)\b/.test(settingsJsSource);
-            const templateHasInlineSaveStatus = /(?:id=["'](?:autoSaveIndicator|settingsSaveBtn|settingsAlert)["']|class=["'][^"']*settings-status-bar)/.test(settingsTemplateSource);
-
-            const hints = [...settingsTemplateSource.matchAll(
-                /<(small|p)\b[^>]*\bclass=["'][^"']*\bsetting-hint\b[^"']*["'][^>]*>([\s\S]*?)<\/\1>/g,
-            )];
-            // The contract is the *component*: every hint is the icon variant
-            // and leads with a setting-hint-icon span. The glyph is not part
-            // of it - a hint that explains a forced setting says `lock` and
-            // one that warns about a cost says `warning`, and demanding
-            // `info` everywhere would make those hints worse to satisfy the
-            // lint rather than the other way round. The allowlist keeps the
-            // set deliberate without pinning it to one icon.
-            const HINT_ICONS = ['info', 'lock', 'warning'];
-            const hintIconPattern = new RegExp(
-                `^\\s*<span\\b[^>]*\\bclass=["'][^"']*\\bmaterial-symbols-outlined\\b[^"']*\\bsetting-hint-icon\\b[^"']*["'][^>]*>\\s*(?:${HINT_ICONS.join('|')})\\s*<\\/span>`,
-            );
-            const hintContractBroken = hints.length === 0 || hints.some((hint) => {
-                const openingTag = hint[0].slice(0, hint[0].indexOf('>') + 1);
-                const content = hint[2];
-                return !openingTag.includes('setting-hint--with-icon')
-                    || !hintIconPattern.test(content);
-            });
-            const hintStyleContractBroken = !(
-                /--text-hint\s*:/.test(settingsStyleSource)
-                && /\.app-root--settings\s+\.setting-hint\s*\{[\s\S]*?color:\s*var\(--text-hint\)/.test(settingsStyleSource)
-                && /\.app-root--settings\s+\.setting-hint--with-icon\s*\{[\s\S]*?display:\s*inline-flex/.test(settingsStyleSource)
-            );
-            const settingsStyleRules = settingsStyleSource.replace(/\/\*[\s\S]*?\*\//g, '');
-            const hintMarginRules = [...settingsStyleRules.matchAll(/([^{}]+)\{([^{}]*)\}/g)].filter(
-                ([, selector, declarations]) => /(^|[\s>+~,])\.setting-hint(?![-\w])/.test(selector)
-                    && /margin-top\s*:/.test(declarations),
-            );
-            const settingsHintSpacingContractBroken = hintMarginRules.length !== 1
-                || !/\.app-root--settings\s+\.setting-hint\s*$/.test(hintMarginRules[0]?.[1] || '')
-                || !/margin-top\s*:\s*var\(--space-1\)/.test(hintMarginRules[0]?.[2] || '');
-
-            return {
-                settingsSaveToastContractBroken: !validationUsesToast
-                    || autosaveSuccessToast
-                    || jsUsesInlineSaveStatus
-                    || templateHasInlineSaveStatus,
-                settingsHintContractBroken: hintContractBroken || hintStyleContractBroken,
-                settingsHintSpacingContractBroken,
-            };
-        })();
-    }
-
-    return settingsSourceContractMetricsPromise;
 }
 
 function envFloat(name, defaultValue) {
@@ -750,16 +635,15 @@ function formatResultSummary(result) {
     if (metrics.stickyFooterDetached) parts.push('stickyFooterDetached=true');
     if (metrics.stickyTableHeaderBroken) parts.push('stickyTableHeaderBroken=true');
     if (metrics.jobsSentinelOutsideScrollContainer) parts.push('jobsSentinelOutsideScroller=true');
-    if (metrics.jobsInfiniteScrollNotObserverBased) parts.push('jobsInfiniteScrollNotObserverBased=true');
-    if (metrics.jobsPagingOffsetContractBroken) parts.push('jobsPagingOffsetContractBroken=true');
-    if (metrics.jobsDesktopFileSizePlacementBroken) parts.push('jobsDesktopFileSizePlacementBroken=true');
-    if (metrics.jobsMobileShareActionMissing) parts.push('jobsMobileShareActionMissing=true');
+    for (const key of JOBS_SOURCE_CONTRACT_KEYS) {
+        if (metrics[key]) parts.push(`${key}=true`);
+    }
     if (metrics.trimWaveformMissingStyle) parts.push('trimWaveformMissingStyle=true');
     if (metrics.videoPreviewContractBroken) parts.push('videoPreviewContractBroken=true');
     if (metrics.settingsFieldStackContractBroken) parts.push('settingsFieldStackContractBroken=true');
-    if (metrics.settingsSaveToastContractBroken) parts.push('settingsSaveToastContractBroken=true');
-    if (metrics.settingsHintContractBroken) parts.push('settingsHintContractBroken=true');
-    if (metrics.settingsHintSpacingContractBroken) parts.push('settingsHintSpacingContractBroken=true');
+    for (const key of SETTINGS_SOURCE_CONTRACT_KEYS) {
+        if (metrics[key]) parts.push(`${key}=true`);
+    }
     if (metrics.lalalMobileActionLayoutBroken) parts.push('lalalMobileActionLayoutBroken=true');
     if (metrics.trimDefaultSelectionInvalid) parts.push('trimDefaultSelection=invalid');
     if (metrics.uiCardChildExpands) parts.push(`uiCardChildExpands=${metrics.uiCardChildExpands}`);
@@ -885,16 +769,11 @@ const BASE_METRICS = Object.freeze({
     stickyFooterDetached: false,
     stickyTableHeaderBroken: false,
     jobsSentinelOutsideScrollContainer: false,
-    jobsInfiniteScrollNotObserverBased: false,
-    jobsPagingOffsetContractBroken: false,
-    jobsDesktopFileSizePlacementBroken: false,
-    jobsMobileShareActionMissing: false,
+    ...JOBS_SOURCE_CONTRACT_DEFAULTS,
     trimWaveformMissingStyle: false,
     videoPreviewContractBroken: false,
     settingsFieldStackContractBroken: false,
-    settingsSaveToastContractBroken: false,
-    settingsHintContractBroken: false,
-    settingsHintSpacingContractBroken: false,
+    ...SETTINGS_SOURCE_CONTRACT_DEFAULTS,
     lalalMobileActionLayoutBroken: false,
     trimDefaultSelectionInvalid: false,
     uiCardChildExpands: 0,
@@ -4226,7 +4105,7 @@ async function auditSettingsTabTitleGap(page, view) {
         await tabButton.click();
         await page.waitForTimeout(350);
 
-         
+
         const gap = await page.evaluate((id) => {
             const panel = document.getElementById(id);
             if (!panel) return null;
@@ -4648,19 +4527,10 @@ async function runView(browser, storageState, view, replacements = {}) {
         const settingsTabTitleGapAudit = await auditSettingsTabTitleGap(page, view);
         const jobsSourceContracts = viewAuditsJobsList(view)
             ? await getJobsSourceContractMetrics()
-            : {
-                jobsInfiniteScrollNotObserverBased: false,
-                jobsPagingOffsetContractBroken: false,
-                jobsDesktopFileSizePlacementBroken: false,
-                jobsMobileShareActionMissing: false,
-            };
+            : JOBS_SOURCE_CONTRACT_DEFAULTS;
         const settingsSourceContracts = viewAuditsSettings(view)
             ? await getSettingsSourceContractMetrics()
-            : {
-                settingsSaveToastContractBroken: false,
-                settingsHintContractBroken: false,
-                settingsHintSpacingContractBroken: false,
-            };
+            : SETTINGS_SOURCE_CONTRACT_DEFAULTS;
         const metrics = {
             ...runtimeMetrics,
             ...footerHistoryAudit,
@@ -4875,17 +4745,10 @@ async function runView(browser, storageState, view, replacements = {}) {
         if (metrics.jobsSentinelOutsideScrollContainer) {
             failures.push('jobs sentinel is missing from the local scroll container');
         }
-        if (metrics.jobsInfiniteScrollNotObserverBased) {
-            failures.push('jobs infinite scroll is not driven by an IntersectionObserver rooted at the local scroller');
-        }
-        if (metrics.jobsPagingOffsetContractBroken) {
-            failures.push('jobs pagination offset is not monotonic across row trimming');
-        }
-        if (metrics.jobsDesktopFileSizePlacementBroken) {
-            failures.push('desktop job file size must share the Media metadata line and stay out of Status');
-        }
-        if (metrics.jobsMobileShareActionMissing) {
-            failures.push('mobile downloadable jobs must expose the shared Download and Share menu');
+        // Wording comes from lib/source-contracts.mjs, so a view failure and
+        // the standalone `npm run lint:contracts` step read identically.
+        for (const violation of sourceContractViolations(metrics, JOBS_SOURCE_CONTRACT_KEYS)) {
+            failures.push(violation.message);
         }
         if (metrics.trimWaveformMissingStyle) {
             failures.push('trim waveform container styling is incomplete');
@@ -4896,14 +4759,8 @@ async function runView(browser, storageState, view, replacements = {}) {
         if (metrics.settingsFieldStackContractBroken) {
             failures.push('settings field stack is missing shrink-safe flex min-width rules');
         }
-        if (metrics.settingsSaveToastContractBroken) {
-            failures.push('settings autosave must stay quiet, while errors use toasts and no inline save-status row is rendered');
-        }
-        if (metrics.settingsHintContractBroken) {
-            failures.push('settings explanation hints must use the info-icon hint style');
-        }
-        if (metrics.settingsHintSpacingContractBroken) {
-            failures.push('settings explanation hints must share the global 4px spacing rule');
+        for (const violation of sourceContractViolations(metrics, SETTINGS_SOURCE_CONTRACT_KEYS)) {
+            failures.push(violation.message);
         }
         if (metrics.lalalMobileActionLayoutBroken) {
             failures.push('Lalal mobile actions must use one equal two-column row');
