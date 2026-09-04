@@ -31,6 +31,16 @@
   <em>Authenticated login with invisible, server-verified anti-bot protection.</em>
 </p>
 
+<p align="center">
+  <img src=".github/img/screen_3.jpeg" alt="fetchly settings: Lalal.ai integration and per-platform cookie tiles" width="800"><br>
+  <em>Integrations — connect Lalal.ai for stem separation and paste browser cookies for sign-in-only downloads.</em>
+</p>
+
+<p align="center">
+  <img src=".github/img/screen_4.jpeg" alt="fetchly settings: host resources, component versions, update check, and changelog" width="800"><br>
+  <em>System — host resources, component versions, one-click update checks, and the in-app changelog.</em>
+</p>
+
 ## Download, shape, share
 
 fetchly turns `yt-dlp` into a self-hosted media workspace. Pick formats in a web UI,
