@@ -7,8 +7,9 @@ import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-import { chromium, devices, webkit } from 'playwright';
+import { chromium, devices, firefox, webkit } from 'playwright';
 
+import { runAxeAudit } from './lib/axe.mjs';
 import {
     collectConsoleAndNetwork,
     diffScreenshots,
@@ -17,6 +18,14 @@ import {
     login,
     sanitize,
 } from './lib/browser-utils.mjs';
+import { triageConsoleEntries } from './lib/console-severity.mjs';
+import {
+    classifyLayoutShift,
+    collectLayoutShift,
+    installLayoutShiftObserver,
+    LAYOUT_SHIFT_POOR,
+} from './lib/layout-shift.mjs';
+import { buildUIHealthReport, summarizeHealthReports } from './lib/ui-health.mjs';
 
 const BASE_URL = process.env.UI_LINT_BASE_URL || 'http://127.0.0.1:8000';
 const BASE_ORIGIN = new URL(BASE_URL).origin;
@@ -183,6 +192,64 @@ const MOBILE_LAYOUT_STABLE_FRAMES = envInt('UI_LINT_MOBILE_LAYOUT_STABLE_FRAMES'
 const DESKTOP_LAYOUT_STABLE_FRAMES = envInt('UI_LINT_DESKTOP_LAYOUT_STABLE_FRAMES', 2);
 const MOBILE_LAYOUT_MAX_FRAMES = envInt('UI_LINT_MOBILE_LAYOUT_MAX_FRAMES', 36);
 const DESKTOP_LAYOUT_MAX_FRAMES = envInt('UI_LINT_DESKTOP_LAYOUT_MAX_FRAMES', 16);
+
+/**
+ * Reads a comma-separated allowlist, falling back to the full set. Unknown
+ * names fail loudly: a typo in UI_LINT_BROWSERS would otherwise silently
+ * narrow the audit to nothing.
+ * @param {string} name
+ * @param {string[]} allowed
+ * @returns {string[]}
+ */
+function envEngineList(name, allowed) {
+    const raw = process.env[name];
+    if (raw === undefined || raw.trim() === '') return [...allowed];
+
+    const selected = raw.split(',').map((entry) => entry.trim().toLowerCase()).filter(Boolean);
+    const unknown = selected.filter((entry) => !allowed.includes(entry));
+    if (unknown.length) {
+        throw new Error(`${name} names unknown engines: ${unknown.join(', ')}. Known: ${allowed.join(', ')}`);
+    }
+    if (!selected.length) {
+        throw new Error(`${name} selected no engines`);
+    }
+    return selected;
+}
+
+/** Playwright launchers, keyed by the engine name a device profile declares. */
+const ENGINE_LAUNCHERS = Object.freeze({ chromium, webkit, firefox });
+
+const SELECTED_ENGINES = envEngineList('UI_LINT_BROWSERS', Object.keys(ENGINE_LAUNCHERS));
+// Engines are separate browser processes, so they overlap without contending
+// for the same page pool; devices within one engine share it and need their
+// own limit. UI_LINT_CONCURRENCY is kept as the default for the device limit
+// so existing recipes (setup.conf) keep their meaning.
+const BROWSER_CONCURRENCY = Math.max(1, envInt('UI_LINT_BROWSER_CONCURRENCY', SELECTED_ENGINES.length));
+const DEVICE_CONCURRENCY = Math.max(1, envInt('UI_LINT_DEVICE_CONCURRENCY', envInt('UI_LINT_CONCURRENCY', 2)));
+const RUN_AXE = envInt('UI_LINT_AXE', 1) !== 0;
+// Which axe impact level becomes a hard failure. 'critical' matches how the
+// runner already treats its own accessibility checks - icon buttons without an
+// accessible name and unlabeled inputs are failures, not warnings - so the
+// imported ruleset is held to the same bar. Set to 'none' to land the ruleset
+// report-only while the existing violations are worked off.
+const AXE_FAIL_ON = (() => {
+    const raw = (process.env.UI_LINT_AXE_FAIL_ON || 'critical').trim().toLowerCase();
+    if (!['critical', 'serious', 'none'].includes(raw)) {
+        throw new Error(`UI_LINT_AXE_FAIL_ON must be one of critical, serious, none - got ${raw}`);
+    }
+    return raw;
+})();
+// Report-only by default. The score is new and uncalibrated against this
+// codebase; turning it into a gate before the baseline is known would only
+// teach everyone to set it back to 0. Raise it once the run is clean.
+const HEALTH_MIN = envInt('UI_LINT_HEALTH_MIN', 0);
+// The hard block is the score's categorical half: a critical UX issue or a
+// blocking axe violation, regardless of how good the rest of the view is. It
+// is reported either way; this turns it into a failure. Off by default for the
+// same reason as UI_LINT_HEALTH_MIN - it currently fires on findings the
+// runner has always treated as warnings (undersized touch targets), and
+// promoting those is a decision, not a side effect of adding the score.
+const HEALTH_GATE = envInt('UI_LINT_HEALTH_GATE', 0) !== 0;
 const PLATFORM_BADGE_WIDTH_PX = 28;
 const PLATFORM_BADGE_HEIGHT_PX = 24;
 const PLATFORM_BADGE_ICON_SIZE_PX = 16;
@@ -330,6 +397,33 @@ const VIEW_DEFS = [
         device: 'tablet-wide',
         requiredSelectors: ['#settingsForm', '#lalalAuthBtn'],
     },
+    // Gecko at the desktop viewport. Same three routes as `desktop`, so any
+    // finding that appears here and not there is an engine difference rather
+    // than a layout one.
+    {
+        name: 'firefox-login',
+        url: '/login',
+        readySelector: '#login-form',
+        auth: false,
+        device: 'desktop-firefox',
+        requiredSelectors: ['#username', '#password', '#submit-btn'],
+    },
+    {
+        name: 'firefox-dashboard',
+        url: '/',
+        readySelector: '#submitForm',
+        auth: true,
+        device: 'desktop-firefox',
+        requiredSelectors: ['.stats-row', '#submitForm', '#jobsRenderRoot', '#jobsTable'],
+    },
+    {
+        name: 'firefox-settings',
+        url: '/settings',
+        readySelector: '#settingsForm',
+        auth: true,
+        device: 'desktop-firefox',
+        requiredSelectors: ['#settingsForm', '#lalalAuthBtn'],
+    },
 ];
 
 // Every device the invalid-login check runs on needs its own /login view;
@@ -357,21 +451,17 @@ function loginViewFor(device) {
 // Views whose name is the desktop variant plus a mobile counterpart. Audits
 // gated on a single view name must accept both, otherwise the WebKit run
 // silently loses coverage the desktop run has.
-const LOGIN_VIEW_NAMES = ['login', 'mobile-login', 'tablet-login'];
-const DASHBOARD_VIEW_NAMES = [
-    'dashboard',
-    'mobile-dashboard',
-    'tablet-dashboard',
-    'tablet-landscape-dashboard',
-    'tablet-wide-dashboard',
-];
-const SETTINGS_VIEW_NAMES = [
-    'settings',
-    'mobile-settings',
-    'tablet-settings',
-    'tablet-landscape-settings',
-    'tablet-wide-settings',
-];
+// Derived from VIEW_DEFS rather than restated: these lists gate whole audits
+// (the settings tab-gap check, the platform-badge geometry check), and a view
+// added to VIEW_DEFS but forgotten in a hand-written list is skipped silently
+// - it still reports PASS, just without ever having run the audit.
+const viewNamesForUrl = (url) => VIEW_DEFS.filter((view) => view.url === url).map((view) => view.name);
+
+const LOGIN_VIEW_NAMES = viewNamesForUrl('/login');
+const DASHBOARD_VIEW_NAMES = viewNamesForUrl('/');
+const SETTINGS_VIEW_NAMES = viewNamesForUrl('/settings');
+// The job-detail views are built at runtime from a discovered job id, so they
+// are not in VIEW_DEFS and stay listed explicitly.
 const JOB_DETAIL_VIEW_NAMES = ['job-detail', 'mobile-job-detail', 'tablet-job-detail'];
 
 /**
@@ -435,6 +525,16 @@ const DEVICE_PROFILES = {
         // touch screen. This is the case a single isMobile flag cannot express
         // - desktop layout, finger-sized hit areas.
         playwrightDevice: 'iPad Pro 11 landscape',
+    },
+    'desktop-firefox': {
+        engine: 'firefox',
+        formFactor: 'desktop',
+        // Same viewport as `desktop` on purpose: this profile exists to vary
+        // the engine, not the layout. Gecko resolves flexbox min-size,
+        // scrollbar gutters and subgrid differently from Blink, and those
+        // differences only show when everything else is held constant.
+        playwrightDevice: null,
+        viewport: { width: 1440, height: 1200 },
     },
 };
 
@@ -511,9 +611,23 @@ function createContextOptions(device) {
  */
 function formatResultSummary(result) {
     const parts = [];
+    // Health first: it is the one number that says how bad the view is, and
+    // the counters below only explain it.
+    if (result.health) parts.push(`health=${result.health.score}/${result.health.severity}`);
     if (result.failures.length) parts.push(`failures=${result.failures.length}`);
     if (result.warnings.length) parts.push(`warnings=${result.warnings.length}`);
     const metrics = result.metrics || {};
+    // A view that never ran says so once, on the status line; repeating it per
+    // audit would only pad the summary.
+    if (!metrics.skipped) {
+        if (metrics.axeAvailable === false) parts.push('axe=skipped');
+        else if (metrics.axeCritical || metrics.axeSerious) {
+            parts.push(`axe=${metrics.axeCritical}c/${metrics.axeSerious}s`);
+        }
+    }
+    if (metrics.layoutShiftSupported && metrics.layoutShiftValue > 0) {
+        parts.push(`cls=${metrics.layoutShiftValue}`);
+    }
     if (metrics.duplicateIds) parts.push(`duplicateIds=${metrics.duplicateIds}`);
     if (metrics.unlabeledControls) parts.push(`unlabeledControls=${metrics.unlabeledControls}`);
     if (metrics.contrastIssues) parts.push(`contrastIssues=${metrics.contrastIssues}`);
@@ -770,6 +884,20 @@ const BASE_METRICS = Object.freeze({
     viewportUnitTraps: 0,
     safeAreaInsetsDisabled: false,
     bottomPinnedWithoutSafeArea: 0,
+    // A skipped or crashed view never ran the accessibility pass, so
+    // axeAvailable is false rather than "zero violations found".
+    axeAvailable: false,
+    axeCritical: 0,
+    axeSerious: 0,
+    axeModerate: 0,
+    axeMinor: 0,
+    axeIncomplete: 0,
+    layoutShiftSupported: false,
+    layoutShiftValue: 0,
+    layoutShiftCount: 0,
+    consoleSeverityScore: 0,
+    consoleSuppressed: 0,
+    uiHealthScore: null,
 });
 
 /**
@@ -896,6 +1024,57 @@ function applyMetricRules(metrics, failures, warnings) {
     }
     if (metrics.bottomPinnedWithoutSafeArea?.length) {
         warnings.push(`elements pinned to the bottom edge without safe-area-inset-bottom: ${metrics.bottomPinnedWithoutSafeArea.length}`);
+    }
+}
+
+/**
+ * Formats one axe impact bucket as a single finding line, naming the rules
+ * rather than only counting them so the report is actionable without opening
+ * results.json.
+ * @param {string} impact
+ * @param {object[]} violations
+ * @returns {string}
+ */
+function formatAxeBucket(impact, violations) {
+    const rules = violations
+        .map((violation) => `${violation.id}(${violation.nodeCount})`)
+        .slice(0, 6)
+        .join(', ');
+    const more = violations.length > 6 ? `, +${violations.length - 6} more` : '';
+    return `axe ${impact}: ${rules}${more}`;
+}
+
+/**
+ * Routes axe violations into failures or warnings per UI_LINT_AXE_FAIL_ON.
+ *
+ * An audit that did not run is a warning naming the reason, never silence: a
+ * missing package would otherwise read exactly like a clean accessibility
+ * pass.
+ * @param {object} axe
+ * @param {string[]} failures
+ * @param {string[]} warnings
+ */
+function applyAxeRules(axe, failures, warnings) {
+    if (!axe.available) {
+        warnings.push(`accessibility audit did not run: ${axe.error || 'unknown reason'}`);
+        return;
+    }
+
+    const failing = AXE_FAIL_ON === 'none' ? [] : ['critical', ...(AXE_FAIL_ON === 'serious' ? ['serious'] : [])];
+
+    for (const impact of ['critical', 'serious', 'moderate', 'minor']) {
+        const violations = axe[impact] || [];
+        if (!violations.length) continue;
+        const line = formatAxeBucket(impact, violations);
+        if (failing.includes(impact)) {
+            failures.push(line);
+        } else {
+            warnings.push(line);
+        }
+    }
+
+    if (axe.incomplete) {
+        warnings.push(`axe could not decide ${axe.incomplete} checks (needs manual review)`);
     }
 }
 
@@ -4232,8 +4411,13 @@ async function discoverJobId(browser, storageState) {
  * @param {'desktop'|'mobile'} [device]
  * @returns {Promise<object>}
  */
+/** Result name the invalid-login check reports under, for a device profile. */
+function invalidLoginResultName(device) {
+    return device === 'desktop' ? 'login-error' : `${device}-login-error`;
+}
+
 async function runInvalidLoginCheck(browser, loginRequired, device = 'desktop') {
-    const resultName = device === 'desktop' ? 'login-error' : `${device}-login-error`;
+    const resultName = invalidLoginResultName(device);
 
     if (!loginRequired) {
         return buildSkippedResult(
@@ -4283,20 +4467,26 @@ async function runInvalidLoginCheck(browser, loginRequired, device = 'desktop') 
         if (traffic.pageErrors.length) {
             failures.push(...traffic.pageErrors.map((entry) => `pageerror ${entry}`));
         }
-        if (traffic.consoleEntries.length) {
-            warnings.push(...traffic.consoleEntries
-                .filter((entry) => !/\b401\b|unauthorized/i.test(entry.text))
-                .map((entry) => `console ${entry.type}: ${entry.text}`));
-        }
+        // The 401 the rejected credentials produce is the expected outcome of
+        // this check, not a finding; everything else goes through the same
+        // allowlist as the regular views.
+        const consoleTriage = triageConsoleEntries(
+            traffic.consoleEntries.filter((entry) => !/\b401\b|unauthorized/i.test(entry.text)),
+        );
+        warnings.push(...consoleTriage.entries.map((entry) => `console ${entry.type}: ${entry.text}`));
         warnings.push(...externalWarnings);
 
         return {
             name: resultName,
             url: `${BASE_URL}/login`,
+            device,
+            engine: deviceProfile(device).engine,
             failures,
             warnings,
             metrics: {
                 loginError: metrics,
+                consoleSeverityScore: consoleTriage.score,
+                consoleSuppressed: consoleTriage.suppressed,
             },
         };
     } finally {
@@ -4318,6 +4508,10 @@ async function runView(browser, storageState, view, replacements = {}) {
         ...createContextOptions(view.device),
         ...(view.auth ? { storageState } : {}),
     });
+    // Must precede newPage(): the observer is an init script and has to be
+    // registered before the document starts executing, or the shifts that
+    // happen during first render are never seen.
+    await installLayoutShiftObserver(context);
     const page = await context.newPage();
     const stopCollecting = collectConsoleAndNetwork(page);
 
@@ -4353,6 +4547,13 @@ async function runView(browser, storageState, view, replacements = {}) {
             ...jobsSourceContracts,
             ...settingsSourceContracts,
         };
+        // Runs against the settled DOM, before the screenshot pair perturbs it
+        // with the motion-reset stylesheet.
+        const axe = RUN_AXE
+            ? await runAxeAudit(page)
+            : { available: false, error: 'disabled via UI_LINT_AXE=0' };
+        const layoutShift = await collectLayoutShift(page);
+
         const shots = await captureStablePair(page, view);
         const visual = diffScreenshots({
             name: view.name,
@@ -4361,6 +4562,7 @@ async function runView(browser, storageState, view, replacements = {}) {
             screenshotDir: SCREENSHOT_DIR,
         });
         const traffic = stopCollecting();
+        const consoleTriage = triageConsoleEntries(traffic.consoleEntries);
 
         const failures = [];
         const warnings = [];
@@ -4596,22 +4798,60 @@ async function runView(browser, storageState, view, replacements = {}) {
             failures.push(`settings tab title-to-content gap is inconsistent across tabs: ${JSON.stringify(metrics.settingsTabTitleGaps)}`);
         }
         applyMetricRules(metrics, failures, warnings);
+        applyAxeRules(axe, failures, warnings);
+
+        // Only reported where the engine can actually observe shifts; see
+        // lib/layout-shift.mjs for why an unsupported engine is not a zero.
+        const layoutShiftRating = classifyLayoutShift(layoutShift);
+        if (layoutShiftRating === 'poor') {
+            failures.push(`cumulative layout shift ${layoutShift.value.toFixed(3)} (poor, > ${LAYOUT_SHIFT_POOR})`);
+        } else if (layoutShiftRating === 'needs-improvement') {
+            warnings.push(`cumulative layout shift ${layoutShift.value.toFixed(3)} over ${layoutShift.count} shifts`);
+        }
 
         failures.push(...sameOriginFailures);
 
         if (traffic.pageErrors.length) {
             failures.push(...traffic.pageErrors.map((entry) => `pageerror ${entry}`));
         }
-        if (traffic.consoleEntries.length) {
-            warnings.push(...traffic.consoleEntries.map((entry) => `console ${entry.type}: ${entry.text}`));
+        // Allowlisted browser noise is dropped but still counted, so the
+        // report says what was suppressed instead of quietly shrinking.
+        warnings.push(...consoleTriage.entries.map((entry) => `console ${entry.type}: ${entry.text}`));
+        if (consoleTriage.suppressed) {
+            warnings.push(`console: ${consoleTriage.suppressed} allowlisted entries suppressed`);
         }
         warnings.push(...externalWarnings);
+
+        const health = buildUIHealthReport({
+            name: view.name,
+            url: page.url(),
+            device: view.device,
+            engine: deviceProfile(view.device).engine,
+            metrics,
+            console: consoleTriage,
+            axe,
+            layoutShift,
+            visualDriftRatio: visual.ratio,
+        });
+
+        if (HEALTH_MIN > 0 && health.score < HEALTH_MIN) {
+            failures.push(`UI health score ${health.score} below UI_LINT_HEALTH_MIN=${HEALTH_MIN}`);
+        }
+        if (HEALTH_GATE && health.gates.hardBlock) {
+            const blocking = health.ux.issues
+                .filter((issue) => issue.severity === 'critical')
+                .map((issue) => issue.kind);
+            failures.push(`UI health hard block: ${[...new Set(blocking)].join(', ') || 'axe critical violation'}`);
+        }
 
         return {
             name: view.name,
             url: page.url(),
+            device: view.device,
+            engine: deviceProfile(view.device).engine,
             failures,
             warnings,
+            health,
             metrics: {
                 duplicateIds: metrics.duplicateIds.length,
                 unlabeledControls: metrics.unlabeledControls.length,
@@ -4741,6 +4981,18 @@ async function runView(browser, storageState, view, replacements = {}) {
                 viewportUnitTraps: metrics.viewportUnitTraps?.length || 0,
                 safeAreaInsetsDisabled: metrics.safeAreaInsetsDisabled || false,
                 bottomPinnedWithoutSafeArea: metrics.bottomPinnedWithoutSafeArea?.length || 0,
+                axeAvailable: axe.available,
+                axeCritical: axe.critical?.length || 0,
+                axeSerious: axe.serious?.length || 0,
+                axeModerate: axe.moderate?.length || 0,
+                axeMinor: axe.minor?.length || 0,
+                axeIncomplete: axe.incomplete || 0,
+                layoutShiftSupported: Boolean(layoutShift.supported),
+                layoutShiftValue: Number(Number(layoutShift.value || 0).toFixed(4)),
+                layoutShiftCount: Number(layoutShift.count || 0),
+                consoleSeverityScore: consoleTriage.score || 0,
+                consoleSuppressed: consoleTriage.suppressed || 0,
+                uiHealthScore: health.score,
             },
             // Keep actionable element-level details in the JSON report while
             // retaining the compact counters above for console output.
@@ -4762,6 +5014,10 @@ async function runView(browser, storageState, view, replacements = {}) {
                 iosInputZoomTargets: metrics.iosInputZoomTargets,
                 viewportUnitTraps: metrics.viewportUnitTraps,
                 bottomPinnedWithoutSafeArea: metrics.bottomPinnedWithoutSafeArea,
+                axeViolations: axe.available
+                    ? [...(axe.critical || []), ...(axe.serious || []), ...(axe.moderate || []), ...(axe.minor || [])]
+                    : [],
+                layoutShiftEntries: layoutShift.entries || [],
             },
             screenshots: {
                 first: shots.shotA,
@@ -4782,14 +5038,46 @@ async function main() {
     ensureDir(OUTPUT_DIR);
     ensureDir(SCREENSHOT_DIR);
 
-    const browser = await chromium.launch({ headless: true });
-    let webkitBrowser;
-
     // Engine follows the device profile: Chromium for the desktop context,
-    // WebKit for every touch profile, since that is what iOS and iPadOS run.
-    const browserFor = (device) => (
-        deviceProfile(device).engine === 'webkit' ? webkitBrowser : browser
-    );
+    // WebKit for every touch profile since that is what iOS and iPadOS run,
+    // and Firefox for the Gecko desktop profile.
+    //
+    // Launch failures are recorded rather than thrown. A missing browser
+    // binary is a setup problem with one fix (`npm run ui-lint:install`), and
+    // failing the whole audit over it would throw away every finding the other
+    // engines did produce. The views on that engine are reported as skipped
+    // with the reason, so the omission is visible in the report.
+    const browsers = new Map();
+    const engineErrors = new Map();
+
+    const launchEngine = async (engine) => {
+        try {
+            browsers.set(engine, await ENGINE_LAUNCHERS[engine].launch({ headless: true }));
+        } catch (error) {
+            engineErrors.set(engine, error instanceof Error ? error.message : String(error));
+        }
+    };
+
+    await Promise.all(SELECTED_ENGINES.map(launchEngine));
+
+    const browserFor = (device) => browsers.get(deviceProfile(device).engine);
+    /** Reason a device profile cannot run, or null when it can. */
+    const engineUnavailable = (device) => {
+        const { engine } = deviceProfile(device);
+        if (!SELECTED_ENGINES.includes(engine)) return `${engine} not selected by UI_LINT_BROWSERS`;
+        if (engineErrors.has(engine)) return `${engine} failed to launch: ${engineErrors.get(engine)}`;
+        return null;
+    };
+
+    // Auth and job discovery need one working engine but not a particular
+    // one; they only produce a storage state and an id.
+    const utilityBrowser = browsers.get('chromium') || browsers.values().next().value;
+    if (!utilityBrowser) {
+        throw new Error(
+            `No browser engine could be launched (${[...engineErrors].map(([e, m]) => `${e}: ${m}`).join('; ')
+            }). Run: npm run ui-lint:install`,
+        );
+    }
 
     try {
         const loginRequired = await detectLoginRequired();
@@ -4798,36 +5086,81 @@ async function main() {
                 'UI_LINT_USERNAME and UI_LINT_PASSWORD are required when login is enabled',
             );
         }
-        webkitBrowser = await webkit.launch({ headless: true });
-        const authState = loginRequired ? await createAuthState(browser) : {};
+        const authState = loginRequired ? await createAuthState(utilityBrowser) : {};
         const firstJobId = process.env.UI_LINT_JOB_ID
-            || await discoverJobId(browser, authState);
+            || await discoverJobId(utilityBrowser, authState);
         const results = [];
 
-        results.push(await runInvalidLoginCheck(browser, loginRequired, 'desktop'));
-        results.push(await runInvalidLoginCheck(webkitBrowser, loginRequired, 'mobile'));
-        results.push(await runInvalidLoginCheck(webkitBrowser, loginRequired, 'tablet'));
+        for (const device of ['desktop', 'mobile', 'tablet']) {
+            const unavailable = engineUnavailable(device);
+            if (unavailable) {
+                results.push(buildSkippedResult(
+                    invalidLoginResultName(device),
+                    `${BASE_URL}/login`,
+                    `skipped invalid-login check: ${unavailable}`,
+                ));
+                continue;
+            }
+            results.push(await runInvalidLoginCheck(browserFor(device), loginRequired, device));
+        }
 
-        const concurrency = Math.max(1, envInt('UI_LINT_CONCURRENCY', 2));
-        const queue = VIEW_DEFS.map((view, index) => ({ view, index }));
+        // One queue per engine rather than one shared queue: the engines are
+        // separate processes and overlap freely, while the pages inside one
+        // engine share it and need their own limit. A single pool of two
+        // workers serialised Chromium behind WebKit for no reason.
         const parallelResults = new Array(VIEW_DEFS.length);
-        const workers = Array.from({ length: concurrency }, async () => {
-            while (queue.length) {
-                const item = queue.shift();
-                if (!item) break;
-                if (LOGIN_VIEW_NAMES.includes(item.view.name) && !loginRequired) {
-                    parallelResults[item.index] = buildSkippedResult(
-                        item.view.name,
-                        `${BASE_URL}${item.view.url}`,
-                        'login is disabled; skipped login page audit',
+        const byEngine = new Map();
+        VIEW_DEFS.forEach((view, index) => {
+            const { engine } = deviceProfile(view.device);
+            if (!byEngine.has(engine)) byEngine.set(engine, []);
+            byEngine.get(engine).push({ view, index });
+        });
+
+        const runEngineQueue = async (engine, queue) => {
+            const unavailable = engineUnavailable(queue[0].view.device);
+            if (unavailable) {
+                for (const { view, index } of queue) {
+                    parallelResults[index] = buildSkippedResult(
+                        view.name,
+                        `${BASE_URL}${view.url}`,
+                        `skipped: ${unavailable}`,
                     );
-                    continue;
                 }
-                const browserForView = browserFor(item.view.device);
-                parallelResults[item.index] = await runViewSafely(browserForView, authState, item.view);
+                return;
+            }
+
+            const pending = [...queue];
+            const workers = Array.from({ length: DEVICE_CONCURRENCY }, async () => {
+                while (pending.length) {
+                    const item = pending.shift();
+                    if (!item) break;
+                    if (LOGIN_VIEW_NAMES.includes(item.view.name) && !loginRequired) {
+                        parallelResults[item.index] = buildSkippedResult(
+                            item.view.name,
+                            `${BASE_URL}${item.view.url}`,
+                            'login is disabled; skipped login page audit',
+                        );
+                        continue;
+                    }
+                    parallelResults[item.index] = await runViewSafely(
+                        browsers.get(engine),
+                        authState,
+                        item.view,
+                    );
+                }
+            });
+            await Promise.all(workers);
+        };
+
+        const engineQueue = [...byEngine.entries()];
+        const engineWorkers = Array.from({ length: BROWSER_CONCURRENCY }, async () => {
+            while (engineQueue.length) {
+                const entry = engineQueue.shift();
+                if (!entry) break;
+                await runEngineQueue(entry[0], entry[1]);
             }
         });
-        await Promise.all(workers);
+        await Promise.all(engineWorkers);
         results.push(...parallelResults.filter(Boolean));
 
         if (firstJobId) {
@@ -4842,6 +5175,15 @@ async function main() {
                 ['mobile-job-detail', 'mobile'],
                 ['tablet-job-detail', 'tablet'],
             ]) {
+                const unavailable = engineUnavailable(device);
+                if (unavailable) {
+                    results.push(buildSkippedResult(
+                        name,
+                        `${BASE_URL}/job/${firstJobId}`,
+                        `skipped: ${unavailable}`,
+                    ));
+                    continue;
+                }
                 results.push(await runViewSafely(browserFor(device), authState, {
                     ...jobDetailView,
                     name,
@@ -4856,12 +5198,20 @@ async function main() {
             return acc;
         }, { failures: 0, warnings: 0 });
 
+        const health = summarizeHealthReports(results.map((result) => result.health).filter(Boolean));
+
         const payload = {
             baseUrl: BASE_URL,
             outputDir: OUTPUT_DIR,
             generatedAt: new Date().toISOString(),
+            engines: {
+                selected: SELECTED_ENGINES,
+                launched: [...browsers.keys()],
+                failed: Object.fromEntries(engineErrors),
+            },
             results,
             totals,
+            health,
         };
 
         await writeFile(RESULTS_PATH, JSON.stringify(payload, null, 2));
@@ -4869,7 +5219,11 @@ async function main() {
         console.log('UI_LINT_START');
         console.log(`Output: ${OUTPUT_DIR}`);
         for (const result of results) {
-            const status = result.failures.length ? 'FAIL' : 'PASS';
+            // A skipped view is not a passing one. Before Firefox could be
+            // missing this only ever meant "login is disabled", but an engine
+            // that failed to launch printing PASS reads as coverage that never
+            // happened.
+            const status = result.failures.length ? 'FAIL' : result.metrics?.skipped ? 'SKIP' : 'PASS';
             console.log(`${status} ${result.name} ${formatResultSummary(result)}`.trim());
             for (const failure of result.failures) {
                 console.log(`  hard: ${failure}`);
@@ -4879,20 +5233,29 @@ async function main() {
             }
         }
         console.log(`Totals: failures=${totals.failures} warnings=${totals.warnings}`);
+        if (health.views) {
+            console.log(
+                `UI health: worst=${health.worstScore} average=${health.averageScore} `
+                + `(healthy=${health.healthy} degraded=${health.degraded} critical=${health.critical})`,
+            );
+            if (health.hardBlocked.length) {
+                console.log(`Hard-blocked views: ${health.hardBlocked.join(', ')}`);
+            }
+        }
+        for (const [engine, message] of engineErrors) {
+            console.log(`Engine unavailable: ${engine} (${message})`);
+        }
         console.log(`Results JSON: ${RESULTS_PATH}`);
 
         process.exitCode = totals.failures > 0 ? 1 : 0;
     } finally {
         // Isolate cleanup errors so they never shadow the original exception.
-        try {
-            await browser.close();
-        } catch (closeErr) {
-            console.error('Browser cleanup failed:', closeErr);
-        }
-        try {
-            await webkitBrowser?.close();
-        } catch (closeErr) {
-            console.error('WebKit cleanup failed:', closeErr);
+        for (const [engine, instance] of browsers) {
+            try {
+                await instance.close();
+            } catch (closeErr) {
+                console.error(`${engine} cleanup failed:`, closeErr);
+            }
         }
     }
 }
