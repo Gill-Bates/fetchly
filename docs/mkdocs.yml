@@ -18,15 +18,19 @@ theme:
   language: en
   favicon: assets/favicon.svg
   palette:
-    # Light mode
-    - scheme: default
+    # Light mode — used when the OS prefers a light scheme. The `media` query
+    # is what makes the theme follow the system setting on first visit; without
+    # it Material always starts on the first palette regardless of the OS.
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
       primary: indigo
       accent: indigo
       toggle:
         icon: material/brightness-7
         name: Switch to dark mode
-    # Dark mode
-    - scheme: slate
+    # Dark mode — used when the OS prefers a dark scheme.
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
       primary: indigo
       accent: indigo
       toggle:
@@ -65,11 +69,13 @@ plugins:
       enable_creation_date: true
       type: timeago
       # changelog.md and license.md are copied in at build time from
-      # CHANGELOG.md / LICENSE. With follow on, `git log --follow` traces the
-      # source files' history and yields a first-revision date newer than the
-      # last-revision one, which aborts `mkdocs build --strict`. Disable follow
-      # so each page's dates come from its own path.
-      enable_git_follow: false
+      # CHANGELOG.md / LICENSE, so their git history does not line up with the
+      # page path: the plugin derives a first-revision date newer than the
+      # last-revision one and aborts `mkdocs build --strict`. Exclude the two
+      # generated pages so they fall back to the build date instead.
+      exclude:
+        - changelog.md
+        - license.md
 
 markdown_extensions:
   - abbr
