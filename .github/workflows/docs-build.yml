@@ -96,6 +96,12 @@ jobs:
       # Runs against the same build that gets deployed. It used to live in a
       # separate job that rebuilt the docs from a shallow checkout, so the
       # git-revision-date plugin saw different history than the real build.
+      # img.shields.io is excluded because the badges are generated on demand
+      # by a third party that throttles: the release badge on the landing page
+      # answered 503 after lychee's retries while the license and Docker Hub
+      # badges from the same host passed in the same run. A badge service
+      # having a bad minute says nothing about the documentation, and blocking
+      # the Pages deploy on it only produces reruns.
       - name: Check links
         uses: lycheeverse/lychee-action@v1
         with:
@@ -103,6 +109,7 @@ jobs:
             --verbose
             --no-progress
             --exclude 'fonts\.gstatic\.com'
+            --exclude 'img\.shields\.io'
             --exclude 'gill-bates\.github\.io/fetchly'
             --exclude 'www\.gnu\.org/licenses/?'
             --exclude 'apps\.apple\.com'
