@@ -43,7 +43,66 @@ _AUTO_FRAGMENTS_PER_CPU: Final[float] = 1.5
 # to back off on a host that is already low on free memory.
 _AUTO_FRAGMENTS_MB_PER_FRAGMENT: Final[int] = 64
 
+# How often an awaiting coroutine retries a slot held by a worker thread. The
+# waits this guards are whole ffmpeg runs, so the poll costs nothing measurable
+# while keeping the event loop free (an executor thread blocked on acquire()
+# would compete with the to_thread() calls the rest of the app depends on).
+_SHARED_SEMAPHORE_POLL_SECONDS: Final[float] = 0.05
+
 type _MemoryCacheEntry = tuple[float, int]
+
+
+class SharedSemaphore:
+    """One counting semaphore for both worker threads and request handlers.
+
+    A limit like ``transcode_limit`` describes what the host can run at once, so
+    it has to be a single budget. Keeping a separate ``asyncio.Semaphore`` and
+    ``threading.Semaphore`` per workload would hand out the full count twice -
+    ``worker.py`` transcoding under the sync one while ``routes/media.py``,
+    ``routes/trim.py`` and ``routes/lalal.py`` transcode under the async one -
+    and allow up to double the configured parallelism on exactly the host that
+    can least afford it.
+
+    Use it as ``with governor.transcode_semaphore_sync:`` from a thread and
+    ``async with governor.transcode_semaphore:`` from a coroutine.
+    """
+
+    __slots__ = ("_poll_seconds", "_semaphore")
+
+    def __init__(self, value: int, *, poll_seconds: float = _SHARED_SEMAPHORE_POLL_SECONDS) -> None:
+        self._semaphore = threading.Semaphore(value)
+        self._poll_seconds = poll_seconds
+
+    def acquire(self) -> bool:
+        return self._semaphore.acquire()
+
+    def release(self) -> None:
+        self._semaphore.release()
+
+    def __enter__(self) -> Self:
+        self._semaphore.acquire()
+        return self
+
+    def __exit__(self, *_exc_info: object) -> None:
+        self._semaphore.release()
+
+    async def acquire_async(self) -> None:
+        """Take a slot without blocking the event loop.
+
+        Cancellation-safe: a cancelled wait happens between polls, so it can
+        never leave an unreleased slot behind.
+        """
+        while True:
+            if self._semaphore.acquire(blocking=False):
+                return
+            await asyncio.sleep(self._poll_seconds)
+
+    async def __aenter__(self) -> Self:
+        await self.acquire_async()
+        return self
+
+    async def __aexit__(self, *_exc_info: object) -> None:
+        self._semaphore.release()
 
 
 def _read_cgroup_file(path: str) -> str | None:
@@ -230,7 +289,8 @@ class GovernorStatus(TypedDict):
 
 class Governor:
     """Central resource governor: cgroup-aware CPU detection, worker/queue
-    sizing, memory backpressure, and per-workload semaphores (async and sync).
+    sizing, memory backpressure, and one semaphore per workload, shared by
+    worker threads and request handlers alike.
 
     Call ``configure()`` once at startup, then read the properties and use the
     semaphores (``async with governor.transcode_semaphore`` /
@@ -243,16 +303,12 @@ class Governor:
         self._lock = threading.Lock()
         self._memory_read_lock = threading.Lock()
 
-        # Semaphores are initialized eagerly in configure()
-        self._cpu_sem: asyncio.Semaphore | None = None
-        self._analysis_sem: asyncio.Semaphore | None = None
-        self._io_sem: asyncio.Semaphore | None = None
-        self._transcode_sem: asyncio.Semaphore | None = None
-
-        self._cpu_sem_sync: threading.Semaphore | None = None
-        self._analysis_sem_sync: threading.Semaphore | None = None
-        self._io_sem_sync: threading.Semaphore | None = None
-        self._transcode_sem_sync: threading.Semaphore | None = None
+        # Semaphores are initialized eagerly in configure(). One object per
+        # workload, shared by the sync and async accessors - see SharedSemaphore.
+        self._cpu_sem: SharedSemaphore | None = None
+        self._analysis_sem: SharedSemaphore | None = None
+        self._io_sem: SharedSemaphore | None = None
+        self._transcode_sem: SharedSemaphore | None = None
 
         # Short-lived memory cache to keep status checks cheap
         self._memory_cache: _MemoryCacheEntry | None = None
@@ -276,8 +332,11 @@ class Governor:
             if self._config.worker_count > 0:
                 worker_count = self._config.worker_count
             else:
-                # 2 workers per CPU, clamped to 1..8
-                worker_count = max(1, min(8, math.ceil(effective_cpus * 2)))
+                # SQLite has a single writer; scaling worker threads adds
+                # subprocess (ffmpeg/yt-dlp) parallelism but not database
+                # throughput, so the ceiling stays lower than the CPU count
+                # would otherwise suggest.
+                worker_count = max(1, min(4, math.ceil(effective_cpus * 1.5)))
 
             if self._config.queue_maxsize > 0:
                 queue_maxsize = self._config.queue_maxsize
@@ -302,14 +361,10 @@ class Governor:
             )
 
             # Initialize semaphores eagerly to avoid race conditions.
-            self._cpu_sem = asyncio.Semaphore(cpu_limit)
-            self._analysis_sem = asyncio.Semaphore(analysis_limit)
-            self._io_sem = asyncio.Semaphore(io_limit)
-            self._transcode_sem = asyncio.Semaphore(transcode_limit)
-            self._cpu_sem_sync = threading.Semaphore(cpu_limit)
-            self._analysis_sem_sync = threading.Semaphore(analysis_limit)
-            self._io_sem_sync = threading.Semaphore(io_limit)
-            self._transcode_sem_sync = threading.Semaphore(transcode_limit)
+            self._cpu_sem = SharedSemaphore(cpu_limit)
+            self._analysis_sem = SharedSemaphore(analysis_limit)
+            self._io_sem = SharedSemaphore(io_limit)
+            self._transcode_sem = SharedSemaphore(transcode_limit)
 
             self._configured = True
 
@@ -369,37 +424,40 @@ class Governor:
         effective_cpus = limits.effective_cpus if limits else _detect_effective_cpus()
         return _auto_concurrent_fragments(effective_cpus, self.get_memory_available_mb())
 
+    # The ``*_sync`` aliases return the same object as their async counterparts.
+    # Both spellings are kept because the call site, not the semaphore, decides
+    # whether a slot is taken with ``with`` or ``async with``.
     @property
-    def cpu_semaphore(self) -> asyncio.Semaphore:
+    def cpu_semaphore(self) -> SharedSemaphore:
         return self._require_value(self._cpu_sem, "cpu_semaphore")
 
     @property
-    def analysis_semaphore(self) -> asyncio.Semaphore:
+    def analysis_semaphore(self) -> SharedSemaphore:
         return self._require_value(self._analysis_sem, "analysis_semaphore")
 
     @property
-    def io_semaphore(self) -> asyncio.Semaphore:
+    def io_semaphore(self) -> SharedSemaphore:
         return self._require_value(self._io_sem, "io_semaphore")
 
     @property
-    def transcode_semaphore(self) -> asyncio.Semaphore:
+    def transcode_semaphore(self) -> SharedSemaphore:
         return self._require_value(self._transcode_sem, "transcode_semaphore")
 
     @property
-    def cpu_semaphore_sync(self) -> threading.Semaphore:
-        return self._require_value(self._cpu_sem_sync, "cpu_semaphore_sync")
+    def cpu_semaphore_sync(self) -> SharedSemaphore:
+        return self._require_value(self._cpu_sem, "cpu_semaphore_sync")
 
     @property
-    def analysis_semaphore_sync(self) -> threading.Semaphore:
-        return self._require_value(self._analysis_sem_sync, "analysis_semaphore_sync")
+    def analysis_semaphore_sync(self) -> SharedSemaphore:
+        return self._require_value(self._analysis_sem, "analysis_semaphore_sync")
 
     @property
-    def io_semaphore_sync(self) -> threading.Semaphore:
-        return self._require_value(self._io_sem_sync, "io_semaphore_sync")
+    def io_semaphore_sync(self) -> SharedSemaphore:
+        return self._require_value(self._io_sem, "io_semaphore_sync")
 
     @property
-    def transcode_semaphore_sync(self) -> threading.Semaphore:
-        return self._require_value(self._transcode_sem_sync, "transcode_semaphore_sync")
+    def transcode_semaphore_sync(self) -> SharedSemaphore:
+        return self._require_value(self._transcode_sem, "transcode_semaphore_sync")
 
     @asynccontextmanager
     async def acquire_or_503(

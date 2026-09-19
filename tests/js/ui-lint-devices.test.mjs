@@ -3,10 +3,12 @@
 // Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 //
 
-// The ui-lint runner separates form factor from touch input. Collapsing the
-// two back into one flag is exactly the regression that left the iPad
-// untested: it either got the 32px desktop hit-area minimum, or was asked for
-// phone-only DOM it never renders.
+// The ui-lint runner separates form factor from touch input. Compact layout
+// keys off the viewport width AND the touch axis (touch iPads render the feed
+// up to 1366px via `(pointer: coarse)`), while hit-area sizing keys off touch
+// alone - collapsing the two back into one flag is the regression that leaves
+// some iPad viewport either over-sized for the desktop minimum or asked for
+// DOM it never renders.
 //
 
 import assert from "node:assert/strict";
@@ -16,6 +18,7 @@ const {
     DEVICE_PROFILES,
     VIEW_DEFS,
     COMPACT_LAYOUT_MAX_WIDTH,
+    COMPACT_LAYOUT_TOUCH_MAX_WIDTH,
     createContextOptions,
     profileHasTouch,
     profileIsCompactLayout,
@@ -35,42 +38,67 @@ test("every profile resolves to a real viewport", () => {
     }
 });
 
-test("the tablet band around the CSS breakpoint is covered on both sides", () => {
+test("the tablet band around the CSS width breakpoint is covered on both sides", () => {
     const tabletWidths = Object.entries(DEVICE_PROFILES)
         .filter(([, profile]) => profile.formFactor === "tablet")
         .map(([device]) => widthOf(device));
 
     assert.ok(
         tabletWidths.some((w) => w <= COMPACT_LAYOUT_MAX_WIDTH),
-        "no tablet profile below the compact breakpoint",
+        "no tablet profile below the 1024px width breakpoint",
     );
     assert.ok(
         tabletWidths.some((w) => w > COMPACT_LAYOUT_MAX_WIDTH),
-        "no tablet profile above the compact breakpoint - the desktop-table-on-touch case is untested",
+        "no tablet profile past 1024px - the coarse-pointer feed extension is untested",
     );
     assert.ok(
         tabletWidths.includes(COMPACT_LAYOUT_MAX_WIDTH),
         "no tablet profile sits exactly on the breakpoint, where off-by-one mistakes show",
     );
+    assert.ok(
+        tabletWidths.every((w) => w <= COMPACT_LAYOUT_TOUCH_MAX_WIDTH),
+        "a tablet profile is wider than the 1366px coarse-pointer bound and would render the desktop table",
+    );
 });
 
-test("touch and compact layout are independent axes", () => {
-    // The whole point: a device that is touch but renders the desktop layout.
-    const touchAndWide = Object.keys(DEVICE_PROFILES)
-        .filter((device) => profileHasTouch(device) && !profileIsCompactLayout(device));
-    assert.ok(touchAndWide.length > 0, "no touch profile outside the compact band");
-
-    // ... and the desktop context must stay non-touch.
+test("touch and compact layout stay separate axes", () => {
+    // The desktop context is neither.
     assert.equal(profileHasTouch("desktop"), false);
     assert.equal(profileIsCompactLayout("desktop"), false);
+
+    // Every touch profile within the 1366px coarse-pointer bound renders the
+    // compact feed - the contract this extension adds.
+    for (const device of Object.keys(DEVICE_PROFILES)) {
+        if (profileHasTouch(device) && widthOf(device) <= COMPACT_LAYOUT_TOUCH_MAX_WIDTH) {
+            assert.ok(
+                profileIsCompactLayout(device),
+                `${device} is a touch screen within 1366px but does not render the feed`,
+            );
+        }
+    }
+
+    // The axes are still distinct: compact layout keys off touch above 1024px,
+    // so a wide viewport is compact only when it is also a touch screen.
+    for (const device of Object.keys(DEVICE_PROFILES)) {
+        if (widthOf(device) > COMPACT_LAYOUT_MAX_WIDTH && !profileHasTouch(device)) {
+            assert.equal(
+                profileIsCompactLayout(device),
+                false,
+                `${device} is a wide non-touch viewport but renders the compact feed`,
+            );
+        }
+    }
 });
 
-test("compact layout follows the viewport, not the device name", () => {
+test("compact layout follows the viewport and touch axis, not the device name", () => {
     for (const device of Object.keys(DEVICE_PROFILES)) {
+        const width = widthOf(device);
+        const expected = width <= COMPACT_LAYOUT_MAX_WIDTH
+            || (width <= COMPACT_LAYOUT_TOUCH_MAX_WIDTH && profileHasTouch(device));
         assert.equal(
             profileIsCompactLayout(device),
-            widthOf(device) <= COMPACT_LAYOUT_MAX_WIDTH,
-            `${device} disagrees with its own viewport width`,
+            expected,
+            `${device} disagrees with its own viewport width and touch axis`,
         );
     }
 });

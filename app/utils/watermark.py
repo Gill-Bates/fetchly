@@ -259,13 +259,29 @@ def _badge_filtergraph(geometry: _Geometry, text: str, font_file: str) -> str:
 
 @dataclass(frozen=True, slots=True)
 class _Logo:
-    """The artwork the badge is built from."""
+    """The artwork the badge is built from.
+
+    ``path`` is bytes that cannot change under us: the bundled file, or a
+    private copy of the custom logo. An admin who uploads a new logo between
+    the fingerprint being read and ffmpeg reading the file would otherwise get
+    a badge cached under the wrong key.
+    """
 
     path: Path
     aspect: float
     # Distinguishes one logo from another in the badge cache key. Empty for the
     # bundled artwork, which only changes when the application does.
     fingerprint: str
+    # Set when ``path`` is a copy this module made, and so has to delete.
+    temp_snapshot: Path | None = None
+
+
+def _bundled_logo() -> _Logo | None:
+    """The shipped artwork, or ``None`` if it is not on disk."""
+    if not _LOGO_PNG.is_file():
+        logger.warning("Watermark artwork missing at %s; skipping watermark", _LOGO_PNG)
+        return None
+    return _Logo(path=_LOGO_PNG, aspect=_LOGO_ASPECT, fingerprint="")
 
 
 def _resolve_logo() -> _Logo | None:
@@ -273,20 +289,33 @@ def _resolve_logo() -> _Logo | None:
 
     A custom logo that has gone missing or unreadable since it was uploaded
     falls back rather than failing: a watermark is cosmetic, and the bundled
-    artwork is always there.
+    artwork is always there. The same applies to a snapshot that cannot be
+    written - see :class:`_Logo` for why the custom logo is copied at all.
     """
     status = logo_status()
     if status.custom and status.height > 0:
+        try:
+            logo_bytes = custom_logo_path().read_bytes()
+        except OSError as exc:
+            logger.warning("Could not read the custom logo for rendering: %s; falling back", exc)
+            return _bundled_logo()
+
+        snapshot = get_data_dir() / _CACHE_DIRNAME / f"snapshot.{uuid.uuid4().hex[:8]}.png"
+        try:
+            snapshot.parent.mkdir(parents=True, exist_ok=True)
+            snapshot.write_bytes(logo_bytes)
+        except OSError as exc:
+            logger.warning("Could not create a watermark logo snapshot: %s; falling back", exc)
+            return _bundled_logo()
+
         return _Logo(
-            path=custom_logo_path(),
+            path=snapshot,
             aspect=status.width / status.height,
             fingerprint=status.fingerprint,
+            temp_snapshot=snapshot,
         )
 
-    if not _LOGO_PNG.is_file():
-        logger.warning("Watermark artwork missing at %s; skipping watermark", _LOGO_PNG)
-        return None
-    return _Logo(path=_LOGO_PNG, aspect=_LOGO_ASPECT, fingerprint="")
+    return _bundled_logo()
 
 
 def _cache_key(hostname: str, geometry: _Geometry, logo_fingerprint: str) -> str:
@@ -363,25 +392,29 @@ def build_watermark(
     directory = cache_dir if cache_dir is not None else get_data_dir() / _CACHE_DIRNAME
     badge = directory / f"{_cache_key(text, geometry, logo.fingerprint)}.png"
 
-    if not badge.is_file():
-        try:
-            directory.mkdir(parents=True, exist_ok=True)
-            _render_badge(badge, geometry, text, font_file, logo.path)
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
-            stderr = getattr(exc, "stderr", b"") or b""
-            logger.warning(
-                "Could not render the video watermark: %s %s",
-                exc,
-                stderr.decode("utf-8", "replace").strip()[:400],
-            )
-            return None
+    try:
+        if not badge.is_file():
+            try:
+                directory.mkdir(parents=True, exist_ok=True)
+                _render_badge(badge, geometry, text, font_file, logo.path)
+            except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
+                stderr = getattr(exc, "stderr", b"") or b""
+                logger.warning(
+                    "Could not render the video watermark: %s %s",
+                    exc,
+                    stderr.decode("utf-8", "replace").strip()[:400],
+                )
+                return None
 
-    return VideoWatermark(
-        path=badge,
-        width=geometry.canvas_width,
-        height=geometry.canvas_height,
-        margin=geometry.margin,
-    )
+        return VideoWatermark(
+            path=badge,
+            width=geometry.canvas_width,
+            height=geometry.canvas_height,
+            margin=geometry.margin,
+        )
+    finally:
+        if logo.temp_snapshot is not None:
+            logo.temp_snapshot.unlink(missing_ok=True)
 
 
 def video_filter_args(watermark: VideoWatermark | None, *, scale: str = "") -> list[str]:

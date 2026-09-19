@@ -136,31 +136,60 @@ accessibility, contrast and iOS/iPadOS problems. It needs a live server, so it i
 local pre-release check rather than part of the PR gate:
 
 ```bash
-npm run ui-lint:install   # once: installs Playwright + Chromium and WebKit
+npm run ui-lint:install   # once: installs Playwright + Chromium, WebKit and Firefox
 python run.py &           # the app must be reachable
 npm run ui-lint
 ```
 
-It audits five device profiles, chosen around the breakpoint in
-`app/static/style.css` where the desktop jobs table gives way to the mobile feed
-(`@media (max-width: 1024px)`):
+It audits six device profiles, chosen around the breakpoint in
+`app/static/style.css` where the desktop jobs table gives way to the mobile feed —
+`@media (max-width: 1024px)` for any pointer, plus
+`(max-width: 1366px) and (pointer: coarse)` so every touch iPad up to a 12.9" Pro
+in landscape gets the feed:
 
 | Profile | Device | Width | Engine | Layout |
 |---|---|---|---|---|
 | `desktop` | — | 1440px | Chromium | desktop table |
 | `mobile` | iPhone 13 | 390px | WebKit | feed |
 | `tablet` | iPad Mini | 768px | WebKit | feed |
-| `tablet-landscape` | iPad Mini landscape | 1024px | WebKit | feed (breakpoint edge) |
-| `tablet-wide` | iPad Pro 11 landscape | 1194px | WebKit | desktop table, touch input |
+| `tablet-landscape` | iPad Mini landscape | 1024px | WebKit | feed (width breakpoint edge) |
+| `tablet-wide` | iPad Pro 11 landscape | 1194px | WebKit | feed via coarse-pointer rule |
+| `desktop-firefox` | — | 1440px | Firefox | desktop table |
 
-Form factor and touch are separate axes in the runner, which is what `tablet-wide`
-exists to prove: it renders the desktop table *and* needs 44px hit areas. Audits are
-gated on the axis they actually depend on — `isMobile` for which DOM renders, `isTouch`
-for hit areas and Safari's viewport quirks, `isPhone` for the pixel contracts written
-against 390px.
+Form factor and touch stay separate axes in the runner. `isMobile` (which DOM
+renders) keys off width *and* touch — a touch iPad past 1024px still gets the feed,
+a hypothetical non-touch window that wide would not. `isTouch` (44px hit areas,
+Safari's viewport quirks) keys off touch alone, and `isPhone` gates the pixel
+contracts written against 390px.
+
+`desktop-firefox` holds the viewport identical to `desktop` and varies only the
+engine, so anything it finds is a Gecko difference rather than a layout one. An
+engine that is not installed is skipped with the reason instead of failing the
+run; those views report `SKIP`, never `PASS`. That tolerance applies only to the
+default. Once `UI_LINT_BROWSERS` names an engine, a launch failure of that engine
+makes the run exit non-zero, because coverage that was asked for did not happen.
+
+Beyond the layout checks, each view runs the axe-core WCAG 2.1 A/AA ruleset,
+records cumulative layout shift (Chromium only — WebKit and Firefox report
+`unsupported`, never a zero), and gets a weighted health score out of 100.
+
+| Variable | Default | Effect |
+|---|---|---|
+| `UI_LINT_BROWSERS` | all three | which engines run, comma-separated |
+| `UI_LINT_BROWSER_CONCURRENCY` | engine count | engines audited in parallel |
+| `UI_LINT_DEVICE_CONCURRENCY` | 2 | pages in flight per engine |
+| `UI_LINT_AXE` | 1 | set to 0 to skip the accessibility pass |
+| `UI_LINT_AXE_FAIL_ON` | `critical` | `serious` widens the gate, `none` makes axe report-only |
+| `UI_LINT_HEALTH_MIN` | 0 (off) | fail a view scoring below this |
+| `UI_LINT_HEALTH_GATE` | 0 (off) | fail on critical UX or blocking axe findings |
+
+Both health knobs are off by default: the score is new, and turning it into a
+gate before the baseline is agreed would only teach everyone to set it back to
+zero.
 
 Results land in `results.json` under the output directory the run prints, and the
-process exits non-zero when any hard failure is found.
+process exits non-zero when any hard failure is found or an explicitly named
+engine could not be launched.
 
 ## Code style
 

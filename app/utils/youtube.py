@@ -39,6 +39,10 @@ _CACHE_TTL_SECONDS = 300
 _INFO_CACHE_MAXSIZE = 256
 _YOUTUBE_FALLBACK_PLAYER_CLIENT = "android"
 _SUBPROCESS_TIMEOUT_SECONDS = 20
+# --dump-single-json on a playlist page can run to tens of MiB. Nothing this
+# module reads out of the payload needs that much, and json.loads() on it is
+# what actually hurts, so anything past the cap is dropped before parsing.
+_MAX_INFO_JSON_CHARS = 16 * 1024 * 1024
 
 # Cap in-flight extractions. Extraction shells out to yt-dlp rather than
 # calling it in-process because a hung in-process call cannot be killed - it
@@ -280,36 +284,48 @@ def _load_video_info_uncached(url: str) -> InfoPayload | None:
 
         try:
             cmd = _build_yt_dlp_cmd(url, player_client=player_client)
-            result = subprocess.run(
+            # Popen rather than subprocess.run so the exit code can be handled
+            # in the same place as the size check, without a
+            # CalledProcessError round trip per candidate client.
+            with subprocess.Popen(
                 cmd,
-                check=True,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
                 # yt-dlp emits UTF-8 JSON regardless of the container locale;
                 # pin the decode so a title in a non-Latin script survives even
                 # when LANG is unset and Python's UTF-8 mode is not in effect.
                 encoding="utf-8",
                 errors="replace",
-                timeout=_SUBPROCESS_TIMEOUT_SECONDS,
-            )
-            if result.stdout:
-                parsed = json.loads(result.stdout)
+            ) as proc:
+                try:
+                    stdout_data, stderr_data = proc.communicate(timeout=_SUBPROCESS_TIMEOUT_SECONDS)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.communicate()
+                    logger.warning("yt-dlp subprocess timed out for %s", _url_for_log(url))
+                    continue
+
+            if proc.returncode != 0:
+                stderr = stderr_data[:500] if stderr_data else None
+                logger.debug(
+                    "yt-dlp subprocess extraction failed for %s: rc=%s stderr=%s",
+                    _url_for_log(url),
+                    proc.returncode,
+                    stderr,
+                )
+                continue
+            if len(stdout_data) > _MAX_INFO_JSON_CHARS:
+                logger.warning("yt-dlp metadata for %s exceeds the parse cap; ignoring", _url_for_log(url))
+                continue
+            if stdout_data:
+                parsed = json.loads(stdout_data)
                 if isinstance(parsed, dict):
                     info = _prune_info(parsed)
-        except subprocess.TimeoutExpired:
-            logger.warning("yt-dlp subprocess timed out for %s", _url_for_log(url))
         except FileNotFoundError:
             # Startup checks for yt-dlp, so this should be unreachable; degrade
             # to None rather than raise past a best-effort caller.
             logger.error("yt-dlp command not found in PATH")
-        except subprocess.CalledProcessError as exc:
-            stderr = exc.stderr[:500] if exc.stderr else None
-            logger.debug(
-                "yt-dlp subprocess extraction failed for %s: rc=%s stderr=%s",
-                _url_for_log(url),
-                exc.returncode,
-                stderr,
-            )
         except json.JSONDecodeError as exc:
             logger.debug("yt-dlp subprocess returned invalid JSON for %s: %s", _url_for_log(url), exc)
         except (OSError, UnicodeError) as exc:

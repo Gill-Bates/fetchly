@@ -21,7 +21,6 @@ from typing import Any, Final
 from fastapi import FastAPI, Request
 from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
 from fastapi.responses import JSONResponse
-from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from slowapi.errors import RateLimitExceeded
 from starlette.datastructures import MutableHeaders
@@ -76,6 +75,7 @@ from .routes.media import init_media, resolve_job_path
 from .routes.share import init_share
 from .routes.trim import init_trim
 from .session import SESSION_COOKIE, refresh_session_settings_cache, renew_session, set_session_cookie
+from .utils.assets import VersionedStaticFiles, asset_url
 from .utils.cookies import ensure_data_cookies_dir
 from .utils.duration import round_seconds
 from .utils.fs import get_data_dir
@@ -122,6 +122,7 @@ _SKIP_RENEW_PREFIXES = (
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
 
 register_filters(templates)
+templates.env.globals["asset_url"] = asset_url
 templates.env.globals["now"] = lambda: datetime.now(UTC)
 templates.env.globals["VERSION"] = VERSION
 templates.env.globals["BUILD_INFO"] = BUILD_INFO
@@ -138,7 +139,9 @@ init_auth(templates, _SECRET_KEY)
 def _should_skip_session_renewal(request_path: str) -> bool:
     if request_path in _SKIP_RENEW_EXACT:
         return True
-    return any(request_path.startswith(prefix) for prefix in _SKIP_RENEW_PREFIXES)
+    return any(
+        request_path == prefix or request_path.startswith(prefix + "/") for prefix in _SKIP_RENEW_PREFIXES
+    )
 
 
 def _governor_config_from_settings(settings: dict[str, Any]) -> GovernorConfig:
@@ -494,7 +497,10 @@ async def lifespan(app: FastAPI):
 # / and /settings do; with authentication off they remain reachable, matching
 # every other route in that mode.
 app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
-app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
+# VersionedStaticFiles, not StaticFiles: the templates address these files
+# through asset_url(), and the cache policy has to agree with that token
+# (see app/utils/assets.py).
+app.mount("/static", VersionedStaticFiles(directory=BASE_DIR / "static"), name="static")
 
 
 @app.get("/openapi.json", include_in_schema=False, response_model=None)

@@ -4,120 +4,11 @@
 //
 
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
-import test from "node:test";
+import test, { afterEach, after } from "node:test";
 
-// Minimal DOM stand-in: enough for toast.js to build its container, append
-// toast nodes, and query them back by type/message.
-class ClassList {
-    constructor() {
-        this._set = new Set();
-    }
-    add(...names) {
-        names.forEach((n) => this._set.add(n));
-    }
-    remove(...names) {
-        names.forEach((n) => this._set.delete(n));
-    }
-    contains(name) {
-        return this._set.has(name);
-    }
-    toString() {
-        return [...this._set].join(" ");
-    }
-}
+import { installFakeDom } from "./helpers/fake-dom.mjs";
 
-class FakeElement {
-    constructor(tag) {
-        this.tagName = String(tag).toUpperCase();
-        this._className = "";
-        this.classList = new ClassList();
-        this.textContent = "";
-        this.children = [];
-        this.parentNode = null;
-        this.attributes = new Map();
-        this._listeners = new Map();
-        this.isConnected = false;
-    }
-
-    get className() {
-        return this._className;
-    }
-
-    set className(value) {
-        this._className = value;
-        this.classList = new ClassList();
-        String(value)
-            .split(/\s+/)
-            .filter(Boolean)
-            .forEach((c) => this.classList.add(c));
-    }
-
-    setAttribute(name, value) {
-        this.attributes.set(name, String(value));
-    }
-
-    appendChild(node) {
-        this.children.push(node);
-        node.parentNode = this;
-        node.isConnected = this.isConnected;
-        return node;
-    }
-
-    removeChild(node) {
-        this.children = this.children.filter((c) => c !== node);
-        node.parentNode = null;
-        return node;
-    }
-
-    remove() {
-        if (this.parentNode) this.parentNode.removeChild(this);
-        this.isConnected = false;
-    }
-
-    contains(node) {
-        if (node === this) return true;
-        return this.children.some((child) => child.contains?.(node));
-    }
-
-    querySelectorAll(selector) {
-        // Only supports the ".fx-toast--{type}" selector used by toast.js.
-        const cls = selector.replace(/^\./, "");
-        const results = [];
-        const walk = (node) => {
-            for (const child of node.children) {
-                if (child.classList?.contains(cls)) results.push(child);
-                walk(child);
-            }
-        };
-        walk(this);
-        return results;
-    }
-
-    querySelector(selector) {
-        return this.querySelectorAll(selector)[0] ?? null;
-    }
-
-    addEventListener(type, handler) {
-        const bucket = this._listeners.get(type) ?? [];
-        bucket.push(handler);
-        this._listeners.set(type, bucket);
-    }
-
-    removeEventListener(type, handler) {
-        const bucket = this._listeners.get(type) ?? [];
-        this._listeners.set(type, bucket.filter((h) => h !== handler));
-    }
-}
-
-const body = new FakeElement("body");
-body.isConnected = true;
-
-globalThis.HTMLElement = FakeElement;
-globalThis.document = {
-    body,
-    createElement: (tag) => new FakeElement(tag),
-};
+const { body } = installFakeDom({ withBootstrap: false });
 globalThis.requestAnimationFrame = (cb) => cb();
 
 // Fake timer registry so we can assert on scheduling without real delays.
@@ -133,20 +24,28 @@ function fakeClearTimeout(id) {
 }
 // toast.js calls the bare globals (clearTimeout) as well as window.setTimeout,
 // mirroring real browsers where both refer to the same function.
+const realSetTimeout = globalThis.setTimeout;
+const realClearTimeout = globalThis.clearTimeout;
 globalThis.setTimeout = fakeSetTimeout;
 globalThis.clearTimeout = fakeClearTimeout;
-globalThis.window = {
-    setTimeout: fakeSetTimeout,
-    clearTimeout: fakeClearTimeout,
-};
+globalThis.window.setTimeout = fakeSetTimeout;
+globalThis.window.clearTimeout = fakeClearTimeout;
 
-const source = await readFile(new URL("../../app/static/js/toast.js", import.meta.url), "utf8");
-const { showToast } = await import(
-    `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`
-);
+after(() => {
+    // Nothing in this suite is async, but leaving the real timers faked would
+    // hang any later test file run in the same process on its first await.
+    globalThis.setTimeout = realSetTimeout;
+    globalThis.clearTimeout = realClearTimeout;
+});
+
+const { showToast } = await import("../../app/static/js/toast.js");
 
 function messageOf(toastEl) {
     return toastEl.children.find((c) => c.className === "fx-toast__message")?.textContent;
+}
+
+function closeButtonOf(toastEl) {
+    return toastEl.children.find((c) => c.className === "fx-toast__close");
 }
 
 // The fake DOM never fires "transitionend", so dismissToast()'s real removal
@@ -157,12 +56,15 @@ function resetDom() {
     body.children = [];
 }
 
+afterEach(() => {
+    resetDom();
+    timers.clear();
+});
+
 test("shows a new toast for a first-time message", () => {
     const t = showToast("Load failed", "danger");
     assert.equal(messageOf(t), "Load failed");
     assert.equal(t.classList.contains("fx-toast--danger"), true);
-    resetDom();
-    timers.clear();
 });
 
 test("repeated identical failures do not stack duplicate toasts", () => {
@@ -179,9 +81,6 @@ test("repeated identical failures do not stack duplicate toasts", () => {
         c.classList?.contains("fx-toast--danger"),
     );
     assert.equal(containerChildren.length, 1, "only one toast node should exist in the DOM");
-
-    resetDom();
-    timers.clear();
 });
 
 test("repeated identical calls restart the auto-dismiss timer instead of adding a new one", () => {
@@ -195,9 +94,6 @@ test("repeated identical calls restart the auto-dismiss timer instead of adding 
     assert.equal(t2, t1);
     assert.equal(timers.size, 1, "old timer must be cleared, not accumulated");
     assert.notEqual([...timers.keys()][0], firstTimerId, "a fresh timer id should be scheduled");
-
-    resetDom();
-    timers.clear();
 });
 
 test("different messages of the same type are not deduped against each other", () => {
@@ -209,9 +105,6 @@ test("different messages of the same type are not deduped against each other", (
         c.classList?.contains("fx-toast--danger"),
     );
     assert.equal(containerChildren.length, 2);
-
-    resetDom();
-    timers.clear();
 });
 
 test("same message with a different type is not deduped", () => {
@@ -219,25 +112,109 @@ test("same message with a different type is not deduped", () => {
     const b = showToast("Retrying...", "info");
 
     assert.notEqual(a, b);
-
-    resetDom();
-    timers.clear();
 });
 
 test("a dismissing toast is not reused; a fresh one is shown instead", () => {
     const t1 = showToast("Could not load more jobs.", "danger");
-    // Manually mark as dismissing, mirroring the moment between
-    // dismissToast() starting its transition and the node being removed.
-    t1.classList.remove("fx-toast--visible");
-    t1.classList.add("fx-toast--hiding");
-    // Directly flip internal dismissing bookkeeping via the exported
-    // behavior: simulate by removing it from the DOM as removeToast() would
-    // eventually do, and confirm a new toast can still be created afterward.
-    t1.remove();
+    // Real dismiss path: the fake DOM never fires "transitionend", so the
+    // node stays in the container mid-hide - exactly the window findActiveToast()
+    // has to recognize and skip.
+    closeButtonOf(t1).click();
+    assert.equal(t1.classList.contains("fx-toast--hiding"), true);
+    assert.notEqual(t1.parentNode, null, "must still be in the DOM while hiding");
 
     const t2 = showToast("Could not load more jobs.", "danger");
     assert.notEqual(t2, t1);
+    assert.equal(
+        body.children[0].children.filter((c) => c.classList?.contains("fx-toast--danger")).length,
+        2,
+    );
+});
 
+function runTimer(id) {
+    const timer = timers.get(id);
+    assert.ok(timer, `no timer registered for id ${id}`);
+    timers.delete(id);
+    timer.fn();
+}
+
+function onlyTimerId() {
+    assert.equal(timers.size, 1, `expected exactly one pending timer, got ${timers.size}`);
+    return [...timers.keys()][0];
+}
+
+// The tests above only assert that a timer was scheduled. Scheduling is half
+// the behaviour: if the callback stopped dismissing, or the fallback stopped
+// removing, a toast would sit on screen forever and every one of those
+// assertions would still pass.
+test("running the auto-dismiss timer hides the toast and schedules its removal", () => {
+    const t = showToast("Auto goes away", "info", 3000);
+    const autoTimer = timers.get(onlyTimerId());
+    assert.equal(autoTimer.delay, 3000, "the caller's duration must be the scheduled delay");
+
+    runTimer([...timers.keys()][0]);
+
+    assert.equal(t.classList.contains("fx-toast--hiding"), true);
+    assert.equal(t.classList.contains("fx-toast--visible"), false);
+    assert.notEqual(t.parentNode, null, "still in the DOM while the hide animation runs");
+
+    // dismissToast() replaces the auto timer with the transitionend fallback.
+    const fallback = timers.get(onlyTimerId());
+    assert.equal(fallback.delay, 350);
+
+    runTimer([...timers.keys()][0]);
+
+    assert.equal(t.parentNode, null, "the fallback must remove the node");
+    assert.equal(t.isConnected, false);
+    assert.equal(timers.size, 0, "no timer may outlive the removed toast");
+});
+
+test("a transitionend on opacity removes the toast without waiting for the fallback", () => {
+    const t = showToast("Transition path", "info", 3000);
+    runTimer(onlyTimerId());
+
+    // A property other than opacity, or an event bubbled from a child, must
+    // not count as the hide animation finishing.
+    t.dispatchEvent("transitionend", { target: t, propertyName: "transform" });
+    assert.notEqual(t.parentNode, null, "a transform transition is not the hide");
+
+    t.dispatchEvent("transitionend", { target: t, propertyName: "opacity" });
+    assert.equal(t.parentNode, null);
+    assert.equal(timers.size, 0, "the fallback timer must be cleared on the real path");
+});
+
+test("a zero duration keeps the toast until it is dismissed by hand", () => {
+    const t = showToast("Sticky", "danger", 0);
+    assert.equal(timers.size, 0, "no auto-dismiss may be scheduled");
+
+    closeButtonOf(t).click();
+    runTimer(onlyTimerId());
+    assert.equal(t.parentNode, null);
+});
+
+test("removal is idempotent: a late fallback after a real transitionend is a no-op", () => {
+    const t = showToast("Once only", "info", 3000);
+    runTimer(onlyTimerId());
+    const fallbackId = onlyTimerId();
+
+    t.dispatchEvent("transitionend", { target: t, propertyName: "opacity" });
+    assert.equal(t.parentNode, null);
+
+    // The real DOM can deliver the fallback timer after the node is gone; a
+    // second removal must not throw or resurrect state.
+    timers.set(fallbackId, { fn: () => { }, delay: 350 });
+    assert.doesNotThrow(() => showToast("Once only", "info", 3000));
+});
+
+test("an error is announced assertively, everything else politely", () => {
+    assert.equal(showToast("boom", "danger").attributes.get("role"), "alert");
     resetDom();
-    timers.clear();
+
+    assert.equal(showToast("saved", "success").attributes.get("role"), "status");
+    resetDom();
+
+    // "error" is an accepted alias and must map onto the danger styling/role.
+    const aliased = showToast("boom", "error");
+    assert.equal(aliased.classList.contains("fx-toast--danger"), true);
+    assert.equal(aliased.attributes.get("role"), "alert");
 });

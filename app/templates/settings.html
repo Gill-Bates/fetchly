@@ -9,6 +9,8 @@
 {{ navbar(show_back=True, show_settings=False, show_logout=settings.enable_authentication, csrf_token=csrf_token) }}
 {% endblock %}
 
+{% block page_heading_text %}Settings{% endblock %}
+
 {% block content %}
 
 {% from "macros/stats.html" import dashboard_stats_row %}
@@ -59,14 +61,13 @@
                                             <label for="retentionDays" class="form-label mb-0">Max. Job retention
                                                 (days)</label>
                                             <output class="ui-badge settings-slider-value" id="retentionDaysValue"
-                                                for="retentionDays" aria-live="polite">Unlimited</output>
+                                                for="retentionDays" aria-live="polite"></output>
                                         </div>
                                         <div class="settings-range-control">
                                             <input type="range" class="form-range settings-range" id="retentionDays"
                                                 min="0" max="6" step="1" value="0"
                                                 data-retention-days="{{ settings.retention_days | default(0) }}"
-                                                aria-describedby="retentionDaysValue retentionDaysHint"
-                                                aria-valuetext="Unlimited">
+                                                aria-describedby="retentionDaysValue retentionDaysHint">
                                             <div class="settings-range-ticks" aria-hidden="true">
                                                 <span class="settings-range-tick"></span>
                                                 <span class="settings-range-tick"></span>
@@ -147,14 +148,13 @@
                                             <label for="shareLinkMaxUses" class="form-label mb-0">Max. uses per share
                                                 link</label>
                                             <output class="ui-badge settings-slider-value" id="shareLinkMaxUsesValue"
-                                                for="shareLinkMaxUses" aria-live="polite">Unlimited</output>
+                                                for="shareLinkMaxUses" aria-live="polite"></output>
                                         </div>
                                         <div class="settings-range-control">
                                             <input type="range" class="form-range settings-range" id="shareLinkMaxUses"
                                                 min="0" max="6" step="1" value="0"
                                                 data-share-link-max-uses="{{ settings.share_link_max_uses | default(0) }}"
-                                                aria-describedby="shareLinkMaxUsesValue shareLinkMaxUsesHint"
-                                                aria-valuetext="Unlimited">
+                                                aria-describedby="shareLinkMaxUsesValue shareLinkMaxUsesHint">
                                             <div class="settings-range-ticks" aria-hidden="true">
                                                 <span class="settings-range-tick"></span>
                                                 <span class="settings-range-tick"></span>
@@ -293,8 +293,9 @@
                                         <small class="setting-hint setting-hint--with-icon">
                                             <span class="material-symbols-outlined setting-hint-icon"
                                                 aria-hidden="true">info</span>
-                                            <span>Off keeps the source codec: higher resolution, no Safari/iOS/TV
-                                                playback.</span>
+                                            <span>Off keeps the source codecs, which may preserve higher-quality
+                                                formats, but some downloads may not play on Safari, iOS, or
+                                                TVs.</span>
                                         </small>
                                         <small class="setting-hint setting-hint--with-icon d-none"
                                             data-role="compatible-output-forced">
@@ -364,8 +365,8 @@
                                         <small class="setting-hint setting-hint--with-icon" id="watermarkLogoHint">
                                             <span class="material-symbols-outlined setting-hint-icon"
                                                 aria-hidden="true">info</span>
-                                            <span>SVG or PNG with transparency, max 2 MB. Replaces the fetchly
-                                                logo.</span>
+                                            <span>SVG or PNG with transparency, max 2 MB. SVG files are converted to
+                                                PNG before upload. Replaces the fetchly logo.</span>
                                         </small>
                                     </div>
                                 </div>
@@ -419,7 +420,8 @@
                                                 {# Filled by applyInitialLalalState() / loadLalalStatus() in
                                                 app/static/js/settings.js: the account line plus the remaining
                                                 processing minutes, and the reason when a status check fails. #}
-                                                <p class="text-muted small mb-0" id="lalalStatusLine"></p>
+                                                <p class="text-muted small mb-0" id="lalalStatusLine" role="status"
+                                                    aria-live="polite"></p>
                                             </div>
 
                                             <div class="lalal-tile-divider">
@@ -513,13 +515,24 @@
                                         {% set is_authenticated = cookie_status.authenticated if cookie_status else
                                         false %}
                                         {% set needs_update = cookie_status.needs_update if cookie_status else false %}
-                                        {% set badge_class = "badge bg-warning text-dark" if needs_update else {"valid":
-                                        "badge bg-success", "missing": "ui-badge"}[status_value] %}
+                                        {# Badge classes/labels cover every CookieAnalysis.status value directly
+                                        (see app/utils/cookie_status.py) rather than relying on needs_update as an
+                                        implicit guard for "valid"/"missing" being the only remaining cases. #}
+                                        {% set badge_class = "badge bg-warning text-dark" if needs_update else {
+                                        "valid": "badge bg-success",
+                                        "missing": "ui-badge",
+                                        "expired": "badge bg-warning text-dark",
+                                        "invalid": "badge bg-warning text-dark",
+                                        }.get(status_value, "ui-badge") %}
                                         <span class="{{ badge_class }} cookie-status-badge" data-cookie-status-badge
                                             data-status="{{ status_value }}"
                                             data-cookie-authenticated="{{ 'true' if is_authenticated else 'false' }}">
-                                            {{ "Needs update" if needs_update else {"valid": "Ready", "missing": "Not
-                                            set up"}[status_value] }}
+                                            {{ "Needs update" if needs_update else {
+                                            "valid": "Ready",
+                                            "missing": "Not set up",
+                                            "expired": "Needs update",
+                                            "invalid": "Needs update",
+                                            }.get(status_value, "Needs attention") }}
                                         </span>
                                     </div>
                                     <p class="cookie-tile-summary {{ 'cookie-tile-summary--warning' if needs_update else '' }}"
@@ -688,6 +701,7 @@
                             data-host-metric="storage">
                             <div class="stat-value">
                                 <span class="material-symbols-outlined stat-icon" aria-hidden="true">hard_drive</span>
+                                <span class="stat-short-label" aria-hidden="true">Disk free</span>
                                 <span class="stat-num-line">
                                     <span data-stat-value>–</span><span class="stat-unit" data-stat-unit hidden></span>
                                 </span>
@@ -700,6 +714,7 @@
                             data-host-metric="cpu">
                             <div class="stat-value">
                                 <span class="material-symbols-outlined stat-icon" aria-hidden="true">speed</span>
+                                <span class="stat-short-label" aria-hidden="true">CPU</span>
                                 <span class="stat-num-line">
                                     <span data-stat-value>–</span><span class="stat-unit" data-stat-unit hidden></span>
                                 </span>
@@ -712,6 +727,7 @@
                             data-host-metric="memory">
                             <div class="stat-value">
                                 <span class="material-symbols-outlined stat-icon" aria-hidden="true">memory</span>
+                                <span class="stat-short-label" aria-hidden="true">Memory</span>
                                 <span class="stat-num-line">
                                     <span data-stat-value>–</span><span class="stat-unit" data-stat-unit hidden></span>
                                 </span>
@@ -724,6 +740,7 @@
                             data-host-metric="uptime">
                             <div class="stat-value">
                                 <span class="material-symbols-outlined stat-icon" aria-hidden="true">schedule</span>
+                                <span class="stat-short-label" aria-hidden="true">Uptime</span>
                                 <span class="stat-num-line">
                                     <span data-stat-value>–</span><span class="stat-unit" data-stat-unit hidden></span>
                                 </span>
@@ -893,10 +910,8 @@
             <div class="modal-body">
                 <div id="lalalAuthAlert" class="alert d-none" role="alert"></div>
 
-                <!-- Step 1: Email -->
-                <div id="lalalAuthStep1">
-                    <div class="auth-step-header mb-3">
-                        <span class="ui-badge auth-step-badge">Step 1</span>
+                <div id="lalalAuthForm">
+                    <div class="auth-panel-header mb-3">
                         <h6 class="mb-0">Connect with activation key</h6>
                     </div>
 
@@ -924,7 +939,7 @@
                             <div class="col-md-6">
                                 <label for="lalalActivationKey" class="form-label">Activation Key</label>
                                 <input type="password" class="form-control ui-input font-monospace"
-                                    id="lalalActivationKey" autocomplete="off">
+                                    id="lalalActivationKey" autocomplete="off" required>
                             </div>
                         </div>
                         <button type="button" class="btn btn-primary w-100" id="lalalAuthUseKeyBtn">
@@ -935,8 +950,7 @@
                     </div>
                 </div>
 
-                <!-- Step 3: Success -->
-                <div id="lalalAuthStep3" class="d-none auth-success-panel">
+                <div id="lalalAuthSuccess" class="d-none auth-success-panel">
                     <span class="material-symbols-outlined text-success auth-success-icon"
                         aria-hidden="true">check_circle</span>
                     <h5 class="mb-0">Authentication Successful!</h5>
@@ -959,5 +973,5 @@
     "lalal_minutes_left": lalal_minutes_left,
     "has_admin_credentials": (has_admin_credentials | default(false))
 } | tojson }}</script>
-<script type="module" src="/static/js/settings.js?v=20260903a"></script>
+<script type="module" src="{{ asset_url('/static/js/settings.js') }}"></script>
 {% endblock %}

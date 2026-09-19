@@ -343,6 +343,11 @@ def _check_shutdown() -> None:
 # for them, so update_job_if_status() must never see them.
 _TRANSIENT_STATUS_FIELDS: Final = frozenset({"progress", "eta_seconds"})
 
+# The statuses a worker thread owns: while the row holds one of these, this
+# thread is the only writer, so a conditional update on them is what
+# distinguishes "still my job" from "cancelled or retried in the meantime".
+_WORKER_OWNED_STATUSES: Final[tuple[str, ...]] = ("processing", "downloading", "transcoding")
+
 
 def _emit(job_id: str, status: str, message: str = "", **extra: Any) -> None:
     callback = _status_callback
@@ -374,12 +379,24 @@ def _transition(job_id: str, status: str, message: str = "", **extra: Any) -> No
     _emit(job_id, status, message, **extra)
 
 
-def _transition_if_processing(job_id: str, status: str, message: str = "", **extra: Any) -> bool:
-    """Persist a terminal update only if the job is still in a worker-owned state."""
+def _transition_if_status(
+    job_id: str,
+    expected_statuses: tuple[str, ...],
+    status: str,
+    message: str = "",
+    **extra: Any,
+) -> bool:
+    """Persist a state change only while the job still holds an expected status.
+
+    Every worker writeback has to be conditional: a cancel or a retry can move
+    the row from under a thread that is still working on it, and an
+    unconditional update would resurrect the state this worker observed
+    (see app/routes/api.py::retry_job, which puts the row back to ``queued``).
+    """
     extra = with_finished_at(status, extra)
     updated = update_job_if_status(
         job_id,
-        ("processing", "downloading", "transcoding"),
+        expected_statuses,
         status=status,
         message=message,
         **extra,
@@ -392,6 +409,11 @@ def _transition_if_processing(job_id: str, status: str, message: str = "", **ext
     return False
 
 
+def _transition_if_processing(job_id: str, status: str, message: str = "", **extra: Any) -> bool:
+    """Persist a terminal update only if the job is still in a worker-owned state."""
+    return _transition_if_status(job_id, _WORKER_OWNED_STATUSES, status, message, **extra)
+
+
 def _transition_worker_status(job_id: str, status: str, message: str = "", **extra: Any) -> bool:
     """Persist worker-owned in-flight statuses and emit matching status events.
 
@@ -401,7 +423,7 @@ def _transition_worker_status(job_id: str, status: str, message: str = "", **ext
     persisted_extra = {k: v for k, v in extra.items() if k not in _TRANSIENT_STATUS_FIELDS}
     updated = update_job_if_status(
         job_id,
-        ("processing", "downloading", "transcoding"),
+        _WORKER_OWNED_STATUSES,
         status=status,
         message=message,
         **persisted_extra,
@@ -1724,12 +1746,16 @@ def process_job(job: Job) -> None:
         )
 
     except JobCancelledError:
+        # Guarded, not unconditional: the cancel marker was observed before the
+        # download was torn down, and a retry issued in that window has already
+        # reset the row to "queued" and re-enqueued it. Writing "cancelled" here
+        # regardless would cancel that fresh attempt (an ABA race).
         logger.info("Job %s was cancelled", job_id)
-        _transition(job_id, "cancelled", "Job was cancelled by user")
+        _transition_if_processing(job_id, "cancelled", "Job was cancelled by user")
     except ShutdownError:
         # Graceful shutdown - keep the job queued for the next startup.
         logger.info("Job %s interrupted by shutdown", job_id)
-        update_job_if_status(job_id, ("processing", "downloading", "transcoding"), status="queued")
+        update_job_if_status(job_id, _WORKER_OWNED_STATUSES, status="queued")
         raise
     except Exception as exc:
         err_msg = _user_facing_error(url, exc)
@@ -1763,7 +1789,11 @@ def worker() -> None:
                 return
 
             if is_job_cancelled(job_id):
-                _transition(job_id, "cancelled", "Job was cancelled by user")
+                # Only from "queued": the row this entry was enqueued for has
+                # never been worked on, so anything else means it moved on
+                # (a retry re-queues and re-enqueues, and this stale entry must
+                # not cancel that new attempt).
+                _transition_if_status(job_id, ("queued",), "cancelled", "Job was cancelled by user")
                 continue
             if not update_job_if_status(job_id, ("queued",), status="processing"):
                 logger.info("Skipping job %s because its state changed before worker pickup", job_id)

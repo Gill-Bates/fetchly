@@ -1,3 +1,36 @@
+## [1.2.2] - 2026-09-20
+
+- ``New`` Switched from AGPL-3.0 to MIT license.
+- ``New`` Every page now has a proper heading (Dashboard, Settings, Job Status, Sign in) for screen readers and "jump to heading".
+- ``New`` Static files are versioned by content hash, so a cached page never keeps serving an outdated stylesheet or script.
+- ``New`` A "Skip to main content" link appears on first Tab press, so keyboard users can jump past the navbar.
+- ``Fix`` The Lalal.ai balance no longer shows the previous account's minutes after you save a different activation key; disconnecting clears it.
+- ``Fix`` An unreachable Lalal.ai is reported as temporarily unavailable instead of marking your activation key invalid.
+- ``Fix`` "Remove all" no longer freezes the app while stopping running downloads.
+- ``Fix`` You are no longer signed out early after visiting a page whose address merely starts with `/download`, `/thumbnail` or `/static`.
+- ``Fix`` `Automatic` download workers cap at 4 instead of 8; more threads added database contention, not speed.
+- ``Fix`` An unreadable watermark logo is rejected with a proper message instead of an upload error.
+- ``Fix`` On touch tablets up to iPad Pro 12.9" in landscape, the job list uses the compact card layout instead of a cramped table.
+- ``Fix`` On touch devices, the navbar icons (Back, Settings, Logout) are full 44px tap targets; on tablets they were 4px short of the minimum.
+- ``Fix`` On touch devices, tapping the logo on a sub-page takes you home again; the pulse animation stays on the dashboard.
+- ``Fix`` On phones, the stat tiles caption their numbers ("Disk free", "CPU", "Memory", "Uptime") instead of showing only an icon.
+- ``Fix`` Retrying a job you just cancelled no longer flips straight back to "Cancelled" when the old attempt finishes shutting down.
+- ``Fix`` A track with no detectable tempo is remembered as such, so downloading the same audio again no longer repeats the full BPM analysis.
+- ``Fix`` Restarting no longer waits for a running BPM analysis to finish; the analysis is stopped and picked up again on the next start.
+- ``Fix`` Downloads and the trim/stem/preview conversions now share one transcode budget instead of each getting the full limit, which could run twice as many encoders as configured.
+- ``Fix`` Video jobs show a plain Download button instead of a dropdown whose only entry was "Download"; the audio menu drops that duplicate too and starts at Trim.
+- ``Fix`` A track reported as 0 seconds long now counts as unknown, so the Duration Guard blocks stem separation on it instead of letting the request through.
+- ``Security`` Share links now use 128-bit tokens instead of 48-bit. Existing links keep working.
+- ``Security`` The container image applies current OS security updates at build time.
+- ``Security`` TikTok thumbnail lookups no longer follow redirects.
+- ``Security`` Rate limiting rejects malformed `X-Forwarded-For` entries instead of trimming them into a usable address.
+- ``Security`` Cookie file names must resolve inside the cookies folder, so no lookup can reach a path outside it.
+- ``Security`` The public hostname rejects over-bracketed IPv6 input such as `[[::1]]` instead of quietly accepting it.
+- ``Security`` Video metadata larger than 16 MiB is discarded instead of parsed, so an oversized response from a source cannot stall a preview.
+
+
+<details markdown="1">
+<summary>Previous versions...</summary>
 
 ## [1.2.1] - 2026-09-04
 
@@ -10,10 +43,6 @@
 - ``Fix`` Fetching a video's title now fails fast instead of tying up a worker slot when the source is blocked or unreachable.
 - ``Fix`` A worker thread that fails to stop in time on restart is no longer left behind, which could otherwise run a second, overlapping set of download workers.
 - ``Security`` Error messages and logs from failed downloads no longer contain signed access tokens from CDN URLs.
-
-
-<details markdown="1">
-<summary>Previous versions...</summary>
 
 ## [1.2.0] - 2026-09-03
 

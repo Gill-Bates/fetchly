@@ -150,6 +150,12 @@ def _remove_job_artifacts(job_ids: list[str]) -> list[str]:
     return [job_id for job_id in job_ids if not cleanup_job_directory(job_id, data_dir)]
 
 
+def _cancel_worker_jobs(job_ids: list[str]) -> None:
+    """Cancel every snapshot job; each call may block on a SIGTERM grace period."""
+    for job_id in job_ids:
+        cancel_worker_job(job_id)
+
+
 def _clamp_int(value: Any, min_value: int, max_value: int, name: str) -> int:
     try:
         int_value = int(value)
@@ -265,8 +271,9 @@ async def api_remove_all_jobs(request: Request, _user: str = Depends(require_use
     # A worker may still own a subprocess or be about to start one. Marking
     # every snapshot job cancelled makes its next cancellation check stop it;
     # subsequent database updates become harmless no-ops after row removal.
-    for job_id in job_ids:
-        cancel_worker_job(job_id)
+    # Off the event loop: terminating a running subprocess waits out a
+    # SIGTERM/SIGKILL grace period of up to ~2s (see worker.cancel_job).
+    await asyncio.to_thread(_cancel_worker_jobs, job_ids)
 
     failed_cleanup = await asyncio.to_thread(_remove_job_artifacts, job_ids)
     if failed_cleanup:
@@ -457,7 +464,7 @@ async def _tiktok_oembed_thumbnail(url: str) -> str | None:
     """Fetch thumbnail from TikTok oEmbed API (no cookies/yt-dlp needed)."""
     oembed_url = f"https://www.tiktok.com/oembed?url={quote(url, safe='')}"
     try:
-        async with httpx.AsyncClient(timeout=6.0, follow_redirects=True, max_redirects=3) as client:
+        async with httpx.AsyncClient(timeout=6.0, follow_redirects=False) as client:
             resp = await client.get(oembed_url, headers={"User-Agent": "Mozilla/5.0"})
         if resp.status_code != 200:
             return None
@@ -865,7 +872,7 @@ async def api_thumbnail_resolve(
             "thumbnail_url": None,
             "cached": False,
             "unavailable": True,
-            "reason": _cookie_hint_for_url(info_url),
+            "reason": await asyncio.to_thread(_cookie_hint_for_url, info_url),
         }
 
     await asyncio.to_thread(_write_cached_thumbnail, cache_key, data, content_type)

@@ -130,11 +130,11 @@ async def _sample_cpu_percent() -> float | None:
     """Host-wide busy-CPU % since the previous call.
 
     Warm (a recent stored sample): returns the delta immediately. Cold/stale:
-    one short inline reading.
+    one short inline reading via asyncio.to_thread to avoid blocking the event loop.
     """
     global _last_cpu_sample
 
-    current = _read_cpu_jiffies()
+    current = await asyncio.to_thread(_read_cpu_jiffies)
     if current is None:
         return None
     now = monotonic()
@@ -152,7 +152,7 @@ async def _sample_cpu_percent() -> float | None:
                 return percent
 
     await asyncio.sleep(_CPU_SAMPLE_INTERVAL_SECONDS)
-    second = _read_cpu_jiffies()
+    second = await asyncio.to_thread(_read_cpu_jiffies)
     if second is None:
         return None
     with _cpu_lock:

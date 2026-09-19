@@ -10,15 +10,23 @@ dist/
 
 # Caches
 .mypy_cache/
+.mypy_cache/**
 .pytest_cache/
+.pytest_cache/**
 .ruff_cache/
+.ruff_cache/**
 __pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+*.pyd
 
 # Coverage
 .coverage
 .coverage.*
 coverage.xml
 htmlcov/
+htmlcov/**
 
 # Editor / OS
 .DS_Store
@@ -41,13 +49,23 @@ venv/
 .claude/settings.local.json
 .codex
 .eslintcache
+.eslintcache/**
+.omc/*
+!.omc/skills/
 .omx/
+.omx/**
 .stylelintcache
 app/static/vendor/wavesurfer/
+app/static/vendor/wavesurfer/**
 cookies.txt
 node_modules/
+node_modules/**
 tools/ui-lint/.cache/
+tools/ui-lint/.cache/**
 tools/ui-lint/output/
+tools/ui-lint/output/**
+tools/ui-lint/node_modules/
+tools/ui-lint/node_modules/**
 
 # Generated from pyproject.toml by tools/pyproject-deps.py (CI and Docker only)
 requirements.txt
@@ -63,8 +81,13 @@ constraints.txt
 # Project-generated metadata
 BUILD_INFO
 
-# Python bytecode
+# Python bytecode and compiled files
 *.py[cod]
+*.pyo
+*.pyd
+.eggs/
+.venv/
+venv/
 
 # Documentation
 site/

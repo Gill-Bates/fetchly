@@ -6,8 +6,9 @@
 
 """BPM detection using beat_this.
 
-beat_this is a state-of-the-art beat tracker from CPJKU/beat_this. BPM is
-derived from the median inter-beat interval.
+beat_this is a neural beat tracker from CPJKU/beat_this. It returns beat
+positions rather than a tempo, so BPM is derived from the median inter-beat
+interval.
 """
 
 from __future__ import annotations
@@ -49,7 +50,8 @@ def _get_model() -> File2Beats:
 
         logger.info("Loading beat_this model...")
 
-        # CPU by default for compatibility.
+        # Always CPU: no GPU path is wired up, and this keeps the model
+        # portable across deployment hosts.
         _model_instance = File2Beats(
             checkpoint_path="final0",
             device="cpu",

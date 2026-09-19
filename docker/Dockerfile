@@ -1,6 +1,9 @@
 # syntax=docker/dockerfile:1.7
 
 ARG PYTHON_BASE=python:3.13-slim
+# APT cache invalidation: pass --build-arg APT_CACHE_DATE="$(date -u +%Y-%m-%d)"
+# to refresh apt packages daily (prevents using stale cached layers)
+ARG APT_CACHE_DATE=""
 
 FROM ${PYTHON_BASE} AS ffmpeg
 
@@ -26,7 +29,8 @@ ARG FFMPEG_RELEASE_URL=https://github.com/BtbN/FFmpeg-Builds/releases/download/l
 
 COPY docker/apt-no-distro-media.pref /etc/apt/preferences.d/no-distro-media
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN echo "APT cache: ${APT_CACHE_DATE}" && \
+    apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
     curl \
     xz-utils \
     ca-certificates \
@@ -110,7 +114,8 @@ ADD https://github.com/MTG/essentia/commits/${ESSENTIA_REF}.atom /tmp/essentia-r
 # portable spelling. Its version is held at 3.3.10 on both: upstream's default
 # of 3.3.2 predates aarch64 and is a decade behind on toolchain compatibility,
 # so pinning it forward keeps the two builds differing in the flag alone.
-RUN set -euo pipefail; \
+RUN echo "APT cache: ${APT_CACHE_DATE}" && \
+    set -euo pipefail; \
     : "${TARGETARCH:?must be provided by BuildKit - build with DOCKER_BUILDKIT=1 or docker buildx}"; \
     case "${TARGETARCH}" in \
         amd64) fftw_simd=--enable-sse2 ;; \
@@ -119,6 +124,7 @@ RUN set -euo pipefail; \
     esac; \
     mkdir -p /wheels; \
     apt-get update; \
+    apt-get upgrade -y; \
     apt-get install -y --no-install-recommends \
         build-essential \
         ca-certificates \
@@ -160,7 +166,8 @@ ARG WAVESURFER_VERSION=7.12.11
 ARG WAVESURFER_ESM_SHA256=49fc9b562f0c0322882aba6fdf354d54e4c81470611a50771bbd1fd398631e13
 ARG WAVESURFER_REGIONS_SHA256=14780f7d3f7cabfc4fb9a37ddf81c4fcc1045cfdb0b93c4a8c4c6acd52d03a7f
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN echo "APT cache: ${APT_CACHE_DATE}" && \
+    apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ca-certificates \
     build-essential \
@@ -190,8 +197,16 @@ COPY pyproject.toml constraints*.txt ./
 
 COPY --from=essentia /wheels /tmp/essentia-wheels
 
-# beat-this depends on torch; without this index pip resolves the CUDA build
-# and the image grows by several gigabytes for GPU code that never runs.
+# beat-this depends on torch and torchaudio; from PyPI both resolve to the CUDA
+# build and the image grows by several gigabytes for GPU code that never runs.
+#
+# Used as --index-url for those two packages alone, not as --extra-index-url for
+# the whole manifest: pip has no index priority: every index it is given is one
+# flat namespace it picks the highest version from, so an --extra-index-url
+# covering the full install lets any name on this host outrank the PyPI release
+# of the same name. --no-deps keeps the exclusive index down to the two wheels
+# that actually have to come from here; torch's own dependencies are ordinary
+# PyPI packages and are resolved as such by the manifest install below.
 ENV TORCH_CPU_INDEX=https://download.pytorch.org/whl/cpu
 
 # essentia is the one dependency pip never resolves here: the wheel was
@@ -228,21 +243,42 @@ RUN set -euo pipefail; \
     ! grep -qi '^essentia' /tmp/requirements.txt || \
         { echo "essentia requirement survived the drop - pip would overwrite the local build" >&2; exit 1; }; \
     cat /tmp/requirements.txt; \
-    pip install --no-cache-dir --extra-index-url "$TORCH_CPU_INDEX" \
-        "${pinned[@]}" -r /tmp/requirements.txt; \
+    echo "Installing torch and torchaudio from ${TORCH_CPU_INDEX}"; \
+    pip install --no-cache-dir --index-url "$TORCH_CPU_INDEX" --no-deps \
+        "${pinned[@]}" torch torchaudio; \
+    pip install --no-cache-dir "${pinned[@]}" -r /tmp/requirements.txt; \
     rm -f /tmp/requirements.txt; \
-    rm -rf /tmp/essentia-wheels
+    rm -rf /tmp/essentia-wheels; \
+    python -c 'import torch; assert torch.version.cuda is None, f"CUDA build selected: {torch.version.cuda}"; print("torch", torch.__version__, "(cpu)")'
 
+# Bare versions ('2026.1.1'), not specifiers: empty means "whatever PyPI serves
+# today", which is the default and what the release workflow overrides with the
+# version it resolved once for every architecture. The specifier is built below
+# rather than pasted in by the caller, because a value that already carried its
+# own '==' used to concatenate into 'yt-dlp===1.2.3' - PEP 440 arbitrary
+# equality, which is valid enough that pip accepts it and builds on silently.
 ARG YTDLP_VERSION=""
 ARG YTDLP_EJS_VERSION=""
 ADD https://pypi.org/pypi/yt-dlp/json /tmp/yt-dlp-pypi.json
 ADD https://pypi.org/pypi/yt-dlp-ejs/json /tmp/yt-dlp-ejs-pypi.json
-RUN pip install --no-cache-dir --upgrade \
-        "yt-dlp${YTDLP_VERSION}" \
-        "yt-dlp-ejs${YTDLP_EJS_VERSION}" && \
-    rm -f /tmp/yt-dlp-pypi.json /tmp/yt-dlp-ejs-pypi.json && \
+RUN set -euo pipefail; \
+    specifier_chars='^[=<>!~]'; \
+    for arg in YTDLP_VERSION YTDLP_EJS_VERSION; do \
+        if [[ "${!arg}" =~ $specifier_chars ]]; then \
+            echo "${arg} takes a bare version like 2026.1.1, not '${!arg}'" >&2; \
+            exit 1; \
+        fi; \
+    done; \
+    pip install --no-cache-dir --upgrade \
+        "yt-dlp${YTDLP_VERSION:+==${YTDLP_VERSION}}" \
+        "yt-dlp-ejs${YTDLP_EJS_VERSION:+==${YTDLP_EJS_VERSION}}"; \
+    rm -f /tmp/yt-dlp-pypi.json /tmp/yt-dlp-ejs-pypi.json; \
     yt-dlp --version
 
+# torch/include holds the C++ headers torch.utils.cpp_extension compiles
+# against. fetchly only runs inference (beat-this), so nothing in the image
+# builds an extension and the headers are dead weight - but that is the trade:
+# a dependency that JIT-compiles a custom op would need them back.
 RUN set -euo pipefail; \
     site_packages="$(python -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')"; \
     python -m pip check; \
@@ -295,7 +331,8 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 COPY docker/apt-no-distro-media.pref /etc/apt/preferences.d/no-distro-media
 
-RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
+RUN echo "APT cache: ${APT_CACHE_DATE}" && \
+    apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
     gosu \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*

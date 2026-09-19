@@ -27,7 +27,8 @@ SESSION_COOKIE: Final = "fetchly_session"
 # Hard session limit: 24 hours from login (non-configurable)
 SESSION_HARD_LIMIT_SECONDS: Final = 24 * 60 * 60
 
-# Fixed sliding idle timeout (non-configurable)
+# Fallback for session_idle_minutes when the setting is unreadable or unset;
+# the effective idle timeout is configurable via settings (1-1440 minutes).
 _DEFAULT_IDLE_MINUTES: Final = 60
 
 _SECRET_KEY = os.environ.get("FETCHLY_SECRET_KEY", "")

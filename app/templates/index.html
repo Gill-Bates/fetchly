@@ -5,7 +5,7 @@
 {% block body_class %} app-root--dashboard{% endblock %}
 
 {% block head_extra %}
-<script src="/static/js/boot-flags.js?v=20260823a"></script>
+<script src="{{ asset_url('/static/js/boot-flags.js') }}"></script>
 {% endblock %}
 
 {% block navbar %}
@@ -13,13 +13,15 @@
 {{ navbar(show_back=False, show_settings=True, show_logout=auth_enabled, csrf_token=csrf_token) }}
 {% endblock %}
 
+{% block page_heading_text %}Dashboard{% endblock %}
+
 {% block content %}
 
 {% from "macros/stats.html" import dashboard_stats_row %}
 
 <div class="dashboard-layout">
     {# Mobile hides this row -- the same tiles are rendered on
-       Settings -> System instead (see .dashboard-stats in style.css). #}
+    Settings -> System instead (see .dashboard-stats in style.css). #}
     {{ dashboard_stats_row(stats, "dashboard-stats") }}
 
     <div class="ui-card mb-4" id="submitCard">
@@ -38,7 +40,7 @@
 
                             <div class="video-meta" id="videoMeta">
                                 <span class="video-meta__eyebrow">Preview</span>
-                                <h3 class="video-meta__title" id="metaTitle">–</h3>
+                                <div class="video-meta__title" id="metaTitle">–</div>
                                 <p class="video-meta__summary" id="metaSummary">–</p>
                                 <div class="video-meta__section">
                                     <span class="video-meta__label">Available formats</span>
@@ -71,15 +73,15 @@
                         </button>
                     </div>
                 </div>
-                <div id="formError" class="alert alert-danger mt-3 d-none" role="alert" aria-live="assertive"></div>
+                <div id="formError" class="alert alert-danger mt-3 d-none" role="alert"></div>
             </form>
         </div>
     </div>
 
     {# Holds this session's just-started job so it stays visible with Show Job
-       History off. Filled by current-job.js; empty/hidden on a fresh load. No
-       card chrome or heading (the job item is already a card); the label is in
-       aria-label. #}
+    History off. Filled by current-job.js; empty/hidden on a fresh load. No
+    card chrome or heading (the job item is already a card); the label is in
+    aria-label. #}
     <section class="current-job-card d-none mb-4" id="currentJobCard" aria-label="Current job"></section>
 
     <div class="mobile-job-history-option" id="mobileJobHistoryOption">
@@ -89,10 +91,10 @@
         </div>
     </div>
 
-    <section class="ui-card ui-card--flush" id="jobsCard">
+    <section class="ui-card ui-card--flush" id="jobsCard" aria-labelledby="jobsCardHeading">
         <div class="ui-card-header d-flex align-items-center jobs-card-header">
             <div class="jobs-card-heading">
-                <span class="jobs-card-kicker">Recent downloads</span>
+                <h2 class="jobs-card-kicker" id="jobsCardHeading">Recent downloads</h2>
             </div>
             <div class="jobs-card-controls">
                 <div class="jobs-quick-filter" id="jobsQuickFilter" data-active-filter="all" role="group"
@@ -198,14 +200,14 @@
                         disabled{% if not lalal_enabled %} title="Lalal.ai is not connected" {% endif %}>
                         <span class="material-symbols-outlined icon-inline" aria-hidden="true">mic</span>
                         A Cappella
-                        <img class="trim-provider-logo" src="/static/img/lalal_ai_small.svg" alt="Lalal.ai" width="34"
+                        <img class="trim-provider-logo" src="/static/img/lalal_ai_small.svg" alt="" width="34"
                             height="10">
                     </button>
                     <button class="btn btn-outline-secondary btn-sm trim-provider-button" id="trimInstr" type="button"
                         disabled{% if not lalal_enabled %} title="Lalal.ai is not connected" {% endif %}>
                         <span class="material-symbols-outlined icon-inline" aria-hidden="true">music_off</span>
                         Instrumental
-                        <img class="trim-provider-logo" src="/static/img/lalal_ai_small.svg" alt="Lalal.ai" width="34"
+                        <img class="trim-provider-logo" src="/static/img/lalal_ai_small.svg" alt="" width="34"
                             height="10">
                     </button>
                 </div>
@@ -317,12 +319,13 @@
             <div class="modal-header">
                 <h5 class="modal-title" id="duplicateJobModalLabel">
                     <span class="material-symbols-outlined icon-inline" aria-hidden="true">info</span>
-                    Video already processed
+                    Download already processed
                 </h5>
                 <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close dialog"></button>
             </div>
             <div class="modal-body">
-                <p id="duplicateJobMessage">This video has already been processed. Do you want to download it again?</p>
+                <p id="duplicateJobMessage">This download has already been processed. Do you want to download it again?
+                </p>
             </div>
             <div class="modal-footer">
                 <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancel</button>
@@ -337,5 +340,5 @@
 {% endblock %}
 
 {% block page_scripts %}
-<script type="module" src="/static/js/main.js?v=20260903a"></script>
+<script type="module" src="{{ asset_url('/static/js/main.js') }}"></script>
 {% endblock %}

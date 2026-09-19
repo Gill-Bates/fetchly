@@ -107,4 +107,4 @@ Then open `http://127.0.0.1:8000`. Pages rebuild on save.
 ## License
 
 By contributing, you agree that your contribution is licensed under the project's
-[AGPL-3.0 license](https://github.com/Gill-Bates/fetchly/blob/main/LICENSE).
+[MIT license](https://github.com/Gill-Bates/fetchly/blob/main/LICENSE).

@@ -3,7 +3,7 @@
 // Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 //
 
-import { CANCELLABLE_STATUSES, DOWNLOADABLE_STATUSES, LALAL_MAX_DURATION_MINUTES, LALAL_MAX_DURATION_SECONDS, RETRYABLE_STATUSES } from "./config.js?v=20260831b";
+import { CANCELLABLE_STATUSES, DOWNLOADABLE_STATUSES, LALAL_MAX_DURATION_MINUTES, LALAL_MAX_DURATION_SECONDS, RETRYABLE_STATUSES } from "./config.js";
 import { EMPTY_VALUE, humanSize } from "./utils.js";
 
 export const ACTION_CATEGORY = Object.freeze({

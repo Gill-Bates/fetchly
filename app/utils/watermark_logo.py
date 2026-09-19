@@ -124,7 +124,8 @@ def _probe_png(path: Path) -> tuple[int, int, str]:
         completed = subprocess.run(
             cmd, check=True, capture_output=True, timeout=_PROBE_TIMEOUT_SECONDS
         )
-        stream = (json.loads(completed.stdout or "{}").get("streams") or [{}])[0]
+        streams = json.loads(completed.stdout or "{}").get("streams")
+        stream = streams[0] if isinstance(streams, list) and streams else {}
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError, OSError) as exc:
         logger.info("Rejected watermark logo: not decodable (%s)", exc)
         raise LogoRejectedError("That file is not a readable image.") from exc
@@ -149,7 +150,9 @@ def _has_visible_transparency(path: Path) -> bool:
     A logo without transparency is not artwork on the video, it is a box over
     it - so this is the one content check that decides usability rather than
     validity. Read straight off the alpha plane: fully opaque means the
-    minimum alpha value is the maximum of the range.
+    minimum alpha value is the maximum of the range. An alpha plane that
+    cannot be read at all answers False as well, so an unverifiable image is
+    rejected instead of assumed transparent.
     """
     cmd = [
         "ffmpeg",
@@ -172,18 +175,22 @@ def _has_visible_transparency(path: Path) -> bool:
             cmd, check=True, capture_output=True, timeout=_PROBE_TIMEOUT_SECONDS, text=True
         )
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
-        # An image whose alpha cannot be read is not worth failing an upload
-        # over; the size and format checks already did the real work.
+        # An image whose alpha cannot be read is rejected: we cannot verify
+        # it has transparency, so fail-closed rather than assuming it does.
         logger.warning("Could not read the alpha channel of an uploaded logo: %s", exc)
-        return True
+        return False
 
     for line in (completed.stdout or "").splitlines():
         if "lavfi.signalstats.YMIN" in line:
             try:
                 return float(line.rsplit("=", 1)[1]) < 255.0
             except (IndexError, ValueError):
-                return True
-    return True
+                # Unparseable output: fail-closed, not -open.
+                logger.warning("Could not parse the alpha statistics of an uploaded logo")
+                return False
+    # No output found: fail-closed.
+    logger.warning("No alpha statistics found in the uploaded logo probe")
+    return False
 
 
 def validate_logo_bytes(data: bytes, target: Path) -> LogoStatus:

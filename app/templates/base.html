@@ -9,21 +9,26 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="color-scheme" content="dark">
     <meta name="theme-color" content="#0f172a">
-    <link rel="icon" href="/static/img/favicon.svg?v=20260831a" type="image/svg+xml">
-    <link rel="icon" href="/static/img/favicon.ico?v=20260831a" sizes="any" type="image/x-icon">
+    <link rel="icon" href="{{ asset_url('/static/img/favicon.svg') }}" type="image/svg+xml">
+    <link rel="icon" href="{{ asset_url('/static/img/favicon.ico') }}" sizes="any" type="image/x-icon">
     {% block head_meta %}{% endblock %}
     <title>{% block title %}fetchly - next-gen Video Downloader{% endblock %}</title>
     {% block head_preconnect %}{% endblock %}
+    {# Deliberately not asset_url(): a preload only counts when its URL is
+    byte-identical to the one that later asks for the file, and that one comes
+    from @font-face in style.css, which no template helper can version. A
+    hashed URL here would download both. #}
     <link rel="preload" href="/static/fonts/roboto-flex.woff2" as="font" type="font/woff2" crossorigin>
     <link rel="preload" href="/static/fonts/material-symbols-outlined.woff2" as="font" type="font/woff2" crossorigin>
-    <link href="/static/vendor/bootstrap.min.css?v=20260428b" rel="stylesheet">
+    <link href="{{ asset_url('/static/vendor/bootstrap.min.css') }}" rel="stylesheet">
     {% block app_styles %}
-    <link href="/static/style.css?v=20260903d" rel="stylesheet">
+    <link href="{{ asset_url('/static/style.css') }}" rel="stylesheet">
     {% endblock %}
     {% block head_extra %}{% endblock %}
 </head>
 
 <body class="app-root{% block body_class %}{% endblock %}">
+    <a class="visually-hidden-focusable skip-link" href="#main-content">Skip to main content</a>
     <div class="app-shell">
         {% from "macros/navbar.html" import navbar %}
         {% block navbar %}
@@ -31,7 +36,16 @@
         {% endblock %}
 
         {% block main_shell %}
-        <main class="app-main app-shell-container" role="main">
+        <main class="app-main app-shell-container" id="main-content">
+            {# Every page needs a level-one heading naming it: it is the first
+            landmark a screen reader announces and what "jump to heading"
+            lands on. The visual design carries no page title - the app name
+            lives in the navbar as a link, not a heading - so the default is
+            hidden rather than invented into the layout. A page whose design
+            does have a visible title overrides this block with it. #}
+            {% block page_heading %}
+            <h1 class="visually-hidden">{% block page_heading_text %}fetchly{% endblock %}</h1>
+            {% endblock %}
             {% block content %}{% endblock %}
         </main>
         {% endblock %}
@@ -61,7 +75,7 @@
         {% endblock %}
     </div>
 
-    <script src="/static/vendor/bootstrap.bundle.min.js"></script>
+    <script src="{{ asset_url('/static/vendor/bootstrap.bundle.min.js') }}"></script>
     {% block page_scripts %}{% endblock %}
 </body>
 

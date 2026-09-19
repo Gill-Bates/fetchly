@@ -110,9 +110,9 @@ disconnected rather than allowed to grow its queue without bound.
 | `POST /api/share/{job_id}` | 20/minute |
 | `GET /share/{token}` | 20/minute |
 
-!!! info "The redeem limit is a security control"
-    Share tokens are 8 characters (48 bits). Brute force is bounded by this limit
-    rather than by token length, so raising it materially weakens share links.
+!!! info "The redeem limit backs up the token length"
+    Share tokens carry 128 bits of randomness, so guessing one is infeasible on its
+    own. This limit additionally caps how fast anybody can try.
 
 ## Exceeding a limit
 

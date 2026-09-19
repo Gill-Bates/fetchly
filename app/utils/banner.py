@@ -95,14 +95,22 @@ def print_banner_once() -> None:
     """Print the startup banner once per parent PID within a 30s window.
 
     A file lock + recorded ppid stops concurrent Gunicorn workers each printing
-    it; the 30s expiry lets a later restart (or reused PID) print again.
+    it; the 30s expiry lets a later restart (or reused PID) print again. The
+    lock is taken non-blocking, so a worker that cannot get it prints rather
+    than waits - a duplicate banner beats a delayed startup.
     """
     ppid = str(os.getppid())
 
     try:
         fd = _open_lock_file()
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                # Lock held by another process; print without deduplication.
+                # This is a best-effort cosmetic banner, not a critical section.
+                print_banner()
+                return
 
             content = os.read(fd, 64).decode("utf-8", errors="ignore").strip()
 

@@ -3,7 +3,7 @@
 // Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 //
 
-import { CONFIG } from "./config.js?v=20260831b";
+import { CONFIG } from "./config.js";
 import { combineAbortSignals, createTimeoutSignal } from "./utils.js";
 
 const TIMEOUT_DEFAULT_MS = 10_000;

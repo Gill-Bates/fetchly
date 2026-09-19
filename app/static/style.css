@@ -139,6 +139,12 @@
     /* Colors */
     --primary: #5b5fdc;
     --primary-hover: #4f46e5;
+    /* Primary as *foreground* on a dark surface. --primary itself carries only
+       3.5:1 against --surface and fails WCAG AA for text; it cannot simply be
+       lightened, because it is also a button fill where white sits on top and
+       lightening it would break that pair instead (5.1:1 today, 3.0:1 at this
+       value). Two tokens, one for each direction. 6.0:1 on --surface. */
+    --primary-text: #818cf8;
     --focus-ring: #818cf8;
     --success: #22c55e;
     --danger: #ef4444;
@@ -146,6 +152,13 @@
 
     --bg-gradient: radial-gradient(circle at 20% 20%, #20384f 0%, #0f172a 50%, #0b1222 100%);
     --border: rgb(255 255 255 / 0.08);
+    /* Two heavier border weights. They were previously written inline as
+       fallbacks to --border-color, a token that was never defined, so the
+       fallback was always what rendered - the values below are exactly that,
+       now declared rather than implied. A drop zone has to read as a target,
+       which --border at 8% is too faint to do. */
+    --border-strong: rgb(255 255 255 / 0.12);
+    --border-dashed: rgb(255 255 255 / 0.18);
     /* Canonical text token (--text-default is the source of truth) */
     --text-default: #e5e7eb;
     --text: var(--text-default);
@@ -406,6 +419,21 @@ body {
     }
 }
 
+/* Skip link: hidden until keyboard focus, then pinned above the fixed
+   navbar (Bootstrap's .fixed-top sits at z-index 1030) so it is never
+   obscured by it. */
+.skip-link:focus-visible {
+    position: fixed;
+    top: var(--space-2);
+    left: var(--space-2);
+    z-index: var(--z-popover);
+    padding: var(--space-2) var(--space-3);
+    background: var(--surface-solid);
+    color: var(--text);
+    border-radius: 0.375rem;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+
 /* Top Navbar */
 
 .top-navbar {
@@ -417,6 +445,19 @@ body {
     -webkit-backdrop-filter: var(--blur-md);
     border-bottom: 1px solid var(--border);
     box-shadow: 0 6px 18px rgb(0 0 0 / 0.22);
+}
+
+/* The blur is what makes the 70% background work: it smears the content
+   scrolling underneath into an unreadable wash. Where backdrop-filter is not
+   supported that content stays sharp and legible straight through the bar,
+   overlapping the navbar's own labels. The fallback drops the transparency
+   instead. Scoped to .top-navbar deliberately - .wb-footer, .fx-toast and
+   .lost-card use the same blur recipe but are static or relative, so no
+   scrolling content ever passes beneath them. */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+    .top-navbar {
+        background: var(--surface);
+    }
 }
 
 .top-navbar__inner {
@@ -444,13 +485,28 @@ body {
     padding: 0;
 }
 
-@media (max-width: 767.98px) {
-    .top-navbar .btn {
+/* Keyed on the pointer, not on a phone width: the navbar icons are 40px by
+   default, and this block used to sit behind (max-width: 767.98px), so every
+   iPad - touch, but 768px and wider - kept the 40px hit area and fell 4px
+   short of the 44px touch minimum. Back, Settings and Logout are the whole
+   navigation on those views, which is why the audit hard-blocked all six
+   tablet dashboards and settings pages on it. A narrow desktop window is
+   deliberately not covered: it is not a touch device, and 40px clears the
+   mouse minimum comfortably.
+
+   The icon selector carries .btn-sm as well: .btn-sm.btn-icon (further down)
+   sets 40px at the same specificity as .top-navbar .btn-icon and comes later,
+   so without the extra class this rule lost and the navbar stayed at 40px. */
+@media (pointer: coarse) {
+
+    .top-navbar .btn,
+    .top-navbar .btn-sm.btn-icon {
         height: 44px;
         min-height: 44px;
     }
 
-    .top-navbar .btn-icon {
+    .top-navbar .btn-icon,
+    .top-navbar .btn-sm.btn-icon {
         width: 44px;
         min-width: 44px;
     }
@@ -554,6 +610,14 @@ body {
     font-size: 0.8rem;
     color: var(--text-muted);
     margin-top: 0.5rem;
+}
+
+/* Phone-only caption. Desktop has the room for the full .stat-label under the
+   value, so the short form stays out of the layout entirely here rather than
+   being visually hidden - it is decorative (aria-hidden) and duplicating it
+   into the a11y tree buys nothing. */
+.stat-short-label {
+    display: none;
 }
 
 .stat-unit {
@@ -1340,7 +1404,7 @@ html body .text-muted {
 }
 
 .settings-app-update[data-app-update-state="prerelease"] .settings-app-update-status {
-    color: var(--primary);
+    color: var(--primary-text);
 }
 
 .settings-app-update-link[hidden] {
@@ -1556,15 +1620,14 @@ html body .text-muted {
 .settings-range-tick {
     grid-row: 1;
     justify-self: start;
-    /* Same diameter as the range thumb (Bootstrap's .form-range thumb is 1rem
-       square), so an inactive tick reads as the bubble's empty slot rather
-       than as a dot next to the track. Shrinking it to a faint marker was
-       tried and read as noise at the far end of the scale. */
-    width: 1rem;
-    height: 1rem;
-    border: 1px solid color-mix(in srgb, var(--text-muted) 38%, var(--surface));
+    /* A touch smaller than the range thumb (Bootstrap's .form-range thumb is
+       1rem square) and paler, so an inactive tick reads as a quiet empty slot
+       for the bubble rather than competing with the thumb. */
+    width: 0.8rem;
+    height: 0.8rem;
+    border: 1px solid color-mix(in srgb, var(--text-muted) 26%, var(--surface));
     border-radius: var(--radius-pill);
-    background: color-mix(in srgb, var(--text-muted) 24%, var(--surface));
+    background: color-mix(in srgb, var(--text-muted) 15%, var(--surface));
     box-shadow: 0 0 0 2px color-mix(in srgb, var(--surface) 82%, transparent);
     margin-top: calc(var(--space-2) + 1.375rem);
     transform: translate(-50%, -50%);
@@ -3009,7 +3072,7 @@ td[data-label="Title"] {
     gap: 0.35rem;
     min-height: 120px;
     padding: 1rem;
-    border: 1px dashed var(--border-color, rgb(255 255 255 / 18%));
+    border: 1px dashed var(--border-dashed);
     border-radius: 0.75rem;
     background: rgb(255 255 255 / 2%);
     text-align: center;
@@ -3019,14 +3082,14 @@ td[data-label="Title"] {
 
 .logo-dropzone:hover,
 .logo-dropzone:focus-visible {
-    border-color: var(--accent, #6c63ff);
-    background: rgb(108 99 255 / 8%);
+    border-color: var(--primary);
+    background: color-mix(in srgb, var(--primary) 8%, transparent);
 }
 
 .logo-dropzone--over {
     border-style: solid;
-    border-color: var(--accent, #6c63ff);
-    background: rgb(108 99 255 / 14%);
+    border-color: var(--primary);
+    background: color-mix(in srgb, var(--primary) 14%, transparent);
 }
 
 .logo-dropzone--busy {
@@ -3052,7 +3115,7 @@ td[data-label="Title"] {
     gap: 0.6rem;
     margin-top: 0.5rem;
     padding: 0.45rem 0.55rem;
-    border: 1px solid var(--border-color, rgb(255 255 255 / 12%));
+    border: 1px solid var(--border-strong);
     border-radius: 0.6rem;
 }
 
@@ -4234,7 +4297,7 @@ td:last-child {
     gap: 1.25rem;
 }
 
-.auth-step-header {
+.auth-panel-header {
     display: flex;
     flex-direction: column;
     gap: 0.35rem;
@@ -4242,10 +4305,6 @@ td:last-child {
     border-radius: var(--radius-md);
     border: 1px solid var(--border);
     background: var(--surface-elevated);
-}
-
-.auth-step-badge {
-    margin-bottom: 0.25rem;
 }
 
 .auth-method-panel {
@@ -4515,6 +4574,15 @@ td:last-child {
         min-height: 44px;
     }
 
+    /* The fields above were raised here, the buttons only inside the phone
+       block, so a settings button on a tablet stayed at the 40px .btn-sm
+       height - including "Reset Statistics" and "Remove all Jobs", the two
+       destructive actions in the danger row. Buttons attached to a field are
+       covered separately below, because they also need the width. */
+    .settings-grid .btn {
+        min-height: 44px;
+    }
+
     .settings-grid .input-group .btn {
         min-width: 44px;
         min-height: 44px;
@@ -4662,9 +4730,25 @@ td:last-child {
         gap: 3px;
     }
 
+    /* Four tiles per row means the glyph is the only thing naming the number,
+       and it is not enough: "246.5 MiB" under a download arrow and "165.3 GiB"
+       under a drive both read as "some amount of storage". The word takes the
+       glyph's place on the first line instead of being added to it, so the
+       tile keeps its two rows and its height - 10px of text where 16px of icon
+       used to be, and .stat-card's min-height governs either way. */
     .stats-row .stat-icon {
-        font-size: 16px;
-        opacity: 0.7;
+        display: none;
+    }
+
+    .stats-row .stat-short-label {
+        display: block;
+        font-size: 0.6875rem;
+        font-weight: 500;
+        line-height: 1;
+        color: var(--text-muted);
+        /* The captions are short enough to fit, but a wrap would push the
+           number out of the tile rather than just looking cramped. */
+        white-space: nowrap;
     }
 
     /* Keep stat-unit smaller on mobile */
@@ -4675,8 +4759,9 @@ td:last-child {
 
     /* Save vertical/horizontal space: four tiles per row leaves no room
        for the label text underneath. Visually hidden rather than
-       display:none so the label stays in the accessibility tree --
-       role="group" derives its accessible name from this text. */
+       display:none so the label stays readable for assistive tech. The
+       group's accessible name comes from aria-label (role="group" does
+       not name itself from content). */
     .stats-row .stat-label {
         position: absolute;
         width: 1px;
@@ -4811,7 +4896,7 @@ td:last-child {
         flex: 1 1 0;
     }
 
-    .auth-step-header,
+    .auth-panel-header,
     .auth-method-panel {
         padding: 0.75rem;
     }
@@ -5123,7 +5208,15 @@ td:last-child {
 
 /* Jobs feed and tablet fallback */
 
-@media (max-width: 1024px) {
+/* Compact jobs surface: the mobile feed replaces the desktop table and the
+   whole card hides behind the "Show Job History" toggle. Covers narrow
+   viewports (<= 1024px) plus every touch tablet up to an iPad Pro 12.9" in
+   landscape (1366px), which is wide enough for the desktop table but is still
+   a finger-driven device that wants the feed. `pointer: coarse` keeps
+   mouse-driven laptops in the same width band on the desktop table.
+   jobs.js's MOBILE_BREAKPOINT mirrors this list. */
+@media (max-width: 1024px),
+(max-width: 1366px) and (pointer: coarse) {
     .jobs-mobile-list {
         display: flex;
         flex-direction: column;
@@ -5304,14 +5397,41 @@ td:last-child {
    inset from the (max-width: 576px) block, which sits *earlier* in the file
    and would otherwise lose to an equally specific 1024px rule. The lower
    bound is 576.02px so it complements `max-width: 576px` exactly and leaves
-   no uncovered gap at fractional viewport widths. */
-@media (min-width: 576.02px) and (max-width: 1024px) {
+   no uncovered gap at fractional viewport widths. The coarse-pointer clause
+   extends the same inset to touch tablets in landscape, matching the compact
+   jobs surface query above. */
+@media (min-width: 576.02px) and (max-width: 1024px),
+(min-width: 576.02px) and (max-width: 1366px) and (pointer: coarse) {
     #jobsCard .jobs-list-shell {
         padding: 0 var(--space-4) var(--space-2);
     }
 }
 
 @media (max-width: 360px) {
+
+    /* Still four columns, only tighter type: "165.3 GiB" at the 767px size
+       is wider than a ~57px tile at 320px. Same specificity as the phone
+       block above and later in the file, so this wins by order. */
+    .stats-row {
+        gap: 0.375rem;
+    }
+
+    .stats-row .stat-card {
+        padding-inline: 0.2rem;
+    }
+
+    .stats-row .stat-value {
+        font-size: 1.05rem;
+    }
+
+    .stats-row .stat-unit {
+        font-size: 0.625rem;
+    }
+
+    .stats-row .stat-num-line {
+        gap: 2px;
+    }
+
     .job-item {
         flex-wrap: wrap;
     }
@@ -5326,7 +5446,8 @@ td:last-child {
     }
 }
 
-@media (min-width: 768px) and (max-width: 1024px) {
+@media (min-width: 768px) and (max-width: 1024px),
+(min-width: 768px) and (max-width: 1366px) and (pointer: coarse) {
 
     .app-root--dashboard,
     .app-root--dashboard .app-shell {
@@ -5902,7 +6023,7 @@ td:last-child {
 }
 
 .changelog-content a {
-    color: var(--primary);
+    color: var(--primary-text);
     text-decoration: underline;
 }
 

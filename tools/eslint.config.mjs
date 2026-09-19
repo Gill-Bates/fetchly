@@ -45,6 +45,23 @@ export default [
             ],
             // A stray console.log ships to users and trips the ui-lint audit.
             "no-console": ["error", { allow: ["warn", "error"] }],
+            // Repo rule: cache busting is the server's job, not a token an
+            // author has to remember to bump. A hand-written ?v= on an import
+            // pins the browser to that exact URL, so a stale one keeps serving
+            // the old module for good - and two importers disagreeing on the
+            // token load the same module twice, with two copies of its state.
+            // The rationale and the mechanism live in app/utils/assets.py.
+            "no-restricted-syntax": [
+                "error",
+                {
+                    selector: "ImportDeclaration[source.value=/\\?v=/]",
+                    message: "Drop the ?v= token: /static is served with content-hashed URLs (app/utils/assets.py).",
+                },
+                {
+                    selector: "ImportExpression[source.value=/\\?v=/]",
+                    message: "Drop the ?v= token: /static is served with content-hashed URLs (app/utils/assets.py).",
+                },
+            ],
             "no-var": "error",
             "prefer-const": "error",
             eqeqeq: ["error", "smart"],

@@ -7,14 +7,18 @@
 {% block title %}fetchly - next-gen Video Downloader{% endblock %}
 
 {% block app_styles %}
-<link href="/static/login.css?v=20260831a" rel="stylesheet">
+<link href="{{ asset_url('/static/login.css') }}" rel="stylesheet">
 {% endblock %}
 
 {% block navbar %}{% endblock %}
 
 {% block main_shell %}
-<main class="login-shell" role="main">
+<main class="login-shell" id="main-content">
     <section class="login-card">
+        {# This template replaces base.html's main_shell wholesale, so it does
+        not inherit the page_heading block and needs its own h1. The logo
+        carries the app name visually; the heading names the task. #}
+        <h1 class="visually-hidden">Sign in to fetchly</h1>
         <div class="login-header text-center">
             <img src="/static/img/fetchly_logo.svg" alt="fetchly" class="logo mb-3">
             <p class="login-kicker">Multi-Platform Video Downloader</p>
@@ -60,5 +64,5 @@
 {% block footer %}{% endblock %}
 
 {% block page_scripts %}
-<script type="module" src="/static/js/login.js?v=20260824b"></script>
+<script type="module" src="{{ asset_url('/static/js/login.js') }}"></script>
 {% endblock %}

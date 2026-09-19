@@ -6,9 +6,7 @@
 
 set -euo pipefail
 
-# --------------------------------------------------------------------------- #
 # Configuration
-# --------------------------------------------------------------------------- #
 readonly DATA_DIR="${DATA_DIR:-/app/data}"
 # beat-this resolves checkpoint "final0" through torch.hub and downloads an
 # 81 MB .ckpt from cloud.cp.jku.at on the first BPM analysis - the one runtime
@@ -63,9 +61,6 @@ readonly -a REQUIRED_DIRS=(
 export FORWARDED_ALLOW_IPS
 export TORCH_HOME
 
-# --------------------------------------------------------------------------- #
-# Logging
-# --------------------------------------------------------------------------- #
 log() {
     # stderr: log()/fail() output must never land on a caller's stdout.
     printf '[%s] [%s] %s\n' "$(date +'%Y-%m-%d %H:%M:%S')" "entrypoint" "$*" >&2
@@ -181,9 +176,7 @@ bootstrap() {
 # get as far as a recursive chown or a started server.
 validate_config
 
-# --------------------------------------------------------------------------- #
 # 1. Bootstrap
-# --------------------------------------------------------------------------- #
 # Gated on UID alone. It used to also require "$1 != --run", but argv is
 # caller-controlled - `docker run <image> --run` satisfied that check as
 # root and skipped straight to Gunicorn without ever dropping to appuser.
@@ -217,14 +210,11 @@ if [[ "$#" -gt 0 ]]; then
     exec "$@"
 fi
 
-# --------------------------------------------------------------------------- #
 # 2. Start Gunicorn
-# --------------------------------------------------------------------------- #
 if ! command -v gunicorn >/dev/null 2>&1; then
     fail "gunicorn not found in PATH"
 fi
 
-# Print startup banner
 python -c "from app.utils.banner import print_banner; print_banner()" 2>/dev/null || true
 
 log "Starting Gunicorn on ${HOST}:${PORT} with ${WORKERS} worker ..."

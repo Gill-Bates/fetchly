@@ -11,7 +11,7 @@
 
 import { showToast } from "./toast.js";
 import { reportError } from "./errors.js";
-import { LALAL_MAX_DURATION_MINUTES, LALAL_MAX_DURATION_SECONDS } from "./config.js?v=20260831b";
+import { LALAL_MAX_DURATION_MINUTES, LALAL_MAX_DURATION_SECONDS } from "./config.js";
 import {
     buildTrimId,
     clamp,
@@ -22,13 +22,12 @@ import {
     triggerDownload,
     SNAP_INTERVAL_SECONDS,
 } from "./utils.js";
-import { isLalalEnabled, isLalalDurationGuardEnabled } from "./ui.js?v=20260831c";
+import { isLalalEnabled, isLalalDurationGuardEnabled } from "./ui.js";
 
 // WaveSurfer imports (loaded dynamically)
 let WaveSurfer = null;
 let RegionsPlugin = null;
 
-// State
 let trimWs = null;
 let trimRegion = null;
 let trimJobId = null;
@@ -554,9 +553,6 @@ function refreshElement(current, id) {
         : document.getElementById(id);
 }
 
-/**
- * Initialize DOM element references
- */
 function initElements() {
     trimModalEl = refreshElement(trimModalEl, "trimModal");
     trimWaveEl = refreshElement(trimWaveEl, "trimWave");
@@ -1158,9 +1154,6 @@ function handleModalHidden() {
     lastFocusedBeforeTrimModal = null;
 }
 
-/**
- * Setup event listeners for trim controls
- */
 function setupEventListeners() {
     if (listenersAttached || !trimModalEl) return;
     listenersAttached = true;
@@ -1195,9 +1188,6 @@ function formatTime(seconds) {
     return `${mins}:${secs.padStart(5, "0")}`;
 }
 
-/**
- * Update the time info display
- */
 function updateInfo() {
     if (!trimRegion || !trimInfoEl) return;
     const duration = trimRegion.end - trimRegion.start;
@@ -1315,10 +1305,8 @@ export async function openTrimModal(jobId, options = {}) {
     try {
         if (session !== trimSession) return;
 
-        // Create regions plugin
         regionPlugin = RegionsPlugin.create();
 
-        // Create WaveSurfer instance
         trimWs = WaveSurfer.create({
             container: trimWaveEl,
             waveColor: "rgba(226, 232, 240, 0.45)",
@@ -1391,7 +1379,6 @@ export async function openTrimModal(jobId, options = {}) {
             updateInfo();
         });
 
-        // Update info on region change
         regionPlugin.on("region-updated", (region) => {
             if (session !== trimSession) return;
             if (region === trimRegion) {
@@ -1423,7 +1410,6 @@ export async function openTrimModal(jobId, options = {}) {
             }
         });
 
-        // Handle loading errors
         trimWs.on("error", (err) => {
             if (session !== trimSession) return;
             setLoading(false);
@@ -1462,9 +1448,6 @@ function handlePlay() {
     trimWs.play();
 }
 
-/**
- * Pause playback
- */
 function handlePause() {
     if (!trimWs) return;
     trimWs.pause();

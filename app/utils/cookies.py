@@ -27,17 +27,48 @@ _DATA_COOKIES_DIR: Final[Path] = get_data_dir() / "cookies"
 _DIR_MODE: Final[int] = 0o700
 
 
+def _resolve_in_cookies_dir(filename: str) -> Path | None:
+    """The path ``filename`` names inside the cookies directory, or ``None``.
+
+    Every caller passes a literal from ``PLATFORM_COOKIE_FILENAMES``, so this
+    is a guard against a future caller rather than against today's input: a
+    bare name only, and the joined path still resolving inside the directory.
+    Leading dots are out too - the jars are named per platform, and nothing
+    here needs to address a dotfile.
+    """
+    if not filename or filename != filename.strip() or filename.startswith("."):
+        return None
+    if "/" in filename or "\\" in filename:
+        return None
+
+    candidate = _DATA_COOKIES_DIR / filename
+    try:
+        candidate.resolve().relative_to(_DATA_COOKIES_DIR.resolve())
+    except ValueError:
+        return None
+    return candidate
+
+
 def find_cookie_file(filename: str) -> Path | None:
     """Return the cookie file for ``filename`` if it exists, else ``None``."""
-    if not filename:
+    candidate = _resolve_in_cookies_dir(filename)
+    if candidate is None:
+        if filename:
+            logger.warning("Rejected cookie filename outside the cookies directory: %s", filename)
         return None
-    candidate = _DATA_COOKIES_DIR / filename
     return candidate if candidate.is_file() else None
 
 
 def default_cookie_file(filename: str) -> Path:
-    """Return the canonical path for a cookie filename (may not exist yet)."""
-    return _DATA_COOKIES_DIR / filename
+    """Return the canonical path for a cookie filename (may not exist yet).
+
+    Raises ``ValueError`` for a name that does not resolve inside the cookies
+    directory; unlike :func:`find_cookie_file` there is no path to return.
+    """
+    candidate = _resolve_in_cookies_dir(filename)
+    if candidate is None:
+        raise ValueError(f"Invalid cookie filename: {filename}")
+    return candidate
 
 
 def ensure_data_cookies_dir() -> None:

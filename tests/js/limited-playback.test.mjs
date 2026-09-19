@@ -11,10 +11,15 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 // jobs.js pulls in config.js and utils.js, which read bootstrap data off the
-// document at import time.
+// document at import time, and runs its own init() on import too - deferred
+// via DOMContentLoaded when readyState is "loading". Without that, init()
+// would run inline in this test process ahead of the null guard, dragging in
+// whatever bootstrap-JSON parsing and event wiring it does before returning.
 globalThis.document = {
     cookie: "",
+    readyState: "loading",
     documentElement: { dataset: { lalalMaxDurationSeconds: "600" } },
+    addEventListener() { },
     querySelector() {
         return null;
     },
@@ -22,7 +27,7 @@ globalThis.document = {
         return null;
     },
 };
-globalThis.window = { matchMedia: () => ({ matches: false, addEventListener() {} }) };
+globalThis.window = { matchMedia: () => ({ matches: false, addEventListener() { } }) };
 
 const { hasLimitedPlayback } = await import("../../app/static/js/jobs.js");
 
@@ -49,6 +54,37 @@ test("an H.264 stream in a Matroska container is still flagged", () => {
     assert.equal(
         hasLimitedPlayback({ type: "video", codec: "h264", filename: "/data/j/Clip.mkv" }),
         true,
+    );
+});
+
+test("mov and m4v are as universal as mp4, and avc1 is the same codec as h264", () => {
+    assert.equal(
+        hasLimitedPlayback({ type: "video", codec: "avc1", filename: "/data/j/Clip.mov" }),
+        false,
+    );
+    assert.equal(
+        hasLimitedPlayback({ type: "video", codec: "h264", filename: "/data/j/Clip.m4v" }),
+        false,
+    );
+});
+
+test("codec and extension are matched case-insensitively", () => {
+    assert.equal(
+        hasLimitedPlayback({ type: "video", codec: "H264", filename: "/data/j/Clip.MP4" }),
+        false,
+    );
+    assert.equal(
+        hasLimitedPlayback({ type: "video", codec: "H264", filename: "/data/j/Clip.MKV" }),
+        true,
+    );
+});
+
+test("a safe container is not flagged just because the codec was not read", () => {
+    // The container alone is enough to know playback is universal; codec is
+    // the extra signal, not a required one.
+    assert.equal(
+        hasLimitedPlayback({ type: "video", codec: "", filename: "/data/j/Clip.mp4" }),
+        false,
     );
 });
 

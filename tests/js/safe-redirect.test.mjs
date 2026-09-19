@@ -4,7 +4,6 @@
 //
 
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 globalThis.window = {
@@ -13,12 +12,7 @@ globalThis.window = {
     },
 };
 
-const utilsSource = await readFile(
-    new URL("../../app/static/js/utils.js", import.meta.url),
-    "utf8",
-);
-const utilsModuleUrl = `data:text/javascript;base64,${Buffer.from(utilsSource).toString("base64")}`;
-const { isSafeSameOriginRedirect, isSafeRedirect } = await import(utilsModuleUrl);
+const { isSafeSameOriginRedirect, isSafeRedirect } = await import("../../app/static/js/utils.js");
 
 test("accepts relative and absolute redirects on the current origin", () => {
     for (const value of [
@@ -72,6 +66,10 @@ test("isSafeRedirect rejects same-origin non-download paths and unsafe/cross-ori
         "https://evil.example/download/123",
         "javascript:alert(1)",
         "http://[",
+        // pathname normalization/case must not widen the allowed prefix
+        "/download/../settings",
+        "/DOWNLOAD/123",
+        "/api/lalal/download/../../settings",
     ]) {
         assert.equal(isSafeRedirect(value), false, String(value));
     }

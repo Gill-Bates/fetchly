@@ -239,7 +239,8 @@ export function formatLalalMinutes(minutes) {
 
 /**
  * Read the server-rendered CSRF token without coupling browser code to the
- * middleware's cookie name. Forms take precedence to preserve login behavior.
+ * middleware's cookie name. The cookie takes precedence; the form/meta value
+ * is a fallback for pages that render a token but do not receive the cookie.
  * @returns {string}
  */
 export function getCsrfToken() {

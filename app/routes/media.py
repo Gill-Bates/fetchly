@@ -395,8 +395,10 @@ async def download(request: Request, job_id: uuid.UUID):
 async def audio_source(request: Request, job_id: uuid.UUID, _user: str = Depends(require_user_json)):
     """Serve a job's stored audio inline for the waveform/trim UI.
 
-    ``X-Audio-Quality`` says whether it is the original source or a cached MP3
-    fallback. Inline, unlike the /download attachment.
+    ``X-Audio-Quality`` reports provenance - the stored source or a converted
+    file, plus whether a cached MP3 fallback is being served instead. It is not
+    a codec-quality claim: a kept-as-is source can itself be lossy.
+    Inline, unlike the /download attachment.
     """
     _ = request  # required by @limiter.limit, unused now that auth is a Depends()
     try:
@@ -407,7 +409,7 @@ async def audio_source(request: Request, job_id: uuid.UUID, _user: str = Depends
     if job["type"] != "audio":
         return JSONResponse(status_code=400, content={"error": "Audio source is only available for audio jobs"})
 
-    quality = "lossless" if is_internal_audio_source(file_path) else "lossy"
+    provenance = "source" if is_internal_audio_source(file_path) else "converted"
 
     if needs_browser_audio_fallback(file_path):
         try:
@@ -421,7 +423,7 @@ async def audio_source(request: Request, job_id: uuid.UUID, _user: str = Depends
             filename=mp3_path.name,
             media_type="audio/mpeg",
             content_disposition_type="inline",
-            headers={**_NOSNIFF_HEADER, "X-Audio-Quality": f"{quality}-mp3-fallback"},
+            headers={**_NOSNIFF_HEADER, "X-Audio-Quality": f"{provenance}-mp3-fallback"},
         )
 
     media_type = _AUDIO_MIME_TYPES.get(file_path.suffix.lower(), "application/octet-stream")
@@ -431,7 +433,7 @@ async def audio_source(request: Request, job_id: uuid.UUID, _user: str = Depends
         filename=file_path.name,
         media_type=media_type,
         content_disposition_type="inline",
-        headers={**_NOSNIFF_HEADER, "X-Audio-Quality": quality},
+        headers={**_NOSNIFF_HEADER, "X-Audio-Quality": provenance},
     )
 
 

@@ -40,7 +40,9 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v5
         with:
-          fetch-depth: 1
+          # Full history, so the main-ancestry check below can actually walk
+          # from the tagged commit back to main.
+          fetch-depth: 0
 
       - name: Validate Docker Hub secrets
         env:
@@ -100,6 +102,18 @@ jobs:
           TAG_VERSION="${GITHUB_REF_NAME#v}"
           if [[ "$TAG_VERSION" != "$VERSION" ]]; then
             echo "ERROR: Git tag (${GITHUB_REF_NAME}) does not match pyproject.toml version (${VERSION})"
+            exit 1
+          fi
+
+          # The tag checks above only prove the name agrees with the manifest,
+          # not that the commit underneath ever passed anything. ci.yml gates
+          # main; this workflow gates tags, and a tag can be pushed from any
+          # commit on any branch. Without this, a v<VERSION> cut from a stale
+          # or unreviewed commit publishes to Docker Hub and moves 'latest'.
+          git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "ERROR: ${GITHUB_REF_NAME} points at ${GITHUB_SHA}, which is not contained in main."
+            echo "Merge the release commit into main first, then tag that commit."
             exit 1
           fi
 
@@ -205,8 +219,9 @@ jobs:
           fi
 
           # yt-dlp and yt-dlp-ejs are installed unpinned by the Dockerfile.
-          # Resolve the current release of each and hand it over as the exact
-          # '==<version>' specifier the YTDLP_* args expect.
+          # Resolve the current release of each and hand it over as the bare
+          # version the YTDLP_* args expect; the Dockerfile builds the '=='
+          # specifier itself and rejects a value that arrives with one.
           ytdlp_version="$(curl --proto '=https' --tlsv1.2 -fsSL --retry 5 --retry-delay 2 \
             https://pypi.org/pypi/yt-dlp/json | jq -r '.info.version')"
           ytdlp_ejs_version="$(curl --proto '=https' --tlsv1.2 -fsSL --retry 5 --retry-delay 2 \
@@ -230,8 +245,8 @@ jobs:
             echo "essentia_ref=${essentia_ref}"
             echo "ffmpeg_release_url=${ffmpeg_release_url}"
             echo "ffmpeg_series=${ffmpeg_series}"
-            echo "ytdlp_version===${ytdlp_version}"
-            echo "ytdlp_ejs_version===${ytdlp_ejs_version}"
+            echo "ytdlp_version=${ytdlp_version}"
+            echo "ytdlp_ejs_version=${ytdlp_ejs_version}"
             echo "deno_version=${deno_version}"
           } >> "$GITHUB_OUTPUT"
 
@@ -361,17 +376,45 @@ jobs:
           fi
 
           api_base="https://hub.docker.com/v2/namespaces/${DOCKERHUB_USERNAME}/repositories/${REPOSITORY}/tags"
-          next_url="${api_base}?page_size=100"
+          first_url="${api_base}?page_size=100"
+          next_url="$first_url"
           : > published-tags.txt
 
-          # A repository that does not exist yet answers 404. That is the very
-          # first release, not an error - it simply has no published tag that
-          # could outrank this one.
+          # This listing decides is_newest, which in turn moves 'latest' and
+          # releases the destructive tag cleanup. An empty answer therefore
+          # cannot be allowed to mean "nothing newer exists" - a 401, a 429, a
+          # 5xx or a dropped connection would then read exactly like a pristine
+          # repository and hand an old re-run permission to prune the releases
+          # that came after it. So only a 404 on the very first page is
+          # tolerated, which is the one case that genuinely has no tags: the
+          # repository does not exist yet. Everything else stops the release.
+          response_body="$(mktemp)"
+          trap 'rm -f "$response_body"' EXIT
+
           while [[ -n "$next_url" && "$next_url" != "null" ]]; do
-            response="$(curl -fsSL -H "Authorization: Bearer ${hub_token}" "$next_url" || true)"
-            [[ -n "$response" ]] || break
-            printf '%s' "$response" | jq -r '.results[].name' >> published-tags.txt
-            next_url="$(printf '%s' "$response" | jq -r '.next // empty')"
+            # No -f: the status code has to be inspected rather than collapsed
+            # into a generic failure. A transport error still aborts here,
+            # because the assignment inherits curl's exit status under set -e.
+            status_code="$(curl -sS --proto '=https' --tlsv1.2 \
+              --retry 5 --retry-delay 2 \
+              -o "$response_body" -w '%{http_code}' \
+              -H "Authorization: Bearer ${hub_token}" \
+              "$next_url")"
+
+            if [[ "$status_code" == "404" && "$next_url" == "$first_url" ]]; then
+              echo "Docker Hub has no ${DOCKERHUB_USERNAME}/${REPOSITORY} repository yet;" \
+                   "treating this as the first release." >&2
+              break
+            fi
+
+            if [[ "$status_code" != "200" ]]; then
+              echo "ERROR: Docker Hub tag listing returned HTTP ${status_code} for ${next_url}." >&2
+              echo "Refusing to decide whether ${VERSION} is the newest release on an incomplete listing." >&2
+              exit 1
+            fi
+
+            jq -r '.results[].name' < "$response_body" >> published-tags.txt
+            next_url="$(jq -r '.next // empty' < "$response_body")"
           done
 
           # Only the is_newest line goes to GITHUB_OUTPUT, which accepts
@@ -1411,7 +1454,15 @@ jobs:
     # skipped for an older re-run (see is_newest), and a skipped result must
     # not suppress the release notes for a version that really was republished
     # - only an outright cleanup failure should.
+    #
+    # !cancelled() is what makes that work: without a status function in this
+    # expression GitHub adds an implicit success() over every entry in needs,
+    # and a skipped dependency does not satisfy it - so the exact re-run this
+    # condition was written for would have skipped the release too. always()
+    # would also do it, but it would additionally publish a release out of a
+    # cancelled run.
     if: >-
+      !cancelled() &&
       needs.create-manifest.result == 'success' &&
       needs.cleanup-dockerhub-tags.result != 'failure'
     runs-on: ubuntu-latest

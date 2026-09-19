@@ -69,6 +69,15 @@ There is no per-job delete action. Jobs are removed either by
 **Settings → System → Remove all jobs**, which clears every job at once (see
 [Bulk cleanup](#bulk-cleanup) below).
 
+## Phones and tablets
+
+On touch devices up to iPad Pro 12.9" in landscape, the job list switches from a table
+to compact cards.
+
+A **Current job** card above the list keeps the download you just started visible even
+while **Show Job History** is off. It holds one job at a time, is cleared by a page
+reload, and hands the job back to the list once the screen is wide enough for the table.
+
 ## Track length
 
 `duration_seconds` is filled twice. At submit time it comes from the source's own

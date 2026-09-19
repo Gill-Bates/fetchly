@@ -5,13 +5,13 @@
 {% block body_class %} app-root--share-lost{% endblock %}
 
 {# Public share route only - drop navbar and footer: visitors are never
-   authenticated, it is a full-bleed scene, and this keeps the build version
-   off a page anonymous visitors can reach. #}
+authenticated, it is a full-bleed scene, and this keeps the build version
+off a page anonymous visitors can reach. #}
 {% block navbar %}{% endblock %}
 {% block footer %}{% endblock %}
 
 {% block main_shell %}
-<main class="lost-shell" role="main">
+<main class="lost-shell" id="main-content">
     <div class="lost-sky" aria-hidden="true">
         <div class="lost-stars lost-stars--far" data-parallax="6"></div>
         <div class="lost-stars lost-stars--mid" data-parallax="14"></div>
@@ -72,5 +72,5 @@
 {% endblock %}
 
 {% block page_scripts %}
-<script type="module" src="/static/js/share-error.js?v=20260824a"></script>
+<script type="module" src="{{ asset_url('/static/js/share-error.js') }}"></script>
 {% endblock %}

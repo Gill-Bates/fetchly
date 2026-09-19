@@ -178,7 +178,7 @@ Read-only panels plus two destructive actions.
 |---|---|
 | Version | Running fetchly version and the latest published release |
 | Components | Installed vs. upstream versions of yt-dlp, ffmpeg, deno, and friends |
-| Host resources | Storage, CPU, RAM, and uptime of the host |
+| Host resources | Storage, CPU, RAM, and uptime of the host; on phones each tile is captioned ("Disk free", "CPU", "Memory", "Uptime") |
 | Changelog | The bundled `CHANGELOG.md`, rendered |
 
 | Action | Endpoint | Rate limit |

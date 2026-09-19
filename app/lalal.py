@@ -13,6 +13,7 @@ import asyncio
 import logging
 import math
 import re
+import sqlite3
 import time
 from collections.abc import AsyncIterator, Callable
 from enum import StrEnum
@@ -46,7 +47,7 @@ class StemType(StrEnum):
     """
 
     VOCALS = "vocals"
-    INSTRUMENTAL = "drum"  # API uses 'drum' internally for instrumental
+    INSTRUMENTAL = "drum"
     DRUMS = "drums"
     BASS = "bass"
     PIANO = "piano"
@@ -215,7 +216,7 @@ def _max_result_download_bytes() -> int:
     """Return the persisted maximum Lalal result size in bytes."""
     try:
         settings = get_settings()
-    except Exception:
+    except (sqlite3.Error, OSError):
         logger.warning("Could not read Lalal download limit; falling back to default", exc_info=True)
         return _DEFAULT_LALAL_MAX_DOWNLOAD_GIB * _BYTES_PER_GIB
 
@@ -632,13 +633,11 @@ class LalalClient(_BaseLalalClient):
                 except Exception:
                     logger.debug("Progress callback failed", exc_info=True)
 
-        # 1. Upload
         emit_progress("upload", 0)
         upload_result = await self.upload_file(input_path)
         file_id = upload_result["id"]
         emit_progress("upload", 100)
 
-        # 2. Start processing
         emit_progress("processing", 0)
         task_id = await self.split(
             file_id,
@@ -651,7 +650,6 @@ class LalalClient(_BaseLalalClient):
             multivocal=multivocal,
         )
 
-        # 3. Wait for completion
         def on_processing_progress(pct: int) -> None:
             emit_progress("processing", pct)
 
@@ -661,7 +659,6 @@ class LalalClient(_BaseLalalClient):
         )
         emit_progress("processing", 100)
 
-        # 4. Download results
         results: dict[str, Path] = {}
         base_name = input_path.stem
         # Lalal.ai returns each stem in the uploaded format; a hardcoded ".mp3"

@@ -3,12 +3,13 @@
 // Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 //
 
-import { readFile, writeFile } from 'node:fs/promises';
+import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-import { chromium, devices, webkit } from 'playwright';
+import { chromium, devices, firefox, webkit } from 'playwright';
 
+import { runAxeAudit } from './lib/axe.mjs';
 import {
     collectConsoleAndNetwork,
     diffScreenshots,
@@ -17,6 +18,23 @@ import {
     login,
     sanitize,
 } from './lib/browser-utils.mjs';
+import { triageConsoleEntries } from './lib/console-severity.mjs';
+import {
+    classifyLayoutShift,
+    collectLayoutShift,
+    installLayoutShiftObserver,
+    LAYOUT_SHIFT_POOR,
+} from './lib/layout-shift.mjs';
+import {
+    getJobsSourceContractMetrics,
+    getSettingsSourceContractMetrics,
+    JOBS_SOURCE_CONTRACT_DEFAULTS,
+    JOBS_SOURCE_CONTRACT_KEYS,
+    SETTINGS_SOURCE_CONTRACT_DEFAULTS,
+    SETTINGS_SOURCE_CONTRACT_KEYS,
+    sourceContractViolations,
+} from './lib/source-contracts.mjs';
+import { buildUIHealthReport, summarizeHealthReports } from './lib/ui-health.mjs';
 
 const BASE_URL = process.env.UI_LINT_BASE_URL || 'http://127.0.0.1:8000';
 const BASE_ORIGIN = new URL(BASE_URL).origin;
@@ -26,130 +44,17 @@ const SESSION_ID = Date.now();
 const OUTPUT_DIR = process.env.UI_LINT_OUTPUT_DIR || `/tmp/fetchly-ui-lint-${SESSION_ID}`;
 const SCREENSHOT_DIR = path.join(OUTPUT_DIR, 'screenshots');
 const RESULTS_PATH = path.join(OUTPUT_DIR, 'results.json');
-const MAIN_JS_PATH = new URL('../../app/static/js/main.js', import.meta.url);
-const JOBS_JS_PATH = new URL('../../app/static/js/jobs.js', import.meta.url);
-const UI_JS_PATH = new URL('../../app/static/js/ui.js', import.meta.url);
-const SETTINGS_JS_PATH = new URL('../../app/static/js/settings.js', import.meta.url);
-const SETTINGS_TEMPLATE_PATH = new URL('../../app/templates/settings.html', import.meta.url);
-const SETTINGS_STYLE_PATH = new URL('../../app/static/style.css', import.meta.url);
 
-let jobsSourceContractMetricsPromise;
-let settingsSourceContractMetricsPromise;
-
+// The source-level contracts themselves live in lib/source-contracts.mjs so
+// they can also run as a browser-free lint step in CI. Only the per-view
+// scoping below stays here: which view is expected to render the jobs list or
+// the settings form is the runner's business.
 function viewAuditsJobsList(view) {
     return Array.isArray(view?.requiredSelectors) && view.requiredSelectors.includes('#jobsRenderRoot');
 }
 
 function viewAuditsSettings(view) {
     return Array.isArray(view?.requiredSelectors) && view.requiredSelectors.includes('#settingsForm');
-}
-
-async function getJobsSourceContractMetrics() {
-    if (!jobsSourceContractMetricsPromise) {
-        jobsSourceContractMetricsPromise = (async () => {
-            const [mainJsSource, jobsJsSource, uiJsSource] = await Promise.all([
-                readFile(MAIN_JS_PATH, 'utf8'),
-                readFile(JOBS_JS_PATH, 'utf8'),
-                readFile(UI_JS_PATH, 'utf8'),
-            ]);
-
-            const observerBoundToScroller = /new IntersectionObserver\([\s\S]*?root:\s*jobsScrollContainer[\s\S]*?observer\.observe\(jobsSentinel\)/.test(mainJsSource);
-            const localScrollFallback = /jobsScrollContainer\.addEventListener\(\s*['"]scroll['"]\s*,\s*onScroll/.test(mainJsSource);
-            const windowScrollLoadsMore = /window\.addEventListener\(\s*['"]scroll['"][\s\S]{0,400}?maybeLoadMoreJobs/.test(mainJsSource);
-
-            const storeLengthAssignments = [...jobsJsSource.matchAll(/state\.nextOffset\s*=\s*state\.jobs\.length/g)].length;
-            const initSeedsFromStoreLength = /function init\(\)\s*\{[\s\S]*?state\.nextOffset\s*=\s*state\.jobs\.length/.test(jobsJsSource);
-            const usesLegacyDomSyncHelper = /function\s+syncNextOffset\s*\(/.test(jobsJsSource)
-                || /\bsyncNextOffset\(\)/.test(jobsJsSource);
-
-            const tracksMonotonicOffset = /nextOffset:\s*0/.test(jobsJsSource)
-                && /const currentOffset = state\.nextOffset/.test(jobsJsSource)
-                && /await fetchFn\(currentOffset\)/.test(jobsJsSource)
-                && /state\.nextOffset\s*=\s*currentOffset\s*\+\s*jobs\.length/.test(jobsJsSource);
-            const usesRenderedCountAsFetchOffset = /fetchFn\(\s*(?:getRenderedJobCount\(|tbody\s*\.\s*querySelectorAll\(|document\s*\.\s*querySelectorAll\()[\s\S]*?\)/.test(jobsJsSource);
-            const hasUnexpectedStoreLengthResync = storeLengthAssignments > (initSeedsFromStoreLength ? 1 : 0);
-
-            const desktopMediaSecondarySource = jobsJsSource.match(
-                /function formatDesktopMediaSecondary\(job\)\s*\{([\s\S]*?)\n\}/,
-            )?.[1] || '';
-            const desktopMediaDetailUsesSharedText = (
-                /humanSize\(job\?\.filesize_bytes\)/.test(desktopMediaSecondarySource)
-                && /mediaDetail\.className\s*=\s*["']meta-sub job-media-detail["'];[\s\S]{0,200}?mediaDetail\.textContent\s*=\s*formatDesktopMediaSecondary\(job\)/.test(jobsJsSource)
-            );
-            const desktopStatusWithoutSizeCalls = [
-                ...jobsJsSource.matchAll(/renderJobStatus\(job,\s*\{\s*showSize:\s*false\s*\}\)/g),
-            ].length;
-            const mobileDownloadActionSource = uiJsSource.match(
-                /function createMobileDownloadAction\(job\)\s*\{([\s\S]*?)\n\}/,
-            )?.[1] || '';
-            const mobileSharesDesktopDownloadMenu = (
-                /createDownloadOptionsMenu\(job,\s*downloadBtn\.href\)/.test(mobileDownloadActionSource)
-                && /function createDownloadOptionsMenu\(job,\s*downloadHref\)[\s\S]*?["']share["'][\s\S]*?action:\s*["']share-job["']/.test(uiJsSource)
-                && /return createMobileDownloadAction\(action\.job\)/.test(uiJsSource)
-            );
-
-            return {
-                jobsInfiniteScrollNotObserverBased: !(observerBoundToScroller && localScrollFallback) || windowScrollLoadsMore,
-                jobsPagingOffsetContractBroken: !tracksMonotonicOffset || usesRenderedCountAsFetchOffset || usesLegacyDomSyncHelper || hasUnexpectedStoreLengthResync,
-                jobsDesktopFileSizePlacementBroken: !desktopMediaDetailUsesSharedText
-                    || desktopStatusWithoutSizeCalls < 2,
-                jobsMobileShareActionMissing: !mobileSharesDesktopDownloadMenu,
-            };
-        })();
-    }
-
-    return jobsSourceContractMetricsPromise;
-}
-
-async function getSettingsSourceContractMetrics() {
-    if (!settingsSourceContractMetricsPromise) {
-        settingsSourceContractMetricsPromise = (async () => {
-            const [settingsJsSource, settingsTemplateSource, settingsStyleSource] = await Promise.all([
-                readFile(SETTINGS_JS_PATH, 'utf8'),
-                readFile(SETTINGS_TEMPLATE_PATH, 'utf8'),
-                readFile(SETTINGS_STYLE_PATH, 'utf8'),
-            ]);
-
-            const validationUsesToast = /showToast\(\s*validation\.error\s*,\s*["']danger["']\s*\)/.test(settingsJsSource);
-            const autosaveSuccessToast = /showToast\(\s*payload\.message\s*\|\|\s*["']Settings updated["']\s*,\s*["']success["']\s*\)/.test(settingsJsSource);
-            const jsUsesInlineSaveStatus = /\b(?:AUTO_SAVE_STATE|setAutoSaveState|autoSaveIndicator|settingsSaveBtn|settingsAlert)\b/.test(settingsJsSource);
-            const templateHasInlineSaveStatus = /(?:id=["'](?:autoSaveIndicator|settingsSaveBtn|settingsAlert)["']|class=["'][^"']*settings-status-bar)/.test(settingsTemplateSource);
-
-            const hints = [...settingsTemplateSource.matchAll(
-                /<(small|p)\b[^>]*\bclass=["'][^"']*\bsetting-hint\b[^"']*["'][^>]*>([\s\S]*?)<\/\1>/g,
-            )];
-            const hintContractBroken = hints.length === 0 || hints.some((hint) => {
-                const openingTag = hint[0].slice(0, hint[0].indexOf('>') + 1);
-                const content = hint[2];
-                return !openingTag.includes('setting-hint--with-icon')
-                    || !/^\s*<span\b[^>]*\bclass=["'][^"']*\bmaterial-symbols-outlined\b[^"']*\bsetting-hint-icon\b[^"']*["'][^>]*>\s*info\s*<\/span>/.test(content);
-            });
-            const hintStyleContractBroken = !(
-                /--text-hint\s*:/.test(settingsStyleSource)
-                && /\.app-root--settings\s+\.setting-hint\s*\{[\s\S]*?color:\s*var\(--text-hint\)/.test(settingsStyleSource)
-                && /\.app-root--settings\s+\.setting-hint--with-icon\s*\{[\s\S]*?display:\s*inline-flex/.test(settingsStyleSource)
-            );
-            const settingsStyleRules = settingsStyleSource.replace(/\/\*[\s\S]*?\*\//g, '');
-            const hintMarginRules = [...settingsStyleRules.matchAll(/([^{}]+)\{([^{}]*)\}/g)].filter(
-                ([, selector, declarations]) => /(^|[\s>+~,])\.setting-hint(?![-\w])/.test(selector)
-                    && /margin-top\s*:/.test(declarations),
-            );
-            const settingsHintSpacingContractBroken = hintMarginRules.length !== 1
-                || !/\.app-root--settings\s+\.setting-hint\s*$/.test(hintMarginRules[0]?.[1] || '')
-                || !/margin-top\s*:\s*var\(--space-1\)/.test(hintMarginRules[0]?.[2] || '');
-
-            return {
-                settingsSaveToastContractBroken: !validationUsesToast
-                    || autosaveSuccessToast
-                    || jsUsesInlineSaveStatus
-                    || templateHasInlineSaveStatus,
-                settingsHintContractBroken: hintContractBroken || hintStyleContractBroken,
-                settingsHintSpacingContractBroken,
-            };
-        })();
-    }
-
-    return settingsSourceContractMetricsPromise;
 }
 
 function envFloat(name, defaultValue) {
@@ -183,6 +88,72 @@ const MOBILE_LAYOUT_STABLE_FRAMES = envInt('UI_LINT_MOBILE_LAYOUT_STABLE_FRAMES'
 const DESKTOP_LAYOUT_STABLE_FRAMES = envInt('UI_LINT_DESKTOP_LAYOUT_STABLE_FRAMES', 2);
 const MOBILE_LAYOUT_MAX_FRAMES = envInt('UI_LINT_MOBILE_LAYOUT_MAX_FRAMES', 36);
 const DESKTOP_LAYOUT_MAX_FRAMES = envInt('UI_LINT_DESKTOP_LAYOUT_MAX_FRAMES', 16);
+
+/**
+ * Reads a comma-separated allowlist, falling back to the full set. Unknown
+ * names fail loudly: a typo in UI_LINT_BROWSERS would otherwise silently
+ * narrow the audit to nothing.
+ * @param {string} name
+ * @param {string[]} allowed
+ * @returns {string[]}
+ */
+function envEngineList(name, allowed) {
+    const raw = process.env[name];
+    if (raw === undefined || raw.trim() === '') return [...allowed];
+
+    const selected = raw.split(',').map((entry) => entry.trim().toLowerCase()).filter(Boolean);
+    const unknown = selected.filter((entry) => !allowed.includes(entry));
+    if (unknown.length) {
+        throw new Error(`${name} names unknown engines: ${unknown.join(', ')}. Known: ${allowed.join(', ')}`);
+    }
+    if (!selected.length) {
+        throw new Error(`${name} selected no engines`);
+    }
+    return selected;
+}
+
+/** Playwright launchers, keyed by the engine name a device profile declares. */
+const ENGINE_LAUNCHERS = Object.freeze({ chromium, webkit, firefox });
+
+const SELECTED_ENGINES = envEngineList('UI_LINT_BROWSERS', Object.keys(ENGINE_LAUNCHERS));
+// Naming engines is a request for their coverage; the all-engines default is
+// only "whatever is installed", so a missing browser stays a skip there.
+const ENGINES_EXPLICIT = Boolean(process.env.UI_LINT_BROWSERS?.trim());
+// Engines are separate browser processes, so they overlap without contending
+// for the same page pool; devices within one engine share it and need their
+// own limit. UI_LINT_CONCURRENCY is kept as the default for the device limit
+// so existing recipes (setup.conf) keep their meaning.
+// Note the product: this many engines each run that many pages, so the total
+// load on the app under audit is BROWSER * DEVICE, not DEVICE. Two engines is
+// the default rather than "all of them" for exactly that reason - the audit
+// measures layout, and an app being hit by six concurrent page loads produces
+// timing flake that reads as a layout defect.
+const BROWSER_CONCURRENCY = Math.max(1, envInt('UI_LINT_BROWSER_CONCURRENCY', Math.min(2, SELECTED_ENGINES.length)));
+const DEVICE_CONCURRENCY = Math.max(1, envInt('UI_LINT_DEVICE_CONCURRENCY', envInt('UI_LINT_CONCURRENCY', 2)));
+const RUN_AXE = envInt('UI_LINT_AXE', 1) !== 0;
+// Which axe impact level becomes a hard failure. 'critical' matches how the
+// runner already treats its own accessibility checks - icon buttons without an
+// accessible name and unlabeled inputs are failures, not warnings - so the
+// imported ruleset is held to the same bar. Set to 'none' to land the ruleset
+// report-only while the existing violations are worked off.
+const AXE_FAIL_ON = (() => {
+    const raw = (process.env.UI_LINT_AXE_FAIL_ON || 'critical').trim().toLowerCase();
+    if (!['critical', 'serious', 'none'].includes(raw)) {
+        throw new Error(`UI_LINT_AXE_FAIL_ON must be one of critical, serious, none - got ${raw}`);
+    }
+    return raw;
+})();
+// Report-only by default. The score is new and uncalibrated against this
+// codebase; turning it into a gate before the baseline is known would only
+// teach everyone to set it back to 0. Raise it once the run is clean.
+const HEALTH_MIN = envInt('UI_LINT_HEALTH_MIN', 0);
+// The hard block is the score's categorical half: a critical UX issue or a
+// blocking axe violation, regardless of how good the rest of the view is. It
+// is reported either way; this turns it into a failure. Off by default for the
+// same reason as UI_LINT_HEALTH_MIN - it currently fires on findings the
+// runner has always treated as warnings (undersized touch targets), and
+// promoting those is a decision, not a side effect of adding the score.
+const HEALTH_GATE = envInt('UI_LINT_HEALTH_GATE', 0) !== 0;
 const PLATFORM_BADGE_WIDTH_PX = 28;
 const PLATFORM_BADGE_HEIGHT_PX = 24;
 const PLATFORM_BADGE_ICON_SIZE_PX = 16;
@@ -312,15 +283,22 @@ const VIEW_DEFS = [
         device: 'tablet-landscape',
         requiredSelectors: ['#settingsForm', '#lalalAuthBtn'],
     },
-    // iPad Pro 11 landscape (1194px): past the compact breakpoint, so the
-    // desktop table renders - on a touch screen.
+    // iPad Pro 11 landscape (1194px): past the 1024px width breakpoint but a
+    // touch screen, so `(max-width: 1366px) and (pointer: coarse)` renders the
+    // compact feed here just as the narrower iPads do.
     {
         name: 'tablet-wide-dashboard',
         url: '/',
         readySelector: '#submitForm',
         auth: true,
         device: 'tablet-wide',
-        requiredSelectors: ['.stats-row', '#submitForm', '#jobsRenderRoot', '#jobsTable'],
+        requiredSelectors: [
+            '.stats-row',
+            '#submitForm',
+            '#jobsRenderRoot',
+            '#jobsMobileList',
+            '#showJobHistoryToggle',
+        ],
     },
     {
         name: 'tablet-wide-settings',
@@ -328,6 +306,33 @@ const VIEW_DEFS = [
         readySelector: '#settingsForm',
         auth: true,
         device: 'tablet-wide',
+        requiredSelectors: ['#settingsForm', '#lalalAuthBtn'],
+    },
+    // Gecko at the desktop viewport. Same three routes as `desktop`, so any
+    // finding that appears here and not there is an engine difference rather
+    // than a layout one.
+    {
+        name: 'firefox-login',
+        url: '/login',
+        readySelector: '#login-form',
+        auth: false,
+        device: 'desktop-firefox',
+        requiredSelectors: ['#username', '#password', '#submit-btn'],
+    },
+    {
+        name: 'firefox-dashboard',
+        url: '/',
+        readySelector: '#submitForm',
+        auth: true,
+        device: 'desktop-firefox',
+        requiredSelectors: ['.stats-row', '#submitForm', '#jobsRenderRoot', '#jobsTable'],
+    },
+    {
+        name: 'firefox-settings',
+        url: '/settings',
+        readySelector: '#settingsForm',
+        auth: true,
+        device: 'desktop-firefox',
         requiredSelectors: ['#settingsForm', '#lalalAuthBtn'],
     },
 ];
@@ -357,21 +362,17 @@ function loginViewFor(device) {
 // Views whose name is the desktop variant plus a mobile counterpart. Audits
 // gated on a single view name must accept both, otherwise the WebKit run
 // silently loses coverage the desktop run has.
-const LOGIN_VIEW_NAMES = ['login', 'mobile-login', 'tablet-login'];
-const DASHBOARD_VIEW_NAMES = [
-    'dashboard',
-    'mobile-dashboard',
-    'tablet-dashboard',
-    'tablet-landscape-dashboard',
-    'tablet-wide-dashboard',
-];
-const SETTINGS_VIEW_NAMES = [
-    'settings',
-    'mobile-settings',
-    'tablet-settings',
-    'tablet-landscape-settings',
-    'tablet-wide-settings',
-];
+// Derived from VIEW_DEFS rather than restated: these lists gate whole audits
+// (the settings tab-gap check, the platform-badge geometry check), and a view
+// added to VIEW_DEFS but forgotten in a hand-written list is skipped silently
+// - it still reports PASS, just without ever having run the audit.
+const viewNamesForUrl = (url) => VIEW_DEFS.filter((view) => view.url === url).map((view) => view.name);
+
+const LOGIN_VIEW_NAMES = viewNamesForUrl('/login');
+const DASHBOARD_VIEW_NAMES = viewNamesForUrl('/');
+const SETTINGS_VIEW_NAMES = viewNamesForUrl('/settings');
+// The job-detail views are built at runtime from a discovered job id, so they
+// are not in VIEW_DEFS and stay listed explicitly.
 const JOB_DETAIL_VIEW_NAMES = ['job-detail', 'mobile-job-detail', 'tablet-job-detail'];
 
 /**
@@ -391,17 +392,19 @@ const isSameOrigin = (urlStr) => {
 /**
  * Device profiles the audit runs against.
  *
- * Form factor and touch are deliberately separate axes. A tablet is touch but
- * renders the desktop table, so a single isMobile flag cannot describe it:
- * gating touch-target size on "is this the phone layout" would hand the iPad
- * the 32px desktop minimum, and gating the phone DOM contracts on "does this
- * have touch" would demand `#jobsMobileList` on a viewport that never renders
- * it. `formFactor` answers the layout question, `hasTouch` the input one.
+ * Form factor and touch are deliberately separate axes. `formFactor` answers
+ * the layout question (which jobs surface renders, which pixel contracts
+ * apply), `hasTouch` the input one (32px vs 44px hit areas, momentum scroll,
+ * the iOS viewport audits). They are not redundant: a narrow non-touch
+ * viewport would still render the compact layout, and gating hit-area size on
+ * layout alone would hand a touch iPad the 32px desktop minimum.
  *
  * The viewport widths matter: app/static/style.css carries a tablet band -
  * `(min-width: 768px) and (max-width: 1024px)`, `(max-width: 1024px)`,
- * `(min-width: 576.02px) and (max-width: 1024px)` - that neither the 390px
- * phone nor the 1440px desktop context ever renders.
+ * `(min-width: 576.02px) and (max-width: 1024px)`, plus the coarse-pointer
+ * extension `(max-width: 1366px) and (pointer: coarse)` that pulls every touch
+ * iPad (both orientations, up to the 12.9" Pro) onto the compact jobs feed -
+ * that neither the 390px phone nor the 1440px desktop context ever renders.
  */
 const DEVICE_PROFILES = {
     desktop: {
@@ -431,18 +434,33 @@ const DEVICE_PROFILES = {
     'tablet-wide': {
         engine: 'webkit',
         formFactor: 'tablet',
-        // 1194x834: past the breakpoint, so the desktop table renders on a
-        // touch screen. This is the case a single isMobile flag cannot express
-        // - desktop layout, finger-sized hit areas.
+        // 1194x834: past the 1024px width breakpoint but inside the
+        // coarse-pointer extension `(max-width: 1366px) and (pointer: coarse)`,
+        // so the compact jobs feed renders on this touch screen. The widest
+        // tablet profile - covers the wide-band CSS rules and the
+        // shell-uses-full-width check the narrower iPads never exercise.
         playwrightDevice: 'iPad Pro 11 landscape',
+    },
+    'desktop-firefox': {
+        engine: 'firefox',
+        formFactor: 'desktop',
+        // Same viewport as `desktop` on purpose: this profile exists to vary
+        // the engine, not the layout. Gecko resolves flexbox min-size,
+        // scrollbar gutters and subgrid differently from Blink, and those
+        // differences only show when everything else is held constant.
+        playwrightDevice: null,
+        viewport: { width: 1440, height: 1200 },
     },
 };
 
-// The breakpoint app/static/style.css uses to swap the desktop jobs table for
-// the mobile feed: `@media (max-width: 1024px)`. The audit derives "compact
-// layout" from the viewport rather than from the device name, so a new profile
-// lands on the right side of the contract automatically.
+// The breakpoints app/static/style.css uses to swap the desktop jobs table for
+// the mobile feed: `@media (max-width: 1024px)` for any pointer, plus
+// `(max-width: 1366px) and (pointer: coarse)` so every touch iPad - including a
+// 12.9" Pro in landscape - lands on the feed. The audit derives "compact
+// layout" from the viewport and touch axis rather than the device name, so a
+// new profile lands on the right side of the contract automatically.
 const COMPACT_LAYOUT_MAX_WIDTH = 1024;
+const COMPACT_LAYOUT_TOUCH_MAX_WIDTH = 1366;
 
 /**
  * True when the profile's viewport renders the compact (feed) layout.
@@ -451,7 +469,9 @@ const COMPACT_LAYOUT_MAX_WIDTH = 1024;
  */
 function profileIsCompactLayout(device) {
     const { viewport } = createContextOptions(device);
-    return Number(viewport?.width) <= COMPACT_LAYOUT_MAX_WIDTH;
+    const width = Number(viewport?.width);
+    return width <= COMPACT_LAYOUT_MAX_WIDTH
+        || (width <= COMPACT_LAYOUT_TOUCH_MAX_WIDTH && profileHasTouch(device));
 }
 
 /**
@@ -511,9 +531,23 @@ function createContextOptions(device) {
  */
 function formatResultSummary(result) {
     const parts = [];
+    // Health first: it is the one number that says how bad the view is, and
+    // the counters below only explain it.
+    if (result.health) parts.push(`health=${result.health.score}/${result.health.severity}`);
     if (result.failures.length) parts.push(`failures=${result.failures.length}`);
     if (result.warnings.length) parts.push(`warnings=${result.warnings.length}`);
     const metrics = result.metrics || {};
+    // A view that never ran says so once, on the status line; repeating it per
+    // audit would only pad the summary.
+    if (!metrics.skipped) {
+        if (metrics.axeAvailable === false) parts.push('axe=skipped');
+        else if (metrics.axeCritical || metrics.axeSerious) {
+            parts.push(`axe=${metrics.axeCritical}c/${metrics.axeSerious}s`);
+        }
+    }
+    if (metrics.layoutShiftSupported && metrics.layoutShiftValue > 0) {
+        parts.push(`cls=${metrics.layoutShiftValue}`);
+    }
     if (metrics.duplicateIds) parts.push(`duplicateIds=${metrics.duplicateIds}`);
     if (metrics.unlabeledControls) parts.push(`unlabeledControls=${metrics.unlabeledControls}`);
     if (metrics.contrastIssues) parts.push(`contrastIssues=${metrics.contrastIssues}`);
@@ -553,7 +587,9 @@ function formatResultSummary(result) {
     if (metrics.undefinedCustomProperties) parts.push(`undefinedVars=${metrics.undefinedCustomProperties}`);
     if (metrics.backdropFilterCount > 4) parts.push(`backdropFilters=${metrics.backdropFilterCount}`);
     if (metrics.stickyWithoutBackground) parts.push(`stickyNoBackground=${metrics.stickyWithoutBackground}`);
-    if (!metrics.hasFocusVisibleRules) parts.push('noFocusVisible=true');
+    // Strictly false: results that never ran this check (the invalid-login
+    // probe) carry no such key, and absence is not a missing :focus-visible rule.
+    if (metrics.hasFocusVisibleRules === false) parts.push('noFocusVisible=true');
     if (metrics.noVisibleFocusIndicators) parts.push(`noFocusRing=${metrics.noVisibleFocusIndicators}`);
     if (metrics.unguardedAnimations) parts.push(`unguardedAnimations=${metrics.unguardedAnimations}`);
     if (metrics.clippedDropdowns) parts.push(`clippedDropdowns=${metrics.clippedDropdowns}`);
@@ -604,16 +640,15 @@ function formatResultSummary(result) {
     if (metrics.stickyFooterDetached) parts.push('stickyFooterDetached=true');
     if (metrics.stickyTableHeaderBroken) parts.push('stickyTableHeaderBroken=true');
     if (metrics.jobsSentinelOutsideScrollContainer) parts.push('jobsSentinelOutsideScroller=true');
-    if (metrics.jobsInfiniteScrollNotObserverBased) parts.push('jobsInfiniteScrollNotObserverBased=true');
-    if (metrics.jobsPagingOffsetContractBroken) parts.push('jobsPagingOffsetContractBroken=true');
-    if (metrics.jobsDesktopFileSizePlacementBroken) parts.push('jobsDesktopFileSizePlacementBroken=true');
-    if (metrics.jobsMobileShareActionMissing) parts.push('jobsMobileShareActionMissing=true');
+    for (const key of JOBS_SOURCE_CONTRACT_KEYS) {
+        if (metrics[key]) parts.push(`${key}=true`);
+    }
     if (metrics.trimWaveformMissingStyle) parts.push('trimWaveformMissingStyle=true');
     if (metrics.videoPreviewContractBroken) parts.push('videoPreviewContractBroken=true');
     if (metrics.settingsFieldStackContractBroken) parts.push('settingsFieldStackContractBroken=true');
-    if (metrics.settingsSaveToastContractBroken) parts.push('settingsSaveToastContractBroken=true');
-    if (metrics.settingsHintContractBroken) parts.push('settingsHintContractBroken=true');
-    if (metrics.settingsHintSpacingContractBroken) parts.push('settingsHintSpacingContractBroken=true');
+    for (const key of SETTINGS_SOURCE_CONTRACT_KEYS) {
+        if (metrics[key]) parts.push(`${key}=true`);
+    }
     if (metrics.lalalMobileActionLayoutBroken) parts.push('lalalMobileActionLayoutBroken=true');
     if (metrics.trimDefaultSelectionInvalid) parts.push('trimDefaultSelection=invalid');
     if (metrics.uiCardChildExpands) parts.push(`uiCardChildExpands=${metrics.uiCardChildExpands}`);
@@ -627,16 +662,19 @@ function formatResultSummary(result) {
     if (metrics.mobileActionSurfaceContractBroken) parts.push('mobileActionSurfaceContractBroken=true');
     if (metrics.mobileJobsPageScrollTrap) parts.push('mobileJobsPageScrollTrap=true');
     if (metrics.emptyStateHoverHighlight) parts.push('emptyStateHoverHighlight=true');
-    if (metrics.flexMinHeightOverflowHidden?.length > 0) {
-        parts.push(`flexMinHeightOverflowHidden=${metrics.flexMinHeightOverflowHidden.length}`);
+    if (metrics.flexMinHeightOverflowHidden > 0) {
+        parts.push(`flexMinHeightOverflowHidden=${metrics.flexMinHeightOverflowHidden}`);
     }
     if (metrics.settingsTabTitleGapInconsistent) parts.push('settingsTabTitleGap=inconsistent');
+    if (metrics.settingsTabTitleGapMissing?.length) {
+        parts.push(`settingsTabTitleGapMissing=${metrics.settingsTabTitleGapMissing.join('|')}`);
+    }
     // iOS viewport hardening (2026-09-03)
-    if (metrics.iosInputZoomTargets?.length) parts.push(`iosInputZoom=${metrics.iosInputZoomTargets.length}`);
-    if (metrics.viewportUnitTraps?.length) parts.push(`vhWithoutDvh=${metrics.viewportUnitTraps.length}`);
+    if (metrics.iosInputZoomTargets > 0) parts.push(`iosInputZoom=${metrics.iosInputZoomTargets}`);
+    if (metrics.viewportUnitTraps > 0) parts.push(`vhWithoutDvh=${metrics.viewportUnitTraps}`);
     if (metrics.safeAreaInsetsDisabled) parts.push('safeAreaInsetsDisabled=true');
-    if (metrics.bottomPinnedWithoutSafeArea?.length) {
-        parts.push(`bottomPinnedNoSafeArea=${metrics.bottomPinnedWithoutSafeArea.length}`);
+    if (metrics.bottomPinnedWithoutSafeArea > 0) {
+        parts.push(`bottomPinnedNoSafeArea=${metrics.bottomPinnedWithoutSafeArea}`);
     }
     return parts.join(' ');
 }
@@ -739,16 +777,11 @@ const BASE_METRICS = Object.freeze({
     stickyFooterDetached: false,
     stickyTableHeaderBroken: false,
     jobsSentinelOutsideScrollContainer: false,
-    jobsInfiniteScrollNotObserverBased: false,
-    jobsPagingOffsetContractBroken: false,
-    jobsDesktopFileSizePlacementBroken: false,
-    jobsMobileShareActionMissing: false,
+    ...JOBS_SOURCE_CONTRACT_DEFAULTS,
     trimWaveformMissingStyle: false,
     videoPreviewContractBroken: false,
     settingsFieldStackContractBroken: false,
-    settingsSaveToastContractBroken: false,
-    settingsHintContractBroken: false,
-    settingsHintSpacingContractBroken: false,
+    ...SETTINGS_SOURCE_CONTRACT_DEFAULTS,
     lalalMobileActionLayoutBroken: false,
     trimDefaultSelectionInvalid: false,
     uiCardChildExpands: 0,
@@ -765,26 +798,49 @@ const BASE_METRICS = Object.freeze({
     emptyStateHoverHighlight: false,
     settingsTabTitleGapInconsistent: false,
     settingsTabTitleGaps: {},
+    settingsTabTitleGapMissing: [],
     // iOS viewport hardening (2026-09-03)
     iosInputZoomTargets: 0,
     viewportUnitTraps: 0,
     safeAreaInsetsDisabled: false,
     bottomPinnedWithoutSafeArea: 0,
+    // A skipped or crashed view never ran the accessibility pass, so
+    // axeAvailable is false rather than "zero violations found".
+    axeAvailable: false,
+    axeCritical: 0,
+    axeSerious: 0,
+    axeModerate: 0,
+    axeMinor: 0,
+    axeIncomplete: 0,
+    layoutShiftSupported: false,
+    layoutShiftValue: 0,
+    layoutShiftCount: 0,
+    consoleSeverityScore: 0,
+    consoleSuppressed: 0,
+    uiHealthScore: null,
 });
 
 /**
  * Build a placeholder result for a view that was intentionally skipped.
+ *
+ * The reason goes to `notes`, not `warnings`. Every reason this is reached with
+ * - login disabled, an engine that would not launch, no job to open - describes
+ * a check that did not run, not a defect that was found. Counting those as
+ * warnings made the total read as "29 things wrong with the UI" when seven of
+ * them were "this was not measured", and it restated what the SKIP status on the
+ * same line already says. `totals.skipped` keeps the lost coverage visible.
  * @param {string} name
  * @param {string} url
- * @param {string} warning  Human-readable reason for skipping.
+ * @param {string} note  Human-readable reason the view was not audited.
  * @returns {object}
  */
-function buildSkippedResult(name, url, warning) {
+function buildSkippedResult(name, url, note) {
     return {
         name,
         url,
         failures: [],
-        warnings: [warning],
+        warnings: [],
+        notes: [note],
         metrics: { ...BASE_METRICS, skipped: true },
     };
 }
@@ -800,6 +856,34 @@ async function detectLoginRequired() {
     } catch {
         return true;
     }
+}
+
+/** Path of the Server-Sent Events stream, the one deliberately endless request. */
+const EVENT_STREAM_PATH = '/events';
+
+/**
+ * Whether a request failure is just the SSE stream being closed.
+ *
+ * Kept as its own predicate so the two halves stay separable: the endpoint has
+ * to be the event stream *and* the reason has to be a cancellation. Each engine
+ * phrases the cancellation differently, so the wording is matched rather than
+ * enumerated per browser.
+ * @param {{url?: string, error?: string}} entry
+ * @returns {boolean}
+ */
+function isEventStreamCancellation(entry) {
+    const url = entry?.url || '';
+    if (!isSameOrigin(url)) return false;
+
+    let path;
+    try {
+        path = new URL(url).pathname;
+    } catch {
+        return false;
+    }
+    if (path !== EVENT_STREAM_PATH) return false;
+
+    return /aborted|cancell?ed|NS_BINDING_ABORTED|ERR_ABORTED/i.test(entry?.error || '');
 }
 
 /**
@@ -819,6 +903,20 @@ function splitNetworkFindings(traffic, options = {}) {
         // Playwright cancels transient media/worker blob requests during
         // full-page capture. They are not application network failures.
         if (entry.url.startsWith('blob:') && /aborted/i.test(entry.error || '')) {
+            continue;
+        }
+        // The SSE stream is open for as long as the view lives, so it does not
+        // finish - it gets cancelled, on page close, on navigation, or whenever
+        // EventSource reconnects. Each engine words that differently
+        // (net::ERR_ABORTED, "Load request cancelled", NS_BINDING_ABORTED) and
+        // all of them mean the same thing: the stream ended. Counting it as a
+        // same-origin failure made whether the dashboards passed depend on where
+        // the teardown happened to land relative to the traffic window.
+        //
+        // Scoped to cancellation on purpose: a refused connection or a 5xx on
+        // /events is still reported, because that is the stream genuinely
+        // failing rather than closing.
+        if (isEventStreamCancellation(entry)) {
             continue;
         }
         const bucket = isSameOrigin(entry.url) ? sameOriginFailures : externalWarnings;
@@ -896,6 +994,80 @@ function applyMetricRules(metrics, failures, warnings) {
     }
     if (metrics.bottomPinnedWithoutSafeArea?.length) {
         warnings.push(`elements pinned to the bottom edge without safe-area-inset-bottom: ${metrics.bottomPinnedWithoutSafeArea.length}`);
+    }
+}
+
+/**
+ * Formats one axe impact bucket as a single finding line, naming the rules
+ * rather than only counting them so the report is actionable without opening
+ * results.json.
+ * @param {string} impact
+ * @param {object[]} violations
+ * @returns {string}
+ */
+function formatAxeBucket(impact, violations) {
+    const rules = violations
+        .map((violation) => `${violation.id}(${violation.nodeCount})`)
+        .slice(0, 6)
+        .join(', ');
+    const more = violations.length > 6 ? `, +${violations.length - 6} more` : '';
+    return `axe ${impact}: ${rules}${more}`;
+}
+
+/**
+ * Routes axe violations into failures or warnings per UI_LINT_AXE_FAIL_ON.
+ *
+ * An audit that did not run is a warning naming the reason, never silence: a
+ * missing package would otherwise read exactly like a clean accessibility
+ * pass.
+ * @param {object} axe
+ * @param {string[]} failures
+ * @param {string[]} warnings
+ */
+function applyAxeRules(axe, failures, warnings) {
+    if (!axe.available) {
+        warnings.push(`accessibility audit did not run: ${axe.error || 'unknown reason'}`);
+        return;
+    }
+
+    const failing = AXE_FAIL_ON === 'none' ? [] : ['critical', ...(AXE_FAIL_ON === 'serious' ? ['serious'] : [])];
+
+    for (const impact of ['critical', 'serious', 'moderate', 'minor']) {
+        const violations = axe[impact] || [];
+        if (!violations.length) continue;
+        const line = formatAxeBucket(impact, violations);
+        if (failing.includes(impact)) {
+            failures.push(line);
+        } else {
+            warnings.push(line);
+        }
+    }
+
+    // Only the undecided checks nobody has looked at yet. The reviewed ones are
+    // recorded in REVIEWED_INCOMPLETE_REASONS with the reason they are accepted;
+    // repeating them on every view would bury a genuinely new one. The metric
+    // still carries the full incomplete count.
+    if (axe.incompleteUnreviewed) {
+        const detail = (axe.incompleteDetails || [])
+            .map((entry) => {
+                // Name the element, not just the rule: the reason alone does not
+                // say where to look.
+                const where = (entry.nodes || [])
+                    .map((node) => {
+                        const target = Array.isArray(node.target) ? node.target.join(' ') : '';
+                        return `${target || '?'} [${node.messageKeys.join(', ')}]`;
+                    })
+                    .join(', ');
+                const open = entry.nodes?.length ? ` -> ${where}` : '';
+                return (entry.messageKeys.length
+                    ? `${entry.id} (${entry.messageKeys.join(', ')})`
+                    : entry.id) + open;
+            })
+            .join('; ');
+        warnings.push(
+            `axe could not decide ${axe.incompleteUnreviewed} checks (needs manual review)`
+            + (detail ? `: ${detail}` : ''),
+        );
     }
 }
 
@@ -1077,6 +1249,24 @@ async function collectMetrics(page, view) {
             sheet.ownerNode?.dataset?.uiLintInjected === 'true'
         );
 
+        // WaveSurfer 7 renders the regions plugin inside a shadow root, so a
+        // light-DOM query for `.wavesurfer-region` finds nothing however many
+        // regions exist. This check reported the default selection as missing
+        // on every dashboard view for exactly that reason - the app had
+        // created it and #trimInfo said so. Pierce the shadow roots instead.
+        const countTrimRegions = () => {
+            const wave = document.querySelector('#trimWave');
+            if (!wave) return 0;
+
+            let total = wave.querySelectorAll('[data-id], .wavesurfer-region').length;
+            for (const host of wave.querySelectorAll('*')) {
+                const root = host.shadowRoot;
+                if (!root) continue;
+                total += root.querySelectorAll('[part~="region"], [part*="region"], .wavesurfer-region').length;
+            }
+            return total;
+        };
+
         const accessibleName = (el) => {
             const ariaLabel = el.getAttribute('aria-label');
             if (ariaLabel && ariaLabel.trim()) return ariaLabel.trim();
@@ -1148,17 +1338,53 @@ async function collectMetrics(page, view) {
             })
             .filter((entry) => entry.width < touchTargetMin || entry.height < touchTargetMin);
 
+        // Reads a computed color into 0-255 channels plus alpha.
+        //
+        // Three syntaxes have to be handled, because getComputedStyle does not
+        // normalise them to one form:
+        //
+        //   rgb(15, 23, 42) / rgba(15, 23, 42, 0.5)   legacy, comma-separated
+        //   rgb(15 23 42 / 0.5)                        modern, slash-separated
+        //   color(srgb 0.0588 0.0902 0.1647 / 0.644)   what color-mix() computes to
+        //
+        // The last one is not an edge case here: style.css uses color-mix() for
+        // 41 backgrounds, and the navbar is one of them. Returning null for it
+        // made getEffectiveBackground drop that layer from the composite and
+        // silently fall back to the dark base colour, so every contrast check
+        // downstream was measuring against a guess rather than the real
+        // surface. Channels are 0-1 fractions in that syntax and are scaled up.
         const parseColor = (value) => {
-            if (!value || value === 'transparent') return null;
-            const match = value.match(/rgba?\(([^)]+)\)/i);
-            if (!match) return null;
-            const parts = match[1].split(',').map((p) => p.trim());
-            const r = Number(parts[0]);
-            const g = Number(parts[1]);
-            const b = Number(parts[2]);
-            const a = parts[3] === undefined ? 1 : Number(parts[3]);
-            if ([r, g, b, a].some((n) => Number.isNaN(n))) return null;
-            return { r, g, b, a };
+            if (!value || value === 'transparent' || value === 'none') return null;
+
+            const numbers = (raw) => raw
+                .split(/[,/\s]+/)
+                .map((part) => part.trim())
+                .filter(Boolean);
+
+            const colorFn = value.match(/color\(\s*srgb\s+([^)]+)\)/i);
+            if (colorFn) {
+                const parts = numbers(colorFn[1]).map(Number);
+                if (parts.length < 3 || parts.slice(0, 3).some((n) => Number.isNaN(n))) return null;
+                const a = parts[3] === undefined ? 1 : parts[3];
+                if (Number.isNaN(a)) return null;
+                return {
+                    r: parts[0] * 255,
+                    g: parts[1] * 255,
+                    b: parts[2] * 255,
+                    a,
+                };
+            }
+
+            const rgbFn = value.match(/rgba?\(([^)]+)\)/i);
+            if (rgbFn) {
+                const parts = numbers(rgbFn[1]).map(Number);
+                if (parts.length < 3 || parts.slice(0, 3).some((n) => Number.isNaN(n))) return null;
+                const a = parts[3] === undefined ? 1 : parts[3];
+                if (Number.isNaN(a)) return null;
+                return { r: parts[0], g: parts[1], b: parts[2], a };
+            }
+
+            return null;
         };
         const relativeLuminance = ({ r, g, b }) => {
             const srgb = [r, g, b].map((v) => {
@@ -1496,9 +1722,26 @@ async function collectMetrics(page, view) {
             }
         }
 
+        // An element reaching past the viewport is only a defect when nothing
+        // clips it. Inside a horizontally scrolling container - the settings
+        // tab strip is one, `overflow-x: auto; flex-wrap: nowrap` - the tabs
+        // beyond the fold are the feature, and the container itself is what
+        // has to stay inside the viewport. Checking that instead of the child
+        // keeps the finding pointed at real page-level overflow.
+        const isClippedByScroller = (el) => {
+            for (let node = el.parentElement; node && node !== document.body; node = node.parentElement) {
+                const overflowX = window.getComputedStyle(node).overflowX;
+                if (overflowX !== 'auto' && overflowX !== 'scroll') continue;
+                const rect = node.getBoundingClientRect();
+                return rect.right <= window.innerWidth + 1 && rect.left >= -1;
+            }
+            return false;
+        };
+
         const localOverflowIssues = isMobile
             ? Array.from(document.querySelectorAll('body *'))
                 .filter((el) => isLayoutVisible(el))
+                .filter((el) => !isClippedByScroller(el))
                 .map((el) => {
                     const rect = el.getBoundingClientRect();
                     return {
@@ -1934,19 +2177,20 @@ async function collectMetrics(page, view) {
         // - each job exposes exactly one visible primary action
         // - no per-row dropdown/action cluster is visible in the feed
         // Tablet contract. app/static/style.css swaps the desktop table for
-        // the feed at `@media (max-width: 1024px)`, so an iPad sits on either
-        // side of that line depending on model and orientation - and neither
-        // the 390px phone context nor the 1440px desktop one ever renders the
-        // band in between.
+        // the feed at `@media (max-width: 1024px)`, plus
+        // `(max-width: 1366px) and (pointer: coarse)` - and every tablet
+        // profile is a touch screen, so an iPad up to a 12.9" Pro in landscape
+        // (1366px) renders the feed. Neither the 390px phone context nor the
+        // 1440px desktop one ever renders this band.
         //
-        // Below the breakpoint the feed must render (as on the phone); above
-        // it the desktop table must render and fit. Either way the shell has
-        // to use the width the device actually has.
+        // Within 1366px the feed must render (as on the phone); past it the
+        // desktop table must render and fit. Either way the shell has to use
+        // the width the device actually has.
         const tabletLayoutIssues = formFactor === 'tablet'
             && document.body.classList.contains('app-root--dashboard')
             ? (() => {
                 const issues = [];
-                const compact = window.innerWidth <= 1024;
+                const compact = window.innerWidth <= 1366;
                 const mobileList = document.querySelector('#jobsMobileList');
                 const desktopView = document.querySelector('.jobs-desktop-view');
                 const displayed = (el) => Boolean(el) && window.getComputedStyle(el).display !== 'none';
@@ -2206,19 +2450,37 @@ async function collectMetrics(page, view) {
                     }
                 }
 
+                // The first row is the tile's caption. On a phone that is the
+                // short label, because four tiles per row leave no space for
+                // the full .stat-label and a glyph alone does not say which
+                // number it is; the icon takes over wherever the word is not
+                // rendered. Whichever one it is has to center over the whole
+                // "number + unit" block, so a tile with a unit does not shift
+                // its caption off to one side.
                 for (const card of cards) {
-                    const icon = card.querySelector('.stat-icon');
                     const numLine = card.querySelector('.stat-num-line');
-                    if (!icon || !numLine) continue;
-                    const iconRect = icon.getBoundingClientRect();
-                    const numLineRect = numLine.getBoundingClientRect();
-                    const iconCenter = iconRect.left + iconRect.width / 2;
-                    const numLineCenter = numLineRect.left + numLineRect.width / 2;
-                    if (Math.abs(iconCenter - numLineCenter) > 2) {
+                    if (!numLine) continue;
+                    const caption = [
+                        card.querySelector('.stat-short-label'),
+                        card.querySelector('.stat-icon'),
+                    ].find((node) => node && isLayoutVisible(node));
+                    if (!caption) {
                         issues.push({
-                            type: 'stat-icon-not-centered-over-metric',
+                            type: 'stat-tile-without-caption',
                             key: card.dataset.statKey || null,
-                            deltaPx: Math.round(iconCenter - numLineCenter),
+                        });
+                        continue;
+                    }
+                    const captionRect = caption.getBoundingClientRect();
+                    const numLineRect = numLine.getBoundingClientRect();
+                    const captionCenter = captionRect.left + captionRect.width / 2;
+                    const numLineCenter = numLineRect.left + numLineRect.width / 2;
+                    if (Math.abs(captionCenter - numLineCenter) > 2) {
+                        issues.push({
+                            type: 'stat-caption-not-centered-over-metric',
+                            key: card.dataset.statKey || null,
+                            captionClass: caption.className,
+                            deltaPx: Math.round(captionCenter - numLineCenter),
                         });
                     }
                 }
@@ -2264,6 +2526,24 @@ async function collectMetrics(page, view) {
 
         const forbiddenColorRegex = /#([0-9a-f]{3,8})|rgba?\(|hsla?\(/i;
         const forbiddenSpacingRegex = /(margin|padding|gap|border-radius)\s*:\s*[-0-9.]+(px|rem|em|%)?/i;
+
+        // Properties whose value is a measurement taken at runtime, not a
+        // design decision: placement, size and visibility toggles that JS
+        // computes from a rect. Colour and spacing stay forbidden inline.
+        const RUNTIME_GEOMETRY_PROPS = new Set([
+            'top', 'right', 'bottom', 'left', 'width', 'height',
+            'max-width', 'max-height', 'min-width', 'min-height',
+            'transform', 'translate', 'inset', 'display', 'visibility',
+        ]);
+        const isRuntimeGeometryOnly = (styleAttr) => styleAttr
+            .split(';')
+            .map((declaration) => declaration.trim())
+            .filter(Boolean)
+            .every((declaration) => {
+                const property = declaration.slice(0, declaration.indexOf(':')).trim().toLowerCase();
+                return RUNTIME_GEOMETRY_PROPS.has(property);
+            });
+
         const tokenViolations = [];
 
         for (const el of document.querySelectorAll('[style], [bgcolor], [color], [fill], [stroke]')) {
@@ -2283,7 +2563,12 @@ async function collectMetrics(page, view) {
                     });
                     continue;
                 }
-                if (styleAttr.includes(':') && !styleAttr.includes('var(')) {
+                // Anything else inline is a violation unless every property it
+                // sets is runtime geometry. A tooltip's top/left are computed
+                // from a measured rect at hover time and cannot come from a
+                // token - flagging them told the reader to replace a number
+                // with a variable that could not exist.
+                if (styleAttr.includes(':') && !styleAttr.includes('var(') && !isRuntimeGeometryOnly(styleAttr)) {
                     tokenViolations.push({
                         tag: el.tagName.toLowerCase(),
                         id: el.id || null,
@@ -2482,20 +2767,58 @@ async function collectMetrics(page, view) {
                 return style.backdropFilter && style.backdropFilter !== 'none';
             }).length;
 
-        // 3. Sticky elements without solid background
+        // 3. Sticky elements the page content stays legible through.
+        //
+        // What this protects against: a sticky or fixed bar that scrolling
+        // content shows through, so the two layers of text overlap and neither
+        // reads. A low alpha alone does not establish that. A translucent layer
+        // with a blur backdrop is the frosted-glass pattern - the backdrop is
+        // resolved to an unreadable smear, which is exactly the protection the
+        // check is asking for - so blur counts as cover. .top-navbar is that
+        // case: alpha 0.644 plus blur(10px), tripping the old alpha-only rule
+        // on every view that renders a navbar.
+        //
+        // Blur only covers the content where the browser supports it, so a
+        // @supports fallback has to supply an opaque background otherwise;
+        // style.css carries that fallback for .top-navbar.
+        const BLUR_COVER_MIN_PX = 4;
+        const BLUR_COVER_ALPHA_MIN = 0.5;
+        const blurRadiusPx = (filterValue) => {
+            if (!filterValue || filterValue === 'none') return 0;
+            const blur = filterValue.match(/blur\(\s*([\d.]+)px\s*\)/i);
+            return blur ? Number.parseFloat(blur[1]) : 0;
+        };
+
         const stickyWithoutBackground = Array.from(
             document.querySelectorAll('th, [class*="header"], nav, thead')
         ).filter(el => {
             if (!isVisible(el)) return false;
             const style = window.getComputedStyle(el);
             if (style.position !== 'sticky' && style.position !== 'fixed') return false;
+
             const bg = parseColor(style.backgroundColor);
-            return !bg || bg.a < 0.9;
-        }).map(el => ({
-            tag: el.tagName.toLowerCase(),
-            id: el.id || null,
-            position: window.getComputedStyle(el).position,
-        }));
+            if (bg && bg.a >= 0.9) return false;
+
+            // A blur backdrop covers what is behind it, but only over a
+            // background that still carries most of the way; a near-transparent
+            // bar with a blur is reported.
+            const radius = Math.max(
+                blurRadiusPx(style.backdropFilter),
+                blurRadiusPx(style.webkitBackdropFilter),
+            );
+            if (radius >= BLUR_COVER_MIN_PX && bg && bg.a >= BLUR_COVER_ALPHA_MIN) return false;
+
+            return true;
+        }).map(el => {
+            const style = window.getComputedStyle(el);
+            return {
+                tag: el.tagName.toLowerCase(),
+                id: el.id || null,
+                position: style.position,
+                backgroundColor: style.backgroundColor,
+                backdropFilter: style.backdropFilter,
+            };
+        });
 
         // 4. Focus-visible styles check
         const focusVisibleCheck = (() => {
@@ -2600,17 +2923,68 @@ async function collectMetrics(page, view) {
             };
         })();
 
-        // 6. Dropdowns inside overflow:hidden containers
+        // 6. Dropdowns that a clipping ancestor would cut off when open.
+        //
+        // Only menus that are actually rendered are measured. A closed
+        // Bootstrap menu is display:none and still carries its authored
+        // position:absolute; Popper rewrites that to the configured strategy at
+        // open time. Judging it while closed therefore reads a state the user
+        // never sees - which is what produced 18 findings on the dashboard for
+        // the 18 job action menus, all of them display:none, while opening them
+        // showed position:fixed and no clipping on any edge. main.js sets
+        // strategy "fixed" with boundary "viewport" for exactly this reason.
+        //
+        // The position:fixed exemption below holds only while no ancestor
+        // establishes a containing block for fixed-position descendants
+        // (transform, filter, backdrop-filter, perspective, will-change,
+        // contain, content-visibility). Such an ancestor makes fixed resolve
+        // against it instead of the viewport, putting the menu back inside the
+        // clip, so it is checked rather than assumed.
+        const establishesFixedContainingBlock = (el) => {
+            const style = window.getComputedStyle(el);
+            return (style.transform && style.transform !== 'none')
+                || (style.perspective && style.perspective !== 'none')
+                || (style.filter && style.filter !== 'none')
+                || (style.backdropFilter && style.backdropFilter !== 'none')
+                || (style.willChange && /transform|perspective|filter/i.test(style.willChange))
+                || (style.contain && /paint|layout|strict|content/i.test(style.contain))
+                || (style.contentVisibility && style.contentVisibility !== 'visible');
+        };
+
         const clippedDropdowns = Array.from(
             document.querySelectorAll('.dropdown-menu, [role="menu"], [role="listbox"]')
         ).filter(el => {
-            if (window.getComputedStyle(el).position === 'fixed') return false;
+            // Not rendered: its position is not resolved yet, so there is
+            // nothing to measure.
+            if (el.getClientRects().length === 0) return false;
+
+            const isFixed = window.getComputedStyle(el).position === 'fixed';
             let parent = el.parentElement;
-            while (parent && parent !== document.body) {
+            let fixedIsAnchoredToAncestor = false;
+
+            while (parent && parent !== document.documentElement) {
                 const style = window.getComputedStyle(parent);
                 const overflow = `${style.overflow} ${style.overflowX} ${style.overflowY}`;
-                if (overflow.includes('hidden') || overflow.includes('clip')) {
-                    return true;
+                const clips = /\b(hidden|clip|auto|scroll|overlay)\b/.test(overflow);
+
+                if (isFixed && !fixedIsAnchoredToAncestor) {
+                    if (establishesFixedContainingBlock(parent)) {
+                        fixedIsAnchoredToAncestor = true;
+                    } else {
+                        parent = parent.parentElement;
+                        continue;
+                    }
+                }
+
+                if (clips) {
+                    const menuRect = el.getBoundingClientRect();
+                    const clipRect = parent.getBoundingClientRect();
+                    if (menuRect.top < clipRect.top - 1
+                        || menuRect.bottom > clipRect.bottom + 1
+                        || menuRect.left < clipRect.left - 1
+                        || menuRect.right > clipRect.right + 1) {
+                        return true;
+                    }
                 }
                 parent = parent.parentElement;
             }
@@ -2618,6 +2992,7 @@ async function collectMetrics(page, view) {
         }).map(el => ({
             tag: el.tagName.toLowerCase(),
             id: el.id || null,
+            position: window.getComputedStyle(el).position,
         }));
 
         // 6b. Jobs action buttons should not sit flush against the right edge.
@@ -3374,7 +3749,14 @@ async function collectMetrics(page, view) {
             const usesPreviewHeightLimit = (value) => value === 'var(--video-preview-max-height)';
             const computedMaxHeight = Number.parseFloat(window.getComputedStyle(thumb).maxHeight);
             const viewportHeightRatio = computedMaxHeight / window.innerHeight;
-            const viewportHeightLimit = isMobile ? 0.38 : 0.42;
+            // Keyed on the width breakpoint the preview's own CSS uses
+            // (`@media (max-width: 767.98px)` tightens it to 38vh), not on
+            // isMobile. Those two used to coincide; once the compact band grew
+            // to cover touch devices up to 1366px they stopped, and this check
+            // started demanding the phone limit from an iPad that renders the
+            // 42vh rule. The bound being asserted is that the preview cannot
+            // outgrow the viewport - the exact ratio is per-breakpoint design.
+            const viewportHeightLimit = window.innerWidth < 768 ? 0.38 : 0.42;
             const hasViewportBound = Number.isFinite(viewportHeightRatio)
                 && viewportHeightRatio <= viewportHeightLimit + 0.001;
 
@@ -3504,10 +3886,9 @@ async function collectMetrics(page, view) {
         const trimDefaultSelectionInvalid = (() => {
             const trimModal = document.querySelector('#trimModal');
             if (!trimModal || !trimModal.classList.contains('show')) return false;
-            const regions = document.querySelectorAll('#trimWave [data-id], #trimWave .wavesurfer-region');
             const infoText = document.querySelector('#trimInfo');
             const text = infoText?.textContent?.trim() || '';
-            return regions.length === 0 || !text.startsWith('0:00.00');
+            return countTrimRegions() === 0 || !text.startsWith('0:00.00');
         })();
 
         // 28. UI card children should not expand unless explicitly needed
@@ -3726,10 +4107,11 @@ async function collectMetrics(page, view) {
         requiredSelectors: view.requiredSelectors,
         mobileTouchTargetMin: MOBILE_TOUCH_TARGET_MIN,
         desktopTouchTargetMin: DESKTOP_TOUCH_TARGET_MIN,
-        // isMobile means "compact layout" - the viewport is inside
-        // `@media (max-width: 1024px)`, so the jobs feed renders instead of the
-        // desktop table. isTouch means "finger input". An iPad Pro in landscape
-        // is the second without being the first, which is why they are separate.
+        // isMobile means "compact layout" - the viewport renders the jobs feed
+        // instead of the desktop table, via `@media (max-width: 1024px)` or the
+        // touch extension `(max-width: 1366px) and (pointer: coarse)`. isTouch
+        // means "finger input". They still differ: a narrow non-touch viewport
+        // is the first without the second, and hit-area sizing keys off isTouch.
         isMobile: profileIsCompactLayout(view.device),
         // Phone-viewport pixel contracts (edge-to-edge shell, the four stat
         // tiles in one row) are written against 390px and do not describe an
@@ -3928,11 +4310,19 @@ async function auditEmptyStateHover(page, view) {
  * so the same visual gap silently drifted between 12px, 16px, and 24px.
  * @param {import('playwright').Page} page
  * @param {object} view
- * @returns {Promise<{settingsTabTitleGapInconsistent: boolean, settingsTabTitleGaps: object}>}
+ * All four tabs must be present and measurable: a tab that has vanished, or
+ * whose panel has lost its title or the content beneath it, is reported in
+ * `settingsTabTitleGapMissing` instead of silently shrinking the comparison
+ * (one surviving tab would otherwise always look consistent). The tab that was
+ * active on entry is re-selected afterwards, so the axe pass and the
+ * screenshot pair that follow see the same tab the other metrics measured.
+ * @param {import('playwright').Page} page
+ * @param {object} view
+ * @returns {Promise<{settingsTabTitleGapInconsistent: boolean, settingsTabTitleGaps: object, settingsTabTitleGapMissing: string[]}>}
  */
 async function auditSettingsTabTitleGap(page, view) {
     if (!SETTINGS_VIEW_NAMES.includes(view.name)) {
-        return { settingsTabTitleGapInconsistent: false, settingsTabTitleGaps: {} };
+        return { settingsTabTitleGapInconsistent: false, settingsTabTitleGaps: {}, settingsTabTitleGapMissing: [] };
     }
 
     const tabs = [
@@ -3942,38 +4332,58 @@ async function auditSettingsTabTitleGap(page, view) {
         { tabId: 'settingsSystemTab', panelId: 'settingsSystemPanel' },
     ];
 
+    const originalTabId = await page.evaluate(
+        (ids) => ids.find((id) => document.getElementById(id)?.classList.contains('active')) ?? null,
+        tabs.map(({ tabId }) => tabId),
+    );
+
     const gaps = {};
-    for (const { tabId, panelId } of tabs) {
-        const tabButton = page.locator(`#${tabId}`);
-        if (await tabButton.count() === 0) continue;
-        await tabButton.click();
-        await page.waitForTimeout(350);
+    const missing = [];
+    try {
+        for (const { tabId, panelId } of tabs) {
+            const tabButton = page.locator(`#${tabId}`);
+            if (await tabButton.count() === 0) {
+                missing.push(tabId);
+                continue;
+            }
+            await tabButton.click();
+            await page.waitForTimeout(350);
 
-         
-        const gap = await page.evaluate((id) => {
-            const panel = document.getElementById(id);
-            if (!panel) return null;
-            const title = panel.querySelector('h2, .settings-panel-title');
-            if (!title) return null;
-            const titleRect = title.getBoundingClientRect();
-            // Skip siblings that render nothing -- the System tab's job-stat
-            // row is display:none above 768px, and measuring its zeroed rect
-            // would report a nonsense gap instead of the visible one.
-            let next = title.nextElementSibling;
-            while (next && next.getClientRects().length === 0) next = next.nextElementSibling;
-            if (!next) return null;
-            const nextRect = next.getBoundingClientRect();
-            return Math.round((nextRect.top - titleRect.bottom) * 100) / 100;
-        }, panelId);
+            const gap = await page.evaluate((id) => {
+                const panel = document.getElementById(id);
+                if (!panel) return null;
+                const title = panel.querySelector('h2, .settings-panel-title');
+                if (!title) return null;
+                const titleRect = title.getBoundingClientRect();
+                // Skip siblings that render nothing -- the System tab's job-stat
+                // row is display:none above 768px, and measuring its zeroed rect
+                // would report a nonsense gap instead of the visible one.
+                let next = title.nextElementSibling;
+                while (next && next.getClientRects().length === 0) next = next.nextElementSibling;
+                if (!next) return null;
+                const nextRect = next.getBoundingClientRect();
+                return Math.round((nextRect.top - titleRect.bottom) * 100) / 100;
+            }, panelId);
 
-        if (gap !== null) gaps[tabId] = gap;
+            if (gap === null) missing.push(tabId);
+            else gaps[tabId] = gap;
+        }
+    } finally {
+        if (originalTabId) {
+            await page.locator(`#${originalTabId}`).click().catch(() => { });
+            await page.waitForTimeout(350);
+        }
     }
 
     const values = Object.values(gaps);
     const settingsTabTitleGapInconsistent = values.length > 1
         && Math.max(...values) - Math.min(...values) > 1;
 
-    return { settingsTabTitleGapInconsistent, settingsTabTitleGaps: gaps };
+    return {
+        settingsTabTitleGapInconsistent,
+        settingsTabTitleGaps: gaps,
+        settingsTabTitleGapMissing: missing,
+    };
 }
 
 /**
@@ -4030,10 +4440,51 @@ async function auditTrimModal(page, view) {
 
     let trimKeyboardMissing = [];
     let trimProbeInstalled = false;
+
+    // Waits until the modal is really gone, not just until it stopped matching
+    // `#trimModal.show`.
+    //
+    // Bootstrap drops the .show class first and only detaches .modal-backdrop
+    // after its own fade transition. A `state: 'hidden'` wait on the .show
+    // selector resolves the moment the class goes, which is roughly 300ms too
+    // early: at that point the backdrop is still in the DOM at opacity 1 and
+    // z-index 1050, covering the page. Everything that runs next - the
+    // accessibility pass above all - then measures a page behind a full-screen
+    // overlay, which is what made axe report color-contrast
+    // elmPartiallyObscured on the dashboards, intermittently and only there.
+    const waitForModalFullyClosed = async () => {
+        await page.waitForFunction(() => {
+            const modal = document.querySelector('#trimModal');
+            const modalClosed = !modal
+                || (!modal.classList.contains('show')
+                    && window.getComputedStyle(modal).display === 'none');
+            return modalClosed
+                && document.querySelectorAll('.modal-backdrop').length === 0
+                && !document.body.classList.contains('modal-open');
+        }, undefined, { timeout: 5000 }).catch(() => { });
+    };
+
+    // Opening the dropdown gets a short, explicit budget rather than
+    // Playwright's 30s default, so a broken surface does not stall every other
+    // view on the engine. No trigger at all is a data gap (skipped above); a
+    // trigger that is rendered but cannot be operated is the regression this
+    // audit exists to catch - an overlay, z-index, disabled or layout fault
+    // that makes trimming unusable - so it fails rather than skips.
+    const group = trigger.locator('xpath=ancestor::div[contains(concat(" ", normalize-space(@class), " "), " btn-group ")][1]');
     try {
-        const group = trigger.locator('xpath=ancestor::div[contains(concat(" ", normalize-space(@class), " "), " btn-group ")][1]');
-        await group.locator('.dropdown-toggle').first().click();
-        await trigger.click();
+        await group.locator('.dropdown-toggle').first().click({ timeout: 5000 });
+    } catch (error) {
+        await restoreHistory();
+        const reason = (error instanceof Error ? error.message : String(error)).split('\n', 1)[0];
+        return {
+            failures: [`trim trigger is rendered but not operable in this layout: ${reason}`],
+            warnings: [],
+            metrics: {},
+        };
+    }
+
+    try {
+        await trigger.click({ timeout: 5000 });
         await page.locator('#trimModal.show').waitFor({ state: 'visible', timeout: 10000 });
         await page.locator('#trimLoader.d-none').waitFor({ state: 'attached', timeout: 15000 });
 
@@ -4094,8 +4545,16 @@ async function auditTrimModal(page, view) {
 
         const trimDefaultSelectionInvalid = await page.evaluate(() => {
             const infoText = document.querySelector('#trimInfo')?.textContent?.trim() || '';
-            return document.querySelectorAll('#trimWave [data-id], #trimWave .wavesurfer-region').length === 0
-                || !infoText.startsWith('0:00.00');
+            // Same shadow-DOM caveat as countTrimRegions() in collectMetrics:
+            // the regions plugin renders inside a shadow root, so the light
+            // DOM shows none no matter how many exist.
+            const wave = document.querySelector('#trimWave');
+            let regions = wave ? wave.querySelectorAll('[data-id], .wavesurfer-region').length : 0;
+            for (const host of wave?.querySelectorAll('*') || []) {
+                if (!host.shadowRoot) continue;
+                regions += host.shadowRoot.querySelectorAll('[part~="region"], [part*="region"], .wavesurfer-region').length;
+            }
+            return regions === 0 || !infoText.startsWith('0:00.00');
         });
 
         const trimKeyboardConflicts = [];
@@ -4107,7 +4566,7 @@ async function auditTrimModal(page, view) {
         }
 
         await page.locator('#trimModal .btn-close').click().catch(() => { });
-        await page.locator('#trimModal.show').waitFor({ state: 'hidden', timeout: 5000 }).catch(() => { });
+        await waitForModalFullyClosed();
         await restoreHistory();
         return {
             failures: [],
@@ -4128,7 +4587,10 @@ async function auditTrimModal(page, view) {
                 delete window.__uiLintTrimKeyEvents;
             }).catch(() => { });
         }
+        // Same wait on the failure path: leaving a backdrop behind would push
+        // this view's fault onto every check that follows.
         await page.locator('#trimModal .btn-close').click().catch(() => { });
+        await waitForModalFullyClosed();
         await restoreHistory();
         return {
             failures: [`trim modal interaction failed: ${error instanceof Error ? error.message : String(error)}`],
@@ -4232,8 +4694,13 @@ async function discoverJobId(browser, storageState) {
  * @param {'desktop'|'mobile'} [device]
  * @returns {Promise<object>}
  */
+/** Result name the invalid-login check reports under, for a device profile. */
+function invalidLoginResultName(device) {
+    return device === 'desktop' ? 'login-error' : `${device}-login-error`;
+}
+
 async function runInvalidLoginCheck(browser, loginRequired, device = 'desktop') {
-    const resultName = device === 'desktop' ? 'login-error' : `${device}-login-error`;
+    const resultName = invalidLoginResultName(device);
 
     if (!loginRequired) {
         return buildSkippedResult(
@@ -4283,20 +4750,26 @@ async function runInvalidLoginCheck(browser, loginRequired, device = 'desktop') 
         if (traffic.pageErrors.length) {
             failures.push(...traffic.pageErrors.map((entry) => `pageerror ${entry}`));
         }
-        if (traffic.consoleEntries.length) {
-            warnings.push(...traffic.consoleEntries
-                .filter((entry) => !/\b401\b|unauthorized/i.test(entry.text))
-                .map((entry) => `console ${entry.type}: ${entry.text}`));
-        }
+        // The 401 the rejected credentials produce is the expected outcome of
+        // this check, not a finding; everything else goes through the same
+        // allowlist as the regular views.
+        const consoleTriage = triageConsoleEntries(
+            traffic.consoleEntries.filter((entry) => !/\b401\b|unauthorized/i.test(entry.text)),
+        );
+        warnings.push(...consoleTriage.entries.map((entry) => `console ${entry.type}: ${entry.text}`));
         warnings.push(...externalWarnings);
 
         return {
             name: resultName,
             url: `${BASE_URL}/login`,
+            device,
+            engine: deviceProfile(device).engine,
             failures,
             warnings,
             metrics: {
                 loginError: metrics,
+                consoleSeverityScore: consoleTriage.score,
+                consoleSuppressed: consoleTriage.suppressed,
             },
         };
     } finally {
@@ -4318,6 +4791,10 @@ async function runView(browser, storageState, view, replacements = {}) {
         ...createContextOptions(view.device),
         ...(view.auth ? { storageState } : {}),
     });
+    // Must precede newPage(): the observer is an init script and has to be
+    // registered before the document starts executing, or the shifts that
+    // happen during first render are never seen.
+    await installLayoutShiftObserver(context);
     const page = await context.newPage();
     const stopCollecting = collectConsoleAndNetwork(page);
 
@@ -4331,19 +4808,10 @@ async function runView(browser, storageState, view, replacements = {}) {
         const settingsTabTitleGapAudit = await auditSettingsTabTitleGap(page, view);
         const jobsSourceContracts = viewAuditsJobsList(view)
             ? await getJobsSourceContractMetrics()
-            : {
-                jobsInfiniteScrollNotObserverBased: false,
-                jobsPagingOffsetContractBroken: false,
-                jobsDesktopFileSizePlacementBroken: false,
-                jobsMobileShareActionMissing: false,
-            };
+            : JOBS_SOURCE_CONTRACT_DEFAULTS;
         const settingsSourceContracts = viewAuditsSettings(view)
             ? await getSettingsSourceContractMetrics()
-            : {
-                settingsSaveToastContractBroken: false,
-                settingsHintContractBroken: false,
-                settingsHintSpacingContractBroken: false,
-            };
+            : SETTINGS_SOURCE_CONTRACT_DEFAULTS;
         const metrics = {
             ...runtimeMetrics,
             ...footerHistoryAudit,
@@ -4353,6 +4821,36 @@ async function runView(browser, storageState, view, replacements = {}) {
             ...jobsSourceContracts,
             ...settingsSourceContracts,
         };
+        // The interaction audits above raise app toasts as a side effect, and a
+        // toast is a translucent overlay (90% background) pinned over whatever
+        // happens to be beneath it. axe cannot composite that, so it reported
+        // the toast's own text as color-contrast elmPartiallyObscured - not a
+        // defect: hit-testing puts the message on top with nothing above it, and
+        // two stacked toasts were measured 4px apart, never overlapping.
+        //
+        // Clearing them keeps elmPartiallyObscured meaningful for a real overlap
+        // elsewhere, which accepting the reason wholesale would not. Dismissed
+        // through the app's own clearToasts() rather than by waiting out the 3s
+        // auto-dismiss: idling that long on the dashboards let the /events SSE
+        // stream reach a teardown inside the traffic window, and a cancelled
+        // long-lived stream was then counted as a same-origin request failure.
+        await page.evaluate(async () => {
+            const module = await import('/static/js/toast.js').catch(() => null);
+            module?.clearToasts?.();
+        }).catch(() => { });
+        await page.waitForFunction(
+            () => document.querySelectorAll('.fx-toast').length === 0,
+            undefined,
+            { timeout: 2000 },
+        ).catch(() => { });
+
+        // Runs against the settled DOM, before the screenshot pair perturbs it
+        // with the motion-reset stylesheet.
+        const axe = RUN_AXE
+            ? await runAxeAudit(page)
+            : { available: false, error: 'disabled via UI_LINT_AXE=0' };
+        const layoutShift = await collectLayoutShift(page);
+
         const shots = await captureStablePair(page, view);
         const visual = diffScreenshots({
             name: view.name,
@@ -4361,6 +4859,7 @@ async function runView(browser, storageState, view, replacements = {}) {
             screenshotDir: SCREENSHOT_DIR,
         });
         const traffic = stopCollecting();
+        const consoleTriage = triageConsoleEntries(traffic.consoleEntries);
 
         const failures = [];
         const warnings = [];
@@ -4464,7 +4963,7 @@ async function runView(browser, storageState, view, replacements = {}) {
         }
         if (metrics.tabletLayoutIssues?.length) {
             const kinds = metrics.tabletLayoutIssues.map((issue) => issue.type).join(', ');
-            failures.push(`tablet layout issues (768-1024px band): ${kinds}`);
+            failures.push(`tablet layout issues (768-1366px band): ${kinds}`);
         }
         if (metrics.mobileJobsFeedIssues?.length) {
             failures.push(`mobile jobs feed layout issues: ${metrics.mobileJobsFeedIssues.length}`);
@@ -4550,17 +5049,10 @@ async function runView(browser, storageState, view, replacements = {}) {
         if (metrics.jobsSentinelOutsideScrollContainer) {
             failures.push('jobs sentinel is missing from the local scroll container');
         }
-        if (metrics.jobsInfiniteScrollNotObserverBased) {
-            failures.push('jobs infinite scroll is not driven by an IntersectionObserver rooted at the local scroller');
-        }
-        if (metrics.jobsPagingOffsetContractBroken) {
-            failures.push('jobs pagination offset is not monotonic across row trimming');
-        }
-        if (metrics.jobsDesktopFileSizePlacementBroken) {
-            failures.push('desktop job file size must share the Media metadata line and stay out of Status');
-        }
-        if (metrics.jobsMobileShareActionMissing) {
-            failures.push('mobile downloadable jobs must expose the shared Download and Share menu');
+        // Wording comes from lib/source-contracts.mjs, so a view failure and
+        // the standalone `npm run lint:contracts` step read identically.
+        for (const violation of sourceContractViolations(metrics, JOBS_SOURCE_CONTRACT_KEYS)) {
+            failures.push(violation.message);
         }
         if (metrics.trimWaveformMissingStyle) {
             failures.push('trim waveform container styling is incomplete');
@@ -4571,14 +5063,8 @@ async function runView(browser, storageState, view, replacements = {}) {
         if (metrics.settingsFieldStackContractBroken) {
             failures.push('settings field stack is missing shrink-safe flex min-width rules');
         }
-        if (metrics.settingsSaveToastContractBroken) {
-            failures.push('settings autosave must stay quiet, while errors use toasts and no inline save-status row is rendered');
-        }
-        if (metrics.settingsHintContractBroken) {
-            failures.push('settings explanation hints must use the info-icon hint style');
-        }
-        if (metrics.settingsHintSpacingContractBroken) {
-            failures.push('settings explanation hints must share the global 4px spacing rule');
+        for (const violation of sourceContractViolations(metrics, SETTINGS_SOURCE_CONTRACT_KEYS)) {
+            failures.push(violation.message);
         }
         if (metrics.lalalMobileActionLayoutBroken) {
             failures.push('Lalal mobile actions must use one equal two-column row');
@@ -4592,26 +5078,67 @@ async function runView(browser, storageState, view, replacements = {}) {
         if (metrics.emptyStateHoverHighlight) {
             failures.push('empty jobs table row highlights on hover like an interactive row');
         }
+        if (metrics.settingsTabTitleGapMissing?.length) {
+            failures.push(`settings tabs missing or without a measurable title/content: ${metrics.settingsTabTitleGapMissing.join(', ')}`);
+        }
         if (metrics.settingsTabTitleGapInconsistent) {
             failures.push(`settings tab title-to-content gap is inconsistent across tabs: ${JSON.stringify(metrics.settingsTabTitleGaps)}`);
         }
         applyMetricRules(metrics, failures, warnings);
+        applyAxeRules(axe, failures, warnings);
+
+        // Only reported where the engine can actually observe shifts; see
+        // lib/layout-shift.mjs for why an unsupported engine is not a zero.
+        const layoutShiftRating = classifyLayoutShift(layoutShift);
+        if (layoutShiftRating === 'poor') {
+            failures.push(`cumulative layout shift ${layoutShift.value.toFixed(3)} (poor, > ${LAYOUT_SHIFT_POOR})`);
+        } else if (layoutShiftRating === 'needs-improvement') {
+            warnings.push(`cumulative layout shift ${layoutShift.value.toFixed(3)} over ${layoutShift.count} shifts`);
+        }
 
         failures.push(...sameOriginFailures);
 
         if (traffic.pageErrors.length) {
             failures.push(...traffic.pageErrors.map((entry) => `pageerror ${entry}`));
         }
-        if (traffic.consoleEntries.length) {
-            warnings.push(...traffic.consoleEntries.map((entry) => `console ${entry.type}: ${entry.text}`));
+        // Allowlisted browser noise is dropped but still counted, so the
+        // report says what was suppressed instead of quietly shrinking.
+        warnings.push(...consoleTriage.entries.map((entry) => `console ${entry.type}: ${entry.text}`));
+        if (consoleTriage.suppressed) {
+            warnings.push(`console: ${consoleTriage.suppressed} allowlisted entries suppressed`);
         }
         warnings.push(...externalWarnings);
+
+        const health = buildUIHealthReport({
+            name: view.name,
+            url: page.url(),
+            device: view.device,
+            engine: deviceProfile(view.device).engine,
+            metrics,
+            console: consoleTriage,
+            axe,
+            layoutShift,
+            visualDriftRatio: visual.ratio,
+        });
+
+        if (HEALTH_MIN > 0 && health.score < HEALTH_MIN) {
+            failures.push(`UI health score ${health.score} below UI_LINT_HEALTH_MIN=${HEALTH_MIN}`);
+        }
+        if (HEALTH_GATE && health.gates.hardBlock) {
+            const blocking = health.ux.issues
+                .filter((issue) => issue.severity === 'critical')
+                .map((issue) => issue.kind);
+            failures.push(`UI health hard block: ${[...new Set(blocking)].join(', ') || 'axe critical violation'}`);
+        }
 
         return {
             name: view.name,
             url: page.url(),
+            device: view.device,
+            engine: deviceProfile(view.device).engine,
             failures,
             warnings,
+            health,
             metrics: {
                 duplicateIds: metrics.duplicateIds.length,
                 unlabeledControls: metrics.unlabeledControls.length,
@@ -4717,6 +5244,7 @@ async function runView(browser, storageState, view, replacements = {}) {
                 settingsHintSpacingContractBroken: metrics.settingsHintSpacingContractBroken || false,
                 settingsTabTitleGapInconsistent: metrics.settingsTabTitleGapInconsistent || false,
                 settingsTabTitleGaps: metrics.settingsTabTitleGaps || {},
+                settingsTabTitleGapMissing: metrics.settingsTabTitleGapMissing || [],
                 lalalMobileActionLayoutBroken: metrics.lalalMobileActionLayoutBroken || false,
                 trimDefaultSelectionInvalid: metrics.trimDefaultSelectionInvalid || false,
                 uiCardChildExpands: metrics.uiCardChildExpands || 0,
@@ -4741,6 +5269,18 @@ async function runView(browser, storageState, view, replacements = {}) {
                 viewportUnitTraps: metrics.viewportUnitTraps?.length || 0,
                 safeAreaInsetsDisabled: metrics.safeAreaInsetsDisabled || false,
                 bottomPinnedWithoutSafeArea: metrics.bottomPinnedWithoutSafeArea?.length || 0,
+                axeAvailable: axe.available,
+                axeCritical: axe.critical?.length || 0,
+                axeSerious: axe.serious?.length || 0,
+                axeModerate: axe.moderate?.length || 0,
+                axeMinor: axe.minor?.length || 0,
+                axeIncomplete: axe.incomplete || 0,
+                layoutShiftSupported: Boolean(layoutShift.supported),
+                layoutShiftValue: Number(Number(layoutShift.value || 0).toFixed(4)),
+                layoutShiftCount: Number(layoutShift.count || 0),
+                consoleSeverityScore: consoleTriage.score || 0,
+                consoleSuppressed: consoleTriage.suppressed || 0,
+                uiHealthScore: health.score,
             },
             // Keep actionable element-level details in the JSON report while
             // retaining the compact counters above for console output.
@@ -4762,6 +5302,16 @@ async function runView(browser, storageState, view, replacements = {}) {
                 iosInputZoomTargets: metrics.iosInputZoomTargets,
                 viewportUnitTraps: metrics.viewportUnitTraps,
                 bottomPinnedWithoutSafeArea: metrics.bottomPinnedWithoutSafeArea,
+                // These three are hard failures whose console line is only a
+                // count, so without the elements here the report says a view
+                // failed but not on what.
+                tokenViolations: metrics.tokenViolations,
+                localOverflowIssues: metrics.localOverflowIssues,
+                flexMinHeightOverflowHidden: metrics.flexMinHeightOverflowHidden,
+                axeViolations: axe.available
+                    ? [...(axe.critical || []), ...(axe.serious || []), ...(axe.moderate || []), ...(axe.minor || [])]
+                    : [],
+                layoutShiftEntries: layoutShift.entries || [],
             },
             screenshots: {
                 first: shots.shotA,
@@ -4782,14 +5332,48 @@ async function main() {
     ensureDir(OUTPUT_DIR);
     ensureDir(SCREENSHOT_DIR);
 
-    const browser = await chromium.launch({ headless: true });
-    let webkitBrowser;
-
     // Engine follows the device profile: Chromium for the desktop context,
-    // WebKit for every touch profile, since that is what iOS and iPadOS run.
-    const browserFor = (device) => (
-        deviceProfile(device).engine === 'webkit' ? webkitBrowser : browser
-    );
+    // WebKit for every touch profile since that is what iOS and iPadOS run,
+    // and Firefox for the Gecko desktop profile.
+    //
+    // Launch failures are recorded rather than thrown. A missing browser
+    // binary is a setup problem with one fix (`npm run ui-lint:install`), and
+    // failing the whole audit over it would throw away every finding the other
+    // engines did produce. The views on that engine are reported as skipped
+    // with the reason. When the engines were named explicitly the run also
+    // exits non-zero: an engine that was asked for and never ran is missing
+    // coverage, not a pass.
+    const browsers = new Map();
+    const engineErrors = new Map();
+
+    const launchEngine = async (engine) => {
+        try {
+            browsers.set(engine, await ENGINE_LAUNCHERS[engine].launch({ headless: true }));
+        } catch (error) {
+            engineErrors.set(engine, error instanceof Error ? error.message : String(error));
+        }
+    };
+
+    await Promise.all(SELECTED_ENGINES.map(launchEngine));
+
+    const browserFor = (device) => browsers.get(deviceProfile(device).engine);
+    /** Reason a device profile cannot run, or null when it can. */
+    const engineUnavailable = (device) => {
+        const { engine } = deviceProfile(device);
+        if (!SELECTED_ENGINES.includes(engine)) return `${engine} not selected by UI_LINT_BROWSERS`;
+        if (engineErrors.has(engine)) return `${engine} failed to launch: ${engineErrors.get(engine)}`;
+        return null;
+    };
+
+    // Auth and job discovery need one working engine but not a particular
+    // one; they only produce a storage state and an id.
+    const utilityBrowser = browsers.get('chromium') || browsers.values().next().value;
+    if (!utilityBrowser) {
+        throw new Error(
+            `No browser engine could be launched (${[...engineErrors].map(([e, m]) => `${e}: ${m}`).join('; ')
+            }). Run: npm run ui-lint:install`,
+        );
+    }
 
     try {
         const loginRequired = await detectLoginRequired();
@@ -4798,70 +5382,136 @@ async function main() {
                 'UI_LINT_USERNAME and UI_LINT_PASSWORD are required when login is enabled',
             );
         }
-        webkitBrowser = await webkit.launch({ headless: true });
-        const authState = loginRequired ? await createAuthState(browser) : {};
+        const authState = loginRequired ? await createAuthState(utilityBrowser) : {};
         const firstJobId = process.env.UI_LINT_JOB_ID
-            || await discoverJobId(browser, authState);
+            || await discoverJobId(utilityBrowser, authState);
         const results = [];
 
-        results.push(await runInvalidLoginCheck(browser, loginRequired, 'desktop'));
-        results.push(await runInvalidLoginCheck(webkitBrowser, loginRequired, 'mobile'));
-        results.push(await runInvalidLoginCheck(webkitBrowser, loginRequired, 'tablet'));
+        for (const device of ['desktop', 'mobile', 'tablet']) {
+            const unavailable = engineUnavailable(device);
+            if (unavailable) {
+                results.push(buildSkippedResult(
+                    invalidLoginResultName(device),
+                    `${BASE_URL}/login`,
+                    `skipped invalid-login check: ${unavailable}`,
+                ));
+                continue;
+            }
+            results.push(await runInvalidLoginCheck(browserFor(device), loginRequired, device));
+        }
 
-        const concurrency = Math.max(1, envInt('UI_LINT_CONCURRENCY', 2));
-        const queue = VIEW_DEFS.map((view, index) => ({ view, index }));
+        // One queue per engine rather than one shared queue: the engines are
+        // separate processes and overlap freely, while the pages inside one
+        // engine share it and need their own limit. A single pool of two
+        // workers serialised Chromium behind WebKit for no reason.
         const parallelResults = new Array(VIEW_DEFS.length);
-        const workers = Array.from({ length: concurrency }, async () => {
-            while (queue.length) {
-                const item = queue.shift();
-                if (!item) break;
-                if (LOGIN_VIEW_NAMES.includes(item.view.name) && !loginRequired) {
-                    parallelResults[item.index] = buildSkippedResult(
-                        item.view.name,
-                        `${BASE_URL}${item.view.url}`,
-                        'login is disabled; skipped login page audit',
+        const byEngine = new Map();
+        VIEW_DEFS.forEach((view, index) => {
+            const { engine } = deviceProfile(view.device);
+            if (!byEngine.has(engine)) byEngine.set(engine, []);
+            byEngine.get(engine).push({ view, index });
+        });
+
+        const runEngineQueue = async (engine, queue) => {
+            const unavailable = engineUnavailable(queue[0].view.device);
+            if (unavailable) {
+                for (const { view, index } of queue) {
+                    parallelResults[index] = buildSkippedResult(
+                        view.name,
+                        `${BASE_URL}${view.url}`,
+                        `skipped: ${unavailable}`,
                     );
-                    continue;
                 }
-                const browserForView = browserFor(item.view.device);
-                parallelResults[item.index] = await runViewSafely(browserForView, authState, item.view);
+                return;
+            }
+
+            const pending = [...queue];
+            const workers = Array.from({ length: DEVICE_CONCURRENCY }, async () => {
+                while (pending.length) {
+                    const item = pending.shift();
+                    if (!item) break;
+                    if (LOGIN_VIEW_NAMES.includes(item.view.name) && !loginRequired) {
+                        parallelResults[item.index] = buildSkippedResult(
+                            item.view.name,
+                            `${BASE_URL}${item.view.url}`,
+                            'login is disabled; skipped login page audit',
+                        );
+                        continue;
+                    }
+                    parallelResults[item.index] = await runViewSafely(
+                        browsers.get(engine),
+                        authState,
+                        item.view,
+                    );
+                }
+            });
+            await Promise.all(workers);
+        };
+
+        const engineQueue = [...byEngine.entries()];
+        const engineWorkers = Array.from({ length: BROWSER_CONCURRENCY }, async () => {
+            while (engineQueue.length) {
+                const entry = engineQueue.shift();
+                if (!entry) break;
+                await runEngineQueue(entry[0], entry[1]);
             }
         });
-        await Promise.all(workers);
+        await Promise.all(engineWorkers);
         results.push(...parallelResults.filter(Boolean));
 
-        if (firstJobId) {
-            const jobDetailView = {
-                url: '/job/:jobId',
-                readySelector: '#status',
-                auth: true,
-                requiredSelectors: ['#status', '#message'],
-            };
-            for (const [name, device] of [
-                ['job-detail', 'desktop'],
-                ['mobile-job-detail', 'mobile'],
-                ['tablet-job-detail', 'tablet'],
-            ]) {
-                results.push(await runViewSafely(browserFor(device), authState, {
-                    ...jobDetailView,
+        // Always emitted: with an empty database the three detail views have
+        // no job to open, and a view missing from results.json reads as
+        // coverage that was never asked for rather than coverage that lapsed.
+        const jobDetailView = {
+            url: '/job/:jobId',
+            readySelector: '#status',
+            auth: true,
+            requiredSelectors: ['#status', '#message'],
+        };
+        for (const [name, device] of [
+            ['job-detail', 'desktop'],
+            ['mobile-job-detail', 'mobile'],
+            ['tablet-job-detail', 'tablet'],
+        ]) {
+            const unavailable = engineUnavailable(device);
+            if (unavailable || !firstJobId) {
+                results.push(buildSkippedResult(
                     name,
-                    device,
-                }, { jobId: firstJobId }));
+                    `${BASE_URL}/job/${firstJobId ?? ':jobId'}`,
+                    unavailable ? `skipped: ${unavailable}` : 'skipped: no job available for job-detail audit',
+                ));
+                continue;
             }
+            results.push(await runViewSafely(browserFor(device), authState, {
+                ...jobDetailView,
+                name,
+                device,
+            }, { jobId: firstJobId }));
         }
 
         const totals = results.reduce((acc, result) => {
             acc.failures += result.failures.length;
             acc.warnings += result.warnings.length;
+            // Skipped views are counted on their own so a shrinking warning
+            // count can never be mistaken for coverage that silently vanished.
+            if (result.metrics?.skipped) acc.skipped += 1;
             return acc;
-        }, { failures: 0, warnings: 0 });
+        }, { failures: 0, warnings: 0, skipped: 0 });
+
+        const health = summarizeHealthReports(results.map((result) => result.health).filter(Boolean));
 
         const payload = {
             baseUrl: BASE_URL,
             outputDir: OUTPUT_DIR,
             generatedAt: new Date().toISOString(),
+            engines: {
+                selected: SELECTED_ENGINES,
+                launched: [...browsers.keys()],
+                failed: Object.fromEntries(engineErrors),
+            },
             results,
             totals,
+            health,
         };
 
         await writeFile(RESULTS_PATH, JSON.stringify(payload, null, 2));
@@ -4869,7 +5519,11 @@ async function main() {
         console.log('UI_LINT_START');
         console.log(`Output: ${OUTPUT_DIR}`);
         for (const result of results) {
-            const status = result.failures.length ? 'FAIL' : 'PASS';
+            // A skipped view is not a passing one. Before Firefox could be
+            // missing this only ever meant "login is disabled", but an engine
+            // that failed to launch printing PASS reads as coverage that never
+            // happened.
+            const status = result.failures.length ? 'FAIL' : result.metrics?.skipped ? 'SKIP' : 'PASS';
             console.log(`${status} ${result.name} ${formatResultSummary(result)}`.trim());
             for (const failure of result.failures) {
                 console.log(`  hard: ${failure}`);
@@ -4877,28 +5531,44 @@ async function main() {
             for (const warning of result.warnings) {
                 console.log(`  warn: ${warning}`);
             }
+            for (const note of result.notes || []) {
+                console.log(`  note: ${note}`);
+            }
         }
-        console.log(`Totals: failures=${totals.failures} warnings=${totals.warnings}`);
+        console.log(
+            `Totals: failures=${totals.failures} warnings=${totals.warnings}`
+            + ` skipped=${totals.skipped}`,
+        );
+        if (health.views) {
+            console.log(
+                `UI health: worst=${health.worstScore} average=${health.averageScore} `
+                + `(healthy=${health.healthy} degraded=${health.degraded} critical=${health.critical})`,
+            );
+            if (health.hardBlocked.length) {
+                console.log(`Hard-blocked views: ${health.hardBlocked.join(', ')}`);
+            }
+        }
+        for (const [engine, message] of engineErrors) {
+            console.log(`Engine unavailable: ${engine} (${message})`);
+        }
         console.log(`Results JSON: ${RESULTS_PATH}`);
 
-        process.exitCode = totals.failures > 0 ? 1 : 0;
+        const requestedEngineMissing = ENGINES_EXPLICIT && engineErrors.size > 0;
+        process.exitCode = totals.failures > 0 || requestedEngineMissing ? 1 : 0;
     } finally {
         // Isolate cleanup errors so they never shadow the original exception.
-        try {
-            await browser.close();
-        } catch (closeErr) {
-            console.error('Browser cleanup failed:', closeErr);
-        }
-        try {
-            await webkitBrowser?.close();
-        } catch (closeErr) {
-            console.error('WebKit cleanup failed:', closeErr);
+        for (const [engine, instance] of browsers) {
+            try {
+                await instance.close();
+            } catch (closeErr) {
+                console.error(`${engine} cleanup failed:`, closeErr);
+            }
         }
     }
 }
 
 // Exported so tests/js can assert the device model without launching browsers.
-export { DEVICE_PROFILES, VIEW_DEFS, COMPACT_LAYOUT_MAX_WIDTH, createContextOptions, deviceProfile, profileHasTouch, profileIsCompactLayout };
+export { DEVICE_PROFILES, VIEW_DEFS, COMPACT_LAYOUT_MAX_WIDTH, COMPACT_LAYOUT_TOUCH_MAX_WIDTH, createContextOptions, deviceProfile, formatResultSummary, isEventStreamCancellation, profileHasTouch, profileIsCompactLayout };
 
 // Only audit when run as a program. Importing the module (from a test, or to
 // reuse the registry) must not start Playwright.

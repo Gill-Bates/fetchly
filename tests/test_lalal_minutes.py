@@ -10,8 +10,10 @@ import unittest
 from typing import Any, Self
 from unittest.mock import patch
 
+import httpx
+
 from app import db
-from app.lalal import parse_minutes_left
+from app.lalal import LalalError, parse_minutes_left
 from tests._support import WebAppTestCase
 
 
@@ -104,6 +106,36 @@ class LalalStatusMinutesTests(WebAppTestCase):
         self.assertIsNone(payload["remaining_minutes"])
         self.assertEqual(db.get_settings()["lalalaai_minutes_left"], -1)
 
+    def test_a_rejected_credential_is_reported_as_invalid(self) -> None:
+        self._status()
+        FakeLalalClient.error = LalalError("Invalid API key")
+
+        payload = self._status(force_refresh=True)
+        self.assertFalse(payload["token_valid"])
+        self.assertIsNone(payload["remaining_minutes"])
+        self.assertEqual(db.get_settings()["lalalaai_auth_is_valid"], False)
+
+    def test_an_unreachable_provider_keeps_the_last_known_verdict(self) -> None:
+        # A DNS/timeout failure is not a statement about the credential; caching
+        # "invalid" for the whole TTL would falsely disconnect a working account.
+        self._status()
+        FakeLalalClient.error = httpx.ConnectError("name resolution failed")
+
+        payload = self._status(force_refresh=True)
+        self.assertTrue(payload["token_valid"])
+        self.assertEqual(payload["remaining_minutes"], 261.5)
+        self.assertEqual(payload["validation_error"], "Lalal.ai is temporarily unavailable")
+        self.assertEqual(db.get_settings()["lalalaai_minutes_left"], 261.5)
+
+    def test_a_timeout_keeps_the_last_known_verdict(self) -> None:
+        self._status()
+        FakeLalalClient.error = TimeoutError()
+
+        payload = self._status(force_refresh=True)
+        self.assertTrue(payload["token_valid"])
+        self.assertEqual(payload["remaining_minutes"], 261.5)
+
+
     def test_a_source_without_a_balance_reports_unknown(self) -> None:
         FakeLalalClient.quota = {"mode": "web_session"}
         payload = self._status()
@@ -128,3 +160,53 @@ class LalalStatusMinutesTests(WebAppTestCase):
         # account line and the balance into #lalalStatusLine and silently does
         # nothing when that element is missing - as it was once already.
         self.assertIn('id="lalalStatusLine"', self.client.get("/settings").text)
+
+
+class LalalActivationKeyMinutesTests(WebAppTestCase):
+    """Saving a key stamps checked_at, so it must store the balance it just read."""
+
+    def setUp(self) -> None:
+        super().setUp()
+
+        FakeLalalClient.calls = 0
+        FakeLalalClient.quota = {"minutes_left": 42.0}
+        FakeLalalClient.error = None
+        client_patcher = patch("app.lalal.LalalClient", FakeLalalClient)
+        client_patcher.start()
+        self.addCleanup(client_patcher.stop)
+
+    def _save_key(self, key: str) -> None:
+        response = self.client.post(
+            "/api/lalal/auth/activation-key",
+            json={"email": "user@example.com", "activation_key": key},
+            headers={"X-CSRF-Token": self._csrf()},
+        )
+        self.assertEqual(response.status_code, 200)
+
+    def test_saving_a_key_persists_the_balance_it_validated_with(self) -> None:
+        self._save_key("key-123")
+        self.assertEqual(db.get_settings()["lalalaai_minutes_left"], 42.0)
+
+        # Within the validation TTL /status must not call out again, so the
+        # stored value is what the UI shows.
+        calls_after_save = FakeLalalClient.calls
+        payload = self.client.get("/api/lalal/status").json()
+        self.assertEqual(FakeLalalClient.calls, calls_after_save)
+        self.assertEqual(payload["remaining_minutes"], 42.0)
+
+    def test_logging_out_clears_the_balance(self) -> None:
+        self._save_key("key-123")
+        response = self.client.post(
+            "/api/lalal/auth/logout",
+            headers={"X-CSRF-Token": self._csrf()},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(db.get_settings()["lalalaai_minutes_left"], -1)
+
+    def test_a_new_key_does_not_inherit_the_previous_balance(self) -> None:
+        self._save_key("key-123")
+        FakeLalalClient.quota = {"mode": "web_session"}
+
+        self._save_key("key-456")
+        self.assertEqual(db.get_settings()["lalalaai_minutes_left"], -1)
+        self.assertIsNone(self.client.get("/api/lalal/status").json()["remaining_minutes"])

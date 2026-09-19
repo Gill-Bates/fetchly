@@ -2,34 +2,10 @@
 #
 # CVEs accepted for the published fetchly image, consumed by the Trivy scan in
 # .github/workflows/docker-build.yml. The scan already passes --ignore-unfixed,
-# so anything listed here is a finding that HAS a fix available and is being
-# accepted anyway - record why, and revisit it on the next release.
+# so every entry here is a finding that HAS a fix available and is accepted
+# anyway. Each entry needs a reason and an `exp:` date, after which Trivy
+# reports it again and forces a re-check.
 #
-# Format: one vulnerability id per line, with the reason in a comment above it.
+# Format: `<id> exp:YYYY-MM-DD`, with the reason in a comment above it.
 #
-#   # torch pulls this transitively; not reachable from any code path fetchly
-#   # executes, upstream fix expected in <version>.
-#   CVE-0000-00000
-
-# The two below are both reported against pip's *vendored* copies, not against
-# anything installed in the image. pip 26.2.1 ships PEP 770 SBOM documents in
-# its .dist-info/sboms/, Trivy reads them (hence the "Third-party SBOM may lead
-# to inaccurate vulnerability detection" warnings in the scan log) and reports
-# the versions bundled inside pip/_vendor/. They carry no FilePath in the
-# report, and each appears twice - once for /usr/local/lib/python3.13 pip and
-# once for the /venv one.
-#
-# Nothing in the running container executes pip, and the packages that ARE
-# installed are already past both fixes: the venv carries setuptools 84.0.0,
-# and msgpack is not a dependency of this application at all. Re-check when
-# pip refreshes its vendored bundle - dropping these entries then is the
-# expected outcome, not carrying them forward.
-
-# pip vendors msgpack for CacheControl's HTTP cache serializer. Only reachable
-# by running pip, which the image never does at runtime.
-GHSA-6v7p-g79w-8964
-
-# pip's vendor.txt pins setuptools for pkg_resources. The CVE is in
-# setuptools' PackageIndex.download path handling, which needs pip's own
-# package-index code path to be executed.
-CVE-2025-47273
+# No exceptions are currently accepted.

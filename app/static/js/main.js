@@ -3,17 +3,17 @@
 // Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 //
 
-import { AUDIO_TYPE, CONFIG, DOWNLOADABLE_STATUSES, RETRYABLE_STATUSES, TERMINAL_STATUSES } from "./config.js?v=20260831b";
+import { AUDIO_TYPE, CONFIG, DOWNLOADABLE_STATUSES, RETRYABLE_STATUSES, TERMINAL_STATUSES } from "./config.js";
 import { fetchJobs, fetchResolvedThumbnail, fetchStats, submitJob, fetchVideoInfo, toErrorMessage } from "./api.js";
 import { reportWarning } from "./errors.js";
 import { createTimeoutSignal, EMPTY_VALUE, getCsrfToken, humanSize, isValidMediaUrl, detectPlatform, platformPillLabel, PLATFORM, extractYouTubeVideoId, formatDuration, isSafeRedirect, subscribeToLalalProgress, triggerDownload } from "./utils.js";
-import { prependJob, loadMore, applyJobUpdate, getJobById, applyStoredJobTitleFilter, formatCreatedText, isMobileJobsView, buildDesktopEmptyState, buildMobileEmptyState, hasLimitedPlayback } from "./jobs.js?v=20260903b";
-import { refreshCurrentJob, setCurrentJob } from "./current-job.js?v=20260903a";
-import { EVENT_NAMES, dispatchJobUpdate, setEventStreamEnabled } from "./events.js?v=20260903a";
-import { normalizeStatus } from "./ui.js?v=20260831c";
+import { prependJob, loadMore, applyJobUpdate, getJobById, applyStoredJobTitleFilter, formatCreatedText, isMobileJobsView, buildDesktopEmptyState, buildMobileEmptyState, hasLimitedPlayback } from "./jobs.js";
+import { refreshCurrentJob, setCurrentJob } from "./current-job.js";
+import { EVENT_NAMES, dispatchJobUpdate, setEventStreamEnabled } from "./events.js";
+import { normalizeStatus } from "./ui.js";
 import { showToast } from "./toast.js";
 import { confirmModal } from "./confirm.js";
-import { initTrim } from "./trim.js?v=20260902a";
+import { initTrim } from "./trim.js";
 
 const submitForm = document.getElementById("submitForm");
 const urlInput = document.getElementById("urlInput");

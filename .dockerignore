@@ -10,12 +10,20 @@ dist/
 
 # Caches
 .eslintcache
+.eslintcache/**
 .mypy_cache/
+.mypy_cache/**
 .pytest_cache/
+.pytest_cache/**
 .ruff_cache/
+.ruff_cache/**
 .stylelintcache
+.stylelintcache/**
 __pycache__/
 **/__pycache__/
+*.pyc
+*.pyo
+*.pyd
 
 # Editor / OS
 .DS_Store
@@ -49,12 +57,23 @@ site/
 .claude/settings.local.json
 .codex
 .kiro/
+.kiro/**
+.omc/
+.omc/**
 .omx/
+.omx/**
 node_modules/
+node_modules/**
 package.json
 package-lock.json
 setup.conf
 tools/
+tools/ui-lint/node_modules/
+tools/ui-lint/node_modules/**
+tools/ui-lint/.cache/
+tools/ui-lint/.cache/**
+tools/ui-lint/output/
+tools/ui-lint/output/**
 
 # Tests: the image copies app/ and middleware/ only, so these are pure context.
 tests/
@@ -62,7 +81,13 @@ tests/
 # Python
 *.py[cod]
 **/*.py[cod]
+*.pyo
+*.pyd
 .venv/
+.venv/**
+venv/
+venv/**
+.eggs/
 
 # Runtime and development artifacts
 *.backup
@@ -71,6 +96,8 @@ tests/
 .coverage
 .coverage.*
 app/static/vendor/wavesurfer/
+app/static/vendor/wavesurfer/**
 cookies.txt
 coverage.xml
 htmlcov/
+htmlcov/**

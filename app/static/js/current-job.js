@@ -14,7 +14,7 @@
  * table already shows a new job as its first row.
  */
 
-import { buildJobCard, getJobById, isMobileJobsView, patchJobCard, setDetachedJobId } from "./jobs.js?v=20260903b";
+import { buildJobCard, getJobById, isMobileJobsView, patchJobCard, setDetachedJobId } from "./jobs.js";
 
 let currentJobId = null;
 let currentNode = null;

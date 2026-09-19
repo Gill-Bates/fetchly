@@ -36,9 +36,17 @@ def normalize_public_hostname(value: str | None) -> str:
     if not host:
         return ""
 
-    # Bare IPv4/IPv6, returned canonical; input brackets tolerated, not stored.
+    # A pasted IPv6 URL brings its brackets along, so one pair is tolerated -
+    # but stripped, not stored. Anything left inside (``[[::1]]``) is a typo
+    # worth reporting rather than something to keep peeling.
+    if host.startswith("[") and host.endswith("]"):
+        host = host[1:-1]
+        if "[" in host or "]" in host:
+            raise ValueError("Enter the address once, in a single pair of brackets")
+
+    # Bare IPv4/IPv6, returned canonical.
     try:
-        return str(ipaddress.ip_address(host.strip("[]")))
+        return str(ipaddress.ip_address(host))
     except ValueError:
         pass
 
@@ -61,7 +69,10 @@ def build_public_base_url(request: Request, public_hostname: str | None) -> str:
     """The scheme+host origin for outward-facing links.
 
     Configured hostname: ``https://<host>`` (IPv6 bracketed). Otherwise the
-    request's own base URL (already reflects trusted ``X-Forwarded-*``).
+    request's own base URL, which already reflects trusted ``X-Forwarded-*``
+    but is still whatever ``Host`` the caller sent - so a share link created
+    through an untrusted proxy carries that proxy's hostname. Setting
+    ``public_hostname`` is what pins it.
     """
     host = (public_hostname or "").strip().strip("[]")
     if not host:

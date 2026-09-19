@@ -39,7 +39,11 @@ def _to_confidence(value: Real | object) -> float | None:
         return None
 
     numeric_value = float(value)
-    if not math.isfinite(numeric_value):
+    # Negatives are rejected here, not at the database: jobs.bpm_confidence
+    # carries a CHECK (>= 0), so an out-of-range detector result would surface
+    # as an IntegrityError that fails the whole analysis instead of as a missing
+    # confidence next to a perfectly usable BPM.
+    if not math.isfinite(numeric_value) or numeric_value < 0:
         return None
 
     # Keep DB/UI payloads stable without preserving meaningless float noise.

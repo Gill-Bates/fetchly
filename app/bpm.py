@@ -4,8 +4,9 @@
 # Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 #
 
-# BPM (beats per minute) detection for audio files using Essentia.
-# Callers are responsible for concurrency control.
+# BPM (beats per minute) detection for audio files. Cascades Essentia's
+# RhythmExtractor2013 and beat_this (see extract_bpm_cascade) and fuses the two
+# answers by confidence. Callers are responsible for concurrency control.
 
 import logging
 import subprocess
@@ -64,9 +65,9 @@ def _run_ffmpeg(
 
     cmd.extend([
         "-i", str(input_path),
-        "-ac", "1",          # Mono
-        "-ar", "44100",      # 44.1kHz sample rate
-        "-vn",               # No video
+        "-ac", "1",
+        "-ar", "44100",
+        "-vn",
     ])
 
     if duration is not None:
@@ -147,7 +148,6 @@ def extract_bpm(
             filters="highpass=f=40",
         )
 
-        # Run Essentia BPM detection
         logger.debug("Running Essentia BPM detection")
         result = _extract_bpm_essentia(clean_wav)
 
@@ -184,13 +184,12 @@ def extract_bpm_cascade(
 ) -> BPMResult:
     """Extract BPM by cascading Essentia and beat_this.
 
-    Runs Essentia RhythmExtractor2013, then beat_this (with optional DBN
-    postprocessing). Within 5 BPM, results are confidence-weighted averaged and
-    confidence is boosted; otherwise the higher-confidence result wins.
+    Runs Essentia RhythmExtractor2013, then beat_this. Within 5 BPM, results
+    are confidence-weighted averaged and confidence is boosted; otherwise the
+    higher-confidence result wins.
     """
     _ensure_file_exists(file_path)
 
-    # Step 1: Run Essentia.
     logger.debug("Cascade step 1: Running Essentia BPM detection for %s", file_path.name)
     try:
         essentia_result = extract_bpm(file_path, max_duration=max_duration)
@@ -200,7 +199,6 @@ def extract_bpm_cascade(
         logger.warning("Essentia BPM detection failed: %s", exc)
         essentia_result = BPMResult(bpm=0.0, confidence=0.0)
 
-    # Step 2: Run beat_this with optional DBN postprocessing
     logger.debug("Cascade step 2: Running beat_this for %s", file_path.name)
     try:
         from .bpm_beat_this import extract_bpm_beat_this, is_beat_this_available
@@ -211,7 +209,7 @@ def extract_bpm_cascade(
 
         with tempfile.TemporaryDirectory(prefix="beat_this_") as tmp:
             bounded_audio = Path(tmp) / "input.wav"
-            # No highpass here, unlike step 1: beat_this is a trained model with
+            # No highpass here, unlike the Essentia pass: beat_this is a trained model with
             # its own front end and expects the untouched spectrum, while the
             # rumble filter exists for Essentia's onset detection. Both results
             # end up comparable because each detector normalizes its tempo into
@@ -227,7 +225,7 @@ def extract_bpm_cascade(
         logger.warning("beat_this failed: %s, using Essentia result only", exc)
         return essentia_result
 
-    # Step 3: Combine results
+    # Combine the two detector results.
     essentia_bpm = essentia_result.bpm
     essentia_conf = essentia_result.confidence
     beat_this_bpm = beat_this_result.bpm
@@ -257,7 +255,6 @@ def extract_bpm_cascade(
         else:
             combined_bpm = (essentia_bpm + beat_this_bpm) / 2.0
 
-        # Boost confidence when algorithms agree
         combined_conf = min(1.0, (essentia_conf + beat_this_conf) / 2.0 + 0.1)
 
         logger.debug(
@@ -284,7 +281,6 @@ def extract_bpm_cascade(
             beat_this_bpm,
             beat_this_conf,
         )
-        # Reduce confidence due to disagreement
         return BPMResult(bpm=essentia_bpm, confidence=max(0.0, essentia_conf - 0.1))
 
     logger.debug(
@@ -296,5 +292,4 @@ def extract_bpm_cascade(
         essentia_bpm,
         essentia_conf,
     )
-    # Reduce confidence due to disagreement
     return BPMResult(bpm=beat_this_bpm, confidence=max(0.0, beat_this_conf - 0.1))

@@ -13,6 +13,7 @@ what the client said about them. A user's own PNG is why the odd encodings
 below (palette, 16-bit) are covered: a canvas render only ever produced rgba.
 """
 
+import re
 import shutil
 import subprocess
 import tempfile
@@ -32,6 +33,32 @@ from app.utils.watermark_logo import (
 )
 
 _HAS_FFMPEG = shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is not None
+_LOGO_JS = Path(__file__).resolve().parent.parent / "app/static/js/watermark-logo.js"
+
+
+class ClientServerParityTests(unittest.TestCase):
+    """The drop zone's own checks (tests/js/watermark-logo.test.mjs) must
+    reject at least as much as validate_logo_bytes() does. A client that
+    accepted more would only produce uploads the server refuses after the
+    file has already been picked and previewed.
+    """
+
+    def test_client_bounds_match_the_servers(self) -> None:
+        source = _LOGO_JS.read_text(encoding="utf-8")
+        self.assertIn(
+            f"export const MAX_LOGO_BYTES = {watermark_logo.MAX_LOGO_BYTES // (1024 * 1024)} * 1024 * 1024;",
+            source,
+        )
+        self.assertIn(f"const MIN_LOGO_PIXELS = {watermark_logo.MIN_LOGO_PIXELS};", source)
+        self.assertIn(f"const MAX_LOGO_PIXELS = {watermark_logo.MAX_LOGO_PIXELS};", source)
+        # JS integer literals drop the trailing ".0" that Python's float repr
+        # keeps (20.0 -> "20"), so the two constants are compared as numbers.
+        min_aspect_literal = re.search(r"const MIN_ASPECT = ([0-9.]+);", source)
+        max_aspect_literal = re.search(r"const MAX_ASPECT = ([0-9.]+);", source)
+        self.assertIsNotNone(min_aspect_literal, "MIN_ASPECT not found in watermark-logo.js")
+        self.assertIsNotNone(max_aspect_literal, "MAX_ASPECT not found in watermark-logo.js")
+        self.assertEqual(float(min_aspect_literal.group(1)), watermark_logo.MIN_LOGO_ASPECT)
+        self.assertEqual(float(max_aspect_literal.group(1)), watermark_logo.MAX_LOGO_ASPECT)
 
 
 def _png(source: str, target: Path, *, filters: str = "", pix_fmt: str = "rgba") -> bytes:

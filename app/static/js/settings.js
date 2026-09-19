@@ -5,10 +5,10 @@
 
 import { showToast } from "./toast.js";
 import { confirmModal } from "./confirm.js";
-import { openCookiePasteDialog } from "./cookie-paste.js?v=20260901a";
+import { openCookiePasteDialog } from "./cookie-paste.js";
 import { fetchStats, toErrorMessage } from "./api.js";
 import { formatLalalMinutes, getCsrfToken, humanSize, isSafeSameOriginRedirect } from "./utils.js";
-import { MAX_LOGO_BYTES, logoFileKind, prepareLogoUpload } from "./watermark-logo.js?v=20260904a";
+import { MAX_LOGO_BYTES, logoFileKind, prepareLogoUpload } from "./watermark-logo.js";
 
 const AUTO_SAVE_DELAY_MS = 800;
 const REQUEST_TIMEOUT_MS = 10_000;
@@ -187,8 +187,8 @@ const lalalDisconnectBtn = document.getElementById("lalalDisconnectBtn");
 const lalalAnalysisLimits = document.getElementById("lalalAnalysisLimits");
 const lalalAuthModal = document.getElementById("lalalAuthModal");
 const lalalAuthAlert = document.getElementById("lalalAuthAlert");
-const lalalAuthStep1 = document.getElementById("lalalAuthStep1");
-const lalalAuthStep3 = document.getElementById("lalalAuthStep3");
+const lalalAuthForm = document.getElementById("lalalAuthForm");
+const lalalAuthSuccess = document.getElementById("lalalAuthSuccess");
 const lalalAuthEmail = document.getElementById("lalalAuthEmail");
 const lalalAuthUseKeyBtn = document.getElementById("lalalAuthUseKeyBtn");
 const lalalAuthUseKeySpinner = document.getElementById("lalalAuthUseKeySpinner");
@@ -396,9 +396,9 @@ function applyInitialLalalState() {
     setAnalysisLimitsVisible(bootstrapData.lalal_configured);
 }
 
-function showAuthStep(step) {
-    lalalAuthStep1?.classList.toggle("d-none", step !== 1);
-    lalalAuthStep3?.classList.toggle("d-none", step !== 3);
+function showAuthPanel(panel) {
+    lalalAuthForm?.classList.toggle("d-none", panel !== "form");
+    lalalAuthSuccess?.classList.toggle("d-none", panel !== "success");
     clearAlert(lalalAuthAlert);
 }
 
@@ -1828,7 +1828,7 @@ function bindLalalEvents() {
             }
 
             if (lalalActivationKey) lalalActivationKey.value = "";
-            showAuthStep(3);
+            showAuthPanel("success");
             void loadLalalStatus();
             window.setTimeout(() => {
                 if (lalalAuthModal) {
@@ -1844,7 +1844,7 @@ function bindLalalEvents() {
     });
 
     lalalAuthModal?.addEventListener("show.bs.modal", () => {
-        showAuthStep(1);
+        showAuthPanel("form");
         if (lalalAuthEmail) lalalAuthEmail.value = "";
         if (lalalActivationKey) {
             lalalActivationKey.value = "";

@@ -3,8 +3,8 @@
 // Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 //
 
-import { DOWNLOADABLE_STATUSES, TERMINAL_STATUSES } from "./config.js?v=20260831b";
-import { getStatusPillClass, getStatusText, toProgressPercent } from "./ui.js?v=20260831c";
+import { DOWNLOADABLE_STATUSES, TERMINAL_STATUSES } from "./config.js";
+import { getStatusPillClass, getStatusText, toProgressPercent } from "./ui.js";
 import { fetchJob } from "./api.js";
 
 const script = document.getElementById("jobStatusScript");

@@ -4,168 +4,32 @@
 //
 
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-// Minimal DOM + Bootstrap stand-ins: enough for cookie-paste.js to build its
-// one reusable dialog and drive it through paste / save / failure / dismiss.
-class FakeElement {
-    constructor(tag) {
-        this.tagName = String(tag).toUpperCase();
-        this.className = "";
-        this.id = "";
-        this.tabIndex = 0;
-        this.type = "";
-        this.value = "";
-        this.rows = 0;
-        this.disabled = false;
-        this.readOnly = false;
-        this.placeholder = "";
-        this.spellcheck = true;
-        this.htmlFor = "";
-        this.children = [];
-        this.parentNode = null;
-        this.attributes = new Map();
-        this.focusCount = 0;
-        this._text = "";
-        this._listeners = new Map();
-        this.classList = {
-            toggle: (name, force) => {
-                const classes = new Set(this.className.split(" ").filter(Boolean));
-                const shouldAdd = force ?? !classes.has(name);
-                if (shouldAdd) classes.add(name);
-                else classes.delete(name);
-                this.className = [...classes].join(" ");
-            },
-            contains: (name) => this.className.split(" ").includes(name),
-        };
-    }
+import { findByClass, installFakeDom } from "./helpers/fake-dom.mjs";
 
-    // Assigning textContent replaces every child, which is how the dialog
-    // clears its step list before rendering the next platform's.
-    set textContent(value) {
-        this._text = String(value);
-        this.children = [];
-    }
+// cookie-paste.js builds its dialog node once and reuses it for every call,
+// so the body is never reset between tests here.
+const { body, activeElement, modalCalls } = installFakeDom();
 
-    get textContent() {
-        return this.children.length
-            ? this.children.map((child) => child.textContent).join("")
-            : this._text;
-    }
-
-    setAttribute(name, value) {
-        this.attributes.set(name, String(value));
-    }
-
-    getAttribute(name) {
-        return this.attributes.has(name) ? this.attributes.get(name) : null;
-    }
-
-    append(...nodes) {
-        for (const node of nodes) {
-            this.children.push(node);
-            node.parentNode = this;
-        }
-    }
-
-    appendChild(node) {
-        this.children.push(node);
-        node.parentNode = this;
-        return node;
-    }
-
-    contains(node) {
-        return node === this || this.children.some((child) => child.contains?.(node));
-    }
-
-    addEventListener(type, handler, options = {}) {
-        const bucket = this._listeners.get(type) ?? [];
-        bucket.push({ handler, once: Boolean(options.once) });
-        this._listeners.set(type, bucket);
-    }
-
-    dispatchEvent(type, event = {}) {
-        const bucket = this._listeners.get(type) ?? [];
-        this._listeners.set(type, bucket.filter((entry) => !entry.once));
-        for (const entry of bucket) {
-            entry.handler({ type, ...event });
-        }
-    }
-
-    click() {
-        this.dispatchEvent("click");
-    }
-
-    focus() {
-        this.focusCount += 1;
-        activeElement.current = this;
-    }
-}
-
-const body = new FakeElement("body");
-const activeElement = { current: body };
-const modalCalls = { show: 0, hide: 0 };
-
-globalThis.HTMLElement = FakeElement;
-globalThis.window = {};
-globalThis.document = {
-    body,
-    createElement: (tag) => new FakeElement(tag),
-    get activeElement() {
-        return activeElement.current;
-    },
-};
-globalThis.bootstrap = {
-    Modal: {
-        getOrCreateInstance(root) {
-            return {
-                show() {
-                    modalCalls.show += 1;
-                    root.dispatchEvent("shown.bs.modal");
-                },
-                hide() {
-                    modalCalls.hide += 1;
-                    root.dispatchEvent("hidden.bs.modal");
-                },
-            };
-        },
-    },
-};
-
-const source = await readFile(
-    new URL("../../app/static/js/cookie-paste.js", import.meta.url),
-    "utf8",
-);
-const { openCookiePasteDialog } = await import(
-    `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`
-);
+const { openCookiePasteDialog } = await import("../../app/static/js/cookie-paste.js");
 
 function dialogParts() {
     const root = body.children.find((child) => child.id === "cookiePasteModal");
-    const content = root.children[0].children[0];
-    const [header, bodyEl, footer] = content.children;
-    const [identity] = header.children;
-    const [platformBadge, heading] = identity.children;
-    const [, title, subtitle] = heading.children;
-    const [layout] = bodyEl.children;
-    const [guide, pastePanel] = layout.children;
-    const [, steps] = guide.children;
-    const [, textarea, formats, hint, error] = pastePanel.children;
-    const [, actions] = footer.children;
     return {
         root,
-        title,
-        subtitle,
-        platformBadge,
-        platformIcon: platformBadge.children[0],
-        steps,
-        textarea,
-        formats,
-        hint,
-        error,
-        cancelBtn: actions.children[0],
-        saveBtn: actions.children[1],
+        title: findByClass(root, "cookie-connect-title"),
+        subtitle: findByClass(root, "cookie-connect-subtitle"),
+        platformBadge: findByClass(root, "cookie-connect-platform"),
+        platformIcon: findByClass(root, "platform-pill__icon"),
+        steps: findByClass(root, "cookie-paste-steps"),
+        textarea: findByClass(root, "cookie-paste-input"),
+        formats: findByClass(root, "cookie-connect-formats"),
+        hint: findByClass(root, "cookie-paste-hint"),
+        error: findByClass(root, "cookie-paste-error"),
+        cancelBtn: findByClass(root, "cookie-connect-actions").children[0],
+        saveBtn: findByClass(root, "cookie-connect-save"),
+        saveLabel: findByClass(root, "cookie-connect-save").children[1],
     };
 }
 
@@ -178,7 +42,7 @@ test("opens with the platform's name and instructions", async () => {
     const pending = openCookiePasteDialog({
         platform: "youtube",
         label: "YouTube",
-        onSubmit: async () => {},
+        onSubmit: async () => { },
     });
     const {
         root,
@@ -240,6 +104,33 @@ test("hands the trimmed paste to the submit handler and closes", async () => {
     assert.equal(modalCalls.hide, hidesBefore + 1);
 });
 
+test("while a submit is in flight the dialog is locked against a second one", async () => {
+    let releaseSubmit;
+    const pending = openCookiePasteDialog({
+        platform: "youtube",
+        label: "YouTube",
+        onSubmit: () => new Promise((resolve) => {
+            releaseSubmit = resolve;
+        }),
+    });
+    const { textarea, saveBtn, cancelBtn, saveLabel } = dialogParts();
+
+    type(textarea, "LOGIN_INFO=a; SAPISID=b");
+    saveBtn.click();
+
+    assert.equal(saveBtn.disabled, true, "cannot double-submit while busy");
+    assert.equal(cancelBtn.disabled, true, "cannot dismiss mid-request via the button");
+    assert.equal(textarea.readOnly, true, "the pasted text cannot be edited mid-request");
+    assert.equal(saveLabel.textContent, "Checking\u2026");
+
+    releaseSubmit();
+    await pending;
+
+    assert.equal(cancelBtn.disabled, false);
+    assert.equal(textarea.readOnly, false);
+    assert.equal(saveLabel.textContent, "Save cookies");
+});
+
 test("a rejected paste keeps the dialog open with the text and the reason", async () => {
     const pending = openCookiePasteDialog({
         platform: "youtube",
@@ -268,10 +159,28 @@ test("a rejected paste keeps the dialog open with the text and the reason", asyn
 });
 
 test("reopening clears the previous paste, error and steps", async () => {
+    // Produce the dirty state here rather than inheriting it from the
+    // previous test, so this case survives reordering and
+    // --test-name-pattern runs.
+    const dirty = openCookiePasteDialog({
+        platform: "youtube",
+        label: "YouTube",
+        onSubmit: async () => {
+            throw new Error("No login cookie in this paste");
+        },
+    });
+    const stale = dialogParts();
+    type(stale.textarea, "PREF=f6=4");
+    stale.saveBtn.click();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.notEqual(stale.error.textContent, "");
+    stale.root.dispatchEvent("hidden.bs.modal");
+    assert.equal(await dirty, false);
+
     const pending = openCookiePasteDialog({
         platform: "tiktok",
         label: "TikTok",
-        onSubmit: async () => {},
+        onSubmit: async () => { },
     });
     const { root, title, steps, textarea, error } = dialogParts();
 
@@ -292,7 +201,7 @@ test("reuses the dialog with the correct branding for all four platforms", async
         ["instagram", "Instagram"],
         ["facebook", "Facebook"],
     ]) {
-        const pending = openCookiePasteDialog({ platform, label, onSubmit: async () => {} });
+        const pending = openCookiePasteDialog({ platform, label, onSubmit: async () => { } });
         const { root, title, platformBadge, platformIcon, textarea } = dialogParts();
 
         assert.equal(root.getAttribute("data-cookie-platform"), platform);
@@ -353,12 +262,30 @@ test("a late response from a dismissed dialog cannot close the next one", async 
     assert.equal(await secondPending, false);
 });
 
+test("the dialog is wired for assistive tech", async () => {
+    const pending = openCookiePasteDialog({
+        platform: "youtube",
+        label: "YouTube",
+        onSubmit: async () => { },
+    });
+    const { root, subtitle, steps, error } = dialogParts();
+
+    assert.equal(root.getAttribute("aria-labelledby"), "cookiePasteModalLabel");
+    assert.equal(root.getAttribute("aria-describedby"), "cookiePasteModalDescription");
+    assert.equal(subtitle.id, "cookiePasteModalDescription");
+    assert.equal(error.getAttribute("role"), "alert");
+    assert.equal(steps.getAttribute("aria-label"), "How to copy YouTube cookies");
+
+    root.dispatchEvent("hidden.bs.modal");
+    assert.equal(await pending, false);
+});
+
 test("without Bootstrap the caller gets a readable reason", async () => {
     const savedBootstrap = globalThis.bootstrap;
     delete globalThis.bootstrap;
     try {
         await assert.rejects(
-            openCookiePasteDialog({ platform: "youtube", label: "YouTube", onSubmit: async () => {} }),
+            openCookiePasteDialog({ platform: "youtube", label: "YouTube", onSubmit: async () => { } }),
             /reload the page/,
         );
     } finally {

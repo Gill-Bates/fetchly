@@ -189,9 +189,14 @@ Every redeem failure returns the same `404` page. See
 | `DELETE /api/settings/watermark-logo` | 10/min | Remove it; the bundled artwork applies again |
 
 Writable keys: `retention_days`, `enable_authentication`, `admin_username`,
-`admin_password`, `session_idle_minutes`, `download_concurrent_fragments`,
-`download_compatible_output`, `video_watermark`, `lalalaai_duration_guard`,
-`share_link_max_uses`, `public_hostname`.
+`admin_password`, `download_concurrent_fragments`, `download_compatible_output`,
+`video_watermark`, `lalalaai_duration_guard`, `share_link_max_uses`,
+`public_hostname`, plus the runtime limits — `session_idle_minutes`,
+`download_worker_count`, `download_timeout_minutes`,
+`transcode_timeout_minutes`, `download_max_filesize_gib`,
+`audio_analysis_max_minutes`, `audio_analysis_timeout_minutes`,
+`lalal_max_download_gib`. Their ranges are listed under
+[Application Settings](../configuration/settings.md).
 
 - Unknown keys are silently ignored, not rejected with an error
 - Values are parsed and range-checked server-side

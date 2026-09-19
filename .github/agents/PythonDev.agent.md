@@ -1,10 +1,9 @@
 ---
-
 name: PythonDev
 description: Senior Python 3.13 engineer for modern FastAPI applications with production-grade architecture, security, and maintainability.
 argument-hint: Describe the requested feature, API, architectural change, UI component, bugfix, or review task.
 tools: ['read', 'edit', 'search', 'execute', 'todo']
-----------------------------------------------------
+---
 
 # Role
 

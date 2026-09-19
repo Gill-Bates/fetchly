@@ -36,6 +36,31 @@ test("both accepted kinds are recognized by type and by extension", () => {
     assert.equal(logoFileKind(null), "");
 });
 
+// The two signals can disagree - a file manager that types .svg as image/png,
+// or a .png that is really an SVG. The routes differ (SVG is parsed and
+// rasterized, PNG is uploaded as-is), so which signal wins has to be decided
+// rather than left to selector order. It is "SVG if either signal says SVG",
+// and that is the safe direction: the SVG route runs the structure checks in
+// inspectSvg() (forbidden elements, on* handlers) and rasterizes, whereas the
+// PNG route would hand the bytes straight to the upload. Mislabelling only
+// costs a rejection; the reverse would skip the checks. The server re-derives
+// the kind from the bytes either way (app/utils/watermark_logo.py), so this is
+// a UX contract, not the security boundary.
+test("a MIME type and an extension that disagree resolve to SVG", () => {
+    assert.equal(logoFileKind({ name: "logo.svg", type: "image/png" }), "svg");
+    assert.equal(logoFileKind({ name: "logo.png", type: "image/svg+xml" }), "svg");
+
+    // An unaccepted MIME type does not veto an accepted extension, and vice
+    // versa: either signal on its own is enough to pick a route.
+    assert.equal(logoFileKind({ name: "logo.svg", type: "application/octet-stream" }), "svg");
+    assert.equal(logoFileKind({ name: "logo.png", type: "application/octet-stream" }), "png");
+    assert.equal(logoFileKind({ name: "logo.bin", type: "image/png" }), "png");
+
+    // A name that only contains the extension mid-string is not a match.
+    assert.equal(logoFileKind({ name: "logo.svg.txt", type: "" }), "");
+    assert.equal(logoFileKind({ name: "png", type: "" }), "");
+});
+
 // Mirrors the server's size and shape rules, so a PNG that cannot be stored is
 // refused before it is uploaded (app/utils/watermark_logo.py).
 test("a PNG's dimensions are held to the server's bounds", () => {
@@ -53,10 +78,17 @@ test("a wide logo is rendered at twice the widest badge", () => {
 });
 
 test("a tall logo is bounded by the server's pixel limit instead", () => {
-    const { width, height } = rasterSize(1 / 4);
-    assert.ok(height <= 4096, `height ${height} exceeds the server limit`);
-    assert.ok(width >= 1, "width must stay positive");
-    assert.equal(Math.round(width / height * 100) / 100, 0.25);
+    assert.deepEqual(rasterSize(1 / 4), { width: 1024, height: 4096 });
+});
+
+test("the pixel and aspect bounds are inclusive on both edges", () => {
+    // Matches MIN/MAX_LOGO_PIXELS and MIN/MAX_LOGO_ASPECT in
+    // app/utils/watermark_logo.py, which use <= on every side.
+    assert.equal(pixelSizeProblem(32, 32), "");
+    assert.equal(pixelSizeProblem(4096, 4096), "");
+    assert.equal(pixelSizeProblem(4000, 200), "");               // aspect exactly 20
+    assert.equal(pixelSizeProblem(400, 4000), "");               // aspect exactly 0.1
+    assert.match(pixelSizeProblem(200, 4000), /too elongated/);  // aspect 0.05
 });
 
 function pixels(alphas) {

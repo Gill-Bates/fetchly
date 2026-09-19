@@ -68,8 +68,16 @@ def _normalize_ip(value: str | None) -> str | None:
     if not candidate or candidate.lower() == "unknown":
         return None
 
-    if candidate.startswith("[") and "]" in candidate:
-        candidate = candidate[1:candidate.index("]")]
+    if candidate.startswith("["):
+        closing = candidate.find("]")
+        if closing < 0:
+            return None
+        # Only an optional ``:port`` may follow the bracket; anything else means
+        # a malformed entry, which must not be silently reduced to a valid IP.
+        remainder = candidate[closing + 1:]
+        if remainder and not (remainder.startswith(":") and remainder[1:].isdigit()):
+            return None
+        candidate = candidate[1:closing]
     elif candidate.count(":") == 1 and "." in candidate:
         host, port = candidate.rsplit(":", 1)
         if port.isdigit():

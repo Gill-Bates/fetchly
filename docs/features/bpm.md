@@ -22,7 +22,7 @@ flowchart TD
 | Detector | Role |
 |---|---|
 | [Essentia](https://essentia.upf.edu/) `RhythmExtractor2013` (multifeature) | Fast baseline |
-| [beat_this](https://github.com/CPJKU/beat_this) (CPJKU) | State of the art; BPM derived from the median inter-beat interval |
+| [beat_this](https://github.com/CPJKU/beat_this) (CPJKU) | Neural beat tracker; BPM derived from the median inter-beat interval |
 
 When the two agree within 5 BPM the result is a confidence-weighted average with a
 confidence bonus, because independent agreement is itself evidence. When they disagree,

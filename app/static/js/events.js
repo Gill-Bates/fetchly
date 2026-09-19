@@ -3,12 +3,12 @@
 // Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 //
 
-import { CONFIG } from "./config.js?v=20260831b";
+import { CONFIG } from "./config.js";
 import { fetchJob, fetchJobs } from "./api.js";
 import { reportError, reportWarning } from "./errors.js";
 // Specifier must be byte-identical to main.js's: a different query string is a
 // different module, loading the job store twice with separate state.
-import { applyJobUpdate, upsertJobSnapshot } from "./jobs.js?v=20260903b";
+import { applyJobUpdate, upsertJobSnapshot } from "./jobs.js";
 
 export const EVENT_NAMES = Object.freeze({
     JOB_UPDATE: "fetchly:job-update",

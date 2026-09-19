@@ -1,96 +1,73 @@
 <div class="action-buttons">
 
-{% if job["status"] in ("done", "analysis", "analysis_done") %}
+    {% if job["status"] in ("done", "analysis", "analysis_done") %}
 
     <div class="btn-group">
-        <a class="btn btn-primary btn-sm btn-icon"
-           href="/download/{{ job["id"] }}"
-           title="Download"
-           aria-label="Download">
+        <a class="btn btn-primary btn-sm btn-icon" href="/download/{{ job['id'] }}" title="Download"
+            aria-label="Download">
             <span class="material-symbols-outlined" aria-hidden="true">download</span>
         </a>
-        <button type="button"
-                class="btn btn-primary btn-sm dropdown-toggle dropdown-toggle-split"
-                data-bs-toggle="dropdown"
-                data-bs-boundary="viewport"
-                aria-expanded="false">
+        {% if job["type"] == "audio" %}
+        <button type="button" class="btn btn-primary btn-sm dropdown-toggle dropdown-toggle-split"
+            data-bs-toggle="dropdown" data-bs-boundary="viewport" aria-expanded="false">
             <span class="visually-hidden">More options</span>
         </button>
         <ul class="dropdown-menu dropdown-menu-end">
             <li>
-                <a class="dropdown-item" href="/download/{{ job["id"] }}">
-                    <span class="material-symbols-outlined icon-inline" aria-hidden="true">download</span>
-                    Download
-                </a>
-            </li>
-            {% if job["type"] == "audio" %}
-            <li><hr class="dropdown-divider"></li>
-            <li>
-                <button class="dropdown-item" type="button"
-                        data-action="open-trim"
-                        data-job-id="{{ job["id"] }}">
+                <button class="dropdown-item" type="button" data-action="open-trim" data-job-id="{{ job['id'] }}">
                     <span class="material-symbols-outlined icon-inline" aria-hidden="true">content_cut</span>
                     Trim
                 </button>
             </li>
-            <li><hr class="dropdown-divider"></li>
-            {% set duration_value = job["duration_seconds"] %}
-            {% set duration_known = duration_value is not none and duration_value >= 0 %}
-            {% set duration_blocked = lalal_duration_guard and (not duration_known or duration_value > LALAL_MAX_DURATION_SECONDS) %}
             <li>
-                <button class="dropdown-item{% if not lalal_enabled or duration_blocked %} disabled{% endif %}" type="button"
-                        data-action="lalal-split"
-                        data-job-id="{{ job["id"] }}"
-                        data-stem="instrumental"
-                        {% if not lalal_enabled %}disabled aria-disabled="true" title="Lalal.ai is not connected"{% elif duration_blocked %}disabled aria-disabled="true" title="{{ 'Track duration unknown' if not duration_known else 'Track exceeds ' ~ LALAL_MAX_DURATION_MINUTES ~ ' min' }} — blocked by Duration Guard"{% endif %}>
+                <hr class="dropdown-divider">
+            </li>
+            {% set duration_value = job["duration_seconds"] %}
+            {% set duration_known = duration_value is not none and duration_value > 0 %}
+            {% set duration_blocked = lalal_duration_guard and (not duration_known or duration_value >
+            LALAL_MAX_DURATION_SECONDS) %}
+            <li>
+                <button class="dropdown-item{% if not lalal_enabled or duration_blocked %} disabled{% endif %}"
+                    type="button" data-action="lalal-split" data-job-id="{{ job['id'] }}" data-stem="instrumental" {% if
+                    not lalal_enabled %} disabled title="Lalal.ai is not connected" {% elif duration_blocked %} disabled
+                    title="{{ 'Track duration unknown' if not duration_known else 'Track exceeds ' ~ LALAL_MAX_DURATION_MINUTES ~ ' min' }} — blocked by Duration Guard"
+                    {% endif %}>
                     <span class="material-symbols-outlined icon-inline" aria-hidden="true">music_off</span>
                     <span>Instrumental</span>
-                    <img class="dropdown-provider-logo"
-                         src="/static/img/lalal_ai_small.svg"
-                         alt="Lalal.ai"
-                         width="34"
-                         height="10">
+                    <img class="dropdown-provider-logo" src="/static/img/lalal_ai_small.svg" alt="" aria-hidden="true"
+                        width="34" height="10">
                 </button>
             </li>
             <li>
-                <button class="dropdown-item{% if not lalal_enabled or duration_blocked %} disabled{% endif %}" type="button"
-                        data-action="lalal-split"
-                        data-job-id="{{ job["id"] }}"
-                        data-stem="vocals"
-                        {% if not lalal_enabled %}disabled aria-disabled="true" title="Lalal.ai is not connected"{% elif duration_blocked %}disabled aria-disabled="true" title="{{ 'Track duration unknown' if not duration_known else 'Track exceeds ' ~ LALAL_MAX_DURATION_MINUTES ~ ' min' }} — blocked by Duration Guard"{% endif %}>
+                <button class="dropdown-item{% if not lalal_enabled or duration_blocked %} disabled{% endif %}"
+                    type="button" data-action="lalal-split" data-job-id="{{ job['id'] }}" data-stem="vocals" {% if not
+                    lalal_enabled %} disabled title="Lalal.ai is not connected" {% elif duration_blocked %} disabled
+                    title="{{ 'Track duration unknown' if not duration_known else 'Track exceeds ' ~ LALAL_MAX_DURATION_MINUTES ~ ' min' }} — blocked by Duration Guard"
+                    {% endif %}>
                     <span class="material-symbols-outlined icon-inline" aria-hidden="true">mic</span>
                     <span>A Cappella</span>
-                    <img class="dropdown-provider-logo"
-                         src="/static/img/lalal_ai_small.svg"
-                         alt="Lalal.ai"
-                        width="34"
-                        height="10">
+                    <img class="dropdown-provider-logo" src="/static/img/lalal_ai_small.svg" alt="" aria-hidden="true"
+                        width="34" height="10">
                 </button>
             </li>
-            {% endif %}
         </ul>
+        {% endif %}
     </div>
 
-{% elif job["status"] in ("queued", "processing", "downloading", "transcoding") %}
+    {% elif job["status"] in ("queued", "processing", "downloading", "transcoding") %}
 
-    <button class="btn btn-danger btn-sm btn-icon"
-            type="button"
-            data-action="cancel-job"
-            data-job-id="{{ job["id"] }}"
-            aria-label="Cancel">
+    <button class="btn btn-danger btn-sm btn-icon" type="button" data-action="cancel-job" data-job-id="{{ job['id'] }}"
+        aria-label="Cancel">
         <span class="material-symbols-outlined" aria-hidden="true">cancel</span>
     </button>
 
-{% else %}
+    {% else %}
 
-    <button class="btn btn-sm btn-outline-secondary btn-icon"
-            type="button"
-            data-action="open-detail"
-            data-job-id="{{ job["id"] }}"
-            aria-label="Details">
+    <button class="btn btn-sm btn-outline-secondary btn-icon" type="button" data-action="open-detail"
+        data-job-id="{{ job['id'] }}" aria-label="Details">
         <span class="material-symbols-outlined" aria-hidden="true">info</span>
     </button>
 
-{% endif %}
+    {% endif %}
 
 </div>

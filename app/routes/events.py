@@ -48,7 +48,13 @@ class SSEStreamingResponse(StreamingResponse):
 
 
 def publish_payload(payload: dict[str, Any]) -> None:
-    """Broadcast a payload to all current SSE subscribers."""
+    """Broadcast a payload to all current SSE subscribers.
+
+    Must be called on the event-loop thread: the subscriber queues are plain
+    ``asyncio.Queue`` objects and are not thread-safe. Worker threads hand their
+    events over through ``loop.call_soon_threadsafe()`` in ``app/main.py``, which
+    is why the broadcaster - not the worker - calls this.
+    """
     sequenced_payload = dict(payload)
     sequenced_payload.setdefault("seq", next(_sse_sequence))
     _publish_sse_payload(sequenced_payload)

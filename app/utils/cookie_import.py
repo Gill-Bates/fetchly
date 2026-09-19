@@ -33,6 +33,7 @@ fabricated expiry date.
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import dataclass
 from typing import Any, Final
@@ -203,6 +204,8 @@ def _passthrough_netscape(text: str, platform: str) -> tuple[str, tuple[str, ...
         seen_entry = True
         if not _belongs_to(fields[0], platform):
             continue
+        if len(lines) >= _MAX_COOKIES:
+            raise CookieImportError("Too many cookies in one import")
         names.append(fields[5])
         lines.append("\t".join(fields))
 
@@ -350,8 +353,13 @@ def _expiry_from_json(entry: dict[str, Any]) -> int:
         if raw is None or isinstance(raw, bool):
             continue
         try:
-            expires = int(float(raw))
-        except (TypeError, ValueError):
+            numeric = float(raw)
+            # json.loads() accepts Infinity and NaN; int() on either raises,
+            # and neither is a timestamp, so skip to the next candidate key.
+            if not math.isfinite(numeric):
+                continue
+            expires = int(numeric)
+        except (TypeError, ValueError, OverflowError):
             continue
         return expires if expires > 0 else 0
     return 0
@@ -383,6 +391,11 @@ def _from_json(text: str, platform: str) -> CookieImport:
         if not _is_writable(name, value):
             continue
 
+        # Validate path: must not contain tabs or newlines (Netscape format requirement)
+        path = str(entry.get("path") or "/").strip() or "/"
+        if not _is_writable("path", path):
+            continue
+
         domain = str(entry.get("domain") or fallback_domain).strip() or fallback_domain
         # Host-only cookie: no leading dot; domain cookie: leading dot.
         if entry.get("hostOnly") is True:
@@ -397,7 +410,7 @@ def _from_json(text: str, platform: str) -> CookieImport:
         lines.append(
             _netscape_line(
                 domain=domain,
-                path=str(entry.get("path") or "/"),
+                path=path,
                 secure=bool(entry.get("secure", True)),
                 expires=_expiry_from_json(entry),
                 name=name,

@@ -3,8 +3,9 @@
 # Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 #
 # The PR gate. docker-build.yml only runs on release tags, so this is the only
-# workflow standing between a broken commit and main. Gates on linting, pytest,
-# npm test, and the single-manifest invariant.
+# workflow standing between a broken commit and main. Gates on linting, the
+# source-level UI contracts, pytest, npm test, the container entrypoint and
+# Dockerfile, and the single-manifest invariant.
 #
 
 name: CI
@@ -13,8 +14,6 @@ on:
   push:
     branches:
       - main
-      - 'feature/**'
-      - 'fix/**'
   pull_request:
     branches:
       - main
@@ -75,7 +74,7 @@ jobs:
         run: pytest -q
 
   frontend:
-    name: ESLint + Stylelint + node --test
+    name: ESLint + Stylelint + contracts + node --test
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -121,8 +120,51 @@ jobs:
       - name: Stylelint
         run: npm run lint:css
 
+      # The browser-free half of the ui-lint audit: regexes over
+      # app/static/js/{main,jobs,ui,settings}.js, app/templates/settings.html
+      # and app/static/style.css that assert the paging offset stays monotonic,
+      # infinite scroll stays bound to the local scroller, the mobile job row
+      # keeps the shared Download/Share menu and settings hints stay the icon
+      # component. No server, no database, no login, no browser - so unlike the
+      # visual and layout-stability passes it is deterministic and belongs in
+      # the PR gate. Runs on the root install alone; the ui-lint step above is
+      # not a prerequisite.
+      #
+      # The rest of the audit stays out of CI on purpose: it is timing-sensitive
+      # enough to go intermittently red on a shared runner, wants ~500MB of
+      # browsers, and skips its job-detail and trim views against an empty
+      # database. It is a manual run - see setup.conf.
+      - name: Source contracts
+        run: npm run lint:contracts
+
       - name: node --test
         run: npm test
+
+  container:
+    name: Dockerfile + entrypoint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      # The image is only ever built from a release tag, so without these two
+      # steps a broken entrypoint or Dockerfile stays invisible until the
+      # release itself - the one run where a failure is most expensive. The
+      # full multi-GB build is far too slow for a PR; these are the cheap half
+      # that still catches a typo.
+      #
+      # entrypoint.sh runs as bash (its shebang) and uses bash-only syntax, so
+      # it is parsed as bash rather than sh. -n parses without executing.
+      - name: Entrypoint shell syntax
+        run: bash -n docker/entrypoint.sh
+
+      # BuildKit's own linter: resolves the stages, ARG/ENV references and
+      # COPY --from targets and reports on them without running a single
+      # build step. Non-zero on any finding.
+      - name: Dockerfile check
+        run: docker build --check -f docker/Dockerfile .
 
   manifest:
     name: pyproject.toml is the only manifest

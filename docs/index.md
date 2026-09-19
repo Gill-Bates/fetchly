@@ -17,7 +17,7 @@ hide:
 <p align="center">
   <a href="https://github.com/Gill-Bates/fetchly/releases"><img src="https://img.shields.io/github/v/release/Gill-Bates/fetchly?logo=github&logoColor=white" alt="GitHub Release"></a>
   <a href="https://hub.docker.com/r/giiibates/fetchly"><img src="https://img.shields.io/docker/pulls/giiibates/fetchly?logo=docker&logoColor=white" alt="Docker Pulls"></a>
-  <a href="https://github.com/Gill-Bates/fetchly/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-AGPL--3.0-blue.svg" alt="License"></a>
+  <a href="https://github.com/Gill-Bates/fetchly/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License"></a>
 </p>
 
 ---
@@ -50,8 +50,9 @@ a volume you control.
 
     ---
 
-    Queued, active, completed, and failed jobs stream to the browser over
-    Server-Sent Events — no polling, no page reloads.
+    Every job status change — `queued`, `downloading`, `transcoding`,
+    `analysis`, `done`, `error`, `cancelled` — streams to the browser over
+    Server-Sent Events. No polling, no page reloads.
 
     [:octicons-arrow-right-24: Job Dashboard](features/jobs.md)
 
@@ -139,10 +140,10 @@ docker run --rm \
 ## Screenshots
 
 === "Dashboard"
-    ![Dashboard](assets/img/screen_1.jpeg)
+    ![Dashboard](assets/img/screen_2.jpeg)
 
 === "Login"
-    ![Login](assets/img/screen_2.jpeg)
+    ![Login](assets/img/screen_1.jpeg)
 
 ## Supported Platforms
 
@@ -190,7 +191,7 @@ still reject stale or revoked sessions.
 
 ## License
 
-fetchly is licensed under the [GNU Affero General Public License v3.0](https://github.com/Gill-Bates/fetchly/blob/main/LICENSE).
+fetchly is licensed under the [MIT License](https://github.com/Gill-Bates/fetchly/blob/main/LICENSE).
 
 ---
 

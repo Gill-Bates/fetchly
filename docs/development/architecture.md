@@ -112,13 +112,14 @@ in [Resources & Workers](../configuration/resources.md).
 
 ## Data model
 
-SQLite in WAL mode, three tables of note:
+SQLite in WAL mode, four tables:
 
 | Table | Holds |
 |---|---|
 | `jobs` | One row per download: URL, type, quality, status, metadata, BPM |
-| `settings` | Key/value runtime configuration (see `app/db.py::_SETTINGS_DEFAULTS`) |
+| `audio_analysis_cache` | BPM and confidence keyed by audio content hash, so a re-download of the same audio skips analysis |
 | `share_links` | Token, target job, use count, snapshotted max uses |
+| `settings` | Key/value runtime configuration (see `app/db.py::_SETTINGS_DEFAULTS`) |
 
 There is deliberately no `owner` column: fetchly is single-identity, and adding
 multi-user support would start with this table. See

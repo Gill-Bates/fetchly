@@ -58,8 +58,9 @@ def _unavailable(request: Request) -> Response:
         status_code=404,
     )
 
-# Tokens are 8 URL-safe characters (see create_share_link). The upper bound
-# stays generous so lengthening tokens later does not silently 404 every link.
+# New tokens are 22 URL-safe characters / 128 bits (see create_share_link).
+# The range stays wide so links issued by an earlier version keep working and
+# lengthening tokens again does not silently 404 every one of them.
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{8,128}$")
 
 

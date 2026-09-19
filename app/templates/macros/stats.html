@@ -1,11 +1,21 @@
 {# Dashboard stat tile. Shared by the dashboard row and the mobile-only copy
-   on Settings -> System, so both stay in sync (see .dashboard-stats /
-   .settings-job-stats in style.css for which one is visible when). #}
-{% macro stat_card(value, label, icon, stat_key) %}
+on Settings -> System, so both stay in sync (see .dashboard-stats /
+.settings-job-stats in style.css for which one is visible when).
+
+`short_label` is the phone caption. Four tiles per row leaves no room for
+the full label underneath, and a bare icon over a bare number does not say
+which number it is - "246.5 MiB" next to a download glyph could be traffic
+or free space. So on phones the icon's line carries the word instead of the
+glyph (see .stat-short-label in style.css); it swaps in place, which is why
+the tiles keep their height. aria-hidden because the tile is already named
+by aria-label (role="group" does not take a name from its content, so the
+label is set explicitly) - without it every tile would read its name twice. #}
+{% macro stat_card(value, label, short_label, icon, stat_key) %}
 <div class="col-6 col-md-3">
-    <div class="ui-card ui-card--stat stat-card" role="group" data-stat-key="{{ stat_key }}">
+    <div class="ui-card ui-card--stat stat-card" role="group" aria-label="{{ label }}" data-stat-key="{{ stat_key }}">
         <div class="stat-value">
             <span class="material-symbols-outlined stat-icon" aria-hidden="true">{{ icon }}</span>
+            <span class="stat-short-label" aria-hidden="true">{{ short_label }}</span>
             <span class="stat-num-line">
                 {%- if value.value is defined and value.unit is defined -%}
                 <span data-stat-value>{{ value.value }}</span><span class="stat-unit" data-stat-unit>{{ value.unit
@@ -21,12 +31,13 @@
 {% endmacro %}
 
 {# The four dashboard tiles in their fixed order. `extra_class` distinguishes
-   the dashboard row from the Settings copy for the responsive rules. #}
+the dashboard row from the Settings copy for the responsive rules. #}
 {% macro dashboard_stats_row(stats, extra_class='') %}
 <div class="row g-3 mb-4 stats-row {{ extra_class }}">
-    {{ stat_card(stats.total_jobs, "Videos processed", "video_library", "total_jobs") }}
-    {{ stat_card(stats.total_minutes, "Minutes processed", "schedule", "total_minutes") }}
-    {{ stat_card(stats.total_bytes | filesize, "Download traffic", "download", "total_bytes") }}
-    {{ stat_card(stats.total_lalal_minutes or 0, "Lalal stems minutes", "graphic_eq", "total_lalal_minutes") }}
+    {{ stat_card(stats.total_jobs, "Videos processed", "Videos", "video_library", "total_jobs") }}
+    {{ stat_card(stats.total_minutes, "Minutes processed", "Minutes", "schedule", "total_minutes") }}
+    {{ stat_card(stats.total_bytes | filesize, "Download traffic", "Traffic", "download", "total_bytes") }}
+    {{ stat_card(stats.total_lalal_minutes or 0, "Lalal stems minutes", "Stems", "graphic_eq",
+    "total_lalal_minutes") }}
 </div>
 {% endmacro %}

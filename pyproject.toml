@@ -17,11 +17,11 @@ name = "fetchly"
 # at runtime, the release workflow validates the git tag against it, and
 # docker/Dockerfile copies this file into the image so the Settings page and
 # /api/updates report the same number the tag was cut from.
-version = "1.2.1"
+version = "1.2.2"
 description = "Self-hosted media downloader with BPM analysis and stem separation"
 readme = "README.md"
 requires-python = ">=3.13"
-license = "GPL-3.0-or-later"
+license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Gill-Bates", email = "tn.steiner@gmail.com" }]
 keywords = ["yt-dlp", "downloader", "fastapi", "bpm", "stem-separation"]
@@ -38,39 +38,43 @@ classifiers = [
 # absent: they update on their own cadence as platforms change and are
 # installed unpinned (see docker/Dockerfile and docs/development/setup.md).
 #
-# Nothing here carries a version pin either. A release installs the newest
-# resolvable set, and the published images still carry identical versions
-# because the release workflow resolves that set once - for linux/amd64 and
-# linux/arm64 both, failing if the two cannot agree on one - and hands the
-# resolved constraints to every architecture build. A pin here would be a
-# second, slower-moving opinion the images do not follow. See the 'Resolve
-# runtime dependency versions' step in .github/workflows/docker-build.yml.
+# Nothing here carries a version pin. A release installs the newest resolvable
+# set, and the published images still carry identical versions because the
+# release workflow resolves that set once - for linux/amd64 and linux/arm64
+# both, failing if the two cannot agree on one - and hands the resolved
+# constraints to every architecture build. A pin here would be a second,
+# slower-moving opinion the images do not follow. See the 'Resolve runtime
+# dependency versions' step in .github/workflows/docker-build.yml;
+# tests/test_version_source.py rejects any '==' that creeps back in.
+#
+# essentia carries a '# pinned' marker - not a version pin, but a signal to the
+# external .utils/check_requirements.py maintenance script to leave the line
+# alone. It is compiled from source in docker/Dockerfile on every architecture
+# because upstream publishes no linux/aarch64 wheel at all; the builder stage
+# drops the essentia line before pip runs, so no wheel is resolved over the
+# local build. Outside the image pip picks whatever wheel fits the interpreter.
 #
 # beat-this pulls in torch. Install with the CPU wheel index to avoid dragging
 # in the CUDA build:
 #   pip install --extra-index-url https://download.pytorch.org/whl/cpu -e .
 dependencies = [
-    
-    
-    
-    
     "beat-this>=1.1.0",
-    "essentia", # pinned
-    "fastapi==0.141.1",
-    "gunicorn==26.2.0",
-    "httpx==0.28.1",
-    "jinja2==3.1.6",
-    "markdown==3.10.3",
-    "markupsafe==3.0.3",
-    "nh3==0.3.7",
-    "numpy==2.5.2",
-    "pydantic==2.13.5",
-    "python-multipart==0.0.32",
-    "slowapi==0.1.10",
-    "starlette==1.6.0",
-    "torch==2.14.0",
-    "uvicorn[standard]==0.52.4",
-    "uvicorn-worker==0.4.0",
+    "essentia",  # pinned
+    "fastapi",
+    "gunicorn",
+    "httpx",
+    "jinja2",
+    "markdown",
+    "markupsafe",
+    "nh3",
+    "numpy",
+    "pydantic",
+    "python-multipart",
+    "slowapi",
+    "starlette",
+    "torch",
+    "uvicorn[standard]",
+    "uvicorn-worker",
 ]
 
 # The one place pins remain. None of this tooling enters a published image, so
@@ -82,16 +86,16 @@ dev = [
     "pytest==9.1.1",
     "pytest-asyncio==1.4.0",
     "pytest-cov==7.1.0",
-    "ruff==0.16.6",
+    "ruff==0.16.8",
 ]
 docs = [
     "markdown==3.10.3",
     "mkdocs==1.6.1",
-    "mkdocs-git-revision-date-localized-plugin==1.5.4",
+    "mkdocs-git-revision-date-localized-plugin==1.6.0",
     "mkdocs-material==9.7.7",
     "mkdocs-minify-plugin==0.8.0",
     "mkdocs-redirects==1.2.3",
-    "pymdown-extensions==11.0.2",
+    "pymdown-extensions==12.0.1",
 ]
 
 [project.urls]
@@ -100,13 +104,23 @@ Documentation = "https://gill-bates.github.io/fetchly/"
 Source = "https://github.com/Gill-Bates/fetchly"
 Changelog = "https://github.com/Gill-Bates/fetchly/blob/main/CHANGELOG.md"
 
-# The repo is a flat-layout application, not a library: `pip install -e .` is a
-# convenience for local dev (it makes the deps and the console entry point
-# available), so only the two importable packages are declared. The Docker
-# image installs the dependencies alone and runs the copied source tree.
+# The repo is a flat-layout application, not a library, and it declares no
+# console script: `pip install -e .` is a convenience for local dev that pulls
+# in the dependencies and puts the source tree on sys.path. The Docker image
+# installs the dependencies alone and runs the copied source tree.
+#
+# Discovery rather than an explicit list, because none of these directories
+# carries an __init__.py - they are namespace packages, and an explicit
+# `packages = ["app", "middleware"]` silently ships neither app.routes nor
+# app.utils nor app.common, leaving an installed wheel that cannot import
+# app.main. The excludes keep the two asset trees out: they hold no Python, and
+# discovery would otherwise declare them as empty namespace packages.
 [tool.setuptools]
-packages = ["app", "middleware"]
 include-package-data = false
+
+[tool.setuptools.packages.find]
+include = ["app*", "middleware*"]
+exclude = ["app.static*", "app.templates*"]
 
 # uv honours this automatically; plain pip needs the flag spelled out above.
 [tool.uv]
@@ -237,9 +251,6 @@ ignore = [
 "app/utils/banner.py" = ["T20", "W291"]
 # Repo tooling: writing to stdout is the whole point of these scripts.
 "tools/*.py" = ["T20"]
-
-[tool.ruff.lint.pydocstyle]
-convention = "pep257"
 
 [tool.ruff.format]
 quote-style = "double"

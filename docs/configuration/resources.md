@@ -27,7 +27,7 @@ With every variable left at its default:
 
 | Limit | Formula | Bounds |
 |---|---|---|
-| Worker threads | `ceil(cpus × 2)` | 1–8 |
+| Worker threads | `ceil(cpus × 1.5)` | 1–4 |
 | Queue depth | `workers × 2` | — |
 | CPU semaphore | `ceil(cpus)` | ≥ 1 |
 | Analysis semaphore | `min(2, ceil(cpus))` | ≥ 1 |
@@ -45,9 +45,13 @@ two at a time.
 |---:|---:|---:|---:|---:|---:|---:|
 | 0.5 | 1 | 2 | 1 | 1 | 2 | 1 |
 | 1 | 2 | 4 | 1 | 1 | 4 | 1 |
-| 2 | 4 | 8 | 2 | 2 | 8 | 2 |
-| 4 | 8 | 16 | 4 | 2 | 16 | 2 |
-| 8 | 8 | 16 | 8 | 2 | 32 | 2 |
+| 2 | 3 | 6 | 2 | 2 | 8 | 2 |
+| 4 | 4 | 8 | 4 | 2 | 16 | 2 |
+| 8 | 4 | 8 | 8 | 2 | 32 | 2 |
+
+Worker threads cap at 4 regardless of CPU count: SQLite has a single writer, so more
+threads add contention rather than throughput past that point. The other limits keep
+scaling with the CPU quota because they bound different, less contended resources.
 
 Parallel fragments are the one limit re-evaluated per download rather than at startup:
 with **Parallel fragments per download** on `Automatic`, a host that is currently short
@@ -120,7 +124,7 @@ message you can act on.
 
 === "Home server (4 CPU, 8 GB)"
 
-    Leave everything at auto. The defaults land on 8 workers, a 16-deep queue, and 2
+    Leave everything at auto. The defaults land on 4 workers, an 8-deep queue, and 2
     concurrent transcodes.
 
 === "Download-heavy, transcode-light"

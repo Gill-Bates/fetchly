@@ -515,23 +515,41 @@ async def api_lalal_status(
     )
 
     if should_validate:
-        from ..lalal import LalalClient, parse_minutes_left
+        from ..lalal import LalalClient, LalalError, parse_minutes_left
 
-        token_valid = False
-        validation_error = ""
-        # The validation call is /limits/minutes_left/, so the balance rides
-        # along - keep it rather than discard it.
-        minutes_left = None
+        # Only Lalal.ai itself can declare a credential invalid. A timeout or a
+        # transport error says nothing about the key, so those paths keep the
+        # last known verdict instead of caching "invalid" for the whole TTL.
+        last_known_valid = token_valid
+        last_known_minutes = minutes_left
+
         client = LalalClient(auth_key)
         try:
             async with client:
                 quota = await asyncio.wait_for(client.check_quota(), timeout=20.0)
+        except LalalError:
+            logger.warning("Lalal.ai rejected the stored credential")
+            token_valid = False
+            minutes_left = None
+            validation_error = "Lalal.ai rejected the stored credential"
+        except (TimeoutError, httpx.HTTPError, OSError) as exc:
+            logger.warning("Lalal.ai validation unavailable: %s", exc)
+            token_valid = last_known_valid
+            minutes_left = last_known_minutes
+            validation_error = "Lalal.ai is temporarily unavailable"
+        except Exception:
+            # Not a known-transient condition: fail closed rather than keep
+            # reporting a verdict and a balance we can no longer stand behind.
+            logger.exception("Unexpected Lalal.ai validation failure")
+            token_valid = False
+            minutes_left = None
+            validation_error = "Authentication validation failed"
+        else:
+            # The validation call is /limits/minutes_left/, so the balance rides
+            # along - keep it rather than discard it.
             minutes_left = parse_minutes_left(quota)
             token_valid = True
-        except Exception:
-            logger.exception("Lalal status validation failed")
-            token_valid = False
-            validation_error = "Authentication validation failed"
+            validation_error = ""
 
         checked_at = now_ts
         # A key saved/cleared during validation: report the result, but the
@@ -573,12 +591,12 @@ async def api_lalal_auth_activation_key(
 
     _validate_email(email)
 
-    from ..lalal import LalalClient, LalalError
+    from ..lalal import LalalClient, LalalError, parse_minutes_left
 
     client = LalalClient(activation_key)
     try:
         async with client:
-            await asyncio.wait_for(client.check_quota(), timeout=20.0)
+            quota = await asyncio.wait_for(client.check_quota(), timeout=20.0)
     except TimeoutError as exc:
         raise HTTPException(status_code=504, detail="Lalal.ai validation timed out") from exc
     except httpx.TimeoutException as exc:
@@ -592,6 +610,11 @@ async def api_lalal_auth_activation_key(
         logger.exception("Unexpected Lalal activation-key validation failure")
         raise HTTPException(status_code=503, detail="Lalal.ai is temporarily unavailable") from exc
 
+    # The stamped checked_at suppresses revalidation for the whole TTL, so the
+    # balance this call already read has to be stored with it - otherwise
+    # /status would keep reporting the previous account's minutes.
+    minutes_left = parse_minutes_left(quota)
+
     saved = await _commit_auth_settings(
         {
             "lalalaai_email": email,
@@ -599,6 +622,7 @@ async def api_lalal_auth_activation_key(
             "lalalaai_auth_checked_at": int(time()),
             "lalalaai_auth_is_valid": True,
             "lalalaai_auth_last_error": "",
+            "lalalaai_minutes_left": -1 if minutes_left is None else minutes_left,
         },
         expected_generation=generation,
         bump=True,
@@ -625,6 +649,9 @@ async def api_lalal_auth_logout(
             "lalalaai_auth_checked_at": 0,
             "lalalaai_auth_is_valid": False,
             "lalalaai_auth_last_error": "",
+            # -1 is "not known yet": the next account must not inherit this
+            # one's balance while its first validation is still pending.
+            "lalalaai_minutes_left": -1,
         },
         expected_generation=None,
         bump=True,

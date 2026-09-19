@@ -60,7 +60,11 @@ def _sign(secret_key: str, payload: str) -> str:
 
 def issue_captcha_token(secret_key: str) -> str:
     """Mint a signed, timestamped token for the login form."""
-    payload = f"{_TOKEN_VERSION}:{int(time())}"
+    # Store timestamp with microsecond precision to enforce min_age_seconds
+    # strictly: int(time()) only stores whole seconds, allowing a submission
+    # within ~0-1 second window. With 6 decimal places we get microsecond
+    # precision while keeping the token compact.
+    payload = f"{_TOKEN_VERSION}:{time():.6f}"
     signature = _sign(secret_key, payload)
     raw = f"{payload}:{signature}".encode()
     return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
@@ -103,7 +107,7 @@ def verify_captcha_token(
         return CaptchaOutcome.INVALID
 
     try:
-        issued_at = int(issued_at_raw)
+        issued_at = float(issued_at_raw)
     except ValueError:
         return CaptchaOutcome.INVALID
 

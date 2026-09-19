@@ -6,9 +6,10 @@
     "license": "GPL-3.0-or-later",
     "scripts": {
         "test": "node --test \"tests/js/*.test.mjs\"",
-        "lint": "npm run lint:js && npm run lint:css",
+        "lint": "npm run lint:js && npm run lint:css && npm run lint:contracts",
         "lint:js": "eslint --config tools/eslint.config.mjs .",
         "lint:css": "stylelint --config tools/stylelint.config.mjs --config-basedir . \"app/static/**/*.css\"",
+        "lint:contracts": "node tools/ui-lint/check-source-contracts.mjs",
         "lint:fix": "eslint --config tools/eslint.config.mjs . --fix && stylelint --config tools/stylelint.config.mjs --config-basedir . \"app/static/**/*.css\" --fix",
         "ui-lint": "npm --prefix tools/ui-lint run audit",
         "ui-lint:install": "npm --prefix tools/ui-lint install && npm --prefix tools/ui-lint run install:browsers"

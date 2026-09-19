@@ -15,7 +15,7 @@
   <a href="https://hub.docker.com/r/giiibates/fetchly"><img src="https://img.shields.io/docker/pulls/giiibates/fetchly?logo=docker&logoColor=white" alt="Docker Pulls"></a>
   <a href="https://hub.docker.com/r/giiibates/fetchly"><img src="https://img.shields.io/docker/image-size/giiibates/fetchly?logo=docker&logoColor=white" alt="Docker Image Size"></a>
   <br>
-  <a href="https://github.com/Gill-Bates/fetchly/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-AGPL--3.0-blue.svg" alt="License"></a>
+  <a href="https://github.com/Gill-Bates/fetchly/blob/main/LICENSE"><img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License"></a>
   <img src="https://img.shields.io/badge/Platform-linux%2Famd64%20|%20linux%2Farm64-lightgrey?logo=linux&logoColor=white" alt="Platform">
 </p>
 
@@ -26,10 +26,24 @@
   <em>Dashboard — paste a link, preview the media, pick a format, and track every job live.</em>
 </p>
 
-<p align="center">
-  <img src="https://raw.githubusercontent.com/Gill-Bates/fetchly/main/.github/img/screen_1.jpeg" alt="fetchly login screen" width="800"><br>
-  <em>Authenticated login with invisible, server-verified anti-bot protection.</em>
-</p>
+<details>
+  <summary align="center"><b>More screenshots</b></summary>
+  <br>
+  <p align="center">
+    <img src="https://raw.githubusercontent.com/Gill-Bates/fetchly/main/.github/img/screen_1.jpeg" alt="fetchly login screen" width="800"><br>
+    <em>Authenticated login with invisible, server-verified anti-bot protection.</em>
+  </p>
+  <p align="center">
+    <img src="https://raw.githubusercontent.com/Gill-Bates/fetchly/main/.github/img/screen_3.jpeg" alt="fetchly settings: Lalal.ai integration and per-platform cookie tiles" width="800"><br>
+    <em>Integrations — connect Lalal.ai for stem separation and paste browser cookies for sign-in-only downloads.</em>
+  </p>
+  <p align="center">
+    <img src="https://raw.githubusercontent.com/Gill-Bates/fetchly/main/.github/img/screen_4.jpeg" alt="fetchly settings: host resources, component versions, update check, and changelog" width="800"><br>
+    <em>System — host resources, component versions, one-click update checks, and the in-app changelog.</em>
+  </p>
+</details>
+
+<br>
 
 ## Download, shape, share
 
@@ -42,7 +56,7 @@ finished downloads without handing your media to another service.
 | Feature | What you get |
 | --- | --- |
 | **Download everywhere** | Save video or audio from YouTube, TikTok, Instagram, and Facebook in one place. |
-| **Stay in control** | Follow every queued, active, completed, or failed job from a live dashboard. |
+| **Stay in control** | Follow every job from a live dashboard, from queued through downloading and analysis to finished, cancelled, or failed. |
 | **Choose your quality** | Pick the format and quality you want, then let fetchly handle the conversion. |
 | **Brand every video** | Burn the fetchly logo — or your own uploaded SVG or PNG — and your hostname, once set, into the corner of every downloaded video, or switch it off. |
 | **Trim with precision** | Cut audio visually with an interactive waveform before you download or process it further. |
@@ -100,7 +114,7 @@ The [fetchly documentation](https://gill-bates.github.io/fetchly/) covers instal
 configuration, reverse proxies, security, platform cookies, the API, and troubleshooting.
 
 ---
-
+<br>
 <p align="center">
   <a href="https://www.buymeacoffee.com/tnsteinerx">
     <img src="https://img.buymeacoffee.com/button-api/?text=Buy%20me%20a%20beer&emoji=%F0%9F%8D%BA&slug=tnsteinerx&button_colour=FFDD00&font_colour=000000&font_family=Cookie&outline_colour=000000&coffee_colour=ffffff" alt="Buy Me A Coffee">
