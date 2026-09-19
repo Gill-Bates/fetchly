@@ -141,6 +141,7 @@ mkdocs build -f docs/mkdocs.yml --verbose    # Show detailed build output
 ### Viewing Last-Updated Dates
 - Plugin `mkdocs-git-revision-date-localized-plugin` adds last-modified timestamp to each page footer
 - Requires git history; not shown on `mkdocs serve` (only in built site)
+- `changelog.md` and `license.md` are generated at build time (copied from `CHANGELOG.md` / `LICENSE`), so their git history does not match the page path. They are listed under the plugin's `exclude:` and fall back to the build date. Without that, the plugin emits a "first revision timestamp is older than last" warning that fails the `--strict` build. Add any other build-time-copied page to that list.
 
 ---
 

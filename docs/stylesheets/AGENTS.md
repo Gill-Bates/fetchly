@@ -17,7 +17,7 @@ The stylesheet extends the Material theme rather than replacing it, so theme upd
 ### How theming actually works here
 Two things matter and both differ from a plain static site:
 
-1. **Dark mode is driven by the Material palette toggle, not by the OS.** `docs/mkdocs.yml` declares two palettes — `scheme: default` (light) and `scheme: slate` (dark) — each with a toggle button. Material sets `data-md-color-scheme="default"` or `"slate"` on the document, and CSS keys off that attribute:
+1. **The active scheme follows the OS on first visit, then the toggle; either way CSS keys off the attribute, never a media query.** `docs/mkdocs.yml` declares two palettes — `scheme: default` (light) and `scheme: slate` (dark) — each carrying a `media: "(prefers-color-scheme: …)"` entry so the site opens in the visitor's system scheme, plus a toggle button that overrides it and is then remembered. Whichever wins, Material sets `data-md-color-scheme="default"` or `"slate"` on the document, and CSS keys off that attribute:
 
    ```css
    [data-md-color-scheme="slate"] {
@@ -25,7 +25,7 @@ Two things matter and both differ from a plain static site:
    }
    ```
 
-   `extra.css` contains **no `@media (prefers-color-scheme: dark)` query**, and adding one would not work: the visitor's manual toggle would be ignored, and the rule would fire against the wrong palette whenever OS preference and toggle disagree. Use the attribute selector.
+   The `media` queries belong on the palettes in `docs/mkdocs.yml`, not in the stylesheet. `extra.css` contains **no `@media (prefers-color-scheme: dark)` query**, and adding one would not work: it would ignore the visitor's manual toggle and fire against the wrong palette whenever OS preference and toggle disagree. Style off the attribute selector.
 
 2. **There are two families of custom properties, with different jobs.**
    - `--fy-primary` (`#5b5fdc`) and `--fy-accent` (`#818cf8`) — fetchly's own brand tokens, defined on `:root`. Use these for fetchly-specific accents.
@@ -90,5 +90,5 @@ Material's variable names are documented upstream and visible in DevTools on any
 
 **Last Updated:** 2026-09-19  
 **Theme:** Material for MkDocs  
-**Dark Mode:** `[data-md-color-scheme="slate"]`, driven by the palette toggle in `docs/mkdocs.yml`  
+**Dark Mode:** `[data-md-color-scheme="slate"]`; palettes in `docs/mkdocs.yml` follow the OS via `prefers-color-scheme` and the toggle overrides it  
 **Brand Tokens:** `--fy-primary`, `--fy-accent`
