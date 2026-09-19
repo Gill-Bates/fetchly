@@ -885,6 +885,13 @@ jobs:
         # Hub login, so a compromised action would see those credentials.
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
+          # The action's own default trails its scanner by several releases
+          # (v0.36.0 installs Trivy v0.70.0 and then prints a notice that
+          # v0.74.0 exists). The vulnerability database this step gates on is
+          # rolling anyway - it is re-downloaded on every run - so pinning the
+          # binary that reads it buys no reproducibility, only a scanner that
+          # ages until someone bumps it by hand.
+          version: 'latest'
           cache: 'false'
           image-ref: '${{ matrix.test_image }}'
           format: 'json'
@@ -908,6 +915,26 @@ jobs:
           # (torch, essentia, beat-this and their transitive deps) is a
           # large library surface to walk.
           timeout: '15m'
+          # pip ships a CycloneDX SBOM of its own vendored libraries
+          # (pip/_vendor/bom.cdx.json, PEP 770). Trivy parses it as a
+          # third-party SBOM - warning "Third-party SBOM may lead to
+          # inaccurate vulnerability detection" as it does so - and adds its
+          # 18 components to the results as if they were installed
+          # distributions. They are not: they are source trees inside
+          # pip/_vendor, they carry the versions pip vendored rather than
+          # anything this image resolved, and there is nothing a release can do
+          # about them. The venv's own setuptools is 84.0.0; pip's SBOM
+          # declares 70.3.0 and drags CVE-2025-47273 with it, a flaw in
+          # setuptools' PackageIndex - code pip does not even vendor, since it
+          # takes only pkg_resources. Excluding that file keeps the gate on
+          # what the image actually installs - pip itself included, so a CVE in
+          # pip proper still stops the release.
+          #
+          # One pattern covers both copies (the base interpreter's and the
+          # venv's) and survives a Python minor bump: Trivy matches skip-files
+          # against paths relative to the scanned artifact's root, where a
+          # leading slash never matches.
+          skip-files: '**/pip/_vendor/bom.cdx.json'
           # Accepted findings live in .trivyignore at the repository root, one
           # CVE id per line with the reason in a comment above it.
           trivyignores: '.trivyignore'
