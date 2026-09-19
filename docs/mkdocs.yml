@@ -64,6 +64,12 @@ plugins:
   - git-revision-date-localized:
       enable_creation_date: true
       type: timeago
+      # changelog.md and license.md are copied in at build time from
+      # CHANGELOG.md / LICENSE. With follow on, `git log --follow` traces the
+      # source files' history and yields a first-revision date newer than the
+      # last-revision one, which aborts `mkdocs build --strict`. Disable follow
+      # so each page's dates come from its own path.
+      enable_git_follow: false
 
 markdown_extensions:
   - abbr
