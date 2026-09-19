@@ -47,7 +47,6 @@ theme:
     - navigation.expand
     - navigation.top
     - navigation.footer
-    - navigation.prune
     - search.suggest
     - search.highlight
     - search.share
@@ -62,17 +61,17 @@ theme:
 plugins:
   - search:
       lang: en
-      separator: '[\s\-\.]+'
   - minify:
       minify_html: true
   - git-revision-date-localized:
       enable_creation_date: true
       type: timeago
       # changelog.md and license.md are copied in at build time from
-      # CHANGELOG.md / LICENSE, so their git history does not line up with the
-      # page path: the plugin derives a first-revision date newer than the
-      # last-revision one and aborts `mkdocs build --strict`. Exclude the two
-      # generated pages so they fall back to the build date instead.
+      # CHANGELOG.md / LICENSE, so their copied source paths carry no
+      # meaningful Git revision history for that path (a first-revision date
+      # newer than the last-revision one), which aborts `mkdocs build --strict`
+      # (this plugin's own `strict` option also defaults to true). Excluding
+      # them skips revision-date processing for both pages entirely.
       exclude:
         - changelog.md
         - license.md
