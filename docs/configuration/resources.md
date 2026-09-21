@@ -60,11 +60,12 @@ free, 4 on 256 MB, 8 from 512 MB up). A fixed value of `1`–`16` skips the prob
 
 ## Runtime settings and operator overrides
 
-**Settings → Processing → Downloads** controls the parallel fragments per download, where
-`Automatic` is the default. **Settings → General → Runtime limits** controls download
-worker count, download and transcode timeouts, and input size. A worker count of `0` means automatic sizing and
-applies after the next restart. The BPM-analysis limits and the Lalal result limit
-live in the Lalal.ai tile under **Settings → Integrations**.
+**Settings → General → Runtime limits** controls the download worker count, the parallel
+fragments per download (`Automatic` by default), the download and transcode timeouts, and
+the maximum source download size. A worker count of `0` means automatic sizing and
+applies after the next restart. The
+BPM-analysis limits and the Lalal result limit live in the Lalal.ai tile under
+**Settings → Integrations**.
 
 The remaining resource-governor limits are operator-level overrides. `0` means "auto".
 

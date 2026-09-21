@@ -50,7 +50,14 @@ concurrency:
 jobs:
   audit:
     name: Playwright UI audit
-    runs-on: ubuntu-latest
+    # Named, not ubuntu-latest, and on 26.04 ahead of the migration
+    # (actions/runner-images#14748). The pixel comparison in
+    # tools/ui-lint/lib/browser-utils.mjs diffs two screenshots taken in the
+    # same run against each other rather than against committed baselines, and
+    # Playwright installs its own browsers, so the host's font stack cannot
+    # turn into a regression this repository did not cause - it only has to
+    # stay constant within one run.
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     # Reports, never blocks. Job-level, so a red audit leaves the run green and
     # the PR mergeable while the finding is still visible and downloadable.

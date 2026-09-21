@@ -63,7 +63,31 @@
       "Bash(curl -sI \"http://localhost:8000/static/style.css\")",
       "Bash(curl -s http://localhost:8000/static/style.css)",
       "Bash(UI_LINT_BASE_URL=http://localhost:8000 UI_LINT_USERNAME=admin UI_LINT_PASSWORD=admin UI_LINT_BROWSERS=chromium,webkit,firefox UI_LINT_BROWSER_CONCURRENCY=2 UI_LINT_DEVICE_CONCURRENCY=2 npm run ui-lint)",
-      "Bash(echo \"EXIT: $?\")"
+      "Bash(echo \"EXIT: $?\")",
+      "Bash(python -m pytest tests/test_gunicorn_logging.py -q)",
+      "Bash(curl -s -o /dev/null -w \"%{http_code}\" http://localhost:8000/)",
+      "Bash(curl -s http://localhost:8000/settings)",
+      "Bash(python -c ' *)",
+      "Bash(node /tmp/claude-0/-opt-fetchly/830c16bd-42be-47c3-8d43-f889851896b8/scratchpad/measure-table.mjs)",
+      "Bash(node /tmp/claude-0/-opt-fetchly/830c16bd-42be-47c3-8d43-f889851896b8/scratchpad/diagnose.mjs)",
+      "Bash(grep -oE '`[a-z_]+`' docs/configuration/settings.md)",
+      "Bash(grep -oE \"[A-Z][A-Z_]{2,}\")",
+      "Bash(grep -ohE '\\\\b[A-Z][A-Z_]{3,}\\\\b' docker/entrypoint.sh)",
+      "Bash(grep -oE '`[A-Z][A-Z0-9_]{3,}`' docs/configuration/environment.md)",
+      "Bash(grep -ohE '`\\(GET|POST|PUT|DELETE|PATCH\\) [^`]+`' docs/api/endpoints.md)",
+      "Bash(git commit -m 'docs\\(v1.3.0\\): update changelog with container, retention, and output format changes *)",
+      "Bash(grep -E '\\\\.\\(py|pyi|sh|bash\\)$|^[^.]+$')",
+      "Bash(grep -E '\\\\.\\(py|pyi|sh|bash\\)$|^[^/.]+$')",
+      "Bash(python3)",
+      "Bash(chmod 644 tools/pyproject-deps.py)",
+      "Bash(git update-index *)",
+      "Bash(git commit -m 'chore: fix executable bit on tools/pyproject-deps.py *)",
+      "Bash(git commit -m 'chore: fix executable bit and update docs *)",
+      "Bash(pytest -q)",
+      "Bash(git rebase *)",
+      "Bash(git commit -m 'refactor\\(settings\\): consolidate slider preview functions *)",
+      "Bash(GIT_EDITOR='sed -i \"s/^pick 7f0af74/reword 7f0af74/\"' git rebase -i 7f0af74^)",
+      "Bash(git commit *)"
     ]
   }
 }

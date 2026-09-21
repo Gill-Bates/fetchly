@@ -14,11 +14,22 @@ limits**.
 | Setting | Panel | Key | Range | Default |
 |---|---|---|---|---|
 | Retention | Retention | `retention_days` | `0`–`365` | `0` (unlimited) |
+| Enable Job History | Retention | `enable_job_history` | on/off | on |
 | Public hostname | Sharing | `public_hostname` | hostname or IP | empty |
 | Share link max uses | Sharing | `share_link_max_uses` | `0`–`10000` | `0` (unlimited) |
 
-**Retention** — days after which a job's files are swept. `0` keeps everything until
-you remove it explicitly. See [Storage & Retention](storage.md).
+**Retention** — days after which an expired job is removed completely: its files, its
+entry in the job history and its share links. Its numbers leave the statistics with it.
+`0` keeps everything until you remove it explicitly. See
+[Storage & Retention](storage.md).
+
+**Enable Job History** — whether new jobs are listed in the dashboard's job history.
+Switched off, a new job still runs normally and still counts in the statistics; it is
+just left out of the dashboard list. The value is snapshotted onto each job when it is
+submitted, so the setting applies to **new jobs only**: turning it off does not hide
+jobs already in the list, and turning it on does not bring back jobs submitted while it
+was off. This is separate from the **Show Job History** toggle on the dashboard, which
+only collapses the list in your browser.
 
 **Share link max uses** — snapshotted onto each link at creation. Changing it never
 retroactively re-opens or closes links already handed out. See
@@ -36,58 +47,98 @@ work immediately.
 | Setting | Key | Range | Default |
 |---|---|---|---|
 | Download workers | `download_worker_count` | `0`–`8` | `0` (automatic; restart required) |
+| Parallel fragments per download | `download_concurrent_fragments` | `Automatic` or `1`–`16` | `Automatic` (`0`) |
 | Download timeout | `download_timeout_minutes` | `1`–`240` min | `60` min |
 | Transcode timeout | `transcode_timeout_minutes` | `1`–`480` min | `120` min |
-| Maximum input size | `download_max_filesize_gib` | `1`–`100` GiB | `4` GiB |
+| Maximum source download size | `download_max_filesize_gib` | `1`–`100` GiB | `4` GiB |
 
 **Download workers** controls the in-process download pool. It is read when the app
 starts, so restart after changing it. The queue and SSE registry are process-local;
 Gunicorn itself remains fixed at one process.
 
+**Parallel fragments per download** is yt-dlp's `--concurrent-fragments`, which applies
+to fragmented DASH/HLS sources and is ignored for progressive single-file downloads.
+`Automatic` sizes it per download from the host's CPU quota and free memory; the UI
+shows what that resolves to on this host right now. Higher values use more CPU.
+
+**Maximum source download size** is passed straight through as yt-dlp's own
+`--max-filesize` flag. It bounds the size of the file yt-dlp fetches from the
+platform (YouTube, TikTok, …), not the size of any file fetchly produces afterwards —
+transcoding, trimming, or the watermark pass happen after the download completes and
+are not covered by this limit. A source larger than the configured value fails the
+download instead of being fetched and then rejected.
+
 ## Processing
 
-The **Processing** tab is split into panels: **Downloads** and **Watermark**.
+The **Processing** tab is split into panels: **Output format** and **Watermark**.
 
 | Setting | Panel | Key | Range | Default |
 |---|---|---|---|---|
-| Parallel fragments per download | Downloads | `download_concurrent_fragments` | `Automatic` or `1`–`16` | `Automatic` (`0`) |
-| Universally playable output (H.264/AAC) | Downloads | `download_compatible_output` | on/off | off |
-| Show fetchly watermark | Watermark | `video_watermark` | on/off | on |
+| Video output format | Output format | `download_output_mode` | `source`, `universal`, `av1` | `universal` |
+| Show Watermark | Watermark | `video_watermark` | on/off | on |
 | Custom logo | Watermark | *(file, not a setting)* | SVG or PNG upload | built-in logo |
 
-**Universally playable output (H.264/AAC)** — decides what `max` quality means.
+**Video output format** — a three-position slider that decides what `max` quality
+means. Both targeted modes are preferred at format-selection time, so a source that
+already matches is downloaded and remuxed with no encoder involved.
 
-Off, `max` is a pure download and remux: the highest resolution the source offers, in
-the container those streams belong in (`.mp4`, `.webm` for VP9/Opus, `.mkv` for AV1),
-with no encoder involved and nothing lost. Those files do not play on Safari, iOS or
-most TVs, so jobs that produce one are marked **Limited playback** in the job list.
+**Source** (left) — the source rendition is passed through untouched: the highest
+resolution the source offers, in the container those streams belong in (`.mp4`,
+`.webm` for VP9/Opus, `.mkv` for AV1), with nothing lost. No encoder runs at all unless
+the watermark is on (see below). Those
+files do not play on Safari, iOS or most TVs, so jobs that produce one are marked
+**Limited playback** in the job list.
 
-On, the finished file is guaranteed H.264/AAC in MP4. The promise is kept at format
-selection first (yt-dlp sorts `vcodec:h264` ahead of resolution), which costs no CPU
-and no quality — only the resolutions that exist solely as VP9/AV1. A source with no
-H.264 rendition at all is re-encoded afterwards, and only as far as needed: a file
-whose video is already H.264 but whose audio is Opus gets `-c:v copy` and an AAC audio
-track, nothing more.
+**H.264 (Recommended)** (middle, default; stored as `universal`) — the finished file is
+guaranteed H.264/AAC in MP4.
+The promise is kept at format selection first (yt-dlp sorts `vcodec:h264` ahead of
+resolution), which costs no CPU and no quality — you only give up the resolutions that
+exist solely as VP9/AV1. A source with no H.264 rendition at all is re-encoded
+afterwards, and only as far as needed: a file whose video is already H.264 but whose
+audio is Opus gets `-c:v copy` and an AAC audio track, nothing more.
 
-Migrated installs keep their old `download_mp4_preset` value under the new key, so
-upgrading does not change what an existing instance produces. The watermark implies
-this setting (see below); the switch is then shown locked and your stored choice is
-left alone.
+**AV1** (right) — the finished video is guaranteed AV1, for the smallest file at a
+given quality. An AV1 rendition is preferred at format selection, so a source that
+already is AV1 is never re-encoded. One that is not goes through `libsvtav1`, which is
+considerably slower than H.264 — budget for it before switching. The audio track is
+left exactly as downloaded (AV1 is a video codec), and the source container is kept,
+since AV1 is valid in `.webm`, `.mkv` and `.mp4` alike.
 
-See [Downloads](../features/downloads.md#universally-playable-output) for the full
-trade-off.
+The setting applies to **new downloads only**. Nothing already on disk is touched:
+fetchly never converts a finished file retroactively, so a job downloaded under one
+mode keeps that format for good. The mode is read when a download starts, which means a
+job still sitting in the queue picks up the new value, and retrying a failed or
+cancelled job re-downloads it under the current mode.
 
-**Show fetchly watermark** — burns the fetchly logo into the bottom-right corner of
+Upgraded installs keep their previous behaviour: the old `download_compatible_output`
+switch maps to `universal` when it was on and `source` when it was off (and an install
+still on the older `download_mp4_preset` migrates the whole way in one start).
+
+The watermark burns an overlay into the picture, which costs a video encode in every
+mode — but the encode targets the mode's own codec, so the watermark never changes the
+format you chose. Under **Source** it re-encodes into the codec the download arrived in
+(H.264, HEVC, AV1, VP9 or VP8) and keeps the container; the file is then no longer a
+bit-exact copy of the source, but it is still the same format. A codec fetchly has no
+encoder for falls back to H.264 in MP4.
+
+See [Video Codecs & Output Format](../features/video-codecs.md) for the full
+trade-off between resolution, file size, compatibility and CPU time, and
+[Downloads](../features/downloads.md#video-output-format) for the mechanics.
+
+**Show Watermark** — burns the fetchly logo into the bottom-right corner of
 every downloaded video, with the public hostname on a second line once one is set.
 Audio-only jobs are unaffected. The badge (logo, drop shadow, hostname) is composited
 once per hostname and output size and cached under `data/watermark-cache/`, so the
 encode only alpha-blends a still image into the corner. On `medium`/`small` quality
 that rides along in the transcode fetchly already runs and costs nothing measurable;
-`max` quality is otherwise a pure download and remux, so it gains an x264 pass that a
-4K download will feel. That pass picks its settings from the source resolution — the
-CRF is the quality lever, and a small low-bitrate source needs a lower one than a
-high-bitrate 4K frame does, which a flat setting got visibly wrong (`medium`/CRF 16 up
-to 576p, `fast`/CRF 18 up to 1080p, `veryfast`/CRF 20 above). Audio is stream-copied
+`max` quality is otherwise a pure download and remux, so it gains an encoding pass that
+a 4K download will feel. Which encoder runs follows the output format — x264 for
+**H.264**, `libsvtav1` for **AV1**, and under **Source** whichever matches the codec
+that was downloaded. Each picks its settings from the source resolution — the CRF is the
+quality lever, and a small low-bitrate source needs a lower one than a high-bitrate 4K
+frame does, which a flat setting got visibly wrong (for x264: `medium`/CRF 16 up to
+576p, `fast`/CRF 18 up to 1080p, `veryfast`/CRF 20 above; the other encoders use their
+own equivalents, since CRF scales do not carry across). Audio is stream-copied
 unless the compatibility promise needs it re-encoded. Turn the switch off to leave
 `max` downloads untouched. The hostname line is set in the
 same Roboto Flex already shipped for the app UI (`app/static/fonts/`), so no system

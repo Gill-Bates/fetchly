@@ -61,8 +61,8 @@ Real keys from the defaults dict in `app/db.py`:
 | `download_concurrent_fragments` | `0` | `0` means auto-size per download |
 | `download_timeout_minutes` | `60` | Abort a download that exceeds this |
 | `transcode_timeout_minutes` | `120` | Abort a transcode that exceeds this |
-| `download_max_filesize_gib` | `4` | Reject downloads above this size |
-| `download_compatible_output` | `false` | Force a broadly playable container/codec |
+| `download_max_filesize_gib` | `4` | yt-dlp `--max-filesize`; rejects a source download above this size, before any transcode/trim |
+| `download_output_mode` | `universal` | Output target for `max`: `source`, `universal` (H.264/AAC) or `av1` |
 | `video_watermark` | `true` | Overlay the watermark on video output |
 | `audio_analysis_max_minutes` | `15` | Skip analysis for longer audio |
 | `audio_analysis_timeout_minutes` | `5` | Abort analysis that exceeds this |
@@ -130,7 +130,7 @@ python run.py   # defaults dict repopulates the table on startup
 
 ---
 
-**Last Updated:** 2026-09-19  
+**Last Updated:** 2026-09-20  
 **Configuration Style:** Hybrid (environment + database + runtime UI)  
 **Persistence:** Database (survives restarts) + environment (startup only)  
 **Database File:** `${DATA_DIR}/jobs.db`

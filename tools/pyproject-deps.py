@@ -7,16 +7,17 @@
 """Print one dependency group from pyproject.toml as a pip requirements list.
 
 pyproject.toml replaced requirements.txt and docs/requirements-docs.txt, but a
-few consumers still need a flat file: pip's ``-r``, Trivy's filesystem scanner,
-and the Docker builder, which installs the dependencies without installing the
-project so the layer stays cached across source-only changes.
+few consumers still need a flat file: pip's ``-r`` in CI, and Trivy's filesystem
+scanner. The Docker builder is not one of them - ``tools/`` is excluded from the
+build context, and it reads ``[project].dependencies`` with tomllib itself.
 
     python tools/pyproject-deps.py            # [project] dependencies
     python tools/pyproject-deps.py docs       # [project.optional-dependencies] docs
     python tools/pyproject-deps.py dev        # ... dev
 
     # CI installs the web stack without the multi-gigabyte audio toolchain:
-    python tools/pyproject-deps.py --exclude torch --exclude beat-this --exclude essentia
+    python tools/pyproject-deps.py \
+        --exclude torch --exclude torchaudio --exclude beat-this --exclude essentia
 """
 
 from __future__ import annotations

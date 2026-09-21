@@ -92,9 +92,10 @@ From a finished job you can:
 
 | Setting | Default | Effect |
 |---|---|---|
-| Retention | `0` (unlimited) | Days before job files are swept; `0` keeps them forever |
-| Universally playable output (H.264/AAC) | Off | On guarantees H.264/AAC MP4; off keeps the source codec and the highest resolution. The watermark turns it on |
-| Show fetchly watermark | On | Burns the fetchly logo, plus the public hostname when set, into the bottom-right corner of every video |
+| Retention | `0` (unlimited) | Days before an expired job is removed entirely — files, history entry and share links; `0` keeps them forever |
+| Enable Job History | On | Whether new jobs appear in the dashboard's job history; applies to new jobs only |
+| Video output format | H.264 (Recommended) | `H.264` guarantees H.264/AAC MP4; `Source` keeps the source codec and the highest resolution; `AV1` guarantees AV1 video but re-encodes slowly when the source is not already AV1 |
+| Show Watermark | On | Burns the fetchly logo, plus the public hostname when set, into the bottom-right corner of every video |
 | Parallel fragments per download | `Automatic` | Parallel fragment downloads for DASH/HLS sources, sized from the host's CPU quota and free memory |
 | Share link max uses | `0` (unlimited) | How often a newly created share link may be redeemed |
 | Public hostname | empty | Hostname share links are built from behind a reverse proxy |

@@ -36,8 +36,13 @@ dependencies, and the `dev` and `docs` extras. It replaced `VERSION`,
 now happens in one file, and `app/utils/version.py` reads `[project] version` straight
 back out at runtime.
 
-`--extra-index-url` picks the CPU build of PyTorch (`beat_this`'s dependency); without
+`--extra-index-url` picks the CPU build of PyTorch (`torch` and `torchaudio`); without
 it pip resolves the CUDA wheels and pulls in gigabytes of GPU code the app never runs.
+pip has no notion of index priority, so that flag opens the index for every package in
+the install — acceptable for a dev environment, but not for a release. `uv` users get
+the narrow version for free: `pyproject.toml` declares that index `explicit` and binds
+only `torch` and `torchaudio` to it, which is the same separation the release
+resolution and the Dockerfile use.
 yt-dlp and `yt-dlp-ejs` stay outside the manifest on purpose, since yt-dlp updates on
 its own cadence as platforms change.
 

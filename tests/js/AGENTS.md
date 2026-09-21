@@ -15,7 +15,7 @@ These run in plain Node.js with no browser. Two groups live here: tests of `app/
 | `csrf-token.test.mjs` | Client-side CSRF contract: `getCsrfToken()` cookie/form/meta precedence, plus `submitJob()` sending the token as the `X-CSRF-Token` header |
 | `cookie-paste-modal.test.mjs` | Cookie import UI: paste validation, format detection, errors |
 | `watermark-logo.test.mjs` | Logo validation: SVG inspection, PNG inspection, rasterization, size limits |
-| `limited-playback.test.mjs` | Playback restriction logic: clip boundaries and duration limits |
+| `limited-playback.test.mjs` | The **Limited playback** marker: which codec/container combinations the job list flags as unplayable on Safari, iOS and TVs |
 | `safe-redirect.test.mjs` | Redirect safety: origin validation against a stubbed `window.location` |
 | `format-helpers.test.mjs` | Format description parsing and quality/codec naming. Self-contained — it stubs `document` and does not import an `app/static/js/format-helpers.js` module (no such file exists). |
 | `config-contract.test.mjs` | Reads `app/static/js/config.js` as text, re-imports it per case with a stubbed `documentElement.dataset`, and asserts both the Lalal duration bootstrap contract and the exported status sets |

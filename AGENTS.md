@@ -1,6 +1,6 @@
 # fetchly Agent Guidance
 
-**Purpose:** Root-level coordination guide for the fetchly self-hosted media downloader (FastAPI backend, server-rendered Jinja2 frontend, v1.2.2).
+**Purpose:** Root-level coordination guide for the fetchly self-hosted media downloader (FastAPI backend, server-rendered Jinja2 frontend). `pyproject.toml` carries the current version.
 
 fetchly is a full-stack application that enables users to download, analyze, trim, and share media from YouTube, TikTok, Instagram, and Facebook. The backend is FastAPI (Python 3.13+) with a single-process job queue, yt-dlp media handling, BPM analysis, and Lalal.ai stem separation. The frontend is server-rendered Jinja2 plus hand-written ES modules — there is no build step and no frontend framework beyond vendored Bootstrap 5.
 
@@ -37,7 +37,7 @@ fetchly is a full-stack application that enables users to download, analyze, tri
 - **Real-time:** Server-Sent Events. `/app/routes/events.py` returns `text/event-stream`; `/app/static/js/events.js` consumes it with `EventSource`.
 
 ### Testing
-- **Python tests:** `/tests/test_*.py` — 39 files. pytest is the runner, but the tests are **unittest-style classes**; there are no pytest fixtures. Subclass `IsolatedDbTestCase` or `WebAppTestCase` from `/tests/_support.py`.
+- **Python tests:** `/tests/test_*.py` — 40 files. pytest is the runner, but the tests are **unittest-style classes**; there are no pytest fixtures. Subclass `IsolatedDbTestCase` or `WebAppTestCase` from `/tests/_support.py`.
 - **JavaScript tests:** `/tests/js/*.test.mjs` — 17 files using `node:test` + `node:assert/strict` with the shared fake DOM in `/tests/js/helpers/fake-dom.mjs`
 - **UI audit:** `/tools/ui-lint/` — a separate Playwright suite run via `npm run ui-lint`, not part of `npm test`
 - **CI gate:** ruff, pytest, ESLint, Stylelint, source contracts, and `node --test` must all pass
@@ -58,7 +58,7 @@ fetchly is a full-stack application that enables users to download, analyze, tri
 - `app/routes/*` import `app/db.py`; `app/worker.py` imports `db`, `governor` and `analysis_worker` but **not** `app/routes/`
 
 ### External
-- **Runtime:** FastAPI, Uvicorn, uvicorn-worker, Gunicorn, Jinja2, Pydantic, Slowapi, Starlette, yt-dlp, yt-dlp-ejs, essentia, beat-this, torch (CPU), httpx, markdown, markupsafe, nh3, numpy, python-multipart
+- **Runtime:** FastAPI, Uvicorn, uvicorn-worker, Gunicorn, Jinja2, Pydantic, Slowapi, Starlette, yt-dlp, yt-dlp-ejs, essentia, beat-this, torch and torchaudio (CPU wheels), httpx, markdown, markupsafe, nh3, numpy, python-multipart
 - **Development:** pytest, pytest-asyncio, pytest-cov, ruff (all pinned; runtime deps deliberately are not)
 - **Documentation:** MkDocs, mkdocs-material, pymdown-extensions and the plugins listed under `[project.optional-dependencies] docs`
 - **Frontend tooling:** ESLint, Stylelint, Playwright, @axe-core/playwright, pixelmatch, pngjs
@@ -74,7 +74,7 @@ python run.py       # Dev server on http://127.0.0.1:8000
 
 ### Testing
 ```bash
-pytest                    # Run all Python tests (39 files)
+pytest                    # Run all Python tests (40 files)
 npm test                  # node --test over tests/js/*.test.mjs (17 files)
 npm run lint              # ESLint + Stylelint + source contracts
 npm run ui-lint           # Playwright UI audit (needs: npm run ui-lint:install)
@@ -83,7 +83,7 @@ ruff check .              # Lint Python, as CI does
 
 ### Building & Deploying
 - **Docker:** `docker build -f docker/Dockerfile -t fetchly:local .` — there is no Dockerfile at the repo root; the build context is the root
-- **Release:** tag with `v1.2.2` format (must match `pyproject.toml`); `.github/workflows/docker-build.yml` builds multi-arch images and pushes to Docker Hub
+- **Release:** tag with `vX.Y.Z` format (must match `pyproject.toml`); `.github/workflows/docker-build.yml` builds multi-arch images and pushes to Docker Hub
 
 ### Key Configuration
 Authoritative reference: `docs/configuration/environment.md`. Most-used variables:
@@ -99,11 +99,11 @@ Authoritative reference: `docs/configuration/environment.md`. Most-used variable
 ### Release Checklist
 - Update `pyproject.toml` version
 - Update `CHANGELOG.md` with new features/fixes
-- Push commit and tag with `git tag v1.2.2` and `git push --tags`
+- Push commit and tag with `git tag vX.Y.Z` (the version just written to `pyproject.toml`) and `git push --tags`
 - `.github/workflows/docker-build.yml` builds and pushes images to Docker Hub
 
 ---
 
-**Last Updated:** 2026-09-19  
-**Version:** 1.2.2  
-**Branch:** feature/v1.2.2 (main for stable releases)
+**Last Updated:** 2026-09-20  
+**Version:** see `pyproject.toml` (`[project].version`)  
+**Branch:** `feature/vX.Y.Z` during development, `main` for stable releases

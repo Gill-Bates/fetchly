@@ -3,9 +3,9 @@
 // Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 //
 
-// With "Universally playable output" off, a download keeps the source codec and
-// container. The job list has to say so: a .webm the user cannot open on their
-// phone must look like a choice, not like a broken file.
+// Under the Source and AV1 output formats, a download keeps a codec and
+// container the user's phone may not open. The job list has to say so: a .webm
+// must look like a choice, not like a broken file.
 
 import assert from "node:assert/strict";
 import test from "node:test";

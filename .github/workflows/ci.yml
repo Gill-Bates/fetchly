@@ -29,7 +29,17 @@ concurrency:
 jobs:
   python:
     name: Ruff
-    runs-on: ubuntu-latest
+    # Every job here names its image instead of following ubuntu-latest, which
+    # moves x64 runners to Ubuntu 26.04 in a gradual rollout from 2026-10-19 to
+    # 2026-11-19 (actions/runner-images#14748) - weeks in which two runs of one
+    # commit could disagree about the OS. Taking 26.04 now rather than being
+    # taken there keeps the image a reviewable line instead of a date.
+    #
+    # Nothing in CI depends on what that image dropped (miniconda, Julia,
+    # mercurial, MediaInfo) or on its pre-cached toolchains: Python comes from
+    # setup-python, which publishes 26.04 builds, and Node from setup-node,
+    # which downloads from nodejs.org.
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
 
     steps:
@@ -54,8 +64,10 @@ jobs:
           set -euo pipefail
           python -m pip install --upgrade pip
           python tools/pyproject-deps.py dev > requirements-ci.txt
+          # torchaudio is on this list for the same reason torch is: it resolves
+          # against PyPI here, where it depends on the CUDA torch build.
           python tools/pyproject-deps.py \
-            --exclude torch --exclude beat-this --exclude essentia \
+            --exclude torch --exclude torchaudio --exclude beat-this --exclude essentia \
             >> requirements-ci.txt
           cat requirements-ci.txt
           pip install -r requirements-ci.txt
@@ -75,7 +87,7 @@ jobs:
 
   frontend:
     name: ESLint + Stylelint + contracts + node --test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
 
     steps:
@@ -142,7 +154,7 @@ jobs:
 
   container:
     name: Dockerfile + entrypoint
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
 
     steps:
@@ -168,7 +180,7 @@ jobs:
 
   manifest:
     name: pyproject.toml is the only manifest
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
 
     steps:

@@ -1494,6 +1494,12 @@ html body .text-muted {
     margin-top: 0;
 }
 
+/* The card's own padding closes the tile; a trailing Bootstrap mb-* on the
+   last field block would double the bottom gap. !important beats mb-*. */
+.settings-grid .settings-section:last-child>:last-child {
+    margin-bottom: 0 !important;
+}
+
 .settings-field-stack {
     display: flex;
     flex-direction: column;
@@ -1606,11 +1612,18 @@ html body .text-muted {
     outline-offset: 3px;
 }
 
+/* One column per *gap* between positions: item i sits on the start line of
+   column i, and the last item is pinned to the end line of the final column
+   (see the :last-child rules), so N items land on N evenly spaced points from
+   0% to 100%. --settings-range-steps is therefore the position count minus
+   one; 6 covers the seven-position retention and share-link sliders, and a
+   control with a different number of ticks overrides it (see
+   [data-range-positions] below). */
 .settings-range-ticks {
     position: absolute;
     inset: 0;
     display: grid;
-    grid-template-columns: repeat(6, minmax(0, 1fr));
+    grid-template-columns: repeat(var(--settings-range-steps, 6), minmax(0, 1fr));
     align-items: start;
     padding-inline: 0.55rem;
     pointer-events: none;
@@ -1657,8 +1670,11 @@ html body .text-muted {
     grid-column: 6;
 }
 
-.settings-range-tick:nth-child(7) {
-    grid-column: 6;
+/* The final tick, whichever index it has: pinned to the end line of the last
+   column so it sits exactly at 100%. Declared after the :nth-child rules
+   above, which it deliberately overrides at equal specificity. */
+.settings-range-tick:last-child {
+    grid-column: var(--settings-range-steps, 6);
     justify-self: end;
     transform: translate(50%, -50%);
 }
@@ -1675,11 +1691,17 @@ html body .text-muted {
 
 .settings-range-labels {
     display: grid;
-    grid-template-columns: repeat(6, minmax(0, 1fr));
+    grid-template-columns: repeat(var(--settings-range-steps, 6), minmax(0, 1fr));
     padding-inline: 0.55rem;
-    margin-top: -0.15rem;
+    /* The range input's box is taller than the track drawn through it, so the
+       labels start just below that box and read as captions for the ticks. What
+       follows the labels - a hint, a table - needs clear separation instead, or
+       the whole block reads as one crowded paragraph hanging off the slider. */
+    margin-top: calc(var(--space-1) - 1.1rem);
+    margin-bottom: var(--space-3);
     color: var(--text-muted);
     font-size: 0.75rem;
+    font-weight: 500;
     line-height: 1.2;
     user-select: none;
 }
@@ -1715,36 +1737,196 @@ html body .text-muted {
 
 .settings-range-labels span:nth-child(6) {
     grid-column: 6;
-    /* Pinned to row 1 like the ticks: the 7th label explicitly claims
-       column 6 / row 1, so without this the auto-placer bumps the 6th label
-       (180d, 5k) down to a second row. Overlap between the two is fine - they
-       resolve to different points on the track via the transforms below. */
+    /* Pinned to row 1 like the ticks: the last label explicitly claims the
+       final column on row 1, so without this the auto-placer bumps the 6th
+       label (180d, 5k) down to a second row. Overlap between the two is fine -
+       they resolve to different points on the track via the transforms
+       below. */
     grid-row: 1;
 }
 
-.settings-range-labels span:nth-child(7) {
-    grid-column: 6;
+/* Every label but the last sits on a column start line, so each is nudged half
+   its own width to the left to centre it on that line. */
+.settings-range-labels span:not(:last-child) {
+    transform: translateX(-50%);
+}
+
+/* The last label sits on the *end* line of the final column and is nudged the
+   other way. Declared after the :nth-child rules, which it overrides at equal
+   specificity. */
+.settings-range-labels span:last-child {
+    grid-column: var(--settings-range-steps, 6);
     grid-row: 1;
     justify-self: end;
     transform: translateX(50%);
 }
 
-/* Labels 1-6 sit on a column start line, so each is nudged half its own width
-   to the left to centre it on that line. The 7th sits on the *end* line of the
-   last column and is nudged the other way (see the :nth-child(7) rule above);
-   it is excluded here because -n+6 does not match it. */
-.settings-range-labels span:nth-child(-n + 6) {
-    transform: translateX(-50%);
+/* Three-position sliders (output format): two gaps instead of six. */
+[data-range-positions="3"] .settings-range-ticks,
+[data-range-positions="3"] .settings-range-labels {
+    --settings-range-steps: 2;
 }
 
-@media (max-width: 575.98px) {
+/* These labels are whole words rather than "7d"/"1y", so centring the outer two
+   on their ticks would push them past the card padding. The edge labels are
+   flush with the track instead and only the middle one is centred. */
+[data-range-positions="3"] .settings-range-labels span:first-child,
+[data-range-positions="3"] .settings-range-labels span:last-child {
+    transform: none;
+}
 
-    .settings-range-ticks,
-    .settings-range-labels {
-        padding-inline: 0.7rem;
+/* Minimal reference for what each output mode produces, under the slider. The
+   row matching the current selection is highlighted from
+   updateOutputModePreview() in settings.js. */
+.settings-mode-table {
+    width: 100%;
+    /* No top margin: the table sits in a `.mt-3.pt-3.border-top` wrapper that
+       draws the hairline above it, and that padding is the gap. The bottom
+       margin stays, because the last row drops its bottom border and whatever
+       follows needs breathing room. It goes here, not on the following hint:
+       every settings hint shares one global margin-top (see the
+       settingsHintSpacing source contract), and a second rule targeting
+       .setting-hint would break it. */
+    margin-block: 0 var(--space-3);
+    border-collapse: collapse;
+    font-size: 0.75rem;
+    line-height: 1.3;
+}
+
+/* Fixed layout so the four columns keep the same rhythm whatever the cell text
+   is: the mode name gets the most room because it is what the eye returns to,
+   and "Re-encoding" the least because it rarely decides the choice. */
+.settings-mode-table {
+    table-layout: fixed;
+}
+
+.settings-mode-table th,
+.settings-mode-table td {
+    /* Generous vertical padding is the point: fewer words per cell, more air
+       between rows, so the matrix scans down a column instead of being read. */
+    padding: 0.7rem 0.6rem;
+    text-align: left;
+    vertical-align: top;
+    border-bottom: 1px solid color-mix(in srgb, var(--text-muted) 16%, transparent);
+}
+
+.settings-mode-table thead th {
+    color: var(--text-hint);
+    font-weight: 600;
+    text-transform: uppercase;
+    font-size: 0.68rem;
+    letter-spacing: 0.04em;
+    padding-block-end: 0.45rem;
+}
+
+/* Widths follow the content, not the reading order. The mode names are one
+   short word each ("Source", "H.264", "AV1"), so the first column only needs
+   enough to hold them; the two comparison columns wrap to two lines at this
+   card width; and "Re-encoding" takes the remainder because its sentences are
+   the longest in the table, even though it is the least important column. */
+.settings-mode-table th:nth-child(1) {
+    width: 15%;
+}
+
+.settings-mode-table th:nth-child(2),
+.settings-mode-table th:nth-child(3) {
+    width: 25%;
+}
+
+/* The vertical hairline that separates the two comparison columns from each
+   other. Only an inline-start rule, so it reads as one divider rather than a
+   grid of boxes. */
+.settings-mode-table .settings-mode-table-divide {
+    border-inline-start: 1px solid color-mix(in srgb, var(--text-muted) 12%, transparent);
+    padding-inline-start: 0.7rem;
+}
+
+/* Undo the global `td:last-child { white-space: nowrap }` further down, which
+   exists for the jobs table's action column but is not scoped to it. Here it
+   pinned "Re-encoding" to one line, and because this table is
+   table-layout:fixed that line spilled out of the card instead of widening the
+   column - visible only below ~800px, where the column gets narrow. */
+.settings-mode-table td:last-child {
+    white-space: normal;
+}
+
+/* Deliberately wrappable: the table is table-layout:fixed, so a cell that
+   cannot wrap spills over its neighbour instead of widening the column. */
+.settings-mode-table tbody th {
+    color: var(--text-strong);
+    font-weight: 600;
+}
+
+.settings-mode-table td {
+    color: var(--text-muted);
+}
+
+/* Secondary by design: re-encoding is a consequence of the choice, not the
+   reason for it, so it sits a step back from the two columns that decide. */
+.settings-mode-table .settings-mode-table-minor {
+    color: var(--text-hint);
+    font-size: 0.7rem;
+}
+
+.settings-mode-table tbody tr:last-child th,
+.settings-mode-table tbody tr:last-child td {
+    border-bottom: 0;
+}
+
+/* Not colour alone: the active row also carries an inline marker on its header
+   cell, so the highlight is not the only cue. Kept faint - it marks the current
+   row without competing with the content of the other two. */
+.settings-mode-table tbody tr[data-mode-active="true"] th,
+.settings-mode-table tbody tr[data-mode-active="true"] td {
+    background: color-mix(in srgb, var(--primary) 7%, transparent);
+    color: var(--text);
+}
+
+.settings-mode-table tbody tr[data-mode-active="true"] th {
+    box-shadow: inset 2px 0 0 var(--primary);
+}
+
+/* Sized to the 0.75rem body text and nudged onto the same baseline; the words
+   beside them carry the meaning, so these only speed up scanning. */
+.settings-mode-icon {
+    font-size: 0.95rem;
+    line-height: 1;
+    vertical-align: -0.18rem;
+    margin-inline-end: 0.1rem;
+}
+
+.settings-mode-icon--ok {
+    color: var(--success);
+}
+
+.settings-mode-icon--warn {
+    color: var(--warning);
+}
+
+/* The panel keeps two columns well below tablet width, so it is the card that
+   runs out of room, not the viewport. Under roughly 900px the four columns no
+   longer fit: "COMPATIBILITY" alone needs ~99px and the column is down to
+   ~81px, so the header collided with the next one. Re-encoding is the column
+   to drop - it is a consequence of the choice rather than a reason for it -
+   which leaves the three that actually decide the setting with room to wrap.
+   The full matrix is still there from ~900px up. */
+@media (max-width: 899.98px) {
+
+    .settings-mode-table th:nth-child(1) {
+        width: 20%;
     }
 
+    .settings-mode-table th:nth-child(2),
+    .settings-mode-table th:nth-child(3) {
+        width: 40%;
+    }
+
+    .settings-mode-table .settings-mode-table-minor {
+        display: none;
+    }
 }
+
+
 
 .settings-danger-actions {
     display: grid;
@@ -3211,6 +3393,15 @@ td[data-label="Title"] {
 .form-check.form-switch {
     min-height: 44px;
     align-items: center;
+}
+
+@media (min-width: 576px) {
+    .settings-switch-with-hint {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: var(--space-3);
+    }
 }
 
 .jobs-table .col-status {
@@ -6105,10 +6296,10 @@ td:last-child {
         display: none;
     }
 
-    /* .stats-row zeroes every margin on mobile, so the gap to the host tiles
-       below has to come back explicitly. */
+    /* The gap to the host tiles below matches the tile gap inside a row. The
+       template's Bootstrap mb-4 is !important, so this must be too. */
     .stats-row.settings-job-stats {
-        margin-bottom: var(--space-3);
+        margin-bottom: 0.5rem !important;
     }
 }
 

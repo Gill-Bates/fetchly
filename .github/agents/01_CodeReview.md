@@ -100,6 +100,12 @@ agent is analysis only and proposes changes as minimal snippets or diffs.
 
 # Delegation
 
+When `03_CheckComments` ran before this review, first verify its patch stays
+within the write scope defined in the suite `README.md` (comment/docstring
+text, canonical header, and only evidence-backed shebang/mode changes) and
+changes no program behavior. Report a violation as the first P1 finding,
+before any other finding in this review.
+
 When the specialized agents of this suite are part of the review workflow:
 
 * **Duplication** — do not classify duplication as a DRY violation, and do not

@@ -61,7 +61,7 @@
                                             <label for="retentionDays" class="form-label mb-0">Max. Job retention
                                                 (days)</label>
                                             <output class="ui-badge settings-slider-value" id="retentionDaysValue"
-                                                for="retentionDays" aria-live="polite"></output>
+                                                for="retentionDays"></output>
                                         </div>
                                         <div class="settings-range-control">
                                             <input type="range" class="form-range settings-range" id="retentionDays"
@@ -92,8 +92,24 @@
                                         <small class="setting-hint setting-hint--with-icon" id="retentionDaysHint">
                                             <span class="material-symbols-outlined setting-hint-icon"
                                                 aria-hidden="true">info</span>
-                                            <span>Job files follow this period; history and statistics stay.</span>
+                                            <span>Expired jobs are removed completely: files, history entry and
+                                                share links.</span>
                                         </small>
+                                        <div class="settings-switch-with-hint mt-3">
+                                            <div class="form-check form-switch">
+                                                <input class="form-check-input" type="checkbox" role="switch"
+                                                    id="enableJobHistory" name="enable_job_history" {{ 'checked' if
+                                                    settings.enable_job_history | default(true) else '' }}>
+                                                <label class="form-check-label" for="enableJobHistory">
+                                                    Enable Job History
+                                                </label>
+                                            </div>
+                                            <small class="setting-hint setting-hint--with-icon">
+                                                <span class="material-symbols-outlined setting-hint-icon"
+                                                    aria-hidden="true">info</span>
+                                                <span>Applies to new jobs only.</span>
+                                            </small>
+                                        </div>
                                         <div class="settings-danger-actions mt-3">
                                             <button type="button" class="btn btn-outline-danger btn-sm"
                                                 id="resetStatsBtn">
@@ -148,7 +164,7 @@
                                             <label for="shareLinkMaxUses" class="form-label mb-0">Max. uses per share
                                                 link</label>
                                             <output class="ui-badge settings-slider-value" id="shareLinkMaxUsesValue"
-                                                for="shareLinkMaxUses" aria-live="polite"></output>
+                                                for="shareLinkMaxUses"></output>
                                         </div>
                                         <div class="settings-range-control">
                                             <input type="range" class="form-range settings-range" id="shareLinkMaxUses"
@@ -214,6 +230,28 @@
                                                     next app restart.</span>
                                             </small>
                                         </div>
+                                        <div>
+                                            <label for="concurrentFragments" class="form-label">Parallel fragments per
+                                                download</label>
+                                            <select class="form-select ui-input" id="concurrentFragments"
+                                                name="download_concurrent_fragments">
+                                                {# The number is what "Automatic" resolves to on this host now
+                                                (governor.recommended_concurrent_fragments()). #}
+                                                <option value="0" {{ 'selected' if
+                                                    settings.download_concurrent_fragments | default(0)==0 else '' }}>
+                                                    Automatic ({{ auto_concurrent_fragments }})</option>
+                                                {% for count in range(1, 17) %}
+                                                <option value="{{ count }}" {{ 'selected' if
+                                                    settings.download_concurrent_fragments | default(0)==count else ''
+                                                    }}>{{ count }}</option>
+                                                {% endfor %}
+                                            </select>
+                                            <small class="setting-hint setting-hint--with-icon">
+                                                <span class="material-symbols-outlined setting-hint-icon"
+                                                    aria-hidden="true">info</span>
+                                                <span>Higher values use more CPU.</span>
+                                            </small>
+                                        </div>
                                         <div class="row g-3">
                                             <div class="col-sm-6">
                                                 <label for="downloadTimeoutMinutes" class="form-label">Download timeout
@@ -234,8 +272,8 @@
                                             </div>
                                         </div>
                                         <div>
-                                            <label for="downloadMaxFilesizeGiB" class="form-label">Maximum input size
-                                                (GiB)</label>
+                                            <label for="downloadMaxFilesizeGiB" class="form-label">Maximum source
+                                                download size (GiB)</label>
                                             <input type="number" class="form-control ui-input"
                                                 id="downloadMaxFilesizeGiB" name="download_max_filesize_gib" min="1"
                                                 max="100" value="{{ settings.download_max_filesize_gib | default(4) }}">
@@ -253,56 +291,106 @@
                 <div class="settings-grid settings-grid--cols-2">
                     <div class="settings-grid-item settings-grid-item--titled">
                         <h2 class="settings-panel-title fw-semibold mb-3 d-flex align-items-center gap-1">
-                            <span class="material-symbols-outlined icon-inline" aria-hidden="true">download</span>
-                            Downloads
+                            <span class="material-symbols-outlined icon-inline" aria-hidden="true">movie_edit</span>
+                            Output format
                         </h2>
                         <div class="ui-card h-100">
                             <div>
                                 <div class="settings-section">
-                                    <div class="mb-3">
-                                        <label for="concurrentFragments" class="form-label">Parallel fragments per
-                                            download</label>
-                                        <select class="form-select ui-input" id="concurrentFragments"
-                                            name="download_concurrent_fragments">
-                                            {# The number is what "Automatic" resolves to on this host now
-                                            (governor.recommended_concurrent_fragments()). #}
-                                            <option value="0" {{ 'selected' if settings.download_concurrent_fragments |
-                                                default(0)==0 else '' }}>Automatic ({{ auto_concurrent_fragments
-                                                }})</option>
-                                            {% for count in range(1, 17) %}
-                                            <option value="{{ count }}" {{ 'selected' if
-                                                settings.download_concurrent_fragments | default(0)==count else '' }}>{{
-                                                count }}</option>
-                                            {% endfor %}
-                                        </select>
-                                        <small class="setting-hint setting-hint--with-icon">
-                                            <span class="material-symbols-outlined setting-hint-icon"
-                                                aria-hidden="true">info</span>
-                                            <span>Higher values use more CPU.</span>
-                                        </small>
-                                    </div>
-                                    <div class="mt-3 pt-3 border-top">
-                                        <div class="form-check form-switch">
-                                            <input class="form-check-input" type="checkbox" role="switch"
-                                                id="compatibleOutput" name="download_compatible_output" {{ 'checked' if
-                                                settings.download_compatible_output | default(false) else '' }}>
-                                            <label class="form-check-label" for="compatibleOutput">
-                                                Universally playable output (H.264/AAC)
-                                            </label>
+                                    <div class="mb-3" data-range-positions="3">
+                                        <div class="settings-slider-header">
+                                            <label for="outputMode" class="form-label mb-0">Video output
+                                                format</label>
+                                            {% set output_mode_labels = {
+                                            'source': 'Source',
+                                            'universal': 'H.264 (Recommended)',
+                                            'av1': 'AV1',
+                                            } %}
+                                            <output class="ui-badge settings-slider-value" id="outputModeValue"
+                                                for="outputMode">{{ output_mode_labels.get(settings.download_output_mode
+                                                | default('universal'), 'H.264 (Recommended)') }}</output>
                                         </div>
-                                        <small class="setting-hint setting-hint--with-icon">
-                                            <span class="material-symbols-outlined setting-hint-icon"
-                                                aria-hidden="true">info</span>
-                                            <span>Off keeps the source codecs, which may preserve higher-quality
-                                                formats, but some downloads may not play on Safari, iOS, or
-                                                TVs.</span>
-                                        </small>
-                                        <small class="setting-hint setting-hint--with-icon d-none"
-                                            data-role="compatible-output-forced">
-                                            <span class="material-symbols-outlined setting-hint-icon"
-                                                aria-hidden="true">lock</span>
-                                            <span>Required by the watermark; your choice is kept.</span>
-                                        </small>
+                                        {% set output_mode_index = {
+                                        'source': 0,
+                                        'universal': 1,
+                                        'av1': 2,
+                                        }.get(settings.download_output_mode | default('universal'), 1) %}
+                                        <div class="settings-range-control">
+                                            <input type="range" class="form-range settings-range" id="outputMode"
+                                                min="0" max="2" step="1" value="{{ output_mode_index }}"
+                                                data-output-mode="{{ settings.download_output_mode | default('universal') }}"
+                                                aria-describedby="outputModeValue outputModeHint">
+                                            <div class="settings-range-ticks" aria-hidden="true">
+                                                <span class="settings-range-tick"></span>
+                                                <span class="settings-range-tick"></span>
+                                                <span class="settings-range-tick"></span>
+                                            </div>
+                                        </div>
+                                        <input type="hidden" id="outputModeInput" name="download_output_mode"
+                                            value="{{ settings.download_output_mode | default('universal') }}">
+                                        <div class="settings-range-labels" aria-hidden="true">
+                                            <span>Source</span>
+                                            <span>H.264 (Recommended)</span>
+                                            <span>AV1</span>
+                                        </div>
+                                        <div class="mt-3 pt-3 border-top">
+                                            <table class="settings-mode-table" data-role="output-mode-table">
+                                                <caption class="visually-hidden">What each video output format
+                                                    produces</caption>
+                                                <thead>
+                                                    <tr>
+                                                        <th scope="col">Mode</th>
+                                                        <th scope="col">Quality / size</th>
+                                                        <th scope="col" class="settings-mode-table-divide">
+                                                            Compatibility</th>
+                                                        <th scope="col" class="settings-mode-table-minor">
+                                                            Re-encoding</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    <tr data-mode="source">
+                                                        <th scope="row">Source</th>
+                                                        <td>Original resolution &amp; codec</td>
+                                                        <td class="settings-mode-table-divide">
+                                                            <span
+                                                                class="material-symbols-outlined settings-mode-icon settings-mode-icon--warn"
+                                                                aria-hidden="true">warning</span>
+                                                            Varies by source
+                                                        </td>
+                                                        <td class="settings-mode-table-minor">Watermark only</td>
+                                                    </tr>
+                                                    <tr data-mode="universal">
+                                                        <th scope="row">H.264</th>
+                                                        <td>Up to 1080p · larger files</td>
+                                                        <td class="settings-mode-table-divide">
+                                                            <span
+                                                                class="material-symbols-outlined settings-mode-icon settings-mode-icon--ok"
+                                                                aria-hidden="true">check_circle</span>
+                                                            Best compatibility
+                                                        </td>
+                                                        <td class="settings-mode-table-minor">Only if source isn't
+                                                            H.264</td>
+                                                    </tr>
+                                                    <tr data-mode="av1">
+                                                        <th scope="row">AV1</th>
+                                                        <td>Up to 4K · ~50% smaller than H.264</td>
+                                                        <td class="settings-mode-table-divide">
+                                                            <span
+                                                                class="material-symbols-outlined settings-mode-icon settings-mode-icon--warn"
+                                                                aria-hidden="true">warning</span>
+                                                            Limited Apple support
+                                                        </td>
+                                                        <td class="settings-mode-table-minor">Only if source isn't
+                                                            AV1</td>
+                                                    </tr>
+                                                </tbody>
+                                            </table>
+                                            <small class="setting-hint setting-hint--with-icon" id="outputModeHint">
+                                                <span class="material-symbols-outlined setting-hint-icon"
+                                                    aria-hidden="true">info</span>
+                                                <span>Applies to new downloads only.</span>
+                                            </small>
+                                        </div>
                                     </div>
                                 </div>
                             </div>
@@ -322,14 +410,15 @@
                                             id="videoWatermark" name="video_watermark" {{ 'checked' if
                                             settings.video_watermark | default(true) else '' }}>
                                         <label class="form-check-label" for="videoWatermark">
-                                            Show fetchly watermark
+                                            Show Watermark
                                         </label>
                                     </div>
-                                    <small class="setting-hint setting-hint--with-icon">
+                                    <small class="setting-hint setting-hint--with-icon d-none"
+                                        data-role="watermark-cost">
                                         <span
                                             class="material-symbols-outlined setting-hint-icon setting-hint-icon--warning"
                                             aria-hidden="true">warning</span>
-                                        <span>Max quality needs an extra encoding pass, increasing CPU usage.</span>
+                                        <span>This may increase CPU usage.</span>
                                     </small>
 
                                     <div class="mt-3 pt-3 border-top">
@@ -506,7 +595,7 @@
                                     data-cookie-platform="{{ platform.id }}">
                                     <div class="cookie-tile-header mb-3">
                                         <span class="platform-pill platform-pill--{{ platform.id }} cookie-tile-logo"
-                                            role="img" aria-label="{{ platform.label }}">
+                                            aria-hidden="true">
                                             <span class="platform-pill__icon platform-pill__icon--{{ platform.id }}"
                                                 aria-hidden="true"></span>
                                         </span>
@@ -618,7 +707,8 @@
                                             <label class="form-label" for="adminPassword">Password</label>
                                             <div class="input-group">
                                                 <input type="password" class="form-control ui-input" id="adminPassword"
-                                                    value="" autocomplete="new-password">
+                                                    aria-describedby="adminPasswordHint passwordError" value=""
+                                                    autocomplete="new-password">
                                                 <button type="button"
                                                     class="btn btn-outline-secondary password-toggle-btn"
                                                     data-target="adminPassword" aria-label="Show password"
@@ -627,7 +717,7 @@
                                                         aria-hidden="true">visibility</span>
                                                 </button>
                                             </div>
-                                            <small class="setting-hint setting-hint--with-icon">
+                                            <small class="setting-hint setting-hint--with-icon" id="adminPasswordHint">
                                                 <span class="material-symbols-outlined setting-hint-icon"
                                                     aria-hidden="true">info</span>
                                                 <span>At least 8 characters</span>
@@ -638,7 +728,8 @@
                                                 password</label>
                                             <div class="input-group">
                                                 <input type="password" class="form-control ui-input"
-                                                    id="adminPasswordConfirm" value="" autocomplete="new-password">
+                                                    id="adminPasswordConfirm" aria-describedby="passwordError" value=""
+                                                    autocomplete="new-password">
                                                 <button type="button"
                                                     class="btn btn-outline-secondary password-toggle-btn"
                                                     data-target="adminPasswordConfirm" aria-label="Show password"
@@ -648,7 +739,7 @@
                                                 </button>
                                             </div>
                                         </div>
-                                        <div id="passwordError" class="invalid-feedback d-none"></div>
+                                        <div id="passwordError" class="invalid-feedback d-none" role="alert"></div>
                                         <div class="d-flex justify-content-end">
                                             <button id="passwordSaveBtn" class="btn btn-primary btn-sm" type="button">
                                                 <span id="passwordSaveBtnLabel">{{ 'Update credentials' if
@@ -901,10 +992,10 @@
     <div class="modal-dialog modal-dialog-centered modal-lg">
         <div class="modal-content">
             <div class="modal-header">
-                <h5 class="modal-title" id="lalalAuthModalLabel">
+                <h2 class="modal-title h5" id="lalalAuthModalLabel">
                     <span class="material-symbols-outlined icon-inline" aria-hidden="true">key</span>
                     Lalal.ai Authentication
-                </h5>
+                </h2>
                 <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
             </div>
             <div class="modal-body">
@@ -912,7 +1003,7 @@
 
                 <div id="lalalAuthForm">
                     <div class="auth-panel-header mb-3">
-                        <h6 class="mb-0">Connect with activation key</h6>
+                        <h3 class="h6 mb-0">Connect with activation key</h3>
                     </div>
 
                     <div class="auth-method-panel auth-method-panel--alt">
@@ -953,7 +1044,7 @@
                 <div id="lalalAuthSuccess" class="d-none auth-success-panel">
                     <span class="material-symbols-outlined text-success auth-success-icon"
                         aria-hidden="true">check_circle</span>
-                    <h5 class="mb-0">Authentication Successful!</h5>
+                    <h3 class="h5 mb-0">Authentication Successful!</h3>
                     <p class="text-muted mb-0">Your Lalal.ai account is now connected.</p>
                 </div>
             </div>

@@ -17,7 +17,7 @@ name = "fetchly"
 # at runtime, the release workflow validates the git tag against it, and
 # docker/Dockerfile copies this file into the image so the Settings page and
 # /api/updates report the same number the tag was cut from.
-version = "1.2.2"
+version = "1.3.0"
 description = "Self-hosted media downloader with BPM analysis and stem separation"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -54,9 +54,18 @@ classifiers = [
 # drops the essentia line before pip runs, so no wheel is resolved over the
 # local build. Outside the image pip picks whatever wheel fits the interpreter.
 #
-# beat-this pulls in torch. Install with the CPU wheel index to avoid dragging
-# in the CUDA build:
+# beat-this pulls in torch and torchaudio. Both must come from PyTorch's CPU
+# index or the install grows by several gigabytes of CUDA code that never runs;
+# [tool.uv.sources] below binds exactly those two names to that index, and plain
+# pip needs the flag spelled out:
 #   pip install --extra-index-url https://download.pytorch.org/whl/cpu -e .
+#
+# torchaudio is listed although no module here imports it: it is beat-this's
+# dependency, but docker/Dockerfile installs it by name from the CPU index, and
+# a source binding only applies to a *direct* dependency - as a purely
+# transitive one it would be resolved from PyPI, against the CUDA torch, while
+# the image installs the +cpu build. Naming it keeps the resolution and the
+# image on the same artifact.
 dependencies = [
     "beat-this>=1.1.0",
     "essentia",  # pinned
@@ -73,6 +82,7 @@ dependencies = [
     "slowapi",
     "starlette",
     "torch",
+    "torchaudio",
     "uvicorn[standard]",
     "uvicorn-worker",
 ]
@@ -122,9 +132,26 @@ include-package-data = false
 include = ["app*", "middleware*"]
 exclude = ["app.static*", "app.templates*"]
 
-# uv honours this automatically; plain pip needs the flag spelled out above.
-[tool.uv]
-extra-index-url = ["https://download.pytorch.org/whl/cpu"]
+# PyTorch's CPU index, bound to the two packages that have to come from it and
+# to nothing else. `explicit = true` is the point of the declaration: as a plain
+# extra index it would be searched for every name in the resolution, and that
+# index is not a PyPI mirror with a narrow package list - it also serves
+# jinja2, numpy, sympy, filelock, fsspec, networkx, setuptools and more. Any of
+# those could then be resolved from there and pinned to a version PyPI does not
+# carry, while docker/Dockerfile installs them from PyPI - the resolution would
+# no longer describe the image it constrains.
+#
+# This mirrors the Dockerfile exactly: torch and torchaudio with --index-url and
+# --no-deps, everything else from PyPI. The release workflow compiles this
+# manifest, so it resolves against the same split.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu" }]
+torchaudio = [{ index = "pytorch-cpu" }]
 
 # --------------------------------------------------------------------------- #
 # Ruff - lint + format for every Python file in the repo

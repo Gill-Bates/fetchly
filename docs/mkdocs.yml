@@ -13,6 +13,21 @@ site_dir: ../site
 # SEO and canonical URL configuration
 use_directory_urls: true
 
+# The AGENTS.md files scattered through docs/ are internal contributor
+# guidance, not user documentation. With docs_dir: . they sit inside the
+# documentation root, so MkDocs would otherwise render and publish every one
+# of them (docs/AGENTS.md became /AGENTS/, docs/api/AGENTS.md became
+# /api/AGENTS/, ...). The pattern is gitignore-style and matches at any depth.
+exclude_docs: |
+  AGENTS.md
+
+# --strict promotes warnings to errors, but broken heading anchors are only
+# reported at INFO by default, so a link to page.md#no-such-heading would pass
+# an otherwise strict build. Raising them to warnings makes --strict catch them.
+validation:
+  links:
+    anchors: warn
+
 theme:
   name: material
   language: en
@@ -55,8 +70,6 @@ theme:
     - content.tabs.link
   icon:
     repo: fontawesome/brands/github
-    edit: material/pencil
-    view: material/eye
 
 plugins:
   - search:
@@ -133,6 +146,7 @@ nav:
     - Docker Setup: getting-started/docker.md
   - Features:
     - Downloads: features/downloads.md
+    - Video Codecs: features/video-codecs.md
     - Job Dashboard: features/jobs.md
     - Audio Trimming: features/trimming.md
     - BPM Analysis: features/bpm.md
@@ -160,5 +174,11 @@ nav:
     - Architecture: development/architecture.md
     - Contributing: development/contributing.md
   - Troubleshooting: troubleshooting.md
+  # Copied in by the docs workflow from CHANGELOG.md / LICENSE before the
+  # build. Without these entries both pages are built but unreachable: nothing
+  # in the site links to them.
+  - Project:
+    - Changelog: changelog.md
+    - License: license.md
 
 copyright: Copyright &copy; 2026 Gill-Bates | Licensed under MIT

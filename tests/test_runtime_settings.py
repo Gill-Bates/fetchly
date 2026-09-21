@@ -5,7 +5,7 @@
 #
 
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from app import analysis_worker, db, lalal, worker
 from app.governor import _auto_concurrent_fragments, governor
@@ -18,6 +18,7 @@ class RuntimeSettingsTests(WebAppTestCase):
     def test_defaults_are_present_and_public(self) -> None:
         settings = db.get_settings()
         expected = {
+            "enable_job_history": True,
             "download_concurrent_fragments": 0,
             "download_worker_count": 0,
             "download_timeout_minutes": 60,
@@ -30,6 +31,10 @@ class RuntimeSettingsTests(WebAppTestCase):
         self.assertEqual({key: settings[key] for key in expected}, expected)
         public = public_settings(settings)
         self.assertEqual({key: public[key] for key in expected}, expected)
+        settings_page = self.client.get("/settings")
+        self.assertEqual(settings_page.status_code, 200)
+        self.assertIn('id="enableJobHistory"', settings_page.text)
+        self.assertIn('name="enable_job_history" checked', settings_page.text)
 
     def test_settings_api_persists_runtime_limits(self) -> None:
         response = self._post_settings(
@@ -114,10 +119,78 @@ class RuntimeSettingsTests(WebAppTestCase):
         self.assertTrue(db.get_settings()["video_watermark"])
         self.assertTrue(worker._watermark_config()[0])
 
+    def test_job_history_setting_only_affects_future_submissions(self) -> None:
+        metadata = {
+            "video_title": None,
+            "video_meta_hover": None,
+            "duration_seconds": None,
+        }
+        urls = [
+            "https://www.youtube.com/watch?v=abcdefghijk",
+            "https://www.youtube.com/watch?v=lmnopqrstuv",
+            "https://www.youtube.com/watch?v=wxyzABCDefg",
+        ]
+        with (
+            patch("app.routes.api.extract_video_meta_async", new=AsyncMock(return_value=metadata)),
+            patch("app.routes.api.get_job_queue", return_value=MagicMock(full=lambda: False)),
+            patch("app.routes.api.submit_download", return_value=True),
+        ):
+            headers = {"X-CSRF-Token": self._csrf()}
+            first = self.client.post(
+                "/api/submit",
+                data={"url": urls[0], "type": "audio", "quality": "max"},
+                headers=headers,
+            )
+            self.assertEqual(first.status_code, 200)
+
+            self.assertEqual(self._post_settings({"enable_job_history": False}).status_code, 200)
+            hidden = self.client.post(
+                "/api/submit",
+                data={"url": urls[1], "type": "audio", "quality": "max"},
+                headers=headers,
+            )
+            self.assertEqual(hidden.status_code, 200)
+
+            self.assertEqual(self._post_settings({"enable_job_history": True}).status_code, 200)
+            visible = self.client.post(
+                "/api/submit",
+                data={"url": urls[2], "type": "audio", "quality": "max"},
+                headers=headers,
+            )
+            self.assertEqual(visible.status_code, 200)
+
+        self.assertEqual(db.get_settings()["enable_job_history"], True)
+        self.assertEqual(db.get_job(hidden.json()["id"])["include_in_history"], 0)
+        self.assertEqual(
+            {job["id"] for job in self.client.get("/api/jobs").json()},
+            {first.json()["id"], visible.json()["id"]},
+        )
+
     def test_settings_api_rejects_out_of_range_fragments(self) -> None:
         response = self._post_settings({"download_concurrent_fragments": 17})
         self.assertEqual(response.status_code, 400)
         self.assertIn("between 0 and 16", response.json()["detail"])
+
+    def test_settings_api_persists_every_output_mode(self) -> None:
+        for mode in db.DOWNLOAD_OUTPUT_MODES:
+            with self.subTest(mode=mode):
+                self.assertEqual(self._post_settings({"download_output_mode": mode}).status_code, 200)
+                self.assertEqual(db.get_settings()["download_output_mode"], mode)
+                self.assertEqual(self.client.get("/api/settings").json()["download_output_mode"], mode)
+
+    def test_settings_api_rejects_an_unknown_output_mode(self) -> None:
+        response = self._post_settings({"download_output_mode": "vp9"})
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("download_output_mode must be one of", response.json()["detail"])
+
+    def test_the_output_mode_reaches_the_worker(self) -> None:
+        for mode in db.DOWNLOAD_OUTPUT_MODES:
+            for watermark in (False, True):
+                with self.subTest(mode=mode, watermark=watermark):
+                    db.set_settings({"download_output_mode": mode, "video_watermark": watermark})
+                    # The watermark forces an encode but never rewrites the mode:
+                    # in "source" that encode targets the downloaded codec.
+                    self.assertEqual(worker._download_tuning()[1], mode)
 
     def test_manual_fragment_count_skips_host_probe(self) -> None:
         db.set_settings({"download_concurrent_fragments": 9})

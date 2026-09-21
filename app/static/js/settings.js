@@ -194,8 +194,13 @@ const lalalAuthUseKeyBtn = document.getElementById("lalalAuthUseKeyBtn");
 const lalalAuthUseKeySpinner = document.getElementById("lalalAuthUseKeySpinner");
 const lalalActivationKey = document.getElementById("lalalActivationKey");
 const lalalDurationGuard = document.getElementById("lalalDurationGuard");
-const compatibleOutputEl = document.getElementById("compatibleOutput");
+const outputModeEl = document.getElementById("outputMode");
+const outputModeValueEl = document.getElementById("outputModeValue");
+const outputModeInputEl = document.getElementById("outputModeInput");
+const outputModeTableRowEls = document.querySelectorAll('[data-role="output-mode-table"] tbody tr');
+const watermarkCostEl = document.querySelector('[data-role="watermark-cost"]');
 const videoWatermarkEl = document.getElementById("videoWatermark");
+const enableJobHistoryEl = document.getElementById("enableJobHistory");
 const enableAuthenticationEl = document.getElementById("enableAuthentication");
 const retentionDaysEl = document.getElementById("retentionDays");
 const retentionDaysValueEl = document.getElementById("retentionDaysValue");
@@ -212,11 +217,23 @@ const credentialsSectionEl = document.getElementById("credentialsSection");
 
 const RETENTION_DAY_OPTIONS = [0, 7, 14, 30, 90, 180, 365];
 const SHARE_LINK_MAX_USE_OPTIONS = [0, 1, 10, 100, 1_000, 5_000, 10_000];
+// Mirrors DOWNLOAD_OUTPUT_MODES in app/db.py, in slider order. The index is
+// what the range input carries; the mode string is what gets saved.
+const OUTPUT_MODE_OPTIONS = ["source", "universal", "av1"];
+// Where the slider lands when the stored value is missing or unrecognized.
+// Mirrors _DEFAULT_OUTPUT_MODE in app/worker.py: never silently "source",
+// which would quietly drop the compatibility promise.
+const OUTPUT_MODE_FALLBACK_INDEX = OUTPUT_MODE_OPTIONS.indexOf("universal");
+const OUTPUT_MODE_LABELS = {
+    source: "Source",
+    universal: "H.264 (Recommended)",
+    av1: "AV1",
+};
 const RUNTIME_LIMITS = [
     ["download_worker_count", "Download workers", 0, 8],
     ["download_timeout_minutes", "Download timeout", 1, 240],
     ["transcode_timeout_minutes", "Transcode timeout", 1, 480],
-    ["download_max_filesize_gib", "Maximum input size", 1, 100],
+    ["download_max_filesize_gib", "Maximum source download size", 1, 100],
     ["audio_analysis_max_minutes", "BPM analysis track limit", 0, 240],
     ["audio_analysis_timeout_minutes", "BPM analysis timeout", 1, 60],
     ["lalal_max_download_gib", "Lalal result limit", 1, 100],
@@ -240,30 +257,97 @@ let isResettingStats = false;
 let hasAdminCredentials = bootstrapData.has_admin_credentials;
 let authEnablePending = false;
 let isRemovingAllJobs = false;
+// Status reads race the mutations beside them: the GET fired at page load can
+// resolve *after* the user has already connected, disconnected or replaced
+// something, and would then paint its stale answer over the newer state. Every
+// read captures the generation it started in and drops its result once a
+// mutation has bumped the counter; every mutation that renders state locally
+// bumps it first.
+let lalalStatusGeneration = 0;
+let logoStatusGeneration = 0;
+let cookieStatusGeneration = 0;
+// Uploading and removing the logo both write the same server-side slot, and the
+// dropzone stays clickable while a request is in flight, so the writes need
+// serialising as well as versioning.
+let isLogoBusy = false;
 
 function setLogoutVisible(visible) {
     logoutFormEl?.classList.toggle("d-none", !visible);
 }
 
-function updateRetentionDaysPreview() {
-    if (!retentionDaysEl) return;
+/**
+ * Update a range input slider's preview display.
+ * @param {HTMLElement} el - the range input element
+ * @param {any[]} options - array of values to map slider indices to
+ * @param {Function} labelFn - converts the selected value to a display label
+ * @param {Object} config - {inputEl?, valueEl?, fallbackIndex?, onRender?}
+ */
+function updateSliderPreview(el, options, labelFn, config = {}) {
+    if (!el) return;
 
-    const parsed = Number.parseInt(retentionDaysEl.value, 10);
+    const { inputEl, valueEl, fallbackIndex = 0, onRender } = config;
+    const parsed = Number.parseInt(el.value, 10);
     const index = Number.isFinite(parsed)
-        ? Math.min(RETENTION_DAY_OPTIONS.length - 1, Math.max(0, parsed))
-        : 0;
-    const days = RETENTION_DAY_OPTIONS[index];
-    const label = days === 0 ? "Unlimited" : (days === 365 ? "1 year" : `${days} days`);
+        ? Math.min(options.length - 1, Math.max(0, parsed))
+        : fallbackIndex;
+    const value = options[index];
+    const label = labelFn(value);
 
-    retentionDaysEl.value = String(index);
-    retentionDaysEl.dataset.activeIndex = String(index);
-    retentionDaysEl.setAttribute("aria-valuetext", label);
-    if (retentionDaysInputEl) {
-        retentionDaysInputEl.value = String(days);
+    el.value = String(index);
+    el.dataset.activeIndex = String(index);
+    el.setAttribute("aria-valuetext", label);
+    if (inputEl) {
+        inputEl.value = String(value);
     }
-    if (retentionDaysValueEl) {
-        retentionDaysValueEl.textContent = label;
+    if (valueEl) {
+        valueEl.textContent = label;
     }
+    if (onRender) {
+        onRender(value);
+    }
+}
+
+function updateRetentionDaysPreview() {
+    updateSliderPreview(
+        retentionDaysEl,
+        RETENTION_DAY_OPTIONS,
+        (days) => (days === 0 ? "Unlimited" : (days === 365 ? "1 year" : `${days} days`)),
+        { inputEl: retentionDaysInputEl, valueEl: retentionDaysValueEl, fallbackIndex: 0 },
+    );
+}
+
+function updateOutputModePreview() {
+    updateSliderPreview(
+        outputModeEl,
+        OUTPUT_MODE_OPTIONS,
+        (mode) => OUTPUT_MODE_LABELS[mode],
+        {
+            inputEl: outputModeInputEl,
+            valueEl: outputModeValueEl,
+            fallbackIndex: OUTPUT_MODE_FALLBACK_INDEX,
+            // Point the reference table at the selected row, so the table reads
+            // as part of the control rather than as static prose beside it. The
+            // table is the only place each mode is explained.
+            onRender: (mode) => {
+                for (const row of outputModeTableRowEls) {
+                    row.dataset.modeActive = String(row.dataset.mode === mode);
+                }
+            },
+        },
+    );
+}
+
+/** The encoding cost is worth naming, but only once the watermark is actually on. */
+function syncWatermarkCostHint() {
+    watermarkCostEl?.classList.toggle("d-none", !videoWatermarkEl?.checked);
+}
+
+function bindWatermarkCostHint() {
+    if (!watermarkCostEl) {
+        return;
+    }
+    videoWatermarkEl?.addEventListener("change", syncWatermarkCostHint);
+    syncWatermarkCostHint();
 }
 
 function closestOptionIndex(options, value) {
@@ -275,24 +359,12 @@ function closestOptionIndex(options, value) {
 }
 
 function updateShareLinkMaxUsesPreview() {
-    if (!shareLinkMaxUsesEl) return;
-
-    const parsed = Number.parseInt(shareLinkMaxUsesEl.value, 10);
-    const index = Number.isFinite(parsed)
-        ? Math.min(SHARE_LINK_MAX_USE_OPTIONS.length - 1, Math.max(0, parsed))
-        : 0;
-    const uses = SHARE_LINK_MAX_USE_OPTIONS[index];
-    const label = uses === 0 ? "Unlimited" : `${uses.toLocaleString()} use${uses === 1 ? "" : "s"}`;
-
-    shareLinkMaxUsesEl.value = String(index);
-    shareLinkMaxUsesEl.dataset.activeIndex = String(index);
-    shareLinkMaxUsesEl.setAttribute("aria-valuetext", label);
-    if (shareLinkMaxUsesInputEl) {
-        shareLinkMaxUsesInputEl.value = String(uses);
-    }
-    if (shareLinkMaxUsesValueEl) {
-        shareLinkMaxUsesValueEl.textContent = label;
-    }
+    updateSliderPreview(
+        shareLinkMaxUsesEl,
+        SHARE_LINK_MAX_USE_OPTIONS,
+        (uses) => (uses === 0 ? "Unlimited" : `${uses.toLocaleString()} use${uses === 1 ? "" : "s"}`),
+        { inputEl: shareLinkMaxUsesInputEl, valueEl: shareLinkMaxUsesValueEl, fallbackIndex: 0 },
+    );
 }
 
 function renderAuthUseKeyButton() {
@@ -408,9 +480,13 @@ function setAuthAlert(type, message) {
 
 async function loadLalalStatus({ forceRefresh = false } = {}) {
     const url = forceRefresh ? "/api/lalal/status?force_refresh=1" : "/api/lalal/status";
+    const generation = ++lalalStatusGeneration;
     try {
         const res = await fetchWithTimeout(url, { credentials: "same-origin" });
         const payload = await parseResponsePayload(res);
+
+        // A newer read or a disconnect has happened meanwhile: that state wins.
+        if (generation !== lalalStatusGeneration) return;
 
         if (!res.ok) {
             setLalalStatus("Error", "badge bg-danger");
@@ -444,6 +520,7 @@ async function loadLalalStatus({ forceRefresh = false } = {}) {
         setDisconnectVisible(false);
         setAnalysisLimitsVisible(false);
     } catch (err) {
+        if (generation !== lalalStatusGeneration) return;
         setLalalStatus("Error", "badge bg-danger");
         setLalalStatusLine(err?.message || "Unable to check status");
         setDisconnectVisible(false);
@@ -469,6 +546,11 @@ function validateSettings() {
         return { valid: false, error: "Max. uses per share link must be between 0 and 10000" };
     }
 
+    const outputMode = String(form.get("download_output_mode") || "");
+    if (!OUTPUT_MODE_OPTIONS.includes(outputMode)) {
+        return { valid: false, error: "Video output format must be Source, H.264 or AV1" };
+    }
+
     const runtimeLimits = {};
     for (const [key, label, minimum, maximum] of RUNTIME_LIMITS) {
         const value = parseInt(String(form.get(key) || ""), 10);
@@ -488,12 +570,11 @@ function validateSettings() {
         valid: true,
         data: {
             retention_days: retention,
+            enable_job_history: enableJobHistoryEl ? enableJobHistoryEl.checked : true,
             download_concurrent_fragments: fragments,
             share_link_max_uses: shareMaxUses,
             public_hostname: publicHostname,
-            // The user's own choice, never the value the watermark forces on
-            // screen - see syncCompatibleOutputLock().
-            download_compatible_output: compatibleOutputEl ? compatibleOutputEl.dataset.userChoice === "true" : false,
+            download_output_mode: outputMode,
             video_watermark: videoWatermarkEl ? videoWatermarkEl.checked : true,
             lalalaai_duration_guard: lalalDurationGuard ? lalalDurationGuard.checked : true,
             ...runtimeLimits,
@@ -553,6 +634,8 @@ function setPasswordError(message) {
         passwordErrorEl.classList.remove("d-none");
         adminPasswordConfirmEl.classList.add("is-invalid");
         adminPasswordEl.classList.add("is-invalid");
+        adminPasswordConfirmEl.setAttribute("aria-invalid", "true");
+        adminPasswordEl.setAttribute("aria-invalid", "true");
         return;
     }
 
@@ -560,6 +643,8 @@ function setPasswordError(message) {
     passwordErrorEl.textContent = "";
     adminPasswordConfirmEl.classList.remove("is-invalid");
     adminPasswordEl.classList.remove("is-invalid");
+    adminPasswordConfirmEl.removeAttribute("aria-invalid");
+    adminPasswordEl.removeAttribute("aria-invalid");
 
     const pw = adminPasswordEl.value;
     const confirm = adminPasswordConfirmEl.value;
@@ -908,6 +993,9 @@ async function resetStatistics() {
         }
 
         showToast(payload.message || "Statistics reset", "success");
+        // The tiles are server-rendered, so nothing else would correct them
+        // until the System tab is opened again.
+        await refreshJobStats();
     } catch (err) {
         const message = err?.name === "AbortError" ? "Request timed out" : (err?.message || "Request failed");
         showToast(`Error: ${message}`, "danger");
@@ -955,6 +1043,7 @@ async function removeAllJobs() {
         }
 
         showToast(payload.message || "All jobs removed", "success");
+        await refreshJobStats();
     } catch (err) {
         const message = err?.name === "AbortError" ? "Request timed out" : (err?.message || "Request failed");
         showToast(`Error: ${message}`, "danger");
@@ -1054,7 +1143,6 @@ window.addEventListener("pageshow", (event) => {
 
 const AUTO_SAVE_INPUT_SELECTOR = [
     '[name="download_concurrent_fragments"]',
-    '[name="download_compatible_output"]',
     '[name="video_watermark"]',
     '[name="lalalaai_duration_guard"]',
     '[name="download_worker_count"]',
@@ -1067,39 +1155,21 @@ const AUTO_SAVE_INPUT_SELECTOR = [
     '[name="session_idle_minutes"]',
 ].join(", ");
 
-/**
- * Keep the compatibility switch in sync with the watermark.
- *
- * The watermark re-encodes to H.264/AAC anyway, so it requires the promise.
- * Rather than writing that into the stored setting - which would silently
- * destroy the user's own choice the moment they turn the watermark on - the
- * switch is only *shown* as forced on and locked. `dataset.userChoice` stays
- * the single source of truth and is what gets saved.
- */
-function syncCompatibleOutputLock() {
-    if (!compatibleOutputEl) {
+function bindOutputModeSlider() {
+    if (!outputModeEl) {
         return;
     }
-    const forced = Boolean(videoWatermarkEl?.checked);
-    compatibleOutputEl.checked = forced || compatibleOutputEl.dataset.userChoice === "true";
-    compatibleOutputEl.disabled = forced;
-    document
-        .querySelector('[data-role="compatible-output-forced"]')
-        ?.classList.toggle("d-none", !forced);
-}
+    // Server-rendered state is the stored mode; an unknown value falls back to
+    // the middle tick rather than silently landing on "source".
+    const storedMode = outputModeEl.dataset.outputMode || "";
+    const storedIndex = OUTPUT_MODE_OPTIONS.indexOf(storedMode);
+    outputModeEl.value = String(storedIndex >= 0 ? storedIndex : OUTPUT_MODE_FALLBACK_INDEX);
 
-function bindCompatibleOutput() {
-    if (!compatibleOutputEl) {
-        return;
-    }
-    // Server-rendered state is the stored choice; the watermark lock is applied
-    // on top of it, never into it.
-    compatibleOutputEl.dataset.userChoice = String(compatibleOutputEl.checked);
-    compatibleOutputEl.addEventListener("change", () => {
-        compatibleOutputEl.dataset.userChoice = String(compatibleOutputEl.checked);
+    outputModeEl.addEventListener("input", updateOutputModePreview);
+    outputModeEl.addEventListener("change", () => {
+        scheduleAutoSave(0, "Output format updated");
     });
-    videoWatermarkEl?.addEventListener("change", syncCompatibleOutputLock);
-    syncCompatibleOutputLock();
+    updateOutputModePreview();
 }
 
 const logoDropzoneEl = document.querySelector('[data-role="logo-dropzone"]');
@@ -1141,9 +1211,12 @@ function renderLogoStatus(status) {
 
 async function loadLogoStatus() {
     if (!logoDropzoneEl) return;
+    const generation = ++logoStatusGeneration;
     try {
         const res = await fetchWithTimeout("/api/settings/watermark-logo", { credentials: "same-origin" });
         const payload = await parseResponsePayload(res);
+        // An upload or a removal has landed meanwhile: it knows better.
+        if (generation !== logoStatusGeneration) return;
         if (res.ok) {
             renderLogoStatus(payload);
         }
@@ -1158,10 +1231,16 @@ function setLogoBusy(busy) {
     if (logoRemoveEl instanceof HTMLButtonElement) {
         logoRemoveEl.disabled = busy;
     }
+    // Without this the picker stays reachable mid-upload, and a second file
+    // could start a competing write to the same slot.
+    if (logoInputEl instanceof HTMLInputElement) {
+        logoInputEl.disabled = busy;
+    }
+    logoDropzoneEl?.setAttribute("aria-busy", String(busy));
 }
 
 async function uploadLogo(file) {
-    if (!file) return;
+    if (!file || isLogoBusy) return;
 
     if (file.size > MAX_LOGO_BYTES) {
         showToast(`Error: that file is larger than ${humanSize(MAX_LOGO_BYTES)}`, "danger");
@@ -1172,6 +1251,7 @@ async function uploadLogo(file) {
         return;
     }
 
+    isLogoBusy = true;
     setLogoBusy(true);
     try {
         // A PNG goes up as it is; an SVG is rasterized first, because the
@@ -1191,12 +1271,14 @@ async function uploadLogo(file) {
             throw new Error(toErrorMessage(payload.detail) || `HTTP ${res.status}`);
         }
 
+        logoStatusGeneration += 1;
         renderLogoStatus(payload);
         showToast("Watermark logo updated", "success");
     } catch (err) {
         const message = err?.name === "AbortError" ? "Request timed out" : (err?.message || "Upload failed");
         showToast(`Error: ${message}`, "danger");
     } finally {
+        isLogoBusy = false;
         setLogoBusy(false);
         if (logoInputEl instanceof HTMLInputElement) {
             // So re-picking the same file fires a change event again.
@@ -1206,14 +1288,19 @@ async function uploadLogo(file) {
 }
 
 async function removeLogo() {
+    if (isLogoBusy) return;
+
     const confirmed = await confirmModal({
         title: "Remove custom logo",
         message: "Remove your logo? New downloads are watermarked with the built-in fetchly logo again.",
         confirmText: "Remove",
         variant: "danger",
     });
-    if (!confirmed) return;
+    // Re-checked: the dialog is modal to the user, not to an upload that was
+    // already running when it opened.
+    if (!confirmed || isLogoBusy) return;
 
+    isLogoBusy = true;
     setLogoBusy(true);
     try {
         const res = await fetchWithTimeout("/api/settings/watermark-logo", {
@@ -1225,12 +1312,14 @@ async function removeLogo() {
         if (!res.ok) {
             throw new Error(toErrorMessage(payload.detail) || `HTTP ${res.status}`);
         }
+        logoStatusGeneration += 1;
         renderLogoStatus({ custom: false });
         showToast("Custom logo removed", "success");
     } catch (err) {
         const message = err?.name === "AbortError" ? "Request timed out" : (err?.message || "Request failed");
         showToast(`Error: ${message}`, "danger");
     } finally {
+        isLogoBusy = false;
         setLogoBusy(false);
     }
 }
@@ -1281,6 +1370,10 @@ function bindSettingsInputs() {
 
         input.addEventListener("input", () => scheduleAutoSave());
         input.addEventListener("change", () => scheduleAutoSave());
+    });
+
+    enableJobHistoryEl?.addEventListener("change", () => {
+        scheduleAutoSave(0, "Job history updated");
     });
 
     enableAuthenticationEl?.addEventListener("change", async () => {
@@ -1638,11 +1731,15 @@ function renderCookieStatus(platform, status) {
 }
 
 async function loadCookieStatuses() {
+    const generation = ++cookieStatusGeneration;
     try {
         const res = await fetchWithTimeout("/api/cookies", { credentials: "same-origin" });
         if (!res.ok) return;
         const payload = await parseResponsePayload(res);
         if (!Array.isArray(payload)) return;
+        // An import or a removal has landed meanwhile. This answer covers every
+        // platform, so applying it would undo that tile's fresh state.
+        if (generation !== cookieStatusGeneration) return;
         payload.forEach((status) => renderCookieStatus(status.platform, status));
     } catch {
         // Best-effort: leave the server-rendered initial state on screen.
@@ -1689,6 +1786,7 @@ async function pasteCookies(platform) {
                     throw new Error(toErrorMessage(payload.detail) || `HTTP ${res.status}`);
                 }
 
+                cookieStatusGeneration += 1;
                 renderCookieStatus(platform, payload);
                 showToast(`${label} cookies stored`, "success");
             },
@@ -1730,6 +1828,7 @@ async function removeCookieFile(platform) {
             throw new Error(toErrorMessage(payload.detail) || `HTTP ${res.status}`);
         }
 
+        cookieStatusGeneration += 1;
         renderCookieStatus(platform, { platform, status: "missing", present: false });
         showToast(`${label} cookies removed`, "success");
     } catch (err) {
@@ -1773,6 +1872,9 @@ function bindLalalEvents() {
                 throw new Error(toErrorMessage(payload.detail) || `HTTP ${res.status}`);
             }
 
+            // Invalidate any status read still in flight: it predates the
+            // disconnect and would report the account as connected again.
+            lalalStatusGeneration += 1;
             setLalalStatus("Not configured");
             setLalalStatusLine("Session disconnected. Click 'Authenticate' to reconnect.");
             setDisconnectVisible(false);
@@ -1789,6 +1891,17 @@ function bindLalalEvents() {
 
     lalalAuthUseKeyBtn?.addEventListener("click", async () => {
         if (isAuthUseKeyBusy) {
+            return;
+        }
+
+        // Both fields carry `required` (and the email field `type="email"`), but
+        // neither lives inside a <form> and this button is type="button", so the
+        // browser never runs constraint validation on its own. Ask for it
+        // explicitly - this also surfaces the browser's native validation bubble.
+        if (lalalAuthEmail && !lalalAuthEmail.reportValidity()) {
+            return;
+        }
+        if (lalalActivationKey && !lalalActivationKey.reportValidity()) {
             return;
         }
 
@@ -2013,6 +2126,10 @@ async function loadUpdateStatus() {
         setAppUpdateVersions(appBox, appBox.dataset.currentVersion, "");
         setAppUpdateState(appBox, "loading");
     }
+    // Clear the previous answer's badges up front. Every failure path below
+    // leaves the components untouched, so a stale "update available" would
+    // otherwise outlive the check that found it - including on a manual refresh.
+    cells.forEach((cell) => applyUpdateBadge(cell, null));
 
     try {
         const res = await fetchWithTimeout("/api/updates", { credentials: "same-origin" });
@@ -2209,7 +2326,8 @@ function init() {
     bindRetentionSlider();
     bindShareLinkMaxUsesSlider();
     bindSettingsInputs();
-    bindCompatibleOutput();
+    bindOutputModeSlider();
+    bindWatermarkCostHint();
     bindWatermarkLogo();
     bindPublicHostnameDetect();
     bindSettingsTabsScrollFade();

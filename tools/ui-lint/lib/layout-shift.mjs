@@ -22,6 +22,52 @@
 const LAYOUT_SHIFT_KEY = '__uiLintLayoutShift';
 
 /**
+ * Calculate CLS using the largest five-second session with less than one
+ * second between consecutive shifts. This is kept pure so the scoring rule
+ * can be tested without a browser.
+ * @param {Array<{value?: number, startTime?: number}>} entries
+ * @returns {{value: number, count: number, largest: number}}
+ */
+export function calculateCumulativeLayoutShift(entries = []) {
+    const shifts = entries
+        .map((entry) => ({
+            value: Number(entry?.value || 0),
+            startTime: Number(entry?.startTime || 0),
+        }))
+        .filter((entry) => Number.isFinite(entry.value) && entry.value > 0
+            && Number.isFinite(entry.startTime))
+        .sort((a, b) => a.startTime - b.startTime);
+
+    let sessionValue = 0;
+    let sessionStart = null;
+    let previousTime = null;
+    let largest = 0;
+    let largestCount = 0;
+    let sessionCount = 0;
+
+    for (const shift of shifts) {
+        const startsNewSession = sessionStart === null
+            || shift.startTime - previousTime >= 1000
+            || shift.startTime - sessionStart > 5000;
+        if (startsNewSession) {
+            sessionStart = shift.startTime;
+            sessionValue = shift.value;
+            sessionCount = 1;
+        } else {
+            sessionValue += shift.value;
+            sessionCount += 1;
+        }
+        if (sessionValue > largest) {
+            largest = sessionValue;
+            largestCount = sessionCount;
+        }
+        previousTime = shift.startTime;
+    }
+
+    return { value: largest, count: largestCount, largest };
+}
+
+/**
  * Registers the observer as an init script, so it is installed before any
  * document script runs and catches shifts from the very first frame.
  * Must be called on the BrowserContext, not the Page: a page-level script
@@ -35,7 +81,16 @@ export async function installLayoutShiftObserver(context) {
             && Array.isArray(PerformanceObserver.supportedEntryTypes)
             && PerformanceObserver.supportedEntryTypes.includes('layout-shift');
 
-        const state = { value: 0, count: 0, largest: 0, entries: [], supported };
+        const state = {
+            value: 0,
+            count: 0,
+            largest: 0,
+            entries: [],
+            sessionValue: 0,
+            sessionStart: null,
+            previousTime: null,
+            supported,
+        };
         window[stateKey] = state;
 
         if (!supported) return;
@@ -49,23 +104,35 @@ export async function installLayoutShiftObserver(context) {
                     if (entry.hadRecentInput) continue;
 
                     const value = entry.value || 0;
-                    state.value += value;
+                    const startTime = entry.startTime || 0;
+                    const startsNewSession = state.sessionStart === null
+                        || startTime - state.previousTime >= 1000
+                        || startTime - state.sessionStart > 5000;
+                    if (startsNewSession) {
+                        state.sessionStart = startTime;
+                        state.sessionValue = value;
+                    } else {
+                        state.sessionValue += value;
+                    }
+                    state.value = Math.max(state.value, state.sessionValue);
                     state.count += 1;
                     if (value > state.largest) state.largest = value;
+                    state.previousTime = startTime;
 
-                    // Capped: a thrashing page can emit thousands of entries,
-                    // and only the worst few are actionable.
-                    if (state.entries.length < 20) {
-                        state.entries.push({
-                            value,
-                            startTime: entry.startTime || 0,
-                            sources: (entry.sources || []).slice(0, 3).map((source) => ({
-                                node: source.node?.tagName
-                                    ? `${source.node.tagName.toLowerCase()}${source.node.id ? `#${source.node.id}` : ''}`
-                                    : null,
-                            })),
-                        });
-                    }
+                    const detail = {
+                        value,
+                        startTime,
+                        sources: (entry.sources || []).slice(0, 3).map((source) => ({
+                            node: source.node?.tagName
+                                ? `${source.node.tagName.toLowerCase()}${source.node.id ? `#${source.node.id}` : ''}`
+                                : null,
+                        })),
+                    };
+                    // Keep the largest entries, not whichever shifts happened
+                    // to arrive first.
+                    state.entries.push(detail);
+                    state.entries.sort((a, b) => b.value - a.value);
+                    state.entries.length = Math.min(state.entries.length, 20);
                 }
             });
             observer.observe({ type: 'layout-shift', buffered: true });

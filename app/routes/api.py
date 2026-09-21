@@ -26,6 +26,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 from ..bpm_cluster import cluster_bpms
 from ..common.rate_limit import limiter
 from ..db import (
+    DOWNLOAD_OUTPUT_MODES,
     TERMINAL_JOB_STATUSES,
     delete_jobs_and_share_links,
     find_active_job_for_submission,
@@ -1058,6 +1059,10 @@ async def api_set_settings(
     if "retention_days" in payload:
         settings_to_update["retention_days"] = _clamp_int(payload["retention_days"], 0, 365, "retention_days")
 
+    if "enable_job_history" in payload:
+        enabled = _parse_bool(payload["enable_job_history"], "enable_job_history")
+        settings_to_update["enable_job_history"] = "true" if enabled else "false"
+
     if "download_concurrent_fragments" in payload:
         settings_to_update["download_concurrent_fragments"] = _clamp_int(
             payload["download_concurrent_fragments"], 0, 16, "download_concurrent_fragments"
@@ -1080,9 +1085,15 @@ async def api_set_settings(
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=f"Public hostname: {exc}") from exc
 
-    if "download_compatible_output" in payload:
-        enabled = _parse_bool(payload["download_compatible_output"], "download_compatible_output")
-        settings_to_update["download_compatible_output"] = "true" if enabled else "false"
+    if "download_output_mode" in payload:
+        mode = str(payload["download_output_mode"] or "").strip().lower()
+        if mode not in DOWNLOAD_OUTPUT_MODES:
+            allowed = ", ".join(DOWNLOAD_OUTPUT_MODES)
+            raise HTTPException(
+                status_code=400,
+                detail=f"download_output_mode must be one of: {allowed}",
+            )
+        settings_to_update["download_output_mode"] = mode
 
     if "video_watermark" in payload:
         enabled = _parse_bool(payload["video_watermark"], "video_watermark")
@@ -1221,6 +1232,7 @@ async def api_submit(
     if job_queue.full():
         raise HTTPException(status_code=503, detail="Job queue is full, please try again later")
 
+    settings = await asyncio.to_thread(get_settings)
     await asyncio.to_thread(
         insert_job,
         job_id,
@@ -1233,6 +1245,7 @@ async def api_submit(
         # Source runtime, so the job shows a length while queued; the worker
         # replaces it with the ffprobe value.
         duration_seconds=meta.get("duration_seconds"),
+        include_in_history=bool(settings.get("enable_job_history", True)),
     )
     if not submit_download((job_id, clean_url, media_type, quality_value)):
         try:

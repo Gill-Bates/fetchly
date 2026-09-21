@@ -462,8 +462,9 @@ function buildTypeIconFragment(job) {
 
 // H.264 in an MP4-family container is the one combination that plays on
 // Safari, iOS, TVs and in editing software. Anything else is what the user
-// asked for by turning "Universally playable output" off (app/db.py), so it is
-// flagged, not treated as an error.
+// asked for by setting the video output format to something other than
+// "universal" (download_output_mode in app/db.py), so it is flagged, not
+// treated as an error.
 const UNIVERSAL_VIDEO_CODECS = new Set(["h264", "avc1"]);
 const UNIVERSAL_CONTAINERS = new Set(["mp4", "m4v", "mov"]);
 
@@ -496,7 +497,7 @@ function buildLimitedPlaybackFragment(job) {
     }
     const chip = document.createElement("span");
     chip.className = "job-playback-warning";
-    chip.title = "Not playable on Safari, iOS or most TVs — turn on \"Universally playable output\" in Settings for future downloads";
+    chip.title = "Not playable on Safari, iOS or most TVs — set the video output format to H.264 (Recommended) in Settings for future downloads";
     const icon = document.createElement("span");
     icon.className = "material-symbols-outlined";
     icon.setAttribute("aria-hidden", "true");

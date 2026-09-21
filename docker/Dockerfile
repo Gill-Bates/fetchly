@@ -1,14 +1,21 @@
-# syntax=docker/dockerfile:1.7
+# syntax=docker/dockerfile:1
 
 ARG PYTHON_BASE=python:3.13-slim
 # APT cache invalidation: pass --build-arg APT_CACHE_DATE="$(date -u +%Y-%m-%d)"
-# to refresh apt packages daily (prevents using stale cached layers)
+# to refresh apt packages daily (prevents using stale cached layers).
+#
+# A global ARG is only visible to the stages that redeclare it, so every stage
+# that references it below carries its own `ARG APT_CACHE_DATE` - without that
+# line the value passed on the command line reaches nothing.
 ARG APT_CACHE_DATE=""
 
 FROM ${PYTHON_BASE} AS ffmpeg
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
+# Redeclared from the global scope above; inherits the value passed to
+# --build-arg. Without this line the RUN below expands it to nothing.
+ARG APT_CACHE_DATE
 ARG TARGETARCH
 # Empty picks the newest stable series the release carries; set it to e.g. 9.0
 # to hold one. Only release-branch tarballs qualify:
@@ -114,8 +121,13 @@ ADD https://github.com/MTG/essentia/commits/${ESSENTIA_REF}.atom /tmp/essentia-r
 # portable spelling. Its version is held at 3.3.10 on both: upstream's default
 # of 3.3.2 predates aarch64 and is a decade behind on toolchain compatibility,
 # so pinning it forward keeps the two builds differing in the flag alone.
-RUN echo "APT cache: ${APT_CACHE_DATE}" && \
-    set -euo pipefail; \
+# Deliberately not keyed on APT_CACHE_DATE, unlike every other apt layer in
+# this file: nothing this stage installs is shipped - build-essential, cmake,
+# nasm and git exist to produce the wheel, and only the wheel leaves the stage.
+# Keying the layer on a daily value would recompile essentia and its whole
+# static 3rd-party chain on every release for packages the image never carries.
+# ESSENTIA_REF (via the commit feed above) is what invalidates this stage.
+RUN set -euo pipefail; \
     : "${TARGETARCH:?must be provided by BuildKit - build with DOCKER_BUILDKIT=1 or docker buildx}"; \
     case "${TARGETARCH}" in \
         amd64) fftw_simd=--enable-sse2 ;; \
@@ -160,14 +172,15 @@ FROM ${PYTHON_BASE} AS builder
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
+ARG APT_CACHE_DATE
 ARG TARGETARCH
 
-ARG WAVESURFER_VERSION=7.12.11
-ARG WAVESURFER_ESM_SHA256=49fc9b562f0c0322882aba6fdf354d54e4c81470611a50771bbd1fd398631e13
-ARG WAVESURFER_REGIONS_SHA256=14780f7d3f7cabfc4fb9a37ddf81c4fcc1045cfdb0b93c4a8c4c6acd52d03a7f
-
+# ca-certificates is the one package here that matters to what ships: every
+# download below (PyPI, the torch index, unpkg, the deno release) validates TLS
+# against it, so it is upgraded with the rest rather than taken as the base
+# image froze it. update, upgrade, install and cleanup stay in one layer.
 RUN echo "APT cache: ${APT_CACHE_DATE}" && \
-    apt-get update && apt-get install -y --no-install-recommends \
+    apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
     curl \
     ca-certificates \
     build-essential \
@@ -204,9 +217,15 @@ COPY --from=essentia /wheels /tmp/essentia-wheels
 # the whole manifest: pip has no index priority: every index it is given is one
 # flat namespace it picks the highest version from, so an --extra-index-url
 # covering the full install lets any name on this host outrank the PyPI release
-# of the same name. --no-deps keeps the exclusive index down to the two wheels
-# that actually have to come from here; torch's own dependencies are ordinary
-# PyPI packages and are resolved as such by the manifest install below.
+# of the same name. That is not hypothetical for this host - it also serves
+# jinja2, numpy, sympy, filelock, fsspec and setuptools. --no-deps keeps the
+# exclusive index down to the two wheels that actually have to come from here;
+# torch's own dependencies are ordinary PyPI packages and are resolved as such
+# by the manifest install below.
+#
+# pyproject.toml's [[tool.uv.index]] pytorch-cpu / [tool.uv.sources] pair states
+# the same split for whoever resolves the manifest - the release workflow does,
+# and hands the result to this stage as constraints.txt.
 ENV TORCH_CPU_INDEX=https://download.pytorch.org/whl/cpu
 
 # essentia is the one dependency pip never resolves here: the wheel was
@@ -312,22 +331,45 @@ RUN set -euo pipefail; \
     rm -f "/tmp/${archive}" /tmp/deno.sha256sum /tmp/deno-release-latest.txt; \
     deno --version
 
-RUN mkdir -p /build/static/vendor/wavesurfer/dist/plugins && \
-    curl --proto '=https' --tlsv1.2 -L "https://unpkg.com/wavesurfer.js@${WAVESURFER_VERSION}/dist/wavesurfer.esm.js" \
-        --fail --retry 5 --retry-delay 2 --connect-timeout 5 --max-time 300 \
-        -o /build/static/vendor/wavesurfer/dist/wavesurfer.esm.js && \
-    curl --proto '=https' --tlsv1.2 -L "https://unpkg.com/wavesurfer.js@${WAVESURFER_VERSION}/dist/plugins/regions.esm.js" \
-        --fail --retry 5 --retry-delay 2 --connect-timeout 5 --max-time 300 \
-        -o /build/static/vendor/wavesurfer/dist/plugins/regions.esm.js && \
-    echo "${WAVESURFER_ESM_SHA256}  /build/static/vendor/wavesurfer/dist/wavesurfer.esm.js" | sha256sum -c - && \
-    echo "${WAVESURFER_REGIONS_SHA256}  /build/static/vendor/wavesurfer/dist/plugins/regions.esm.js" | sha256sum -c -
+# "latest is greatest" by design: no version ARG, no hash pin. Every build
+# resolves whatever unpkg's @latest alias serves for wavesurfer.js at that
+# moment, so a fix release never sits undeployed behind a stale pin. The
+# trade-off - no build-time integrity check, and no scanner that covers these
+# two files either - is spelled out in docker/AGENTS.md.
+#
+# The manifest comes in through ADD rather than curl for two reasons. It is the
+# cache key: a plain RUN with three @latest fetches inside it is a cache hit
+# forever - nothing in the build context changes when upstream publishes, so
+# "every build takes the current release" only held for a cold cache. ADD from a
+# URL re-checks the remote and invalidates this layer when the resolved manifest
+# changes. And it is the single resolution point: the bundle, the plugin and the
+# reported version are then all fetched from one concrete version instead of
+# three independent @latest lookups that can straddle a release.
+ADD https://unpkg.com/wavesurfer.js@latest/package.json /tmp/wavesurfer-package.json
+RUN set -euo pipefail; \
+    version="$(python -c 'import json; print(json.load(open("/tmp/wavesurfer-package.json"))["version"])')"; \
+    [[ -n "${version}" ]] || { echo "could not resolve a wavesurfer.js version from unpkg" >&2; exit 1; }; \
+    echo "Vendoring wavesurfer.js ${version}"; \
+    base="https://unpkg.com/wavesurfer.js@${version}/dist"; \
+    mkdir -p /build/static/vendor/wavesurfer/dist/plugins; \
+    curl --proto '=https' --tlsv1.2 -fsSL "${base}/wavesurfer.esm.js" \
+        --retry 5 --retry-delay 2 --connect-timeout 5 --max-time 300 \
+        -o /build/static/vendor/wavesurfer/dist/wavesurfer.esm.js; \
+    curl --proto '=https' --tlsv1.2 -fsSL "${base}/plugins/regions.esm.js" \
+        --retry 5 --retry-delay 2 --connect-timeout 5 --max-time 300 \
+        -o /build/static/vendor/wavesurfer/dist/plugins/regions.esm.js; \
+    test -s /build/static/vendor/wavesurfer/dist/wavesurfer.esm.js; \
+    test -s /build/static/vendor/wavesurfer/dist/plugins/regions.esm.js; \
+    printf '%s\n' "${version}" > /build/wavesurfer.version; \
+    rm -f /tmp/wavesurfer-package.json
 
 FROM ${PYTHON_BASE} AS runtime
 
-ARG WAVESURFER_VERSION=7.12.11
-ENV WAVESURFER_VERSION=${WAVESURFER_VERSION}
-
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+
+# The one apt layer whose packages actually ship, so this is the stage the
+# daily APT_CACHE_DATE value matters most to.
+ARG APT_CACHE_DATE
 
 COPY docker/apt-no-distro-media.pref /etc/apt/preferences.d/no-distro-media
 
@@ -381,8 +423,14 @@ RUN useradd -u 1000 -m --no-log-init appuser
 # old semantics exactly: regular files stay non-executable, directories stay
 # traversable, and appuser (the uid the entrypoint drops to) can read
 # everything even when the local build context carried tighter umask modes.
-# Supported by the pinned # syntax=docker/dockerfile:1.7 frontend, and no new
-# requirement anyway: this file already mandates BuildKit via TARGETARCH.
+#
+# Symbolic --chmod needs Dockerfile frontend 1.14 or newer, which is why the
+# syntax line at the top of this file follows the rolling `1` tag. Under the
+# 1.7 frontend it used to name, the mode was accepted and then silently ignored
+# for everything below the destination directory - verified against both
+# frontends: 1.7 left a 700 subdirectory and a 600 file untouched, `1` applies
+# 755/644 as intended. Requiring a current frontend is no new requirement
+# anyway: this file already mandates BuildKit via TARGETARCH.
 COPY --chmod=a+rX app ./app
 COPY --chmod=a+rX middleware ./middleware
 RUN test -s ./app/static/img/fetchly_watermark.png && \
@@ -396,6 +444,12 @@ RUN test -s ./app/static/img/fetchly_watermark.png && \
 COPY pyproject.toml BUILD_INFO* ./
 COPY CHANGELOG.md ./
 COPY --from=builder /build/static/vendor/wavesurfer ./app/static/vendor/wavesurfer
+# No WAVESURFER_VERSION build ARG any more (see the builder-stage comment
+# above): the version actually resolved from unpkg's @latest alias at build
+# time is baked in as a plain file instead, outside app/static/ so it is never
+# served. entrypoint.sh reads it at container start and exports
+# WAVESURFER_VERSION for app/utils/version.py to report.
+COPY --from=builder /build/wavesurfer.version /app/.wavesurfer_version
 COPY --chmod=755 docker/entrypoint.sh /entrypoint.sh
 
 RUN bash -n /entrypoint.sh && \

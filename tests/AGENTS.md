@@ -14,7 +14,7 @@
 | `test_cookie_files.py`, `test_cookie_import.py`, `test_cookie_routes.py`, `test_cookie_status.py` | Netscape parsing, per-platform storage, routes, usability reporting |
 | `test_bpm_beat_this.py`, `test_bpm_naming.py`, `test_bpm_normalization.py` | Tempo detection, the `_94bpm` tag folded into download filenames, octave/half-time normalization |
 | `test_watermark.py`, `test_watermark_logo.py` | FFmpeg compositing and uploaded-logo validation |
-| `test_compatible_output.py` | API/format response-shape contract |
+| `test_output_modes.py` | The three `download_output_mode` values: format selection, the post-download pass, and the watermark interaction |
 | `test_db_job_statuses.py` | Job status transitions and the valid status set |
 | `test_worker_hardening.py` | Worker resilience: failure handling, cancellation, recovery |
 | `test_runtime_settings.py`, `test_settings_migration.py` | Settings persistence and schema/setting migration |
@@ -24,6 +24,7 @@
 | `test_lalal_minutes.py`, `test_lalal_policy.py`, `test_lalal_route_safety.py` | Lalal.ai quota, policy guards, route safety |
 | `test_public_url.py` | Share-link host normalization and base-URL construction |
 | `test_remove_all_jobs.py` | Bulk job deletion |
+| `test_housekeeping_retention.py` | The retention sweep: `purge_old_jobs` batching, and that an expired job loses its row, its directory and its share links together while `0` days sweeps nothing |
 | `test_csp_wavesurfer.py` | CSP compatibility with the vendored WaveSurfer bundle |
 | `test_template_filters.py` | Custom Jinja2 filters |
 | `test_mobile_settings_layout.py` | Settings page layout on a mobile viewport |
@@ -38,7 +39,7 @@
 | `test_governor_semaphores.py` | `SharedSemaphore`: one budget per workload across worker threads and the event loop, cancellation safety, and the `*_sync` accessors returning the same object |
 | `test_worker_cancel_retry_race.py` | The worker's terminal writebacks are conditional, so a stale cancel cannot land on a row a retry already moved |
 
-39 Python test files in total.
+40 Python test files in total.
 
 ## Subdirectories
 
@@ -153,7 +154,7 @@ pytest tests/test_worker_hardening.py --pdb
 
 ---
 
-**Last Updated:** 2026-09-19  
+**Last Updated:** 2026-09-20  
 **Python:** pytest runner, unittest-style classes, no fixtures  
 **JavaScript:** `node:test` + `node:assert/strict`  
-**Counts:** 39 Python files, 17 JavaScript files
+**Counts:** 40 Python files, 17 JavaScript files

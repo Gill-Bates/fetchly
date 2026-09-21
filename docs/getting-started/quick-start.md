@@ -33,7 +33,7 @@ export FETCHLY_SECRET_KEY="$(openssl rand -base64 32)"
     docker run -d \
       --name fetchly \
       --restart unless-stopped \
-      -p 8000:8000 \
+      -p 127.0.0.1:8000:8000 \
       -e FETCHLY_SECRET_KEY \
       -v "$PWD/data:/app/data" \
       giiibates/fetchly:latest
@@ -47,8 +47,9 @@ export FETCHLY_SECRET_KEY="$(openssl rand -base64 32)"
         image: giiibates/fetchly:latest
         container_name: fetchly
         restart: unless-stopped
+        stop_grace_period: 20s
         ports:
-          - "8000:8000"
+          - "127.0.0.1:8000:8000"
         environment:
           FETCHLY_SECRET_KEY: ${FETCHLY_SECRET_KEY:?generate with: openssl rand -base64 32}
         volumes:
@@ -65,7 +66,10 @@ Navigate to `http://127.0.0.1:8000`.
 
 !!! warning "Authentication is off on a fresh install"
     There is no built-in account and no default password. Anyone who can reach the
-    port has full access until you create an admin account.
+    port has full access until you create an admin account — which is why the
+    examples above publish the port on `127.0.0.1` only. A published port without
+    a host address binds to every interface. Widen it (`0.0.0.0:8000:8000`) or add
+    a reverse proxy after step 4.
 
 ## 4. Enable authentication
 

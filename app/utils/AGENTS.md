@@ -29,7 +29,7 @@ Utilities here are imported across the app and provide a single source of truth 
 | `assets.py` | `asset_url()` (the Jinja global that content-hashes `/static` URLs) and `VersionedStaticFiles` (the matching `Cache-Control` policy) |
 | `hidden_captcha.py` | Invisible anti-bot protection: honeypot field and signed token |
 | `banner.py` | Startup ASCII banner |
-| `housekeeping.py` | Periodic cleanup of orphaned job directories, old job records, and cached files |
+| `housekeeping.py` | Filesystem side of the retention sweep: expired job directories, orphaned directories, thumbnail cache. The matching **database** purge is `db.purge_old_jobs()`, called from `main.py::_run_housekeeping_once` — this module never touches SQLite |
 | `__init__.py` | Package init |
 
 ## For AI Agents
@@ -125,7 +125,7 @@ Tests are unittest-style classes; subclass the helpers in `tests/_support.py` ra
 
 ---
 
-**Last Updated:** 2026-09-19  
+**Last Updated:** 2026-09-20  
 **Language:** Python 3.13+  
 **Key Dependencies:** yt-dlp, FFmpeg, httpx, markdown/nh3  
 **Design:** Stateless helpers; configuration comes from the settings table or the environment

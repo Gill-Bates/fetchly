@@ -20,7 +20,14 @@ from pathlib import Path
 from typing import Any, Final, NamedTuple
 
 from .analysis_worker import SubmitResult, submit_analysis
-from .db import get_settings, now_iso, update_job, update_job_if_status, with_finished_at
+from .db import (
+    DOWNLOAD_OUTPUT_MODES,
+    get_settings,
+    now_iso,
+    update_job,
+    update_job_if_status,
+    with_finished_at,
+)
 from .governor import governor
 from .utils.cookie_status import cookie_file_is_usable
 from .utils.cookies import default_cookie_file
@@ -172,8 +179,11 @@ _AUTO_CONCURRENT_FRAGMENTS: Final = 0
 # Fallback for an unreadable setting or a failed host probe, not a UI default -
 # the stored default is "Automatic" (see app/db.py).
 _DEFAULT_CONCURRENT_FRAGMENTS: Final = 3
-# Mirrors the "download_compatible_output" default in app/db.py.
-_DEFAULT_COMPATIBLE_OUTPUT: Final = False
+_OUTPUT_MODE_SOURCE: Final = "source"
+_OUTPUT_MODE_UNIVERSAL: Final = "universal"
+_OUTPUT_MODE_AV1: Final = "av1"
+# Mirrors the "download_output_mode" default in app/db.py.
+_DEFAULT_OUTPUT_MODE: Final = _OUTPUT_MODE_UNIVERSAL
 # Mirrors the "video_watermark" default in app/db.py.
 _DEFAULT_VIDEO_WATERMARK: Final = True
 # Watermark-only pass on "max" downloads (otherwise a pure download+remux).
@@ -200,11 +210,79 @@ _COMPATIBLE_AAC_BITRATE: Final = "192k"
 # yt-dlp's own "mp4" preset alias minus its format filter, which would fight
 # with the -f expression the caller already passes.
 _COMPATIBLE_FORMAT_SORT: Final = "vcodec:h264,lang,quality,res,fps,hdr:12,acodec:aac"
+# The AV1 target, same idea as above: ffprobe reports the codec as "av1", while
+# yt-dlp and RFC 6381 spell it "av01" - a file can arrive labelled either way,
+# so both count as "already AV1" and neither is re-encoded.
+_AV1_VIDEO_CODECS: Final[frozenset[str]] = frozenset({"av1", "av01"})
+# Prefers an AV1 rendition at format-selection time so the encoder below only
+# ever runs for a source that has none. No container is forced: AV1 is valid in
+# .webm, .mkv and .mp4 alike, so yt-dlp's own choice already fits.
+_AV1_FORMAT_SORT: Final = "vcodec:av01,lang,quality,res,fps,hdr:12"
+
+# What each output mode promises about the finished file, consulted by
+# _finalize_video_download(). An empty set means "no promise": the stream is
+# left exactly as downloaded. "source" appears in neither table for that
+# reason - it never re-encodes anything.
+_TARGET_VIDEO_CODECS: Final[dict[str, frozenset[str]]] = {
+    _OUTPUT_MODE_UNIVERSAL: _COMPATIBLE_VIDEO_CODECS,
+    _OUTPUT_MODE_AV1: _AV1_VIDEO_CODECS,
+}
+# Only "universal" makes an audio promise; AV1 is a video codec, and a mode
+# that re-encoded a perfectly good Opus track alongside it would cost quality
+# for nothing.
+_TARGET_AUDIO_CODECS: Final[dict[str, frozenset[str]]] = {
+    _OUTPUT_MODE_UNIVERSAL: _COMPATIBLE_AUDIO_CODECS,
+}
+# Containers the mode insists on; anything absent keeps the source container.
+_TARGET_CONTAINER_SUFFIX: Final[dict[str, str]] = {
+    _OUTPUT_MODE_UNIVERSAL: ".mp4",
+}
+# ffprobe's codec_name is the spelling used throughout; yt-dlp and RFC 6381 use
+# "av01", and "h265" turns up in the wild for what ffmpeg calls "hevc".
+_CODEC_ALIASES: Final[dict[str, str]] = {
+    "av01": "av1",
+    "h265": "hevc",
+}
 
 # Beyond 1080p, and whenever the height cannot be read: those sources carry
 # enough bitrate of their own that CRF 20 stays transparent, and a 4K frame is
 # expensive enough that the cheapest preset is the only affordable one.
 _WATERMARK_X264_FALLBACK: Final[tuple[str, str]] = ("veryfast", "20")
+# The AV1 counterpart, for the "av1" output mode. libsvtav1's preset is a
+# number (0 slowest/best, 13 fastest) and its CRF scale is coarser than
+# x264's - roughly 10 points higher for comparable quality - so both ladders
+# are tuned separately rather than shared. AV1 encoding is expensive enough
+# that even the small-frame rung stays well away from the slow presets.
+# (max height, preset, crf), first match wins.
+_AV1_LADDER: Final[tuple[tuple[int, str, str], ...]] = (
+    (576, "6", "30"),
+    (1080, "8", "32"),
+)
+_AV1_FALLBACK: Final[tuple[str, str]] = ("10", "34")
+# The remaining ladders exist for "source" mode: burning in the watermark always
+# costs a video encode, and that mode promises the codec it arrived in, so every
+# codec a platform can hand us needs its own rung. CRF scales are not comparable
+# between encoders (x265 sits ~2 points above x264, VP9's 0-63 scale ~13, VP8
+# wants single digits), so the numbers below are per-encoder equivalents of the
+# x264 ladder rather than shared values.
+_X265_LADDER: Final[tuple[tuple[int, str, str], ...]] = (
+    (576, "medium", "18"),
+    (1080, "fast", "20"),
+)
+_X265_FALLBACK: Final[tuple[str, str]] = ("veryfast", "22")
+# libvpx has no -preset: speed is -cpu-used (0 slowest .. 5 fastest under
+# -deadline good), and honouring -crf at all requires -b:v 0. VP9 is slow enough
+# that the large-frame rungs lean hard on cpu-used.
+_VP9_LADDER: Final[tuple[tuple[int, str, str], ...]] = (
+    (576, "2", "28"),
+    (1080, "4", "31"),
+)
+_VP9_FALLBACK: Final[tuple[str, str]] = ("5", "33")
+_VP8_LADDER: Final[tuple[tuple[int, str, str], ...]] = (
+    (576, "2", "8"),
+    (1080, "3", "10"),
+)
+_VP8_FALLBACK: Final[tuple[str, str]] = ("4", "12")
 _DEFAULT_DOWNLOAD_TIMEOUT_MINUTES: Final = 60
 _DEFAULT_TRANSCODE_TIMEOUT_MINUTES: Final = 120
 _DEFAULT_DOWNLOAD_MAX_FILESIZE_GIB: Final = 4
@@ -1098,21 +1176,24 @@ def _resolve_concurrent_fragments(value: object) -> int:
     return automatic
 
 
-def _compatible_output_required(settings: Mapping[str, Any]) -> bool:
-    """Whether the finished file must be H.264/AAC.
+def _output_mode(settings: Mapping[str, Any]) -> str:
+    """The stored output mode, validated against the allowed vocabulary.
 
-    The watermark implies it: that pass runs libx264 either way, so taking the
-    compatible container along costs nothing. The user's own setting is never
-    written back from here - it stays whatever they chose, and turning the
-    watermark off restores it.
+    The watermark deliberately does not override this. Burning an overlay in
+    costs a video encode whatever the mode, but that encode targets the mode's
+    own codec - for "source" that is the codec the download arrived in (see
+    _target_video_codec), so enabling the watermark no longer silently turns a
+    passthrough into H.264.
     """
-    if bool(settings.get("video_watermark", _DEFAULT_VIDEO_WATERMARK)):
-        return True
-    return bool(settings.get("download_compatible_output", _DEFAULT_COMPATIBLE_OUTPUT))
+    mode = str(settings.get("download_output_mode", _DEFAULT_OUTPUT_MODE))
+    if mode not in DOWNLOAD_OUTPUT_MODES:
+        logger.warning("Unknown download output mode %r; using %r", mode, _DEFAULT_OUTPUT_MODE)
+        return _DEFAULT_OUTPUT_MODE
+    return mode
 
 
-def _download_tuning() -> tuple[int, bool]:
-    """Return ``(concurrent_fragments, compatible_output)`` from the settings.
+def _download_tuning() -> tuple[int, str]:
+    """Return ``(concurrent_fragments, output_mode)`` from the settings.
 
     A failing read falls back to defaults rather than aborting the download.
     """
@@ -1120,12 +1201,12 @@ def _download_tuning() -> tuple[int, bool]:
         settings = get_settings()
     except Exception:
         logger.warning("Could not read download settings; falling back to defaults", exc_info=True)
-        return _DEFAULT_CONCURRENT_FRAGMENTS, _DEFAULT_VIDEO_WATERMARK
+        return _DEFAULT_CONCURRENT_FRAGMENTS, _DEFAULT_OUTPUT_MODE
 
     fragments = _resolve_concurrent_fragments(
         settings.get("download_concurrent_fragments", _AUTO_CONCURRENT_FRAGMENTS)
     )
-    return fragments, _compatible_output_required(settings)
+    return fragments, _output_mode(settings)
 
 
 def _watermark_config() -> tuple[bool, str]:
@@ -1181,13 +1262,81 @@ def _scaled_size(source: tuple[int, int], target_height: int) -> tuple[int, int]
     return out_width, out_height
 
 
+class _EncoderRecipe(NamedTuple):
+    """How to re-encode into one video codec.
+
+    ``speed_flag`` differs by encoder family (``-preset`` for x264/x265/svtav1,
+    ``-cpu-used`` for libvpx) and ``extra`` carries whatever else the encoder
+    needs to honour ``-crf`` at all, so a caller never has to know which family
+    it is talking to.
+    """
+
+    encoder: str
+    speed_flag: str
+    extra: tuple[str, ...]
+    ladder: tuple[tuple[int, str, str], ...]
+    fallback: tuple[str, str]
+
+    def settings_for(self, height: int | None) -> tuple[str, str]:
+        """``(speed, crf)`` for a source this tall; first matching rung wins."""
+        if height is not None:
+            for max_height, speed, crf in self.ladder:
+                if height <= max_height:
+                    return speed, crf
+        return self.fallback
+
+    def args(self, height: int | None) -> list[str]:
+        """The ``-c:v`` argument list for a source this tall."""
+        speed, crf = self.settings_for(height)
+        return ["-c:v", self.encoder, self.speed_flag, speed, "-crf", crf, *self.extra]
+
+
+# Every codec fetchly can re-encode *into*. "source" mode picks the entry
+# matching what it downloaded, so this set is also what makes a codec
+# passthrough-able: anything absent falls back to H.264 (see
+# _target_video_codec).
+_ENCODER_RECIPES: Final[dict[str, _EncoderRecipe]] = {
+    "h264": _EncoderRecipe("libx264", "-preset", (), _WATERMARK_X264_LADDER, _WATERMARK_X264_FALLBACK),
+    "hevc": _EncoderRecipe("libx265", "-preset", (), _X265_LADDER, _X265_FALLBACK),
+    "av1": _EncoderRecipe("libsvtav1", "-preset", (), _AV1_LADDER, _AV1_FALLBACK),
+    "vp9": _EncoderRecipe(
+        "libvpx-vp9", "-cpu-used", ("-b:v", "0", "-deadline", "good", "-row-mt", "1"), _VP9_LADDER, _VP9_FALLBACK
+    ),
+    "vp8": _EncoderRecipe("libvpx", "-cpu-used", ("-b:v", "0", "-deadline", "good"), _VP8_LADDER, _VP8_FALLBACK),
+}
+
+
+def _normalize_codec(codec: str) -> str:
+    return _CODEC_ALIASES.get(codec, codec)
+
+
 def _watermark_x264_settings(height: int | None) -> tuple[str, str]:
-    """``(preset, crf)`` for the watermark-only pass on a source this tall."""
-    if height is not None:
-        for max_height, preset, crf in _WATERMARK_X264_LADDER:
-            if height <= max_height:
-                return preset, crf
-    return _WATERMARK_X264_FALLBACK
+    """``(preset, crf)`` for an x264 pass on a source this tall."""
+    return _ENCODER_RECIPES["h264"].settings_for(height)
+
+
+def _target_video_codec(output_mode: str, source_codec: str) -> str:
+    """Which video codec the finished file must carry.
+
+    "universal" and "av1" name their target outright. "source" keeps whatever
+    arrived - the watermark still forces an encode, but into the source's own
+    codec, so the mode's promise survives the overlay. A codec fetchly has no
+    encoder for falls back to H.264, which is also why the caller moves such a
+    file into MP4: its original container may not accept H.264.
+    """
+    if output_mode == _OUTPUT_MODE_UNIVERSAL:
+        return "h264"
+    if output_mode == _OUTPUT_MODE_AV1:
+        return "av1"
+
+    normalized = _normalize_codec(source_codec)
+    if normalized in _ENCODER_RECIPES:
+        return normalized
+    logger.info(
+        "No encoder for source codec %r; the watermark pass falls back to H.264/MP4",
+        source_codec or "unknown",
+    )
+    return "h264"
 
 
 def _resolve_watermark(
@@ -1255,23 +1404,24 @@ def _finalize_video_download(
     job_id: str,
     video: Path,
     *,
-    compatible_output: bool,
+    output_mode: str,
     transcode_timeout_seconds: int,
 ) -> Path:
-    """Apply the watermark and/or the compatibility promise to a "max" file.
+    """Apply the watermark and/or the output mode to a "max" file.
 
     "max" downloads and remuxes without an encoder, so this is the one pass
     that can run afterwards - and the one place a max download can lose
     quality. It therefore does the least work that satisfies both settings:
 
     * nothing at all when the file already is what was asked for (the common
-      case: the H.264/AAC rendition was picked at download time),
-    * audio only (``-c:v copy``) when just the audio codec is incompatible,
+      case: the target rendition was picked at download time, and always in
+      "source" mode),
+    * audio only (``-c:v copy``) when just the audio codec is off target,
     * a video encode when the watermark has to be burned in or the video codec
-      is incompatible - never twice, the overlay rides along in that pass.
+      is off target - never twice, the overlay rides along in that pass.
 
-    Returns the finished file, which may have a new suffix when the
-    compatibility promise forced the MP4 container.
+    Returns the finished file, which may have a new suffix when the mode forced
+    another container.
     """
     size = _probe_video_size(video, job_id=job_id)
     # Probed once here and handed to the badge (which sizes itself in output
@@ -1279,37 +1429,54 @@ def _finalize_video_download(
     watermark = _resolve_watermark(video, job_id=job_id, size=size)
     video_codec, audio_codec = _stream_codecs(video, job_id=job_id)
 
+    target_video_codecs = _TARGET_VIDEO_CODECS.get(output_mode, frozenset())
+    target_audio_codecs = _TARGET_AUDIO_CODECS.get(output_mode, frozenset())
+
     needs_video_encode = watermark is not None or (
-        compatible_output and video_codec not in _COMPATIBLE_VIDEO_CODECS
+        bool(target_video_codecs) and video_codec not in target_video_codecs
     )
-    # A file with no audio track needs no audio work either.
-    needs_audio_encode = bool(audio_codec) and compatible_output and (
-        audio_codec not in _COMPATIBLE_AUDIO_CODECS
+    # A file with no audio track needs no audio work either. Only "universal"
+    # makes a promise about audio; "av1" targets the picture and leaves the
+    # existing track alone, whatever it is.
+    needs_audio_encode = bool(audio_codec) and bool(target_audio_codecs) and (
+        audio_codec not in target_audio_codecs
     )
     if not needs_video_encode and not needs_audio_encode:
         return video
+
+    target_codec = _target_video_codec(output_mode, video_codec)
 
     messages = []
     if watermark is not None:
         messages.append("watermark")
     if (needs_video_encode and watermark is None) or needs_audio_encode:
-        messages.append("compatibility")
+        messages.append("AV1 conversion" if output_mode == _OUTPUT_MODE_AV1 else "compatibility")
     message = f"Applying {' and '.join(messages)}"
 
-    preset, crf = _watermark_x264_settings(size[1] if size else None)
     duration_seconds = _probe_media(video, "video", job_id=job_id)[2]
     _transition_worker_status(job_id, "transcoding", "Waiting for transcode slot", progress=0, eta_seconds=None)
 
-    # MP4 whenever the promise is on; otherwise the streams stay in the
-    # container they already live in, because only the video is touched.
-    suffix = ".mp4" if compatible_output else video.suffix
-    out = video.with_name(f"{video.stem}.finalized{suffix}")
-    video_args = (
-        ["-c:v", "libx264", "-preset", preset, "-crf", crf]
-        if needs_video_encode
-        else ["-c:v", "copy"]
-    )
+    height = size[1] if size else None
+    video_args = _ENCODER_RECIPES[target_codec].args(height) if needs_video_encode else ["-c:v", "copy"]
     audio_args = ["-c:a", "aac", "-b:a", _COMPATIBLE_AAC_BITRATE] if needs_audio_encode else ["-c:a", "copy"]
+
+    # "universal" forces MP4, and must do so even when only the audio is
+    # re-encoded: H.264/AAC has no other valid home, and an AAC track cannot
+    # stay in a .webm. "av1" and "source" keep the source container instead -
+    # both targets are valid in the container they arrived in, so keeping it
+    # avoids rewrapping an Opus track into one that barely tolerates it.
+    suffix = _TARGET_CONTAINER_SUFFIX.get(output_mode) or video.suffix
+    if (
+        output_mode == _OUTPUT_MODE_SOURCE
+        and needs_video_encode
+        and target_codec != _normalize_codec(video_codec)
+    ):
+        # The no-encoder fallback in _target_video_codec fired: this stream is
+        # about to become H.264, which the original container may not accept.
+        # Scoped to "source" because that is the only mode whose container
+        # follows the source codec rather than its own target.
+        suffix = ".mp4"
+    out = video.with_name(f"{video.stem}.finalized{suffix}")
 
     try:
         with governor.transcode_semaphore_sync:
@@ -1380,7 +1547,7 @@ def _build_ytdlp_cmd(
     ``quality`` is ``"max"`` for best quality, otherwise a capped transcode
     path. ``lossless_audio`` downloads the source audio without re-encoding.
     """
-    concurrent_fragments, compatible_output = _download_tuning()
+    concurrent_fragments, output_mode = _download_tuning()
     runtime_limits = _download_runtime_limits()
     cmd = [
         "yt-dlp",
@@ -1416,7 +1583,7 @@ def _build_ytdlp_cmd(
             cmd.extend(["-f", "ba/b", "--extract-audio", "--audio-format", "mp3", "--audio-quality", "0"])
     elif quality == "max":
         cmd.extend(["-f", "bv*+ba/b"])
-        if compatible_output:
+        if output_mode == _OUTPUT_MODE_UNIVERSAL:
             # The cheap half of the compatibility promise: sorting vcodec ahead
             # of resolution picks the 1080p H.264 rendition over a 2160p
             # VP9/AV1 one, so the file needs no encoder at all. Only a source
@@ -1429,8 +1596,14 @@ def _build_ytdlp_cmd(
                 # container, and is a no-op when it did not.
                 "--remux-video", "mp4",
             ])
-        # Without the promise there is deliberately no --merge-output-format:
-        # yt-dlp then keeps the streams in the container they belong in
+        elif output_mode == _OUTPUT_MODE_AV1:
+            # Same trick for the AV1 target: an existing AV1 rendition costs
+            # nothing, and only a source without one reaches libsvtav1. The
+            # container is left to yt-dlp, because AV1 is at home in .webm and
+            # .mkv as much as in .mp4.
+            cmd.extend(["-S", _AV1_FORMAT_SORT])
+        # In "source" mode there is deliberately no --merge-output-format and
+        # no -S: yt-dlp then keeps the streams in the container they belong in
         # (.webm for VP9/Opus, .mkv for AV1), so the download stays a pure
         # remux and the extension does not lie about what is inside.
     else:
@@ -1493,9 +1666,9 @@ def _download_media(job_id: str, url: str, *, quality: str, media_type: str) -> 
 
     if quality == "max":
         # Read once for the whole job: the format selection and the
-        # post-processing pass must agree on the promise, and a setting changed
+        # post-processing pass must agree on the target, and a setting changed
         # mid-download must not give the two halves different orders.
-        _, compatible_output = _download_tuning()
+        _, output_mode = _download_tuning()
         transcode_timeout = _download_runtime_limits().transcode_timeout_seconds
         max_message = "Downloading best video+audio"
         _transition_worker_status(job_id, "downloading", max_message)
@@ -1522,7 +1695,7 @@ def _download_media(job_id: str, url: str, *, quality: str, media_type: str) -> 
         return _finalize_video_download(
             job_id,
             downloaded,
-            compatible_output=compatible_output,
+            output_mode=output_mode,
             transcode_timeout_seconds=transcode_timeout,
         )
 

@@ -10,7 +10,7 @@ import pixelmatch from 'pixelmatch';
 import { PNG } from 'pngjs';
 
 export function sanitize(name) {
-    return name.replace(/[^a-z0-9-_]+/g, '_').toLowerCase();
+    return name.toLowerCase().replace(/[^a-z0-9-_]+/g, '_');
 }
 
 export function ensureDir(dirPath) {
@@ -52,7 +52,7 @@ export async function disableMotion(page, motionResetCss, viewName = 'unknown') 
 }
 
 export async function login(page, { baseUrl, username, password, motionResetCss }) {
-    await page.goto(`${baseUrl}/login`, { waitUntil: 'networkidle', timeout: 10000 });
+    await page.goto(`${baseUrl}/login`, { waitUntil: 'domcontentloaded', timeout: 10000 });
     await disableMotion(page, motionResetCss, 'login');
 
     if (!page.url().includes('/login')) {

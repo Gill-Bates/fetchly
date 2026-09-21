@@ -15,7 +15,8 @@ readonly DATA_DIR="${DATA_DIR:-/app/data}"
 # re-downloading those 81 MB each time. Pin it onto DATA_DIR so it persists
 # with the volume. Honoured if the operator already set TORCH_HOME - in which
 # case bootstrap() still has to create and chown it, since it is then outside
-# the tree DATA_DIR's own ownership handling covers.
+# the tree DATA_DIR's own ownership handling covers. It is validated like
+# DATA_DIR before that happens (see validate_managed_dir).
 readonly TORCH_HOME="${TORCH_HOME:-${DATA_DIR}/.cache/torch}"
 readonly APP_USER="${APP_USER:-appuser}"
 readonly HOST="${HOST:-${UVICORN_HOST:-0.0.0.0}}"
@@ -47,19 +48,36 @@ readonly FORWARDED_ALLOW_IPS="${FORWARDED_ALLOW_IPS:-127.0.0.1,::1}"
 readonly ACCESS_LOG_FORMAT="${ACCESS_LOG_FORMAT:-[%(t)s] %(h)s \"%(r)s\" %(s)s %(b)s}"
 
 # Directories the application must be able to write after the privilege drop.
-# Handled explicitly in bootstrap(): TORCH_HOME (and its parent) are created
-# fresh on an upgrade of an existing volume, where DATA_DIR already carries the
-# right owner and the recursive chown below therefore never fires.
+# Handled explicitly in bootstrap(): TORCH_HOME is created fresh on an upgrade
+# of an existing volume, where DATA_DIR already carries the right owner and the
+# recursive chown below therefore never fires.
+#
+# TORCH_HOME's *parent* is deliberately not in this list. `mkdir -p` creates it
+# anyway, and torch only ever writes below TORCH_HOME itself, so owning the
+# parent buys nothing - while every entry here is chown'ed and chmod'ed as root:
+# with TORCH_HOME=/etc/torch the parent entry would have handed /etc to appuser
+# and stripped group/other permissions from it, and TORCH_HOME=/torch would have
+# done the same to /.
 readonly -a REQUIRED_DIRS=(
     "${DATA_DIR}"
     "${DATA_DIR}/downloads"
     "${DATA_DIR}/cookies"
-    "$(dirname "${TORCH_HOME}")"
     "${TORCH_HOME}"
 )
 
+# "latest is greatest": the Dockerfile bakes in whatever unpkg's @latest
+# alias resolved to at build time (no version ARG, no hash pin - a deliberate
+# trade-off, see docker/AGENTS.md), and writes it here rather than into a
+# build ARG so app/utils/version.py can still report it without a rebuild
+# changing what "current" means.
+if [[ -z "${WAVESURFER_VERSION:-}" ]] && [[ -r /app/.wavesurfer_version ]]; then
+    WAVESURFER_VERSION="$(tr -d ' \t\r\n' < /app/.wavesurfer_version)"
+fi
+readonly WAVESURFER_VERSION="${WAVESURFER_VERSION:-}"
+
 export FORWARDED_ALLOW_IPS
 export TORCH_HOME
+export WAVESURFER_VERSION
 
 log() {
     # stderr: log()/fail() output must never land on a caller's stdout.
@@ -80,25 +98,32 @@ validate_positive_int() {
     fi
 }
 
-# DATA_DIR is operator-supplied and is handed to a recursive chown that runs as
-# root, so a typo like DATA_DIR=/ or DATA_DIR=/app would rewrite ownership
-# across the container - and across the host for a bind mount. Reject anything
-# that is not an absolute path below a system directory before that can happen.
-validate_data_dir() {
-    [[ "${DATA_DIR}" == /* ]] || fail "DATA_DIR must be an absolute path, got: ${DATA_DIR}"
+# DATA_DIR and TORCH_HOME are operator-supplied and both reach a chown/chmod
+# that runs as root - DATA_DIR a recursive one - so a value like DATA_DIR=/ or
+# TORCH_HOME=/etc would rewrite ownership and permissions across the container,
+# and across the host for a bind mount. Reject anything that is not an absolute
+# path outside the system directories before that can happen.
+validate_managed_dir() {
+    local name="$1"
+    local path="$2"
+
+    [[ "${path}" == /* ]] || fail "${name} must be an absolute path, got: ${path}"
 
     local resolved
-    resolved="$(realpath -m -- "${DATA_DIR}")" || fail "cannot resolve DATA_DIR: ${DATA_DIR}"
+    resolved="$(realpath -m -- "${path}")" || fail "cannot resolve ${name}: ${path}"
 
     case "${resolved}" in
         /|/app|/bin|/boot|/dev|/etc|/home|/lib|/opt|/proc|/root|/run|/sbin|/srv|/sys|/tmp|/usr|/var|/venv)
-            fail "refusing to use ${resolved} as DATA_DIR: recursive chown would damage the system"
+            fail "refusing to use ${resolved} as ${name}: chown/chmod would damage the system"
             ;;
     esac
 }
 
 validate_config() {
-    validate_data_dir
+    validate_managed_dir "DATA_DIR" "${DATA_DIR}"
+    # Not covered by DATA_DIR's check when an operator points it elsewhere, and
+    # it reaches the same privileged chown/chmod in bootstrap().
+    validate_managed_dir "TORCH_HOME" "${TORCH_HOME}"
 
     validate_positive_int "PORT" "${PORT}"
     (( PORT <= 65535 )) || fail "PORT must be between 1 and 65535, got: ${PORT}"

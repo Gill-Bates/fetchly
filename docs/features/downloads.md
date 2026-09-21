@@ -25,28 +25,40 @@ to yt-dlp. URLs that match no known platform are rejected at submit time.
 | `video` | `small` | Capped at 480p |
 | `audio` | any | Audio extracted, encoded to MP3 |
 
-### Universally playable output
+### Video output format
 
-**Settings → Processing → Downloads → Universally playable output (H.264/AAC)**
-(off by default; the watermark turns it on)
+!!! tip "Choosing between the three"
+    The trade-off between resolution, file size, compatibility and CPU time gets its own
+    page: [Video Codecs & Output Format](video-codecs.md). This section covers the
+    mechanics.
+
+**Settings → Processing → Output format → Video output format**
+(a three-position slider, default **H.264 (Recommended)**)
 
 This is the one setting that decides what `max` quality actually means: *the highest
-resolution the source has*, or *a file that plays on every device*. On YouTube you
-cannot have both, because YouTube only encodes H.264 up to 1080p — 1440p and 2160p
-exist exclusively as VP9 or AV1.
+resolution the source has*, or *a file that plays on every device*, or *the smallest
+file*. On YouTube you cannot have the first two at once, because YouTube only encodes
+H.264 up to 1080p — 1440p and 2160p exist exclusively as VP9 or AV1.
 
-**Off** — `max` is a pure download and remux. yt-dlp picks the best rendition by
+All three modes share one principle: the target is applied at **format selection**
+first, so a source that already matches is downloaded and remuxed with no encoder
+involved. Only a source that offers nothing matching reaches ffmpeg.
+
+**Source** — a pure download and remux. yt-dlp picks the best rendition by
 resolution, and the streams are muxed into the container they belong in: `.mp4` when
-the source is H.264/AAC anyway, `.webm` for VP9/Opus, `.mkv` for AV1. No encoder runs,
-so the file is bit-for-bit what the platform serves, at the highest resolution
-available, in the smallest file the codec can manage. The cost is reach: Safari,
+the source is H.264/AAC anyway, `.webm` for VP9/Opus, `.mkv` for AV1. With the watermark
+off no encoder runs at all, so the file is bit-for-bit what the platform serves, at the
+highest resolution available, in the smallest file the codec can manage; with the
+watermark on the format is still kept, but the file is re-encoded (see the note below).
+The cost is reach: Safari,
 iOS, most smart TVs and a good deal of editing software cannot open VP9 or AV1. Jobs
 whose result falls into that category are marked **Limited playback** in the job list
 and in the details dialog, so a file that will not open on your phone is visible here
 rather than a surprise there.
 
-**On** — the finished file is guaranteed to be H.264/AAC in MP4. fetchly keeps that
-promise as cheaply as it can, in two steps:
+**H.264 (Recommended)** — stored as `universal`; the finished file is guaranteed to be
+H.264/AAC in MP4. fetchly keeps
+that promise as cheaply as it can, in two steps:
 
 1. **At format selection**, yt-dlp is told to sort `vcodec:h264` ahead of resolution
    (`-S vcodec:h264,lang,quality,res,fps,hdr:12,acodec:aac`). Where a compatible
@@ -57,25 +69,49 @@ promise as cheaply as it can, in two steps:
    re-encoded afterwards, and then only as far as necessary: if just the audio codec is
    wrong the video is stream-copied (`-c:v copy`) and only the audio becomes AAC.
 
-Note the asymmetry: turning the switch **on** costs resolution but almost never CPU;
-turning it **off** costs reach but nothing else. There is no setting that spends CPU
-to give you 4K H.264, because transcoding a 2160p AV1 source to H.264 would take
-longer than the download, produce a much larger file, and still look worse than the
-source it came from.
+**AV1** — the finished video is guaranteed to be AV1, which gives the smallest file at
+a comparable quality. An AV1 rendition is preferred at format selection
+(`-S vcodec:av01,…`), so on YouTube the 1440p/2160p renditions that Source would have
+picked anyway are downloaded and remuxed with no encoder involved. A source without an
+AV1 rendition goes through `libsvtav1`, and that is the expensive path: AV1 encoding is
+much slower than H.264, so a job can spend considerably longer in `transcoding` than it
+did downloading. The audio track is left exactly as it arrived — AV1 is a video codec,
+and re-encoding a perfectly good Opus track alongside it would cost quality for
+nothing — and the source container is kept, since AV1 is valid in `.webm`, `.mkv` and
+`.mp4` alike. Reach is the same caveat as Source: AV1 does not play on Safari, iOS or
+most TVs, so these jobs are marked **Limited playback** too.
+
+Note the asymmetry: **H.264** costs resolution but almost never CPU; **Source**
+costs reach but nothing else; **AV1** costs CPU whenever the source is not already AV1.
+There is no mode that spends CPU to give you 4K H.264, because transcoding a 2160p AV1
+source to H.264 would take longer than the download, produce a much larger file, and
+still look worse than the source it came from.
 
 The capped qualities (`medium`, `small`) are unaffected: they always re-encode to
-H.264/AAC in MP4 and are therefore universally playable regardless of this switch.
+H.264/AAC in MP4 and are therefore universally playable regardless of this setting.
 
-!!! note "The watermark requires it"
-    Burning in the watermark means running libx264 over the video anyway, so the
-    compatible container comes along for free and the switch is forced on and locked
-    while the watermark is active. Your own choice is stored untouched and applies
-    again as soon as you turn the watermark off.
+!!! note "Only new downloads are affected"
+    Changing the mode never touches anything already on disk — fetchly does not convert
+    finished files retroactively, so a job downloaded as VP9 stays VP9 even after you
+    switch to H.264. The mode is read at the moment a download starts, so a job still
+    waiting in the queue picks up the new value, and retrying a failed or cancelled job
+    re-downloads it under whatever mode is set then. To get an existing file in another
+    format, submit it again.
+
+!!! note "The watermark and Source"
+    Burning in the watermark means running an encoder over the video, whichever mode
+    is set — but that encode targets the mode's own codec, so the mode never changes
+    underneath you. Under **Source** the pass re-encodes into the codec the download
+    arrived in (H.264, HEVC, AV1, VP9 or VP8) and keeps the container, so the format is
+    preserved even though the file is no longer a bit-exact copy of the source. A source
+    in a codec fetchly has no encoder for falls back to H.264 in MP4, and the job log
+    says so. Under **AV1** the watermark pass encodes AV1, which is correspondingly
+    slow.
 
 ### Concurrent fragments
 
-**Settings → Processing → Downloads → Parallel fragments per download** (`Automatic` or
-`1`–`16`, default `Automatic`)
+**Settings → General → Runtime limits → Parallel fragments per download** (`Automatic`
+or `1`–`16`, default `Automatic`)
 
 Parallel fragment downloads for DASH/HLS sources. Progressive single-file downloads
 ignore it. Raise it on a fast link; lower it if a platform throttles you.
@@ -87,7 +123,7 @@ host. The setting hint names the value it resolves to right now. See
 
 ### Video watermark
 
-**Settings → Processing → Watermark → Show fetchly watermark** (on by default)
+**Settings → Processing → Watermark → Show Watermark** (on by default)
 
 Burns the fetchly logo into the bottom-right corner of every downloaded **video**, with
 the [public hostname](../configuration/settings.md#general) on a second line once one is
@@ -97,11 +133,15 @@ The badge is composited once per hostname and output size and cached under
 `data/watermark-cache/`, so each encode only alpha-blends a still image into the corner.
 On `medium` and `small` quality it rides along in the transcode fetchly already runs and
 costs nothing measurable. `max` quality is otherwise a pure download and remux, so it
-gains an x264 pass that a 4K download will feel — turn the switch off to leave `max`
-downloads untouched. That pass picks its preset and CRF from the source resolution
-(`medium`/CRF 16 up to 576p, `fast`/CRF 18 up to 1080p, `veryfast`/CRF 20 above), because
-a small low-bitrate source is re-quantized much more visibly than a high-bitrate 4K one.
-Audio is stream-copied unless the compatibility promise needs it re-encoded.
+gains an encoding pass that a 4K download will feel — turn the switch off to leave `max`
+downloads untouched. Which encoder runs follows the output format: H.264 (`libx264`) for
+**H.264**, `libsvtav1` for **AV1**, and under **Source** whichever encoder matches the
+codec that was downloaded. Each picks its speed setting and CRF from the source
+resolution — for x264 that is `medium`/CRF 16 up to 576p, `fast`/CRF 18 up to 1080p and
+`veryfast`/CRF 20 above — because a small low-bitrate source is re-quantized much more
+visibly than a high-bitrate 4K one. The other encoders use their own equivalents of that
+ladder, since CRF scales are not comparable between them. Audio is stream-copied unless
+the compatibility promise needs it re-encoded.
 
 The hostname line uses the Roboto Flex font shipped with the app UI
 (`app/static/fonts/`); no system font package is required. If that file is missing, the
@@ -221,10 +261,14 @@ the MP3 cache and the stem lookup keep matching. See [BPM Analysis](bpm.md).
 
 | Limit | Default | Configure in |
 |---|---|---|
-| Max input size | 4 GiB | Settings → General → Runtime limits |
+| Maximum source download size | 4 GiB | Settings → General → Runtime limits |
 | Download timeout | 60 min | Settings → General → Runtime limits |
 | Transcode timeout | 120 min | Settings → General → Runtime limits |
 | Submit rate | 10/minute | fixed |
+
+**Maximum source download size** caps the file yt-dlp fetches from the platform, not
+any file fetchly derives from it afterwards (transcode, trim, watermark). A source
+above the limit fails the download.
 
 See [Application Settings](../configuration/settings.md).
 

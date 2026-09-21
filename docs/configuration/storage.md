@@ -33,24 +33,33 @@ $DATA_DIR/
 
 **Settings → General → Retention** (`0`–`365` days, default `0`)
 
-`0` means unlimited: job files are kept until you remove them explicitly. Any other
-value is the number of days a finished job's artifacts survive.
+`0` means unlimited: jobs are kept until you remove them explicitly. Any other value is
+the number of days a finished job survives — and it is the whole job that goes, not just
+its files: the row leaves the database too, so the job disappears from the job history
+and its numbers leave the statistics.
 
 ## The housekeeping sweep
 
 A background task runs **every hour** and, in one pass:
 
-1. Reads the current retention setting
-2. Deletes the artifacts of jobs past their retention age
-3. Deletes the **share links** for those jobs — their targets are gone, so the links
-   could only 404 from here on, and the table would otherwise grow without bound
-4. Removes thumbnail cache entries older than **7 days**
-5. Removes **orphaned directories** — directories on disk with no matching job row
+1. Reads the current retention setting. `0` means unlimited, and the sweep stops here
+2. Deletes the **job rows** past their retention age, in bounded batches, and keeps the
+   deleted ids for the next two steps
+3. Deletes those jobs' **directories** on disk
+4. Deletes their **share links** — their targets are gone, so the links could only 404
+   from here on, and the table would otherwise grow without bound
+5. Removes thumbnail cache entries older than **7 days**
+6. Removes **orphaned directories** — directories on disk with no matching job row
 
-!!! info "Retained rows protect their directories"
-    The orphan sweep only removes directories with no corresponding job record, and it
-    skips anything younger than a 15-minute grace period so a directory being written
-    by a running job is never mistaken for an orphan.
+!!! info "Why the row goes first"
+    Deleting the row before the files means an interruption leaves an orphaned
+    directory, which step 6 collects on the next pass. The reverse order would leave a
+    job in the history whose file is already gone — visible, clickable and broken.
+
+!!! info "The orphan sweep has a grace period"
+    Step 6 only removes directories with no corresponding job record, and it skips
+    anything younger than 15 minutes, so a directory being written by a running job is
+    never mistaken for an orphan.
 
 ## Manual cleanup
 

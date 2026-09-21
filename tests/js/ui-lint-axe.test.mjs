@@ -248,6 +248,18 @@ test("an incomplete result with no reason is never treated as reviewed", () => {
     assert.deepEqual(entry.messageKeys, []);
 });
 
+test("an unreasoned node keeps a mixed result open", () => {
+    const entry = normalizeAxeIncomplete({
+        id: "color-contrast",
+        nodes: [
+            { any: [{ data: { messageKey: "bgGradient" } }] },
+            {},
+        ],
+    });
+    assert.equal(entry.reviewed, false);
+    assert.equal(entry.unreviewedNodeCount, 1);
+});
+
 test("an unknown rule is never treated as reviewed", () => {
     const entry = normalizeAxeIncomplete(incompleteWith("aria-valid-attr-value", ["someReason"]));
     assert.equal(entry.reviewed, false);

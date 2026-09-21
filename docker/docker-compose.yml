@@ -5,12 +5,17 @@ services:
     container_name: fetchly
     restart: always
     stop_grace_period: 20s
+    # Loopback by default: a published port without a host address binds to
+    # every interface, and fetchly starts with no admin account - the first
+    # request from anywhere on the network would reach an unconfigured
+    # instance. Set FETCHLY_BIND=0.0.0.0 once authentication is set up, or
+    # leave it and publish through a reverse proxy on the same Docker network.
     ports:
-      - "${FETCHLY_PORT:-8000}:8000"
+      - "${FETCHLY_BIND:-127.0.0.1}:${FETCHLY_PORT:-8000}:8000"
     environment:
       LOG_LEVEL: ${LOG_LEVEL:-info}
       TZ: ${TZ:-Etc/UTC}
-      TIMEOUT: 60
+      TIMEOUT: ${TIMEOUT:-60}
       FETCHLY_SECRET_KEY: "${FETCHLY_SECRET_KEY:?required - generate with head -c 32 /dev/urandom | base64}"
     logging:
       driver: json-file

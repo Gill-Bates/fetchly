@@ -189,7 +189,7 @@ Every redeem failure returns the same `404` page. See
 | `DELETE /api/settings/watermark-logo` | 10/min | Remove it; the bundled artwork applies again |
 
 Writable keys: `retention_days`, `enable_authentication`, `admin_username`,
-`admin_password`, `download_concurrent_fragments`, `download_compatible_output`,
+`admin_password`, `download_concurrent_fragments`, `download_output_mode`,
 `video_watermark`, `lalalaai_duration_guard`, `share_link_max_uses`,
 `public_hostname`, plus the runtime limits — `session_idle_minutes`,
 `download_worker_count`, `download_timeout_minutes`,
@@ -201,6 +201,8 @@ Writable keys: `retention_days`, `enable_authentication`, `admin_username`,
 - Unknown keys are silently ignored, not rejected with an error
 - Values are parsed and range-checked server-side
 - `download_concurrent_fragments` accepts `0` for automatic host-based sizing
+- `download_output_mode` accepts `source`, `universal` or `av1`; anything else returns
+  `400` rather than being ignored
 - `admin_username` and `admin_password` must be sent as a **pair** — the salt is
   username-derived, so a rename re-hashes and needs the plaintext
 - Enabling authentication without stored credentials returns `400`

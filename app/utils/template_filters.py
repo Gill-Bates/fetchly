@@ -95,6 +95,7 @@ _FILESIZE_UNITS: tuple[tuple[str, int], ...] = (
 # /api/settings until it is added here - no reliance on secret-y key names.
 _PUBLIC_SETTING_KEYS: frozenset[str] = frozenset({
     "retention_days",
+    "enable_job_history",
     "login_required",
     "enable_authentication",
     "session_idle_minutes",
@@ -103,7 +104,7 @@ _PUBLIC_SETTING_KEYS: frozenset[str] = frozenset({
     "download_timeout_minutes",
     "transcode_timeout_minutes",
     "download_max_filesize_gib",
-    "download_compatible_output",
+    "download_output_mode",
     "video_watermark",
     "audio_analysis_max_minutes",
     "audio_analysis_timeout_minutes",

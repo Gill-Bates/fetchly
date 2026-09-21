@@ -8,6 +8,11 @@ on:
       - 'docs/**'
       - 'CHANGELOG.md'
       - 'LICENSE'
+      # The docs toolchain is installed from pyproject.toml's docs extra with
+      # tools/pyproject-deps.py, so both decide what this workflow builds and
+      # scans - a bump to either has to re-run it.
+      - 'pyproject.toml'
+      - 'tools/pyproject-deps.py'
       - '.github/workflows/docs-build.yml'
   pull_request:
     branches:
@@ -16,6 +21,8 @@ on:
       - 'docs/**'
       - 'CHANGELOG.md'
       - 'LICENSE'
+      - 'pyproject.toml'
+      - 'tools/pyproject-deps.py'
       - '.github/workflows/docs-build.yml'
   workflow_dispatch:
   # A release (docker-build.yml) can ship a version/changelog bump that never
@@ -51,7 +58,11 @@ jobs:
     if: >-
       github.event_name != 'workflow_run' ||
       github.event.workflow_run.conclusion == 'success'
-    runs-on: ubuntu-latest
+    # Named, as in ci.yml and docker-build.yml, and on 26.04 ahead of the
+    # ubuntu-latest migration (actions/runner-images#14748). The docs toolchain
+    # is installed from pyproject.toml onto a setup-python interpreter, so the
+    # host only has to provide git for the revision-date plugin.
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     steps:
       - name: Checkout repository
@@ -68,7 +79,11 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version: '3.12'
+          # Same interpreter as ci.yml, the release workflow and
+          # ARG PYTHON_BASE=python:3.13-slim. The docs toolchain does not need
+          # it, but two Python versions in one repo's CI is one more thing that
+          # can differ between a green check and a broken build.
+          python-version: '3.13'
           cache: pip
           cache-dependency-path: pyproject.toml
 
@@ -139,7 +154,7 @@ jobs:
     needs:
       - build
       - security-scan
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
       pages: write
@@ -153,7 +168,7 @@ jobs:
         uses: actions/deploy-pages@v5
 
   security-scan:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
       - name: Checkout repository
@@ -163,10 +178,36 @@ jobs:
           # against a different dependency set than the one being deployed.
           ref: ${{ github.event.workflow_run.head_sha }}
 
-      # Trivy scans a flat requirements file, so regenerate it from the
-      # manifest rather than keeping a second copy in the repo.
-      - name: Materialise docs dependencies for scanning
-        run: python3 tools/pyproject-deps.py docs > requirements-docs.txt
+      # Same interpreter the build job uses, so the resolution below is the one
+      # that actually builds the docs.
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      # Trivy reports on what a manifest names, and the docs extra names its
+      # seven direct dependencies only: mkdocs-material alone pulls in jinja2,
+      # markupsafe, babel, requests, urllib3 and pygments, none of which appear
+      # in pyproject.toml. Scanning the extra by itself therefore left the
+      # majority of the installed code unscanned. Installing it and freezing the
+      # result gives the scanner the environment mkdocs is built in, transitive
+      # set included.
+      #
+      # The frozen file is a scan inventory, not an installation pin: the build
+      # job resolves the extra itself, and the direct dependencies are pinned in
+      # pyproject.toml, so the two environments agree on everything a pinned
+      # dependency determines.
+      - name: Materialise the docs environment for scanning
+        run: |
+          set -euo pipefail
+          python3 tools/pyproject-deps.py docs > requirements-docs.txt
+          python3 -m venv .docs-scan
+          .docs-scan/bin/python -m pip install --quiet --upgrade pip
+          .docs-scan/bin/python -m pip install --quiet -r requirements-docs.txt
+          # The name has to contain "requirement" or Trivy's pip analyzer does
+          # not pick the file up at all.
+          .docs-scan/bin/python -m pip freeze --all > docs-requirements-frozen.txt
+          cat docs-requirements-frozen.txt
 
       - name: Trivy scan docs dependencies
         # Pinned to an immutable commit SHA — see GHSA-69fq-xp46-6x23.
@@ -178,7 +219,8 @@ jobs:
           version: 'latest'
           cache: 'false'
           scan-type: 'fs'
-          scan-ref: 'requirements-docs.txt'
+          # The frozen environment, not the manifest: see the step above.
+          scan-ref: 'docs-requirements-frozen.txt'
           format: 'table'
           exit-code: '1'
           ignore-unfixed: true

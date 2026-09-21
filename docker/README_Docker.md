@@ -57,7 +57,7 @@ finished downloads without handing your media to another service.
 | --- | --- |
 | **Download everywhere** | Save video or audio from YouTube, TikTok, Instagram, and Facebook in one place. |
 | **Stay in control** | Follow every job from a live dashboard, from queued through downloading and analysis to finished, cancelled, or failed. |
-| **Choose your quality** | Pick the format and quality you want, then let fetchly handle the conversion. |
+| **Choose your quality** | Pick the quality you want, then decide what the highest tier produces: H.264 for files that play everywhere, AV1 for the smallest files, or the untouched source for the best resolution. |
 | **Brand every video** | Burn the fetchly logo — or your own uploaded SVG or PNG — and your hostname, once set, into the corner of every downloaded video, or switch it off. |
 | **Trim with precision** | Cut audio visually with an interactive waveform before you download or process it further. |
 | **Find the tempo** | Analyze BPM and beat confidence, then use the result to guide audio trimming. |
@@ -90,8 +90,11 @@ services:
     image: giiibates/fetchly:latest
     container_name: fetchly
     restart: unless-stopped
+    stop_grace_period: 20s
     ports:
-      - "8000:8000"
+      # Loopback until the admin account exists — a port published without a
+      # host address is reachable from the whole network.
+      - "127.0.0.1:8000:8000"
     environment:
       FETCHLY_SECRET_KEY: ${FETCHLY_SECRET_KEY:?generate with: openssl rand -base64 32}
     volumes:
@@ -105,8 +108,10 @@ docker compose up -d
 
 A fuller compose file with logging, timezone, and reverse-proxy notes lives in [the repository's Docker Compose file](https://github.com/Gill-Bates/fetchly/blob/main/docker/docker-compose.yml).
 
-Open <http://127.0.0.1:8000>, then create an admin account in **Settings → Security**
-before exposing fetchly beyond your local machine.
+Open <http://127.0.0.1:8000> and create an admin account in **Settings → Security**.
+Only then widen the port binding (`0.0.0.0:8000:8000`) or put fetchly behind a
+reverse proxy. `stop_grace_period` stays above the container's 15 s graceful
+shutdown so the SQLite WAL checkpoint completes.
 
 ## Learn more
 

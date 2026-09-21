@@ -12,11 +12,31 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 const {
+    calculateCumulativeLayoutShift,
     classifyLayoutShift,
     collectLayoutShift,
     LAYOUT_SHIFT_GOOD,
     LAYOUT_SHIFT_POOR,
 } = await import("../../tools/ui-lint/lib/layout-shift.mjs");
+
+test("uses the largest CLS session instead of summing every shift", () => {
+    const result = calculateCumulativeLayoutShift([
+        { value: 0.09, startTime: 0 },
+        { value: 0.09, startTime: 2000 },
+        { value: 0.09, startTime: 4000 },
+    ]);
+    assert.equal(result.value, 0.09);
+    assert.equal(result.count, 1);
+});
+
+test("keeps close shifts in one CLS session", () => {
+    const result = calculateCumulativeLayoutShift([
+        { value: 0.04, startTime: 0 },
+        { value: 0.03, startTime: 900 },
+    ]);
+    assert.equal(result.value, 0.07);
+    assert.equal(result.count, 2);
+});
 
 test("an engine that cannot observe is not credited with a good score", () => {
     assert.equal(classifyLayoutShift({ value: 0, count: 0, supported: false }), "unsupported");

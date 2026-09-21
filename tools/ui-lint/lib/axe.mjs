@@ -131,7 +131,9 @@ export function normalizeAxeIncomplete(incomplete) {
         id,
         messageKeys,
         nodeCount: nodes.length,
-        reviewed: messageKeys.length > 0 && messageKeys.every((key) => acknowledged.includes(key)),
+        reviewed: messageKeys.length > 0
+            && messageKeys.every((key) => acknowledged.includes(key))
+            && unreviewedNodes.length === 0,
         // Capped for the same reason normalizeAxeViolation caps its node list.
         nodes: unreviewedNodes.slice(0, 5),
         unreviewedNodeCount: unreviewedNodes.length,

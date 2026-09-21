@@ -40,6 +40,16 @@ Open the job — the message field usually names the cause. Common ones:
 | "Queue is full" | The job queue is saturated | Raise **Download workers** in Runtime limits, then restart, or wait — [Resources & Workers](configuration/resources.md) |
 | "restarted during processing" | The app restarted mid-job | Retry the job |
 
+### A downloaded video will not play on my phone, TV or editor
+
+Check the job for a **Limited playback** marker. It means the file is VP9 or AV1, which
+Safari, iOS, most TVs and many editors cannot open. It comes from **Settings → Processing
+→ Video output format** being set to **Source** or **AV1**.
+
+Switch the setting to **H.264 (Recommended)** and download the video again; finished
+files are never converted retroactively. The catch is that YouTube offers H.264 only up
+to 1080p. See [Video Codecs & Output Format](features/video-codecs.md) for the trade-off.
+
 ### Downloads that used to work suddenly fail across the board
 
 Platforms change their internals often; yt-dlp keeps up but needs updating.
@@ -70,9 +80,20 @@ All worker threads are busy. Check **Settings → General → Runtime limits →
 workers**, restart after changing it, then check host resources or whether the host is
 genuinely out of headroom. See [Resources & Workers](configuration/resources.md).
 
+### A job is missing from the history
+
+Check **Settings → General → Retention → Enable Job History**. When it is off, new jobs
+still run and count in statistics, but they are left out of the dashboard history. The
+choice is recorded when a job is submitted: turning the setting on later does not add
+jobs that were submitted while it was off. The dashboard's **Show Job History** toggle
+only collapses or expands the list in the current browser.
+
 ### `413` or a size-related failure on a large file
 
-Raise **Settings → General → Runtime limits → Maximum input size**.
+Raise **Settings → General → Runtime limits → Maximum source download size**. This
+bounds the size of the file yt-dlp downloads from the platform — a long or
+high-resolution source can exceed the default 4 GiB before fetchly ever gets to
+transcode or trim it.
 
 If behind a reverse proxy, also raise its own body-size limit (`client_max_body_size`
 in nginx, `request_body { max_size }` in Caddy).

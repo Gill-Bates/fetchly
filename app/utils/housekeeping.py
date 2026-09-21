@@ -103,9 +103,12 @@ def cleanup_expired_jobs(
     data_dir: Path,
     expired_job_ids_func: ExpiredJobIdsFunc,
 ) -> tuple[int, int]:
-    """Clean filesystem artifacts for expired jobs without deleting DB rows.
+    """Clean filesystem artifacts for expired jobs.
 
-    Returns ``(expired_jobs_found, filesystem_cleanup_ok)`` - the second count
+    ``expired_job_ids_func`` supplies the job IDs to clean; the caller in
+    main.py passes the IDs already deleted from the database by
+    purge_old_jobs() so the two stay in lockstep. Returns
+    ``(expired_jobs_found, filesystem_cleanup_ok)`` - the second count
     includes directories that were already absent. Raises TypeError/ValueError
     for a non-int or negative ``keep_days``.
     """

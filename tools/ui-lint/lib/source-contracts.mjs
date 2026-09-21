@@ -57,6 +57,7 @@ export const SETTINGS_SOURCE_CONTRACT_KEYS = Object.freeze([
     'settingsSaveToastContractBroken',
     'settingsHintContractBroken',
     'settingsHintSpacingContractBroken',
+    'settingsStatusReadsUnversioned',
 ]);
 
 export const SOURCE_CONTRACT_KEYS = Object.freeze([
@@ -79,6 +80,7 @@ export const SOURCE_CONTRACT_MESSAGES = Object.freeze({
     settingsSaveToastContractBroken: 'settings autosave must stay quiet, while errors use toasts and no inline save-status row is rendered',
     settingsHintContractBroken: 'settings explanation hints must use the info-icon hint style',
     settingsHintSpacingContractBroken: 'settings explanation hints must share the global 4px spacing rule',
+    settingsStatusReadsUnversioned: 'settings status reads must be generation-guarded, and logo writes serialised, so a slow read cannot repaint a newer state',
     templateAssetVersionHandwritten: 'templates must address /static through asset_url(), never a hand-written ?v= token',
     scriptElementIdMissingFromMarkup: 'every getElementById() id must be rendered by a template or assigned by the scripts themselves',
 });
@@ -95,6 +97,7 @@ export const SOURCE_CONTRACT_FILES = Object.freeze({
     settingsSaveToastContractBroken: Object.freeze(['app/static/js/settings.js', 'app/templates/settings.html']),
     settingsHintContractBroken: Object.freeze(['app/templates/settings.html', 'app/static/style.css']),
     settingsHintSpacingContractBroken: Object.freeze(['app/static/style.css']),
+    settingsStatusReadsUnversioned: Object.freeze(['app/static/js/settings.js']),
     // Filled in by the asset contract with the templates that actually
     // carry a token, so the CI annotation lands on the file to fix.
     templateAssetVersionHandwritten: () => assetContractOffenders,
@@ -228,6 +231,40 @@ export async function getSettingsSourceContractMetrics() {
                 || !/\.app-root--settings\s+\.setting-hint\s*$/.test(hintMarginRules[0]?.[1] || '')
                 || !/margin-top\s*:\s*var\(--space-1\)/.test(hintMarginRules[0]?.[2] || '');
 
+            // Three tiles read a status over the network while the controls
+            // beside them mutate that same status. A read that started before a
+            // connect/disconnect, a logo replacement or a cookie import must not
+            // repaint its stale answer over the newer state, so each read
+            // captures a generation counter and drops its result if a mutation
+            // bumped it. This cannot be unit-tested: settings.js reads
+            // bootstrapData and the DOM at import time, so importing it from
+            // node:test is not possible - hence the source-level check.
+            const versionedRead = (fn, counter) => {
+                const body = settingsJsSource.match(
+                    new RegExp(`async function ${fn}\\([^)]*\\)\\s*\\{([\\s\\S]*?)\\n\\}`),
+                )?.[1] || '';
+                return new RegExp(`const generation = \\+\\+${counter}`).test(body)
+                    && new RegExp(`generation !== ${counter}`).test(body);
+            };
+            const statusReadsVersioned = (
+                versionedRead('loadLalalStatus', 'lalalStatusGeneration')
+                && versionedRead('loadLogoStatus', 'logoStatusGeneration')
+                && versionedRead('loadCookieStatuses', 'cookieStatusGeneration')
+            );
+            // Every locally-rendered mutation has to invalidate those reads, and
+            // the logo slot needs an in-flight guard on top: its dropzone stays
+            // clickable, so two writes could otherwise overlap.
+            const mutationsInvalidateReads = (
+                /lalalStatusGeneration \+= 1/.test(settingsJsSource)
+                && (settingsJsSource.match(/logoStatusGeneration \+= 1/g) || []).length >= 2
+                && (settingsJsSource.match(/cookieStatusGeneration \+= 1/g) || []).length >= 2
+            );
+            const logoWritesSerialised = (
+                /if \(!file \|\| isLogoBusy\) return;/.test(settingsJsSource)
+                && /if \(!confirmed \|\| isLogoBusy\) return;/.test(settingsJsSource)
+                && (settingsJsSource.match(/isLogoBusy = true;/g) || []).length >= 2
+                && (settingsJsSource.match(/isLogoBusy = false;/g) || []).length >= 2
+            );
             return {
                 settingsSaveToastContractBroken: !validationUsesToast
                     || autosaveSuccessToast
@@ -235,6 +272,9 @@ export async function getSettingsSourceContractMetrics() {
                     || templateHasInlineSaveStatus,
                 settingsHintContractBroken: hintContractBroken || hintStyleContractBroken,
                 settingsHintSpacingContractBroken,
+                settingsStatusReadsUnversioned: !statusReadsVersioned
+                    || !mutationsInvalidateReads
+                    || !logoWritesSerialised,
             };
         })();
     }
@@ -288,9 +328,11 @@ export async function getAssetSourceContractMetrics() {
 export function markupElementIds(sources) {
     const ids = new Set();
     for (const source of sources) {
-        for (const match of source.matchAll(/\bid\s*=\s*(["'])(.*?)\1/g)) {
-            if (!/\{[{%#]/.test(match[2])) {
-                ids.add(match[2]);
+        const withoutComments = source.replace(/<!--[\s\S]*?-->/g, '');
+        for (const tag of withoutComments.matchAll(/<[^>]+>/g)) {
+            const id = tag[0].match(/\s+id\s*=\s*(["'])(.*?)\1/);
+            if (id && !/\{[{%#]/.test(id[2])) {
+                ids.add(id[2]);
             }
         }
     }

@@ -47,9 +47,9 @@ from .db import (
     get_settings,
     init_db,
     job_exists,
-    list_expired_job_ids,
     list_jobs_requiring_audio_analysis,
     list_queued_jobs,
+    purge_old_jobs,
 )
 from .governor import GovernorConfig, governor
 from .lalal_policy import LALAL_MAX_DURATION_MINUTES, LALAL_MAX_DURATION_SECONDS
@@ -201,16 +201,28 @@ async def _event_broadcaster(queue: EventQueue) -> None:
 
 
 def _run_housekeeping_once() -> None:
-    """One retention sweep: read settings, clean expired job files and orphans."""
+    """One retention sweep: purge expired jobs from the DB, then their files.
+
+    Retention deletes the job row first (purge_old_jobs), then reuses the same
+    ID list to remove filesystem artifacts and share links. 0 means unlimited
+    retention, so the sweep is skipped entirely in that case.
+    """
     settings = get_settings()
     keep_days = settings.get("retention_days", 0)
-    expired_ids = list_expired_job_ids(keep_days)
+    if keep_days == 0:
+        cleanup_thumbnail_cache(DATA_DIR / "thumb-cache")
+        cleanup_orphaned_directories(DATA_DIR, job_exists)
+        return
+
+    expired_ids = purge_old_jobs(keep_days)
     cleanup_expired_jobs(keep_days, DATA_DIR, lambda _days: expired_ids)
-    # Artifacts for these jobs are gone, so their share links can only 404 from
+    # The DB rows are already gone, so these share links can only 404 from
     # here on. Dropping them keeps the table from growing without bound.
     removed_links = delete_share_links_for_jobs(expired_ids)
     if removed_links:
         logger.info("Housekeeping: removed %d share link(s) for expired jobs", removed_links)
+    if expired_ids:
+        logger.info("Housekeeping: purged %d expired job(s) from the database", len(expired_ids))
     cleanup_thumbnail_cache(DATA_DIR / "thumb-cache")
     # Retained DB rows protect their directories from this orphan sweep. Only
     # directories with no corresponding job record are removed here.

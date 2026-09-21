@@ -118,7 +118,7 @@ a volume you control.
 export FETCHLY_SECRET_KEY="$(openssl rand -base64 32)"
 
 docker run --rm \
-  -p 8000:8000 \
+  -p 127.0.0.1:8000:8000 \
   -e FETCHLY_SECRET_KEY \
   -v "$PWD/data:/app/data" \
   giiibates/fetchly:latest
@@ -131,8 +131,9 @@ docker run --rm \
 
 !!! warning "Never expose an unauthenticated instance"
     With authentication off, anyone who can reach the port can queue downloads and
-    read every finished file. Enable authentication before binding to anything other
-    than localhost.
+    read every finished file. The command above therefore publishes on `127.0.0.1`
+    only — `-p 8000:8000` without a host address binds to every interface. Enable
+    authentication before widening it.
 
 [:material-rocket-launch: Full Installation Guide](getting-started/installation.md){ .md-button .md-button--primary }
 [:material-book-open-page-variant: Quick Start](getting-started/quick-start.md){ .md-button }

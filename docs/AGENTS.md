@@ -21,7 +21,7 @@ The documentation site is the single source of truth for users and developers: h
 | `getting-started/` | `installation.md`, `docker.md`, `quick-start.md`, `first-steps.md` |
 | `configuration/` | `environment.md`, `settings.md`, `storage.md`, `resources.md`, `reverse-proxy.md` (singular). `environment.md` is the authoritative env-var reference — link to it, never restate its table |
 | `api/` | `overview.md`, `endpoints.md`, `authentication.md` |
-| `features/` | `downloads.md`, `jobs.md`, `bpm.md`, `trimming.md`, `stems.md`, `cookies.md`, `sharing.md` |
+| `features/` | `downloads.md`, `video-codecs.md`, `jobs.md`, `bpm.md`, `trimming.md`, `stems.md`, `cookies.md`, `sharing.md` |
 | `security/` | `overview.md`, `authentication.md`, `anti-bot.md`, `rate-limiting.md`, `best-practices.md` |
 | `development/` | `setup.md`, `architecture.md`, `contributing.md` |
 | `assets/` | Static assets for docs (images, diagrams, screenshots) |
@@ -52,7 +52,10 @@ The documentation site is the single source of truth for users and developers: h
 ### Building and Deploying Docs
 - **Local preview:** `mkdocs serve -f docs/mkdocs.yml` (runs on http://127.0.0.1:8000)
 - **Build static site:** `mkdocs build -f docs/mkdocs.yml` generates the `site/` directory
-- **Deployment:** GitHub Pages, via `.github/workflows/docs-build.yml` on push to `main` (path-filtered to `docs/**`, `CHANGELOG.md`, `LICENSE` and the workflow itself)
+- **Pass the config path relative to the repo root, always.** `docs_dir: .` means the config file sits in its own documentation root, and MkDocs rejects that combination whenever it can see it — `cd docs && mkdocs build` and `mkdocs build -f /abs/path/docs/mkdocs.yml` both abort with "the `docs_dir` should not be the parent directory of the config file". The relative `-f docs/mkdocs.yml` invocation used by the workflow and by every command in this guide is the one form that passes
+- **`AGENTS.md` files are never published.** They live inside `docs_dir`, so `exclude_docs:` in `mkdocs.yml` filters them out by name at any depth. Nothing to do when adding a new one
+- **Broken heading anchors fail the build.** `validation.links.anchors: warn` plus the workflow's `--strict` turns `page.md#no-such-heading` into a build error rather than an INFO line
+- **Deployment:** GitHub Pages, via `.github/workflows/docs-build.yml` on push to `main` (path-filtered to `docs/**`, `CHANGELOG.md`, `LICENSE`, `pyproject.toml`, `tools/pyproject-deps.py` and the workflow itself)
 - **Theme:** Material for MkDocs (https://squidfunk.github.io/mkdocs-material/); customization via `mkdocs.yml` and `stylesheets/`
 
 ### Common Patterns

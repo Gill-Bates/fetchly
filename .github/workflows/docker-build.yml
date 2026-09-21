@@ -19,12 +19,20 @@ env:
 jobs:
   meta:
     name: Validate build metadata
-    runs-on: ubuntu-latest
+    # Named like the build matrix below and every other job in this file, and
+    # on 26.04 ahead of the ubuntu-latest migration rather than through it
+    # (actions/runner-images#14748: x64 only, rolled out 2026-10-19 to
+    # 2026-11-19). This job resolves the versions both architectures are then
+    # built against, so a runner image that can differ between two runs of one
+    # tag is exactly the kind of unannounced change the resolution steps below
+    # exist to rule out.
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
       contents: read
     outputs:
       build_date: ${{ steps.meta.outputs.build_date }}
+      apt_cache_date: ${{ steps.meta.outputs.apt_cache_date }}
       tag: ${{ steps.meta.outputs.tag }}
       version: ${{ steps.meta.outputs.version }}
       is_newest: ${{ steps.newest.outputs.is_newest }}
@@ -120,6 +128,16 @@ jobs:
           BUILD_DATE="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
           TAG="v${VERSION}"
 
+          # Cache buster for the Dockerfile's apt layers. Resolved here, once,
+          # for the same reason every other rolling input is: the two
+          # architecture jobs must key their apt layers on one value, or a
+          # release that straddles midnight UTC upgrades one image against a
+          # different package snapshot than the other. A date rather than
+          # BUILD_DATE's timestamp, so re-running the same release within a day
+          # still restores those layers from cache.
+          APT_CACHE_DATE="${BUILD_DATE%%T*}"
+
+          echo "apt_cache_date=${APT_CACHE_DATE}" >> "$GITHUB_OUTPUT"
           echo "build_date=${BUILD_DATE}" >> "$GITHUB_OUTPUT"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
@@ -284,16 +302,33 @@ jobs:
 
           # essentia is compiled from source on every architecture and its
           # requirement line never reaches pip (see docker/Dockerfile), so
-          # resolving it here would pin a wheel the image does not install.
-          python tools/pyproject-deps.py --exclude essentia > runtime-requirements.txt
+          # resolving it here would pin a wheel the image does not install -
+          # and on arm64 there is no wheel to pin at all, only an sdist this
+          # runner would have to build just to read its metadata.
+          echo essentia > excluded-requirements.txt
 
           # pip is upgraded inside the builder stage and stays in the venv the
           # parity gate inspects, so it is resolved here with everything else -
           # otherwise a pip release landing between the two builds would be the
-          # one version left free to differ.
-          echo pip >> runtime-requirements.txt
-          cat runtime-requirements.txt
+          # one version left free to differ. It is not an application
+          # dependency, so it comes in as a second input file rather than
+          # through the manifest.
+          echo pip > extra-requirements.txt
 
+          # pyproject.toml is compiled directly, rather than flattened into a
+          # requirements file first, because the index separation lives in it:
+          # [[tool.uv.index]] pytorch-cpu is declared `explicit` and
+          # [tool.uv.sources] binds torch and torchaudio to it, and uv only
+          # applies a source binding to a dependency the manifest itself
+          # declares. Resolving a flattened list instead needed
+          # --index-strategy unsafe-best-match across both indexes, which made
+          # every name in the resolution eligible to come from
+          # download.pytorch.org - an index that also serves jinja2, numpy,
+          # sympy, filelock, fsspec and setuptools - while the image installs
+          # those from PyPI. This way the two indexes are separated exactly as
+          # docker/Dockerfile separates them: torch and torchaudio from the CPU
+          # index, everything else from PyPI.
+          #
           # glibc 2.28 is the oldest manylinux tag torch publishes for. A wheel
           # built against an older glibc still installs on the trixie-based
           # python:3.13-slim, so targeting 2.28 can only resolve something more
@@ -304,10 +339,25 @@ jobs:
               --quiet --no-header \
               --python-version 3.13 \
               --python-platform "$platform" \
-              --extra-index-url https://download.pytorch.org/whl/cpu \
-              --index-strategy unsafe-best-match \
-              runtime-requirements.txt \
+              --excludes excluded-requirements.txt \
+              pyproject.toml extra-requirements.txt \
               -o "constraints-${platform}.txt"
+          done
+
+          # The separation is only worth anything if it held: a CUDA build in
+          # the resolution means torch was taken from PyPI after all, and the
+          # +cpu local version is what proves it was not.
+          for platform in x86_64-manylinux_2_28 aarch64-manylinux_2_28; do
+            if grep -qiE '^(nvidia-|triton==)' "constraints-${platform}.txt"; then
+              echo "ERROR: ${platform} resolved CUDA packages - torch did not come from the CPU index:"
+              grep -iE '^(nvidia-|triton==)' "constraints-${platform}.txt"
+              exit 1
+            fi
+            if ! grep -qE '^torch==[^[:space:]]+\+cpu' "constraints-${platform}.txt"; then
+              echo "ERROR: ${platform} did not resolve a +cpu torch build:"
+              grep -iE '^torch(audio)?==' "constraints-${platform}.txt" || true
+              exit 1
+            fi
           done
 
           if ! diff -u \
@@ -320,7 +370,8 @@ jobs:
           fi
 
           mv constraints-x86_64-manylinux_2_28.txt constraints.txt
-          rm -f constraints-aarch64-manylinux_2_28.txt runtime-requirements.txt
+          rm -f constraints-aarch64-manylinux_2_28.txt \
+                excluded-requirements.txt extra-requirements.txt
           resolved_count="$(grep -cE '^[^#[:space:]]' constraints.txt || true)"
           if (( resolved_count == 0 )); then
             echo "ERROR: the resolution produced no versions at all"
@@ -433,6 +484,19 @@ jobs:
           }
           VERSION_RE = re.compile(r"^(\d+(?:\.\d+)*)(?:-([0-9A-Za-z.-]+))?$")
 
+          def suffix_key(suffix):
+              # Identifier-wise, like PEP 440 / semver: numeric parts compare as
+              # numbers, so rc.10 sorts above rc.2 - a plain string comparison
+              # gets that backwards, and this decides whether the destructive
+              # tag cleanup below is allowed to run.
+              parts = []
+              for part in suffix.split("."):
+                  if part.isdigit():
+                      parts.append((0, int(part), ""))
+                  else:
+                      parts.append((1, 0, part))
+              return tuple(parts)
+
           def key(tag):
               match = VERSION_RE.match(tag)
               if not match:
@@ -440,11 +504,17 @@ jobs:
               suffix = match.group(2)
               if suffix in ARCH_SUFFIXES:
                   return None
+              # Padded to a fixed width so 1.6 and 1.6.0 are one version rather
+              # than (1, 6) < (1, 6, 0): fetchly tags both shapes (v1.4, v1.3.0),
+              # and treating the shorter one as older would let a re-run of 1.6.0
+              # prune a 1.6 that is the same release.
               release = tuple(int(part) for part in match.group(1).split("."))
+              if len(release) < 3:
+                  release += (0,) * (3 - len(release))
               # A prerelease sorts below its own release: 1.6-rc.1 < 1.6. GNU
               # `sort -V` gets this backwards, which is why the comparison is
               # done here rather than in the shell.
-              return (release, (0, suffix) if suffix else (1, ""))
+              return (release, (0, suffix_key(suffix)) if suffix else (1, ()))
 
           current = os.environ["VERSION"]
           current_key = key(current)
@@ -488,9 +558,18 @@ jobs:
         # 3rd-party chain (ffmpeg, fftw3, taglib, chromaprint, ...) and then
         # the library itself, which only a cold build cache pays for - a
         # release that does not move ESSENTIA_REF restores the stage instead.
+        #
+        # Both runners name an image rather than following a moving label, and
+        # both name the same generation. The host contributes nothing to what
+        # ships - every layer is produced inside python:3.13-slim - so it only
+        # has to supply Docker and buildx. ubuntu-26.04-arm was still flagged
+        # preview when this was set (actions/runner-images#14226), which is why
+        # it is called out here: if the arm64 job starts queueing for capacity
+        # or fails for reasons the amd64 job does not, this label is the first
+        # thing to put back to ubuntu-24.04-arm.
         include:
           - arch: amd64
-            runner: ubuntu-24.04
+            runner: ubuntu-26.04
             platform: linux/amd64
             cache_scope: amd64
             test_image: fetchly:test-amd64
@@ -498,7 +577,7 @@ jobs:
             image_suffix: amd64
             timeout: 180
           - arch: arm64
-            runner: ubuntu-24.04-arm
+            runner: ubuntu-26.04-arm
             platform: linux/arm64
             cache_scope: arm64
             test_image: fetchly:test-arm64
@@ -576,7 +655,9 @@ jobs:
       # The toolchain the Dockerfile keeps rolling - the python base, essentia,
       # the ffmpeg release, yt-dlp, yt-dlp-ejs, deno - comes in as build args
       # resolved once by the meta job, and the Python dependencies as the
-      # constraints.txt downloaded into the context above. Those are still
+      # constraints.txt downloaded into the context above. APT_CACHE_DATE joins
+      # them: without it the runtime stage's `apt-get upgrade` is a cache hit
+      # against whatever snapshot the last release happened to see. Those are still
       # "whatever is newest", just newest as of one moment rather than as of
       # whenever each runner happened to reach the layer, which is what keeps
       # the amd64 and arm64 images carrying identical versions. The verify step
@@ -589,6 +670,7 @@ jobs:
             --platform "${{ matrix.platform }}" \
             --target runtime \
             --load \
+            --build-arg "APT_CACHE_DATE=${{ needs.meta.outputs.apt_cache_date }}" \
             --build-arg "PYTHON_BASE=${{ needs.meta.outputs.python_base }}" \
             --build-arg "ESSENTIA_REF=${{ needs.meta.outputs.essentia_ref }}" \
             --build-arg "FFMPEG_RELEASE_URL=${{ needs.meta.outputs.ffmpeg_release_url }}" \
@@ -1026,7 +1108,7 @@ jobs:
     name: Create multi-arch manifest
     needs: [meta, build]
     if: needs.build.result == 'success'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     env:
       VERSION: ${{ needs.meta.outputs.version }}
@@ -1237,7 +1319,7 @@ jobs:
     name: Remove architecture fragment tags
     needs: [meta, build, create-manifest]
     if: always()
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 15
     permissions:
       contents: read
@@ -1324,7 +1406,7 @@ jobs:
       needs.create-manifest.result == 'success' &&
       needs.cleanup-arch-tags.result == 'success' &&
       needs.meta.outputs.is_newest == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     # Deletion is verified with polling loops, so cap the total runtime.
     timeout-minutes: 30
     permissions:
@@ -1492,7 +1574,7 @@ jobs:
       !cancelled() &&
       needs.create-manifest.result == 'success' &&
       needs.cleanup-dockerhub-tags.result != 'failure'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 10
     env:
       VERSION: ${{ needs.meta.outputs.version }}

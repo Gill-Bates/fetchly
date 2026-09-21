@@ -1,3 +1,17 @@
+## [1.3.0] - 2026-09-21
+
+- ``New`` A three-way video output slider (Source, H.264 (Recommended), or AV1) keeps matching source codecs without re-encoding; existing settings are preserved and changes apply to new downloads only. A new **Enable Job History** setting omits newly submitted jobs from the dashboard list, while retention now removes expired jobs completely, including files, history entries, share links, and statistics.
+- ``Fix`` Source-mode watermarking preserves the source codec (VP9, AV1, HEVC, etc.), and unlimited retention (`0` days) skips housekeeping entirely.
+- ``Fix`` Statistics tiles refresh immediately after Reset Statistics or Remove all Jobs; stale asynchronous status responses can no longer overwrite newer Lalal.ai, watermark-logo, or cookie state; watermark-logo uploads and removals are serialized; and the update checker clears an update notice when a refresh finds none.
+- ``Fix`` Every container rebuild fetches the current wavesurfer.js release, keeps application files readable by the unprivileged user, and refreshes package indexes so published images include current Debian security updates.
+- ``Security`` Docker Compose binds the published port to `127.0.0.1` by default, keeping an instance without an admin account off the network; set `FETCHLY_BIND=0.0.0.0` to expose it.
+- ``Security`` The container rejects system directories such as `/etc` and `/` as `TORCH_HOME`, preventing ownership or permission changes outside the cache directory.
+- ``Security`` Release builds take every dependency except the PyTorch CPU packages from PyPI alone, so no other package can be pulled from the PyTorch wheel index.
+
+
+<details markdown="1">
+<summary>Previous versions...</summary>
+
 ## [1.2.2] - 2026-09-20
 
 - ``New`` Switched from AGPL-3.0 to MIT license.
@@ -27,10 +41,6 @@
 - ``Security`` Cookie file names must resolve inside the cookies folder, so no lookup can reach a path outside it.
 - ``Security`` The public hostname rejects over-bracketed IPv6 input such as `[[::1]]` instead of quietly accepting it.
 - ``Security`` Video metadata larger than 16 MiB is discarded instead of parsed, so an oversized response from a source cannot stall a preview.
-
-
-<details markdown="1">
-<summary>Previous versions...</summary>
 
 ## [1.2.1] - 2026-09-04
 

@@ -75,6 +75,14 @@ test("a Jinja-interpolated id is not treated as a literal one", () => {
     );
 });
 
+test("ignores data-id attributes and commented-out markup", () => {
+    const ids = markupElementIds([
+        '<div data-id="ghost"></div><!-- <div id="commented"></div> -->',
+        '<div id="real"></div>',
+    ]);
+    assert.deepEqual([...ids], ["real"]);
+});
+
 test("each module is reported once with its ids sorted and deduplicated", () => {
     const source = 'getElementById("zeta"); getElementById("alpha"); getElementById("zeta");';
     assert.deepEqual(

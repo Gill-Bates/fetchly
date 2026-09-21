@@ -46,7 +46,7 @@ for compatibility with images that set them.
 | Variable | Default | Description |
 |---|---|---|
 | `DATA_DIR` | `data/` locally, `/app/data` in Docker | Database, downloads, cookie jars, thumbnail cache, model cache. Use an absolute path in Docker. |
-| `TORCH_HOME` | `${DATA_DIR}/.cache/torch` | Where the `beat_this` checkpoint is cached. Keep it on the volume so the ~81 MB download survives a container recreate. |
+| `TORCH_HOME` | `${DATA_DIR}/.cache/torch` | Where the `beat_this` checkpoint is cached. Keep it on the volume so the ~81 MB download survives a container recreate. The entrypoint creates and chowns this directory as root, so — like `DATA_DIR` — it must be an absolute path and the container refuses to start if it resolves to a system directory (`/`, `/etc`, `/usr`, …). Its parent is left untouched. |
 
 ## Runtime
 
@@ -69,9 +69,9 @@ for compatibility with images that set them.
 
 ## Jobs and workers
 
-Download worker count, download and transcode timeouts, and the maximum input size are
-configured in **Settings → General → Runtime limits**. The worker-count change applies
-after the next restart; the other limits apply to new work immediately.
+Download worker count, download and transcode timeouts, and the maximum source download
+size are configured in **Settings → General → Runtime limits**. The worker-count change
+applies after the next restart; the other limits apply to new work immediately.
 
 | Variable | Default | Description |
 |---|---|---|
@@ -126,7 +126,7 @@ disables it.
 
 | Variable | Description |
 |---|---|
-| `WAVESURFER_VERSION` | Baked into the runtime image and shown in **Settings → System**. The vendored bundle carries no version marker of its own, so outside the image the value reads `unavailable`. |
+| `WAVESURFER_VERSION` | Shown in **Settings → System**. The image build resolves whichever WaveSurfer release unpkg served and records it in `/app/.wavesurfer_version`; the entrypoint reads that file and exports this variable, unless it is already set. There is no build argument for it, and the vendored bundle carries no version marker of its own, so outside the image the value reads `unavailable`. |
 
 ## Compose-file variables
 
@@ -136,6 +136,7 @@ are only defined by the shipped [`docker-compose.yml`](https://github.com/Gill-B
 | Variable | Default | Description |
 |---|---|---|
 | `FETCHLY_TAG` | `latest` | Image tag to pull |
+| `FETCHLY_BIND` | `127.0.0.1` | Host address the port is published on. The default keeps a fresh, account-less install off the network; set `0.0.0.0` only after authentication is configured. |
 | `FETCHLY_PORT` | `8000` | Host port published to the container |
 
 ## Example

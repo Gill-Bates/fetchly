@@ -29,11 +29,11 @@ services:
     restart: always
     stop_grace_period: 20s
     ports:
-      - "${FETCHLY_PORT:-8000}:8000"
+      - "${FETCHLY_BIND:-127.0.0.1}:${FETCHLY_PORT:-8000}:8000"
     environment:
       LOG_LEVEL: ${LOG_LEVEL:-info}
       TZ: ${TZ:-Etc/UTC}
-      TIMEOUT: 60
+      TIMEOUT: ${TIMEOUT:-60}
       FETCHLY_SECRET_KEY: "${FETCHLY_SECRET_KEY:?required}"
     logging:
       driver: json-file
@@ -62,6 +62,13 @@ docker compose up -d
     Keep `stop_grace_period` above the container's graceful shutdown budget
     (`GRACEFUL_TIMEOUT`, 15 s by default). The shutdown path stops the worker threads
     and checkpoints the SQLite WAL; killing it early can leave the WAL uncheckpointed.
+
+!!! warning "The port is published on loopback"
+    `FETCHLY_BIND` defaults to `127.0.0.1`, because a published port without a host
+    address is reachable from every interface and a fresh install has no admin
+    account yet. Set `FETCHLY_BIND=0.0.0.0` once authentication is configured, or
+    keep the loopback binding and publish through a
+    [reverse proxy](../configuration/reverse-proxy.md).
 
 ### Building the image yourself
 

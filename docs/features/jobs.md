@@ -48,7 +48,7 @@ reconnects and re-reads the current state from `GET /api/jobs`.
 running.
 
 A completed video whose file is VP9 or AV1 (see
-[Universally playable output](downloads.md#universally-playable-output)) carries a
+[Video Codecs & Output Format](video-codecs.md)) carries a
 **Limited playback** marker in the job list and the details dialog — it will not open
 on Safari, iOS, or most TVs.
 
@@ -65,9 +65,19 @@ on Safari, iOS, or most TVs.
 | Share | Completed jobs — [Share Links](sharing.md) |
 
 There is no per-job delete action. Jobs are removed either by
-[retention](../configuration/storage.md) sweeping expired artifacts, or by
+[retention](../configuration/storage.md) sweeping expired jobs — row, files and share
+links together, so they leave this list as well — or by
 **Settings → System → Remove all jobs**, which clears every job at once (see
 [Bulk cleanup](#bulk-cleanup) below).
+
+## Hiding jobs from the history
+
+**Settings → General → Retention → Enable Job History** decides whether a *new* job is
+listed in the dashboard. A job submitted while it is off still runs and is counted in
+the statistics, but is left out of the list. The choice is stored per job at submission,
+so flipping the setting later never changes jobs that already exist. The **Show Job
+History** toggle on the dashboard is unrelated: it only collapses the list in your
+browser. See [Application Settings](../configuration/settings.md#general).
 
 ## Phones and tablets
 

@@ -11,6 +11,7 @@ Pages here explain how to use each major feature, with screenshots, examples, an
 | File | Purpose |
 | --- | --- |
 | `downloads.md` | Media download feature: supported platforms (YouTube, TikTok, Instagram, Facebook), format selection, quality options, download progress, errors |
+| `video-codecs.md` | Video output format trade-off: H.264 vs Source vs AV1 across resolution, file size, compatibility and CPU cost; when re-encoding happens |
 | `jobs.md` | Job management: submitting jobs, monitoring progress, canceling jobs, retrying failed jobs, viewing job history |
 | `bpm.md` | BPM detection: the two-detector cascade, preprocessing, octave normalization, the `_94bpm` tag on the download filename, cached results, performance impact |
 | `trimming.md` | Audio trimming: waveform editor, setting trim points, listening to clips, saving trimmed audio |

@@ -24,6 +24,7 @@ __all__ = [
     "COMPLETED_STATUSES",
     "DB_PATH",
     "DOWNLOADABLE_STATUSES",
+    "DOWNLOAD_OUTPUT_MODES",
     "TERMINAL_JOB_STATUSES",
     "cancel_interrupted_jobs",
     "claim_next_queued_job",
@@ -89,7 +90,7 @@ _MAX_QUERY_LIMIT: Final[int] = 2_000
 # into the file (PRAGMA user_version) and refuses to open a file stamped higher,
 # so rolling a deployment back to an older image fails fast instead of silently
 # writing against a schema it does not understand.
-_SCHEMA_VERSION: Final[int] = 1
+_SCHEMA_VERSION: Final[int] = 2
 
 # job_id deletions are chunked so a large retention sweep never trips SQLite's
 # bound-parameter ceiling (SQLITE_MAX_VARIABLE_NUMBER) or holds one oversized
@@ -112,9 +113,19 @@ _JOB_STATUS_SQL_VALUES: Final[str] = ", ".join(
     f"'{status}'" for status in sorted(_JOB_STATUSES)
 )
 
+# Allowed values of the "download_output_mode" setting, in the order the
+# settings slider presents them. app/worker.py maps each to a format-selection
+# preference and a post-processing target; app/static/js/settings.js mirrors
+# this list for the slider ticks.
+DOWNLOAD_OUTPUT_MODES: Final[tuple[str, ...]] = ("source", "universal", "av1")
+
 _SETTINGS_DEFAULTS: Final[dict[str, str]] = {
     # 0 means unlimited: job files are retained until explicitly removed.
     "retention_days": "0",
+    # New jobs are listed in the dashboard history unless this is disabled.
+    # Each job snapshots the value at submission time, so changing it never
+    # changes the visibility of an existing job.
+    "enable_job_history": "true",
     "login_required": "false",
     # Off on a fresh install, and no credentials exist to go with it. The admin
     # account is created in Settings -> Security; authentication cannot be
@@ -132,16 +143,23 @@ _SETTINGS_DEFAULTS: Final[dict[str, str]] = {
     "download_timeout_minutes": "60",
     "transcode_timeout_minutes": "120",
     "download_max_filesize_gib": "4",
-    # Off means "what the source delivers is what the user gets": yt-dlp picks
-    # the best rendition regardless of codec and the streams are only muxed
-    # (losslessly) into whatever container fits - .webm for VP9/Opus, .mkv for
-    # AV1. On means H.264/AAC in MP4, which plays on Safari, iOS, TVs and
-    # editing software; it is preferred at format-selection time and only
-    # re-encoded when the source has no compatible rendition at all. The
-    # watermark implies it (that pass encodes anyway), so the effective value
-    # is `download_compatible_output or video_watermark` - see
-    # app/worker.py::_compatible_output_required.
-    "download_compatible_output": "false",
+    # What the finished "max" download is muxed or encoded into. One of
+    # DOWNLOAD_OUTPUT_MODES:
+    #   "source"    - the source rendition is passed through untouched: best
+    #                 codec regardless of type, muxed (losslessly) into
+    #                 whatever container fits (.webm for VP9/Opus, .mkv for
+    #                 AV1). No encoder runs unless the watermark forces one
+    #                 (see below).
+    #   "universal" - H.264/AAC in MP4, which plays on Safari, iOS, TVs and in
+    #                 editing software. Preferred at format-selection time, so
+    #                 a source that already offers it is never re-encoded.
+    #   "av1"       - AV1 video, preferred at format-selection time; a source
+    #                 that already is AV1 is never re-encoded.
+    # The watermark burns an overlay in, which always costs a video encode, but
+    # that encode targets the mode's own codec - for "source" the codec the
+    # download arrived in - so the watermark never changes the stored mode's
+    # promise. See app/worker.py::_output_mode and ::_target_video_codec.
+    "download_output_mode": "universal",
     # Burns the fetchly logo into the bottom-right corner of every downloaded
     # video, with the public hostname underneath when one is configured. On by
     # default; costs nothing on the capped qualities (the overlay rides along
@@ -194,6 +212,14 @@ def _parse_bounded_int(value: object, *, minimum: int, maximum: int) -> int:
 
 def _parse_nonnegative_int(value: object) -> int:
     return _parse_bounded_int(value, minimum=0, maximum=2**63 - 1)
+
+
+def _parse_output_mode(value: object) -> str:
+    """Parse the "download_output_mode" setting against its allowed vocabulary."""
+    normalized = str(value).strip().lower()
+    if normalized not in DOWNLOAD_OUTPUT_MODES:
+        raise ValueError(f"Invalid download output mode: {value!r}")
+    return normalized
 
 
 def _parse_minutes_left(value: object) -> float:
@@ -272,6 +298,7 @@ def with_finished_at(status: str, extra: dict[str, Any]) -> dict[str, Any]:
 
 _SETTINGS_TYPES: Final[dict[str, Callable[[object], Any]]] = {
     "retention_days": lambda value: _parse_bounded_int(value, minimum=0, maximum=365),
+    "enable_job_history": _parse_bool,
     "statistics_reset_at": str,
     "login_required": _parse_bool,
     "enable_authentication": _parse_bool,
@@ -283,7 +310,7 @@ _SETTINGS_TYPES: Final[dict[str, Callable[[object], Any]]] = {
     "download_timeout_minutes": lambda value: _parse_bounded_int(value, minimum=1, maximum=240),
     "transcode_timeout_minutes": lambda value: _parse_bounded_int(value, minimum=1, maximum=480),
     "download_max_filesize_gib": lambda value: _parse_bounded_int(value, minimum=1, maximum=100),
-    "download_compatible_output": _parse_bool,
+    "download_output_mode": _parse_output_mode,
     "video_watermark": _parse_bool,
     "audio_analysis_max_minutes": lambda value: _parse_bounded_int(value, minimum=0, maximum=240),
     "audio_analysis_timeout_minutes": lambda value: _parse_bounded_int(value, minimum=1, maximum=60),
@@ -419,6 +446,7 @@ def init_db() -> None:
                 ),
                 filename TEXT,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                include_in_history INTEGER NOT NULL DEFAULT 1 CHECK (include_in_history IN (0, 1)),
                 finished_at TEXT,
                 duration_seconds REAL CHECK (duration_seconds IS NULL OR duration_seconds >= 0),
                 filesize_bytes INTEGER CHECK (filesize_bytes IS NULL OR filesize_bytes >= 0),
@@ -483,7 +511,40 @@ def init_db() -> None:
         )
         con.execute("DELETE FROM settings WHERE key = 'download_mp4_preset'")
 
+        # The boolean "download_compatible_output" became the three-way
+        # "download_output_mode" when AV1 joined H.264/AAC as an output target.
+        # On meant "guarantee H.264/AAC" (now "universal"); off meant "pass the
+        # source through" (now "source"). Runs after the migration above, so an
+        # install still on "download_mp4_preset" upgrades in one start. No-op
+        # once migrated (the old row is dropped).
+        con.execute(
+            "INSERT OR IGNORE INTO settings (key, value) "
+            "SELECT 'download_output_mode', "
+            "       CASE WHEN LOWER(TRIM(value)) IN ('true', '1', 'yes', 'on') "
+            "            THEN 'universal' ELSE 'source' END "
+            "FROM settings WHERE key = 'download_compatible_output'"
+        )
+        con.execute("DELETE FROM settings WHERE key = 'download_compatible_output'")
+
+        # Jobs need a database row while they are being processed even when
+        # history is disabled. This per-job snapshot keeps that lifecycle
+        # intact and makes the setting forward-only. Existing jobs retain the
+        # historical behavior through the default of 1.
+        job_columns = {
+            str(row["name"])
+            for row in con.execute("PRAGMA table_info(jobs)").fetchall()
+        }
+        if "include_in_history" not in job_columns:
+            con.execute(
+                "ALTER TABLE jobs ADD COLUMN include_in_history "
+                "INTEGER NOT NULL DEFAULT 1 CHECK (include_in_history IN (0, 1))"
+            )
+
         con.execute("CREATE INDEX IF NOT EXISTS idx_jobs_created_at_id ON jobs(created_at DESC, id DESC)")
+        con.execute(
+            "CREATE INDEX IF NOT EXISTS idx_jobs_history_created_at "
+            "ON jobs(created_at DESC, id DESC) WHERE include_in_history = 1"
+        )
         con.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status_finished_at ON jobs(status, finished_at)")
         con.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status_created_at ON jobs(status, created_at DESC)")
         con.execute(
@@ -516,6 +577,7 @@ def insert_job(
     video_title: str | None = None,
     video_meta_hover: str | None = None,
     duration_seconds: float | None = None,
+    include_in_history: bool = True,
 ) -> None:
     """Insert a queued job row.
 
@@ -532,10 +594,23 @@ def insert_job(
     with get_db() as con:
         con.execute(
             """
-            INSERT INTO jobs (id, url, type, quality, status, video_title, video_meta_hover, duration_seconds)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO jobs (
+                id, url, type, quality, status, video_title, video_meta_hover,
+                duration_seconds, include_in_history
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (job_id, url, job_type, quality, status, video_title, video_meta_hover, duration),
+            (
+                job_id,
+                url,
+                job_type,
+                quality,
+                status,
+                video_title,
+                video_meta_hover,
+                duration,
+                int(include_in_history),
+            ),
         )
         con.commit()
 
@@ -906,7 +981,12 @@ def paginate_jobs(limit: int = 50, offset: int = 0) -> list[sqlite3.Row]:
         raise ValueError("offset must be a non-negative integer")
     with get_db() as con:
         return con.execute(
-            "SELECT * FROM jobs ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
+            """
+            SELECT * FROM jobs
+            WHERE include_in_history = 1
+            ORDER BY created_at DESC, id DESC
+            LIMIT ? OFFSET ?
+            """,
             (limit, offset),
         ).fetchall()
 
@@ -953,11 +1033,11 @@ def get_stats() -> dict[str, int | float]:
 
 
 def list_expired_job_ids(keep_days: int) -> list[str]:
-    """Return terminal job IDs whose filesystem artifacts may be removed.
+    """Return terminal job IDs whose retention window has elapsed.
 
-    Retention is deliberately read-only at the database level. Keeping these
-    rows preserves dashboard statistics and the job history after their files
-    have been cleaned up.
+    Read-only: does not delete rows or files. Superseded by purge_old_jobs()
+    for the housekeeping sweep, which deletes the DB rows outright; this is
+    kept for callers that only need to inspect what would expire.
     """
     if isinstance(keep_days, bool) or not isinstance(keep_days, int):
         raise TypeError("keep_days must be a non-negative integer")
@@ -989,9 +1069,10 @@ def purge_old_jobs(keep_days: int, *, batch_size: int = _MAX_QUERY_LIMIT) -> lis
     databases cascade the delete to share_links; older ones rely on the caller
     also invoking delete_share_links_for_jobs().
 
-    Not currently wired into housekeeping - retention is deliberately read-only
-    at the database level (see list_expired_job_ids) - but kept correct and
-    batch-bounded for callers that opt into hard deletion.
+    Wired into the housekeeping sweep in main.py (_run_housekeeping_once),
+    which is the single caller responsible for treating keep_days == 0 as
+    "unlimited retention" and skipping the sweep - this function has no such
+    special case and will happily purge every terminal job for keep_days == 0.
     """
     if isinstance(keep_days, bool) or not isinstance(keep_days, int):
         raise TypeError("keep_days must be a non-negative integer")

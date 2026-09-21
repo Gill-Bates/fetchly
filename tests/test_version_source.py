@@ -67,6 +67,45 @@ class VersionSourceTests(unittest.TestCase):
             with self.subTest(dependency=requirement):
                 self.assertNotIn("==", requirement)
 
+    def test_torch_packages_are_bound_to_the_cpu_index(self) -> None:
+        # The CPU wheel index is not a torch-only host: it also serves jinja2,
+        # numpy, sympy, filelock, fsspec and setuptools. As a plain extra index
+        # it would be searched for every name in a resolution and could pin a
+        # version PyPI does not carry, while the image installs those from PyPI.
+        # `explicit` plus a source binding is what keeps it to the two packages
+        # docker/Dockerfile installs from it.
+        uv = _pyproject()["tool"]["uv"]
+        self.assertNotIn(
+            "extra-index-url",
+            uv,
+            "an extra index is searched for every package; declare an explicit index instead",
+        )
+        cpu_indexes = [
+            index
+            for index in uv["index"]
+            if index["url"] == "https://download.pytorch.org/whl/cpu"
+        ]
+        self.assertEqual(len(cpu_indexes), 1)
+        self.assertTrue(cpu_indexes[0]["explicit"])
+        for package in ("torch", "torchaudio"):
+            with self.subTest(package=package):
+                self.assertEqual(
+                    [{"index": cpu_indexes[0]["name"]}],
+                    uv["sources"][package],
+                )
+
+    def test_torch_packages_are_direct_dependencies(self) -> None:
+        # uv applies a source binding only to a dependency the manifest declares
+        # itself. torchaudio arrives through beat-this, so without this line it
+        # would be resolved from PyPI - against the CUDA torch - while the image
+        # installs the +cpu build from the CPU index.
+        names = {
+            req.split("==")[0].split(">=")[0].split("[")[0].strip()
+            for req in _pyproject()["project"]["dependencies"]
+        }
+        self.assertIn("torch", names)
+        self.assertIn("torchaudio", names)
+
     def test_runtime_dependencies_cover_the_web_stack(self) -> None:
         names = {
             req.split("==")[0].split(">=")[0].split("[")[0].strip()
