@@ -752,9 +752,21 @@ jobs:
       - name: Verify toolchain and build metadata
         run: |
           set -euo pipefail
+          # `docker exec` starts a fresh process attached to the container's
+          # namespaces, not a child of PID 1 - so it never sees WAVESURFER_VERSION,
+          # which entrypoint.sh only exports into its own process tree (PID 1 ->
+          # gosu -> gunicorn) via `export`, not into the image or container's
+          # environment at large. Read PID 1's actual environment instead of
+          # letting `python -c` inherit docker exec's own, otherwise unrelated,
+          # environment - that is what makes this check equivalent to what
+          # Gunicorn (and therefore the Settings page) actually sees.
+          wavesurfer_version="$(docker exec "${{ matrix.container_name }}" \
+            sh -c "tr '\0' '\n' < /proc/1/environ | sed -n 's/^WAVESURFER_VERSION=//p'")"
+
           docker exec -i \
             -e EXPECTED_VERSION="${VERSION}" \
             -e EXPECTED_BUILD_INFO="${{ github.sha }}" \
+            -e WAVESURFER_VERSION="${wavesurfer_version}" \
             "${{ matrix.container_name }}" python - <<'PY'
           import os
           import sys
@@ -898,7 +910,16 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p toolchain
-          docker exec -i "${{ matrix.container_name }}" python - \
+          # See the "Verify toolchain and build metadata" step: WAVESURFER_VERSION
+          # lives only in PID 1's process tree inside the container, not in an
+          # environment `docker exec` inherits, so it has to be read from
+          # /proc/1/environ and passed in explicitly.
+          wavesurfer_version="$(docker exec "${{ matrix.container_name }}" \
+            sh -c "tr '\0' '\n' < /proc/1/environ | sed -n 's/^WAVESURFER_VERSION=//p'")"
+
+          docker exec -i \
+            -e WAVESURFER_VERSION="${wavesurfer_version}" \
+            "${{ matrix.container_name }}" python - \
             > "toolchain/${{ matrix.image_suffix }}.txt" <<'PY'
           import platform
           from importlib import metadata
