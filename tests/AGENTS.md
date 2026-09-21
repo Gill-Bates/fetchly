@@ -38,8 +38,9 @@
 | `test_analysis_worker.py` | Analysis submission: what a completed analysis writes back, and staying responsive while waiting on the child process |
 | `test_governor_semaphores.py` | `SharedSemaphore`: one budget per workload across worker threads and the event loop, cancellation safety, and the `*_sync` accessors returning the same object |
 | `test_worker_cancel_retry_race.py` | The worker's terminal writebacks are conditional, so a stale cancel cannot land on a row a retry already moved |
+| `test_release_tag_order.py` | The version-ordering function lifted out of `.github/workflows/docker-build.yml`: architecture fragments are not versions, prereleases sort below their release, numeric parts compare as numbers, longer versions are not truncated into equality. A mis-ordered comparison moves `latest` and releases the tag-pruning job, so the failure mode is destructive. |
 
-40 Python test files in total.
+41 Python test files in total.
 
 ## Subdirectories
 
@@ -154,7 +155,7 @@ pytest tests/test_worker_hardening.py --pdb
 
 ---
 
-**Last Updated:** 2026-09-20  
+**Last Updated:** 2026-09-21  
 **Python:** pytest runner, unittest-style classes, no fixtures  
 **JavaScript:** `node:test` + `node:assert/strict`  
-**Counts:** 40 Python files, 17 JavaScript files
+**Counts:** 41 Python files, 17 JavaScript files

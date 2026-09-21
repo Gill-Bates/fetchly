@@ -38,8 +38,9 @@ There is no `__init__.py` in this directory, although `pyproject.toml` declares 
 - Imported by `../app/main.py` and added to the middleware stack
 
 ### External
-- **Starlette:** ASGI types (`Scope`, `Receive`, `Send`) and `Response`
-- **Standard library only** for token generation: `secrets`, `hmac`, `re`. The `cryptography` package is not a project dependency.
+- **Starlette:** `ASGIApp` from `starlette.types` and `MutableHeaders` from `starlette.datastructures`
+- **FastAPI:** `Request` and `JSONResponse` for the rejection response
+- **Standard library only** for tokens: `secrets` (generation *and* the constant-time comparison via `secrets.compare_digest`), `re` for cookie-name validation, `urllib.parse` for form bodies. No `hmac`, and the `cryptography` package is not a project dependency.
 
 ## Manual
 
@@ -83,7 +84,7 @@ app.add_middleware(
 
 ---
 
-**Last Updated:** 2026-09-19  
+**Last Updated:** 2026-09-21  
 **Standard:** Double-Submit Cookie Pattern  
 **Cookie:** `SameSite` set, `Secure` when behind HTTPS, `HttpOnly` deliberately off  
 **Scope:** `/login`, `/logout`, `/api` prefixes

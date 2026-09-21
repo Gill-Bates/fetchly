@@ -26,7 +26,8 @@ This is a **separate tool with its own npm package and its own browsers**, not p
 From the repo root:
 
 ```bash
-npm run ui-lint:install     # once: npm ci --prefix tools/ui-lint && playwright install chromium webkit firefox
+npm run ui-lint:install     # once: npm --prefix tools/ui-lint install && npm --prefix tools/ui-lint run install:browsers
+                            # (CI uses `npm ci --prefix tools/ui-lint` instead — see ui-audit.yml)
 npm run ui-lint             # npm --prefix tools/ui-lint run audit → node run-ui-lint.mjs
 ```
 
@@ -110,7 +111,7 @@ node --test tests/js/ui-lint-health.test.mjs
 
 ---
 
-**Last Updated:** 2026-09-19  
+**Last Updated:** 2026-09-21  
 **Browser Automation:** Playwright (chromium, webkit, firefox)  
 **Accessibility:** axe-core via `@axe-core/playwright`  
 **Screenshot Diffing:** pixelmatch + pngjs  

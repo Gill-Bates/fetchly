@@ -55,7 +55,7 @@ The app module is the heart of fetchly: it handles HTTP requests, runs an in-pro
 - **Watermark logo:** uploaded via `POST /api/settings/watermark-logo`, served from `GET /api/settings/watermark-logo/image`, rendered by `utils/watermark_logo.py`
 
 ### Testing
-- **Unit tests:** `tests/test_*.py` (40 files) — pytest is the runner, but tests are unittest-style classes
+- **Unit tests:** `tests/test_*.py` (41 files) — pytest is the runner, but tests are unittest-style classes
 - **Shared setup:** subclass `IsolatedDbTestCase` or `WebAppTestCase` from `tests/_support.py`. `tests/conftest.py` only imports `_support` for its `FETCHLY_SECRET_KEY` side effect; it defines no fixtures.
 - **API contract tests:** `tests/test_output_modes.py`
 - **Worker hardening:** `tests/test_worker_hardening.py`
@@ -121,7 +121,7 @@ If jobs stay in `queued`:
 
 ---
 
-**Last Updated:** 2026-09-20  
+**Last Updated:** 2026-09-21  
 **Python Version:** 3.13+  
 **Persistence:** stdlib `sqlite3`, synchronous, WAL  
 **Key Dependencies:** FastAPI, yt-dlp, essentia, beat-this

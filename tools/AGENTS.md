@@ -41,7 +41,7 @@
 - **Everything at once:** `npm run lint` = `lint:js` + `lint:css` + `lint:contracts`. `npm run lint:fix` auto-fixes the first two.
 
 ### Working on the UI Audit
-- **Device profiles:** the `DEVICE_PROFILES` object in `run-ui-lint.mjs` — there is no `lib/device-profiles.mjs`. Six profiles: `desktop` (1440x1200, chromium), `mobile` (iPhone 13, webkit), `tablet` (iPad Mini, webkit), `tablet-landscape` (iPad Mini landscape), `tablet-wide` (iPad Pro 11 landscape), `desktop-firefox` (1440x1200, gecko).
+- **Device profiles:** the `DEVICE_PROFILES` object in `run-ui-lint.mjs` — there is no `lib/device-profiles.mjs`. Six profiles: `desktop` (1440x1200, chromium), `mobile` (iPhone 13, webkit), `tablet` (iPad Mini, webkit), `tablet-landscape` (iPad Mini landscape), `tablet-wide` (iPad Pro 11 landscape), `desktop-firefox` (1440x1200, firefox).
 - **Form factor and touch are separate axes.** `formFactor` answers what kind of device it is; touch capability is independent. A narrow non-touch window is not a phone, and a touch iPad must not be handed the desktop touch-target minimum. Keep them separate when adding a profile.
 - **`desktop-firefox` varies the engine, not the layout** — same viewport as `desktop` on purpose, so Gecko's differences in flexbox min-size, scrollbar gutters and subgrid surface with everything else held constant.
 - **Adding a check:** add the logic to a `lib/*.mjs` module, call it from `run-ui-lint.mjs`, and unit-test the pure part from `tests/js/ui-lint-*.test.mjs`
@@ -113,7 +113,7 @@ Use `playwrightDevice` for a named Playwright descriptor, or `viewport` for an e
 
 ---
 
-**Last Updated:** 2026-09-19  
+**Last Updated:** 2026-09-21  
 **Browser Automation:** Playwright (chromium, webkit, firefox)  
 **Accessibility:** axe-core via `@axe-core/playwright`  
 **Key Tools:** ESLint, Stylelint, ruff, Playwright
