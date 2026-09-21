@@ -1,3 +1,10 @@
+
+## [1.3.1] - 2026-xx-xx
+
+
+<details markdown="1">
+<summary>Previous versions...</summary>
+
 ## [1.3.0] - 2026-09-21
 
 - ``New`` A three-way video output slider (Source, H.264 (Recommended), or AV1) keeps matching source codecs without re-encoding; existing settings are preserved and changes apply to new downloads only. A new **Enable Job History** setting omits newly submitted jobs from the dashboard list, while retention now removes expired jobs completely, including files, history entries, share links, and statistics.
@@ -7,10 +14,6 @@
 - ``Security`` Docker Compose binds the published port to `127.0.0.1` by default, keeping an instance without an admin account off the network; set `FETCHLY_BIND=0.0.0.0` to expose it.
 - ``Security`` The container rejects system directories such as `/etc` and `/` as `TORCH_HOME`, preventing ownership or permission changes outside the cache directory.
 - ``Security`` Release builds take every dependency except the PyTorch CPU packages from PyPI alone, so no other package can be pulled from the PyTorch wheel index.
-
-
-<details markdown="1">
-<summary>Previous versions...</summary>
 
 ## [1.2.2] - 2026-09-20
 

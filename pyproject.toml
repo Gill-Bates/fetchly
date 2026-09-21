@@ -17,7 +17,7 @@ name = "fetchly"
 # at runtime, the release workflow validates the git tag against it, and
 # docker/Dockerfile copies this file into the image so the Settings page and
 # /api/updates report the same number the tag was cut from.
-version = "1.3.0"
+version = "1.3.1"
 description = "Self-hosted media downloader with BPM analysis and stem separation"
 readme = "README.md"
 requires-python = ">=3.13"
