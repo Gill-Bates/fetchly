@@ -44,7 +44,7 @@ class SSEStreamingResponse(StreamingResponse):
         try:
             await super().listen_for_disconnect(receive)
         except asyncio.CancelledError:
-            logger.debug("SSE disconnect listener cancelled during shutdown")
+            pass
 
 
 def publish_payload(payload: dict[str, Any]) -> None:
@@ -206,7 +206,6 @@ def _build_sse_response(
             async for chunk in _sse_stream(request, subscriber):
                 yield chunk
         except asyncio.CancelledError:
-            logger.debug("SSE response cancelled during shutdown")
             return
         finally:
             cleanup()

@@ -205,12 +205,6 @@ async def get_cached_stats() -> dict[str, int | float]:
         return cached
 
     async with _get_stats_lock():
-        now_ts = time()
-        cached = _stats_cache.get("data")
-        cached_ts = float(_stats_cache.get("ts", 0.0) or 0.0)
-        if cached is not None and (now_ts - cached_ts) < _STATS_CACHE_TTL_SECONDS:
-            return cached
-
         stats = await asyncio.to_thread(get_stats)
         _stats_cache["data"] = stats
         _stats_cache["ts"] = time()
