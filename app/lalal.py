@@ -32,6 +32,10 @@ LALAL_API_PREFIX = "/api/v1"
 _TRANSFER_CHUNK_SIZE = 65536
 _DEFAULT_LALAL_MAX_DOWNLOAD_GIB = 4
 _BYTES_PER_GIB = 1024 * 1024 * 1024
+# Consecutive transient poll failures tolerated by wait_for_completion()
+# before it gives up. At the default 3s poll_interval this is ~45s of
+# sustained network trouble before a split is abandoned.
+_MAX_CONSECUTIVE_POLL_FAILURES: int = 15
 
 type ProgressCallback = Callable[[int], None]
 type StageProgressCallback = Callable[[str, int], None]
@@ -316,14 +320,45 @@ class _BaseLalalClient:
         timeout: float = 600.0,
         progress_callback: ProgressCallback | None = None,
     ) -> SplitResult:
-        """Poll the Lalal.ai API until processing completes or times out."""
+        """Poll the Lalal.ai API until processing completes or times out.
+
+        A transport-level failure on a single poll (timeout or connection
+        error - the request never reached Lalal.ai, or its response never
+        came back) does not abort an otherwise-successful split: it is logged
+        and retried on the next interval, up to
+        ``_MAX_CONSECUTIVE_POLL_FAILURES`` in a row. Any ``LalalError`` -
+        including a 401, quota error, or a real processing error, all of
+        which ``check_progress()`` already raises as one flat exception type
+        regardless of HTTP status - still raises immediately, since it is not
+        safe to assume that class of failure is transient.
+        """
         start_time = time.monotonic()
+        consecutive_failures = 0
 
         while True:
             if time.monotonic() - start_time > timeout:
                 raise LalalProcessingError(f"Processing timed out after {timeout}s")
 
-            task_info = await self.check_progress(task_id)
+            try:
+                task_info = await self.check_progress(task_id)
+            except (TimeoutError, httpx.TimeoutException, httpx.TransportError) as exc:
+                consecutive_failures += 1
+                if consecutive_failures > _MAX_CONSECUTIVE_POLL_FAILURES:
+                    raise LalalProcessingError(
+                        f"Processing status check failed {consecutive_failures} times in a row: {exc}"
+                    ) from exc
+                logger.warning(
+                    "Transient error polling Lalal.ai progress for %s (attempt %d/%d): %s",
+                    task_id,
+                    consecutive_failures,
+                    _MAX_CONSECUTIVE_POLL_FAILURES,
+                    exc,
+                )
+                await asyncio.sleep(poll_interval)
+                continue
+            else:
+                consecutive_failures = 0
+
             state = self._task_state(task_info)
 
             if state in {"error", "server_error", "cancelled"}:
