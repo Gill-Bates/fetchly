@@ -72,10 +72,14 @@ The remaining resource-governor limits are operator-level overrides. `0` means "
 | Variable | Effect |
 |---|---|
 | `WORKER_QUEUE_MAXSIZE` | Queue depth before submissions are rejected |
-| `CPU_SEMAPHORE_LIMIT` | Concurrent CPU-bound operations |
 | `ANALYSIS_SEMAPHORE_LIMIT` | Concurrent BPM analyses |
-| `IO_SEMAPHORE_LIMIT` | Concurrent I/O-bound operations |
 | `TRANSCODE_SEMAPHORE_LIMIT` | Concurrent ffmpeg transcodes |
+
+`CPU_SEMAPHORE_LIMIT` and `IO_SEMAPHORE_LIMIT` size two further semaphores that the
+governor creates and reports, but no code path currently acquires either one. They are
+reserved for a future gate — setting them has no effect on how much work runs in
+parallel. Download parallelism is shaped by **Download workers** and **Parallel
+fragments per download** instead.
 
 ```yaml
 environment:
@@ -132,11 +136,12 @@ message you can act on.
 
     ```yaml
     environment:
-      IO_SEMAPHORE_LIMIT: 32
       TRANSCODE_SEMAPHORE_LIMIT: 2
     ```
 
-    Set **Download workers** to `8` in Runtime limits.
+    Set **Download workers** to `8` in Runtime limits, and raise **Parallel fragments
+    per download** if the sources are fragmented — those two shape download
+    parallelism.
 
 ## Observing
 

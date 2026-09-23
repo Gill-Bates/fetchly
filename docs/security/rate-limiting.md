@@ -1,7 +1,10 @@
 # Rate Limiting
 
-Every route carries a per-client limit, enforced by
-[SlowAPI](https://github.com/laurentS/slowapi) and keyed on the client IP.
+Every route that costs work carries a per-client limit, enforced by
+[SlowAPI](https://github.com/laurentS/slowapi) and keyed on the client IP. The
+dashboard (`GET /`), the settings page (`GET /settings`), `GET /favicon.ico` and the
+`GET /health` probe carry no limit — they render a template or return a constant, and
+the data behind them is fetched by the `/api/*` routes below, which are limited.
 
 ## Client identification
 
@@ -58,6 +61,10 @@ The login limit is the backstop behind the [invisible anti-bot check](anti-bot.m
 |---|---|
 | `GET /api/settings` | 60/minute |
 | `POST /api/settings` | **5/minute** |
+| `GET /api/settings/watermark-logo` | 60/minute |
+| `GET /api/settings/watermark-logo/image` | 60/minute |
+| `POST /api/settings/watermark-logo` | 10/minute |
+| `DELETE /api/settings/watermark-logo` | 10/minute |
 | `GET /api/stats` | 30/minute |
 | `POST /api/stats/reset` | 5/minute |
 | `GET /api/stats/bpm-clusters` | 30/minute |
