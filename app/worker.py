@@ -647,18 +647,7 @@ def _run_cmd(
                 _check_shutdown()
 
                 if proc.returncode != 0:
-                    executable = cmd[0] if cmd else "command"
-                    stderr_tail = _stderr_tail(stderr_tmp)
-                    if stderr_tail:
-                        logger.warning(
-                            "%s failed with exit code %s. stderr tail: %s",
-                            executable,
-                            proc.returncode,
-                            stderr_tail,
-                        )
-                        raise RuntimeError(f"{executable} failed with exit code {proc.returncode}: {stderr_tail}")
-
-                    raise RuntimeError(f"{executable} failed with exit code {proc.returncode}")
+                    _raise_for_failed_command(cmd, proc.returncode, stderr_tmp)
             except Exception:
                 if proc.poll() is None:
                     _terminate_process(proc)
@@ -744,6 +733,26 @@ def _stderr_tail(stderr_tmp: Any, *, limit: int = 800) -> str:
         return _redact_urls(stderr_tmp.read()[-limit:].strip())
     except Exception:
         return ""
+
+
+def _raise_for_failed_command(cmd: list[str], returncode: int | None, stderr_tmp: Any) -> None:
+    """Raise a RuntimeError describing a non-zero exit, stderr tail included.
+
+    Shared by _run_cmd() and _run_cmd_streaming() so both report a failed
+    ffmpeg/yt-dlp call with the same message the UI stores on the job.
+    """
+    executable = cmd[0] if cmd else "command"
+    stderr_tail = _stderr_tail(stderr_tmp)
+    if stderr_tail:
+        logger.warning(
+            "%s failed with exit code %s. stderr tail: %s",
+            executable,
+            returncode,
+            stderr_tail,
+        )
+        raise RuntimeError(f"{executable} failed with exit code {returncode}: {stderr_tail}")
+
+    raise RuntimeError(f"{executable} failed with exit code {returncode}")
 
 
 def _read_progress_lines(pipe: Any, target_queue: queue.Queue[str | None]) -> None:
@@ -986,15 +995,7 @@ def _run_cmd_streaming(
                 _check_shutdown()
 
                 if proc.returncode != 0:
-                    executable = cmd[0] if cmd else "command"
-                    stderr_tail = _stderr_tail(stderr_tmp)
-                    if stderr_tail:
-                        logger.warning(
-                            "%s failed with exit code %s. stderr tail: %s",
-                            executable, proc.returncode, stderr_tail,
-                        )
-                        raise RuntimeError(f"{executable} failed with exit code {proc.returncode}: {stderr_tail}")
-                    raise RuntimeError(f"{executable} failed with exit code {proc.returncode}")
+                    _raise_for_failed_command(cmd, proc.returncode, stderr_tmp)
             except Exception:
                 if proc.poll() is None:
                     _terminate_process(proc)

@@ -16,7 +16,7 @@ import sqlite3
 import threading
 from dataclasses import dataclass
 from time import time
-from typing import Any, Final, TypedDict
+from typing import Any, Final
 
 from fastapi import Request, Response
 
@@ -59,14 +59,6 @@ class SessionData:
     last_activity: int  # Unix timestamp of last activity (for sliding window)
     nonce: str
     session_version: int
-
-
-class SessionInfo(TypedDict):
-    username: str
-    issued_at: int
-    last_activity: int
-    hard_expires_at: int
-    idle_expires_at: int
 
 
 def _encode_token(payload: str, signature: str) -> str:
@@ -238,28 +230,6 @@ def renew_session(token: str | None) -> str | None:
     nonce = secrets.token_urlsafe(12)
     payload = f"{session.username}:{session.issued_at}:{now}:{nonce}:{session.session_version}"
     return _encode_token(payload, _sign_payload(payload))
-
-
-def get_session_info(token: str | None) -> SessionInfo | None:
-    """Return session metadata including computed expiry timestamps.
-
-    The token is parsed and signature-validated, but expiry is not evaluated.
-    Returns None only when parsing or signature validation fails. Callers must
-    compare the returned timestamps against the current time themselves.
-    """
-    session = parse_session(token)
-    if not session:
-        return None
-
-    idle_timeout = _get_idle_timeout_seconds()
-
-    return {
-        "username": session.username,
-        "issued_at": session.issued_at,
-        "last_activity": session.last_activity,
-        "hard_expires_at": session.issued_at + SESSION_HARD_LIMIT_SECONDS,
-        "idle_expires_at": session.last_activity + idle_timeout,
-    }
 
 
 def _get_cookie_max_age(token: str) -> int:

@@ -23,7 +23,7 @@ Static files here are served by `VersionedStaticFiles` (`app/utils/assets.py`) w
 | `js/events.js` | **SSE client**: opens `new EventSource("/events")`, routes messages, handles reconnect |
 | `js/toast.js` | Toast notifications: success/error/info, auto-dismiss, manual dismiss |
 | `js/confirm.js` | Confirmation modal (`confirmModal()`). Use this for destructive actions — never `window.confirm`/`alert`/`prompt`. |
-| `js/current-job.js` | Active job state: `getCurrentJobId()`, `setCurrentJob()`, `refreshCurrentJob()` |
+| `js/current-job.js` | Active job state: `setCurrentJob()`, `refreshCurrentJob()` |
 | `js/cookie-paste.js` | Cookie import UI: paste field, format validation, platform detection |
 | `js/watermark-logo.js` | Client-side logo validation: `prepareLogoUpload()`, `inspectSvg()`, `inspectPng()`, `rasterizeSvg()`, `MAX_LOGO_BYTES` (2 MiB) |
 | `js/errors.js` | `reportError()` / `reportWarning()` with context |

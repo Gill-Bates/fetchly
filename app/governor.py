@@ -663,10 +663,13 @@ class Governor:
 
         return True
 
-    def status(self) -> GovernorStatus:
-        """Return current governor status without logging side effects."""
-        config, limits = self._require_configured()
-        mem_available, threshold, triggered = self._memory_backpressure_state()
+    def _build_status(
+        self,
+        config: GovernorConfig,
+        limits: ResourceLimits,
+        memory_state: tuple[int, int, bool],
+    ) -> GovernorStatus:
+        mem_available, threshold, triggered = memory_state
         can_accept = True if not config.enable_backpressure else not triggered
 
         return {
@@ -683,27 +686,16 @@ class Governor:
             "backpressure_enabled": config.enable_backpressure,
             "can_accept_job": can_accept,
         }
+
+    def status(self) -> GovernorStatus:
+        """Return current governor status without logging side effects."""
+        config, limits = self._require_configured()
+        return self._build_status(config, limits, self._memory_backpressure_state())
 
     async def status_async(self) -> GovernorStatus:
         """Async variant of status() for request paths."""
         config, limits = self._require_configured()
-        mem_available, threshold, triggered = await self._memory_backpressure_state_async()
-        can_accept = True if not config.enable_backpressure else not triggered
-
-        return {
-            "effective_cpus": limits.effective_cpus,
-            "worker_count": limits.worker_count,
-            "queue_maxsize": limits.queue_maxsize,
-            "cpu_limit": limits.cpu_limit,
-            "analysis_limit": limits.analysis_limit,
-            "io_limit": limits.io_limit,
-            "transcode_limit": limits.transcode_limit,
-            "memory_available_mb": mem_available,
-            "memory_threshold_mb": threshold,
-            "memory_backpressure_triggered": triggered,
-            "backpressure_enabled": config.enable_backpressure,
-            "can_accept_job": can_accept,
-        }
+        return self._build_status(config, limits, await self._memory_backpressure_state_async())
 
 
 governor = Governor()

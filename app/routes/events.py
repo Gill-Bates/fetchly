@@ -41,10 +41,8 @@ class SSEStreamingResponse(StreamingResponse):
     """StreamingResponse variant that treats graceful-shutdown cancellation as normal."""
 
     async def listen_for_disconnect(self, receive):
-        try:
+        with suppress(asyncio.CancelledError):
             await super().listen_for_disconnect(receive)
-        except asyncio.CancelledError:
-            pass
 
 
 def publish_payload(payload: dict[str, Any]) -> None:

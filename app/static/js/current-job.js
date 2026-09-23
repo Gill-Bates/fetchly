@@ -23,11 +23,6 @@ function getCard() {
     return document.getElementById("currentJobCard");
 }
 
-/** @returns {string | null} the job mounted on the card, if any */
-export function getCurrentJobId() {
-    return currentJobId;
-}
-
 /**
  * Detach the current job from the list (or hand it back), depending on whether
  * the card is showing it. Re-renders both list surfaces in one pass.
