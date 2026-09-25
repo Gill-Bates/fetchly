@@ -60,7 +60,8 @@ fetchly uses double-submit CSRF tokens on all state-changing operations.
 
 ### Requirements
 - Browser cookies enabled
-- `SameSite=Lax` on the CSRF cookie
+- `SameSite=Lax` on the CSRF cookie, no `Max-Age` (a browser-session cookie, so it
+  cannot expire out from under a login left open across the full `session_max_days`)
 - `Secure` over HTTPS in production (set `FETCHLY_BEHIND_HTTPS=1`)
 
 ### Why the cookie is not HttpOnly

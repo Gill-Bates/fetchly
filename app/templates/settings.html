@@ -759,17 +759,42 @@
                         <div class="ui-card h-100">
                             <div>
                                 <div class="settings-section">
-                                    <label for="sessionMaxDays" class="form-label">Session lifetime
-                                        (days)</label>
-                                    <input type="number" class="form-control ui-input" id="sessionMaxDays"
-                                        name="session_max_days" min="1" max="7"
+                                    <div class="settings-slider-header">
+                                        <label for="sessionMaxDays" class="form-label mb-0">Session lifetime
+                                            (days)</label>
+                                        <output class="ui-badge settings-slider-value" id="sessionMaxDaysValue"
+                                            for="sessionMaxDays"></output>
+                                    </div>
+                                    <div class="settings-range-control">
+                                        <input type="range" class="form-range settings-range" id="sessionMaxDays"
+                                            min="0" max="6" step="1" value="6"
+                                            data-session-max-days="{{ settings.session_max_days | default(7) }}"
+                                            aria-describedby="sessionMaxDaysValue sessionMaxDaysHint">
+                                        <div class="settings-range-ticks" aria-hidden="true">
+                                            <span class="settings-range-tick"></span>
+                                            <span class="settings-range-tick"></span>
+                                            <span class="settings-range-tick"></span>
+                                            <span class="settings-range-tick"></span>
+                                            <span class="settings-range-tick"></span>
+                                            <span class="settings-range-tick"></span>
+                                            <span class="settings-range-tick"></span>
+                                        </div>
+                                    </div>
+                                    <input type="hidden" id="sessionMaxDaysInput" name="session_max_days"
                                         value="{{ settings.session_max_days | default(7) }}">
-                                    <small class="setting-hint setting-hint--with-icon">
+                                    <div class="settings-range-labels" aria-hidden="true">
+                                        <span>1d</span>
+                                        <span>2d</span>
+                                        <span>3d</span>
+                                        <span>4d</span>
+                                        <span>5d</span>
+                                        <span>6d</span>
+                                        <span>7d</span>
+                                    </div>
+                                    <small class="setting-hint setting-hint--with-icon" id="sessionMaxDaysHint">
                                         <span class="material-symbols-outlined setting-hint-icon"
                                             aria-hidden="true">info</span>
-                                        <span>A login stays valid for this many days (1-7), counted from sign-in.
-                                            Activity does not extend it: once it elapses the session is invalidated
-                                            and a new login is required.</span>
+                                        <span>How long a login stays valid, counted from sign-in.</span>
                                     </small>
                                 </div>
                             </div>

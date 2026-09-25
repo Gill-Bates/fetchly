@@ -16,11 +16,9 @@ Templates here render the entire UI. There is no client-side framework and no co
 | `settings.html` | Settings: authentication, download tuning, watermark, cookies, Lalal.ai integration, System tiles (version/update, host resources) |
 | `job.html` | Job detail: metadata, download controls, trim editor, stem separation |
 | `share_error.html` | Shown when a share link is expired, invalid, or over its use limit |
-| `_status_badge.html` | Status badge partial |
-| `_action_btn.html` | Action button partial |
+| `_action_btn.html` | Action button partial. Currently **not included** by any page — the dashboard renders job rows client-side from `jobsBootstrapData`; `tests/test_status_mapping_parity.py` keeps its status sets in sync with the backend. |
 | `macros/navbar.html` | Navigation bar macro |
 | `macros/stats.html` | Host/statistics display macro |
-| `macros/status.html` | Job status display macro |
 
 ## For AI Agents
 

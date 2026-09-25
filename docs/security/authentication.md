@@ -59,7 +59,7 @@ sequenceDiagram
     participant B as Browser
     participant F as fetchly
     B->>F: GET /login
-    F-->>B: Form + CSRF cookie + anti-bot token + honeypot field
+    F-->>B: Form + CSRF cookie (browser-session, no Max-Age) + anti-bot token + honeypot field
     B->>F: POST /login (credentials, CSRF, token, honeypot)
     F->>F: CSRF check
     F->>F: Anti-bot check (honeypot, token signature, age)
@@ -78,7 +78,7 @@ which check tripped.
 | Property | Value |
 |---|---|
 | Cookie | `fetchly_session` |
-| Contents | Username, issue time, last activity, nonce, session version — HMAC-signed |
+| Contents | Username, issue time, nonce, session version — HMAC-signed |
 | `HttpOnly` | Yes |
 | `SameSite` | `Lax` |
 | `Secure` | When `FETCHLY_BEHIND_HTTPS=1` or the request arrived over HTTPS |

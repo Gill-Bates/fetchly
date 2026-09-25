@@ -33,7 +33,6 @@ __all__ = [
     "public_settings",
     "register_filters",
     "status_class",
-    "status_icon",
     "status_label",
 ]
 
@@ -74,15 +73,6 @@ _STATUS_LABEL_MAP: dict[str, str] = {
     "done": "Done",
     "error": "Error",
     "cancelled": "Cancelled",
-}
-_STATUS_ICON_MAP: dict[str, str] = {
-    "cancelled": "cancel",
-    "error": "error",
-    "analysis": "graphic_eq",
-    "queued": "schedule",
-    "processing": "sync",
-    "downloading": "download",
-    "transcoding": "memory",
 }
 _FILESIZE_UNITS: tuple[tuple[str, int], ...] = (
     ("TiB", 1_099_511_627_776),
@@ -183,13 +173,6 @@ def status_label(status: str | None) -> str:
     return _STATUS_LABEL_MAP.get(status, str(status).replace("_", " ").title())
 
 
-def status_icon(status: str | None) -> str:
-    """Material icon name for a job status."""
-    if status in _SUCCESS_STATUSES:
-        return "check_circle"
-    return _STATUS_ICON_MAP.get(status, "schedule")
-
-
 def platform_pill(url: str | None) -> str:
     """Return the short platform pill label (YT / TikTok / Insta / FB) for a URL."""
     return platform_label(detect_platform(url))
@@ -227,6 +210,5 @@ def register_filters(templates: Jinja2Templates) -> None:
     templates.env.filters["duration"] = duration
     templates.env.filters["status_class"] = status_class
     templates.env.filters["status_label"] = status_label
-    templates.env.filters["status_icon"] = status_icon
     templates.env.filters["platform_pill"] = platform_pill
     templates.env.filters["platform_id"] = platform_id

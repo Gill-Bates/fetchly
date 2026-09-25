@@ -110,6 +110,8 @@ _PERSISTED_CANCELLABLE_JOB_STATUSES = (
     "transcoding",
 )
 _RETRYABLE_JOB_STATUSES = frozenset({"error", "cancelled"})
+_QUEUE_FULL_DETAIL = "Job queue is full, please try again later"
+_LOW_MEMORY_DETAIL = "Server is low on memory, please try again later"
 _RUNTIME_LIMIT_BOUNDS: dict[str, tuple[int, int]] = {
     "download_worker_count": (0, 8),
     "download_timeout_minutes": (1, 240),
@@ -1179,6 +1181,17 @@ async def api_set_settings(
         raise HTTPException(status_code=500, detail="Internal server error") from exc
 
 
+async def _require_job_headroom() -> None:
+    """Reject a new job when the queue is full or memory headroom is gone.
+
+    Implements the documented ENABLE_BACKPRESSURE / MEMORY_THRESHOLD_MB policy.
+    """
+    if get_job_queue().full():
+        raise HTTPException(status_code=503, detail=_QUEUE_FULL_DETAIL)
+    if not await governor.can_accept_job_async():
+        raise HTTPException(status_code=503, detail=_LOW_MEMORY_DETAIL)
+
+
 # response_model=None: see api_set_settings - the 409 duplicate-job branch
 # returns a JSONResponse, so the union cannot be schema-generated.
 @router.post("/api/submit", response_model=None)
@@ -1231,9 +1244,7 @@ async def api_submit(
         logger.debug("Metadata extraction skipped for submit (will be fetched by worker): %s", exc)
 
     job_id = str(uuid.uuid4())
-    job_queue = get_job_queue()
-    if job_queue.full():
-        raise HTTPException(status_code=503, detail="Job queue is full, please try again later")
+    await _require_job_headroom()
 
     settings = await asyncio.to_thread(get_settings)
     await asyncio.to_thread(
@@ -1261,7 +1272,7 @@ async def api_submit(
             )
         except Exception:
             logger.exception("Failed to mark job %s as errored after queue overflow", job_id)
-        raise HTTPException(status_code=503, detail="Job queue is full, please try again later")
+        raise HTTPException(status_code=503, detail=_QUEUE_FULL_DETAIL)
     job = await asyncio.to_thread(get_job, job_id)
     if not job:
         # Row vanished between insert and read (retention sweep or manual
@@ -1336,9 +1347,7 @@ async def retry_job(
     if status not in _RETRYABLE_JOB_STATUSES:
         raise HTTPException(status_code=400, detail=f"Cannot retry job with status: {status}")
 
-    job_queue = get_job_queue()
-    if job_queue.full():
-        raise HTTPException(status_code=503, detail="Job queue is full, please try again later")
+    await _require_job_headroom()
 
     requeued = await asyncio.to_thread(
         update_job_if_status,
@@ -1375,7 +1384,7 @@ async def retry_job(
             )
         except Exception:
             logger.exception("Failed to mark job %s as errored after retry queue overflow", job_id_str)
-        raise HTTPException(status_code=503, detail="Job queue is full, please try again later")
+        raise HTTPException(status_code=503, detail=_QUEUE_FULL_DETAIL)
 
     logger.info("Retry requested for job %s (was: %s)", job_id_str, status)
 

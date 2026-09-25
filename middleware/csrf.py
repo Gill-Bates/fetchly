@@ -8,9 +8,11 @@
 
 from __future__ import annotations
 
+import os
 import re
 import secrets
 from collections.abc import Awaitable, Callable
+from typing import Final
 from urllib.parse import parse_qs
 
 from fastapi import Request
@@ -23,6 +25,11 @@ SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 # Characters that must not appear in a cookie name per RFC 6265.
 _BAD_COOKIE_NAME_CHARS = re.compile(r'[;=\s]')
 
+# Mirrors app/session.py's FETCHLY_BEHIND_HTTPS check, so the session cookie
+# and this one agree on Secure behind a proxy that terminates TLS itself
+# (request.url.scheme alone reads as "http" there).
+_COOKIE_SECURE_ENV: Final = "FETCHLY_BEHIND_HTTPS"
+
 
 def generate_csrf_token() -> str:
     """Return a random token suitable for double-submit cookie CSRF protection."""
@@ -32,7 +39,11 @@ def generate_csrf_token() -> str:
 class CSRFMiddleware:
     """Double-submit cookie CSRF middleware for selected state-changing routes."""
 
-    _COOKIE_MAX_AGE = 3600
+    # No Max-Age: a browser-session cookie that lives as long as the tab does.
+    # A fixed Max-Age shorter than the login's own lifetime (session_max_days,
+    # now up to 7 days) would silently expire the CSRF cookie under a tab left
+    # open longer than that, while the login itself was still valid - every
+    # write in that tab would then 403 until the next reload.
     _COOKIE_SAMESITE = "lax"
     _COOKIE_PATH = "/"
 
@@ -61,6 +72,23 @@ class CSRFMiddleware:
 
     def _path_protected(self, path: str) -> bool:
         return any(path == p or path.startswith(p + "/") for p in self._protected_paths)
+
+    @staticmethod
+    def _resolve_secure(request: Request) -> bool:
+        """Return True when the CSRF cookie should carry Secure.
+
+        Same rule as app/session.py's _resolve_cookie_secure(): trust
+        FETCHLY_BEHIND_HTTPS in addition to the request scheme, since a proxy
+        that terminates TLS itself and is not in FORWARDED_ALLOW_IPS leaves
+        request.url.scheme reading "http" for an HTTPS-facing client.
+        """
+        configured_secure = str(os.environ.get(_COOKIE_SECURE_ENV, "")).strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        return configured_secure or request.url.scheme == "https"
 
     @staticmethod
     def _normalize_content_type(content_type: str) -> str:
@@ -150,7 +178,6 @@ class CSRFMiddleware:
                 key=self._csrf_cookie_name,
                 value=set_cookie_value,
                 path=self._COOKIE_PATH,
-                max_age=self._COOKIE_MAX_AGE,
                 httponly=False,
                 secure=secure,
                 samesite=self._COOKIE_SAMESITE,  # type: ignore[arg-type]
@@ -161,7 +188,6 @@ class CSRFMiddleware:
         """Serialize the CSRF cookie for direct header injection."""
         parts = [
             f"{self._csrf_cookie_name}={value}",
-            f"Max-Age={self._COOKIE_MAX_AGE}",
             f"Path={self._COOKIE_PATH}",
             f"SameSite={self._COOKIE_SAMESITE.capitalize()}",
         ]
@@ -193,7 +219,7 @@ class CSRFMiddleware:
 
         method = request.method
         path = request.url.path
-        secure = request.url.scheme == "https"
+        secure = self._resolve_secure(request)
 
         # A consumed body must be replayed for downstream handlers.
         body_cache: bytes | None = None

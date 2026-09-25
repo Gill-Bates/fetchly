@@ -18,7 +18,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from time import monotonic
-from typing import Final, Self, TypedDict
+from typing import Final, Self
 
 from fastapi import HTTPException
 
@@ -270,21 +270,6 @@ class ResourceLimits:
     analysis_limit: int
     io_limit: int
     transcode_limit: int
-
-
-class GovernorStatus(TypedDict):
-    effective_cpus: float
-    worker_count: int
-    queue_maxsize: int
-    cpu_limit: int
-    analysis_limit: int
-    io_limit: int
-    transcode_limit: int
-    memory_available_mb: int
-    memory_threshold_mb: int
-    memory_backpressure_triggered: bool
-    backpressure_enabled: bool
-    can_accept_job: bool
 
 
 class Governor:
@@ -595,7 +580,7 @@ class Governor:
 
         Cache hits return immediately. A cold cache does a synchronous read; an
         expired cache returns the stale value and refreshes in the background.
-        -1 disables the memory backpressure check in can_accept_job().
+        -1 disables the memory backpressure check in can_accept_job_async().
         """
         cached_value = self._cached_memory_or_start_refresh()
         if cached_value is not None:
@@ -611,31 +596,21 @@ class Governor:
 
         return await asyncio.to_thread(self._read_memory_available_mb_serialized)
 
-    def _memory_backpressure_state(self) -> tuple[int, int, bool]:
-        """Return (available_mb, threshold_mb, is_triggered)."""
-        config, _ = self._require_configured()
-        mem_available = self.get_memory_available_mb()
-        threshold = config.memory_threshold_mb
-        triggered = config.enable_backpressure and mem_available >= 0 and mem_available < threshold
-        return mem_available, threshold, triggered
+    async def can_accept_job_async(self) -> bool:
+        """Whether memory headroom allows accepting another job.
 
-    async def _memory_backpressure_state_async(self) -> tuple[int, int, bool]:
-        """Async variant of _memory_backpressure_state()."""
-        config, _ = self._require_configured()
+        Accepts before :meth:`configure` so a submission never fails on startup
+        ordering, and when the available memory is unknown (-1).
+        """
+        with self._lock:
+            config = self._config
+
+        if config is None or not config.enable_backpressure:
+            return True
+
         mem_available = await self.get_memory_available_mb_async()
         threshold = config.memory_threshold_mb
-        triggered = config.enable_backpressure and mem_available >= 0 and mem_available < threshold
-        return mem_available, threshold, triggered
-
-    def can_accept_job(self) -> bool:
-        """Check whether memory pressure allows accepting another job."""
-        config, _ = self._require_configured()
-
-        if not config.enable_backpressure:
-            return True
-
-        mem_available, threshold, triggered = self._memory_backpressure_state()
-        if triggered:
+        if 0 <= mem_available < threshold:
             logger.warning(
                 "Memory below threshold: %dMB available, %dMB required",
                 mem_available,
@@ -644,58 +619,6 @@ class Governor:
             return False
 
         return True
-
-    async def can_accept_job_async(self) -> bool:
-        """Async variant of can_accept_job() for request paths."""
-        config, _ = self._require_configured()
-
-        if not config.enable_backpressure:
-            return True
-
-        mem_available, threshold, triggered = await self._memory_backpressure_state_async()
-        if triggered:
-            logger.warning(
-                "Memory below threshold: %dMB available, %dMB required",
-                mem_available,
-                threshold,
-            )
-            return False
-
-        return True
-
-    def _build_status(
-        self,
-        config: GovernorConfig,
-        limits: ResourceLimits,
-        memory_state: tuple[int, int, bool],
-    ) -> GovernorStatus:
-        mem_available, threshold, triggered = memory_state
-        can_accept = True if not config.enable_backpressure else not triggered
-
-        return {
-            "effective_cpus": limits.effective_cpus,
-            "worker_count": limits.worker_count,
-            "queue_maxsize": limits.queue_maxsize,
-            "cpu_limit": limits.cpu_limit,
-            "analysis_limit": limits.analysis_limit,
-            "io_limit": limits.io_limit,
-            "transcode_limit": limits.transcode_limit,
-            "memory_available_mb": mem_available,
-            "memory_threshold_mb": threshold,
-            "memory_backpressure_triggered": triggered,
-            "backpressure_enabled": config.enable_backpressure,
-            "can_accept_job": can_accept,
-        }
-
-    def status(self) -> GovernorStatus:
-        """Return current governor status without logging side effects."""
-        config, limits = self._require_configured()
-        return self._build_status(config, limits, self._memory_backpressure_state())
-
-    async def status_async(self) -> GovernorStatus:
-        """Async variant of status() for request paths."""
-        config, limits = self._require_configured()
-        return self._build_status(config, limits, await self._memory_backpressure_state_async())
 
 
 governor = Governor()
