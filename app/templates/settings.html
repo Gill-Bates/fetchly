@@ -759,15 +759,17 @@
                         <div class="ui-card h-100">
                             <div>
                                 <div class="settings-section">
-                                    <label for="sessionIdleMinutes" class="form-label">Session idle timeout
-                                        (min)</label>
-                                    <input type="number" class="form-control ui-input" id="sessionIdleMinutes"
-                                        name="session_idle_minutes" min="1" max="1440"
-                                        value="{{ settings.session_idle_minutes | default(60) }}">
+                                    <label for="sessionMaxDays" class="form-label">Session lifetime
+                                        (days)</label>
+                                    <input type="number" class="form-control ui-input" id="sessionMaxDays"
+                                        name="session_max_days" min="1" max="7"
+                                        value="{{ settings.session_max_days | default(7) }}">
                                     <small class="setting-hint setting-hint--with-icon">
                                         <span class="material-symbols-outlined setting-hint-icon"
                                             aria-hidden="true">info</span>
-                                        <span>Signs an idle session out after this many minutes of inactivity.</span>
+                                        <span>A login stays valid for this many days (1-7), counted from sign-in.
+                                            Activity does not extend it: once it elapses the session is invalidated
+                                            and a new login is required.</span>
                                     </small>
                                 </div>
                             </div>

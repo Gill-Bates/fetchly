@@ -22,7 +22,7 @@ The app module is the heart of fetchly: it handles HTTP requests, runs an in-pro
 | `bpm_naming.py` | Folds a detected tempo into the **download** filename (`Some Track_94bpm.source`). Stored filenames are never rewritten. |
 | `bpm_normalization.py` | Octave/half-time normalization of raw BPM output |
 | `db.py` | Raw `sqlite3` access: schema creation, connection configuration, job/settings/share-link queries, status validation |
-| `session.py` | Session tokens signed with HMAC-SHA256, idle-timeout handling, login state |
+| `session.py` | Session tokens signed with HMAC-SHA256, absolute lifetime (`session_max_days`), login state |
 | `governor.py` | Resource governor: cgroup/cpuset CPU detection, memory thresholds, semaphores, backpressure |
 | `lalal.py` | Lalal.ai API integration: upload, stem request, polling, result retrieval |
 | `lalal_policy.py` | Policy guards for Lalal.ai use (duration guard, quota and size caps) |
@@ -55,7 +55,7 @@ The app module is the heart of fetchly: it handles HTTP requests, runs an in-pro
 - **Watermark logo:** uploaded via `POST /api/settings/watermark-logo`, served from `GET /api/settings/watermark-logo/image`, rendered by `utils/watermark_logo.py`
 
 ### Testing
-- **Unit tests:** `tests/test_*.py` (41 files) — pytest is the runner, but tests are unittest-style classes
+- **Unit tests:** `tests/test_*.py` (42 files) — pytest is the runner, but tests are unittest-style classes
 - **Shared setup:** subclass `IsolatedDbTestCase` or `WebAppTestCase` from `tests/_support.py`. `tests/conftest.py` only imports `_support` for its `FETCHLY_SECRET_KEY` side effect; it defines no fixtures.
 - **API contract tests:** `tests/test_output_modes.py`
 - **Worker hardening:** `tests/test_worker_hardening.py`

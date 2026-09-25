@@ -39,8 +39,9 @@
 | `test_governor_semaphores.py` | `SharedSemaphore`: one budget per workload across worker threads and the event loop, cancellation safety, and the `*_sync` accessors returning the same object |
 | `test_worker_cancel_retry_race.py` | The worker's terminal writebacks are conditional, so a stale cancel cannot land on a row a retry already moved |
 | `test_release_tag_order.py` | The version-ordering function lifted out of `.github/workflows/docker-build.yml`: architecture fragments are not versions, prereleases sort below their release, numeric parts compare as numbers, longer versions are not truncated into equality. A mis-ordered comparison moves `latest` and releases the tag-pruning job, so the failure mode is destructive. |
+| `test_session_lifetime.py` | The absolute session lifetime (`session_max_days`): default and range clamping, expiry at the exact boundary, and that the cookie's `Max-Age` never outlives the server-side check |
 
-41 Python test files in total.
+42 Python test files in total.
 
 ## Subdirectories
 
@@ -158,4 +159,4 @@ pytest tests/test_worker_hardening.py --pdb
 **Last Updated:** 2026-09-21  
 **Python:** pytest runner, unittest-style classes, no fixtures  
 **JavaScript:** `node:test` + `node:assert/strict`  
-**Counts:** 41 Python files, 17 JavaScript files
+**Counts:** 42 Python files, 17 JavaScript files

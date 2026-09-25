@@ -74,7 +74,7 @@ from .routes.lalal import init_lalal
 from .routes.media import init_media, resolve_job_path
 from .routes.share import init_share
 from .routes.trim import init_trim
-from .session import SESSION_COOKIE, refresh_session_settings_cache, renew_session, set_session_cookie
+from .session import refresh_session_settings_cache
 from .utils.assets import VersionedStaticFiles, asset_url
 from .utils.cookies import ensure_data_cookies_dir
 from .utils.duration import round_seconds
@@ -107,17 +107,6 @@ _ANALYSIS_BACKLOG_POLL_INTERVAL = 5.0
 _DOWNLOAD_BACKLOG_POLL_INTERVAL = 15.0
 _EVENT_QUEUE_MAXSIZE = 10_000
 _SESSION_SETTINGS_REFRESH_INTERVAL = 60.0
-_SKIP_RENEW_EXACT = frozenset({
-    "/favicon.ico",
-    "/health",
-    "/login",
-    "/logout",
-})
-_SKIP_RENEW_PREFIXES = (
-    "/static",
-    "/thumbnail",
-    "/download",
-)
 
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
 
@@ -134,14 +123,6 @@ templates.env.globals["LALAL_MAX_DURATION_MINUTES"] = LALAL_MAX_DURATION_MINUTES
 # eagerly as well as during lifespan. This keeps TestClient(app) usable for
 # login/logout checks even when startup events have not run yet.
 init_auth(templates, _SECRET_KEY)
-
-
-def _should_skip_session_renewal(request_path: str) -> bool:
-    if request_path in _SKIP_RENEW_EXACT:
-        return True
-    return any(
-        request_path == prefix or request_path.startswith(prefix + "/") for prefix in _SKIP_RENEW_PREFIXES
-    )
 
 
 def _governor_config_from_settings(settings: dict[str, Any]) -> GovernorConfig:
@@ -539,59 +520,6 @@ async def _redoc_ui(request: Request) -> Response:
     return get_redoc_html(openapi_url="/openapi.json", title=f"{app.title} - ReDoc")
 
 
-class SessionRenewalMiddleware:
-    """Renew session cookies without BaseHTTPMiddleware's streaming-response wrapper."""
-
-    def __init__(self, app: ASGIApp) -> None:
-        self.app = app
-
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope.get("type") != "http":
-            await self.app(scope, receive, send)
-            return
-
-        request = Request(scope, receive=receive)
-        request_path = request.url.path
-        old_token = request.cookies.get(SESSION_COOKIE)
-        renewed_token: str | None = None
-
-        if old_token and not _should_skip_session_renewal(request_path):
-            renewed_token = await asyncio.to_thread(renew_session, old_token)
-            if renewed_token == old_token:
-                renewed_token = None
-
-        async def send_wrapper(message: Message) -> None:
-            if renewed_token and message.get("type") == "http.response.start":
-                status = int(message.get("status", 200))
-                if status < 400:
-                    try:
-                        response = Response()
-                        set_session_cookie(response, renewed_token, request)
-                    except ValueError:
-                        # renewed_token was computed from a session that was
-                        # live at request start, but the handler itself can
-                        # invalidate every outstanding session (e.g. a
-                        # password change bumping session_version - see
-                        # api_set_settings in app/routes/api.py) before this
-                        # response is sent. set_session_cookie correctly
-                        # refuses to reissue a now-invalid token; skip the
-                        # renewal instead of turning that into a 500, and
-                        # leave the handler's own cookie handling (if any) as
-                        # the source of truth.
-                        logger.debug(
-                            "Skipping session renewal: token invalidated during request handling",
-                            exc_info=True,
-                        )
-                    else:
-                        headers = MutableHeaders(scope=message)
-                        for key, value in response.raw_headers:
-                            if key == b"set-cookie":
-                                headers.append("set-cookie", value.decode("latin-1"))
-            await send(message)
-
-        await self.app(scope, receive, send_wrapper)
-
-
 # SHA-256 of the stylesheet WaveSurfer injects into its shadow root, so
 # style-src can allow that one sheet without opening up 'unsafe-inline'.
 # Refresh it (from the browser console's CSP error) whenever the vendored
@@ -658,7 +586,6 @@ class OriginalClientMiddleware:
         await self.app(scope, receive, send)
 
 
-app.add_middleware(SessionRenewalMiddleware)
 app.add_middleware(
     CSRFMiddleware,
     csrf_cookie_name=_CSRF_COOKIE,

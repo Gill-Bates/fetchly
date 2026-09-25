@@ -20,6 +20,13 @@ from .utils.public_url import normalize_public_hostname
 
 logger = logging.getLogger(__name__)
 
+# Shared with app/session.py and app/routes/api.py so the allowed range for
+# session_max_days is defined once. Lives here, not in session.py, because
+# session.py already imports get_settings from this module - the reverse
+# import would be circular.
+SESSION_MAX_DAYS_MIN: Final = 1
+SESSION_MAX_DAYS_MAX: Final = 7
+
 __all__ = [
     "COMPLETED_STATUSES",
     "DB_PATH",
@@ -133,7 +140,9 @@ _SETTINGS_DEFAULTS: Final[dict[str, str]] = {
     # app/routes/api.py::api_set_settings).
     "enable_authentication": "false",
     "admin_username": "",
-    "session_idle_minutes": "60",
+    # Absolute session lifetime in days, counted from login. The session is
+    # invalidated once it elapses - there is no sliding renewal past it.
+    "session_max_days": "7",
     # 0 means "Automatic": sized per download from the host's CPU quota and
     # free memory (app/governor.py::recommended_concurrent_fragments).
     "download_concurrent_fragments": "0",
@@ -303,7 +312,9 @@ _SETTINGS_TYPES: Final[dict[str, Callable[[object], Any]]] = {
     "login_required": _parse_bool,
     "enable_authentication": _parse_bool,
     "admin_username": lambda value: normalize_admin_username(value if isinstance(value, str) else ""),
-    "session_idle_minutes": lambda value: _parse_bounded_int(value, minimum=1, maximum=24 * 60),
+    "session_max_days": lambda value: _parse_bounded_int(
+        value, minimum=SESSION_MAX_DAYS_MIN, maximum=SESSION_MAX_DAYS_MAX
+    ),
     "session_version": _parse_nonnegative_int,
     "download_concurrent_fragments": lambda value: _parse_bounded_int(value, minimum=0, maximum=16),
     "download_worker_count": lambda value: _parse_bounded_int(value, minimum=0, maximum=8),
@@ -510,6 +521,15 @@ def init_db() -> None:
             "SELECT 'download_compatible_output', value FROM settings WHERE key = 'download_mp4_preset'"
         )
         con.execute("DELETE FROM settings WHERE key = 'download_mp4_preset'")
+
+        # "session_idle_minutes" (a sliding idle timeout) became
+        # "session_max_days" (an absolute lifetime from login) when the hard
+        # 24h limit was dropped in favor of a single configurable deadline.
+        # The two settings have no compatible conversion - an idle-minutes
+        # value says nothing about how many days a login should stay valid -
+        # so the old row is just dropped and the new one starts at its
+        # default. No-op once migrated (the old row no longer exists).
+        con.execute("DELETE FROM settings WHERE key = 'session_idle_minutes'")
 
         # The boolean "download_compatible_output" became the three-way
         # "download_output_mode" when AV1 joined H.264/AAC as an output target.

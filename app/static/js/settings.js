@@ -237,7 +237,7 @@ const RUNTIME_LIMITS = [
     ["audio_analysis_max_minutes", "BPM analysis track limit", 0, 240],
     ["audio_analysis_timeout_minutes", "BPM analysis timeout", 1, 60],
     ["lalal_max_download_gib", "Lalal result limit", 1, 100],
-    ["session_idle_minutes", "Session idle timeout", 1, 1440],
+    ["session_max_days", "Session lifetime (days)", 1, 7],
 ];
 
 let saveTimeoutId = null;
@@ -1152,7 +1152,7 @@ const AUTO_SAVE_INPUT_SELECTOR = [
     '[name="audio_analysis_max_minutes"]',
     '[name="audio_analysis_timeout_minutes"]',
     '[name="lalal_max_download_gib"]',
-    '[name="session_idle_minutes"]',
+    '[name="session_max_days"]',
 ].join(", ");
 
 function bindOutputModeSlider() {

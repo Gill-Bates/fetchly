@@ -1,6 +1,9 @@
 
 ## [1.3.1] - 2026-xx-xx
 
+- ``New`` **Session lifetime** in Settings → Security is set in days (1-7, default 7) and replaces the former idle timeout in minutes. A login now stays valid for the configured number of days counted from sign-in, and is invalidated once it elapses regardless of activity.
+- ``Security`` A login is no longer signed out early after a period of inactivity, and the previous 24-hour hard limit is gone. A session now lives for the full configured **Session lifetime** (up to 7 days, default 7) regardless of activity, which also extends how long a stolen session cookie stays usable. Change the admin password to invalidate every outstanding session immediately.
+
 
 <details markdown="1">
 <summary>Previous versions...</summary>

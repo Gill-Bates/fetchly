@@ -98,7 +98,7 @@ _PUBLIC_SETTING_KEYS: frozenset[str] = frozenset({
     "enable_job_history",
     "login_required",
     "enable_authentication",
-    "session_idle_minutes",
+    "session_max_days",
     "download_concurrent_fragments",
     "download_worker_count",
     "download_timeout_minutes",

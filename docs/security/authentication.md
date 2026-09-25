@@ -82,23 +82,22 @@ which check tripped.
 | `HttpOnly` | Yes |
 | `SameSite` | `Lax` |
 | `Secure` | When `FETCHLY_BEHIND_HTTPS=1` or the request arrived over HTTPS |
-| Hard limit | 24 hours from login (not configurable) |
-| Idle timeout | Sliding, `session_idle_minutes` (1–1440, default 60) |
+| Lifetime | Absolute, `session_max_days` (1–7, default 7), counted from login |
 
 A session is valid only while **all** of these hold:
 
 1. The signature verifies
-2. The hard 24-hour limit has not passed
-3. The last activity is within the idle timeout
-4. The embedded session version matches the current one
+2. The absolute lifetime since login has not elapsed
+3. The embedded session version matches the current one
 
-Cookie `Max-Age` is the smaller of the remaining hard and idle budgets, so the browser
-discards the cookie exactly when the server stops accepting it.
+Cookie `Max-Age` is the remaining lifetime, so the browser discards the cookie exactly
+when the server stops accepting it.
 
-### Idle timeout
+### Session lifetime
 
-**Settings → Security → Session idle timeout**, 1–1440 minutes, default 60. The window
-slides: each authenticated request refreshes it.
+**Settings → Security → Session lifetime**, 1–7 days, default 7. It is absolute and
+counted from sign-in: activity does not extend it. Once it elapses the session is
+invalidated and the user must log in again.
 
 ### Invalidating every session
 

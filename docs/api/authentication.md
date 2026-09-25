@@ -91,11 +91,10 @@ The cookie is `HttpOnly`, `SameSite=Lax`, and `Secure` when
 
 | Limit | Value |
 |---|---|
-| Hard | 24 hours from login, not configurable |
-| Idle | Sliding, `session_idle_minutes` (1–1440, default 60) |
+| Absolute | `session_max_days` (1–7, default 7), counted from login |
 
-Both are enforced server-side and reflected in the cookie's `Max-Age`. A client that
-sits idle past the timeout gets `401`/`403` and must log in again.
+It is enforced server-side and reflected in the cookie's `Max-Age`. Activity does not
+extend it: once the lifetime elapses the client gets `401`/`403` and must log in again.
 
 ## Logging out
 

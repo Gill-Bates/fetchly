@@ -25,7 +25,7 @@ What the design assumes:
 |---|---|
 | Authentication | Optional login; PBKDF2-HMAC-SHA256, 200,000 iterations, per-username salt and a key-derived pepper |
 | Sessions | HMAC-signed cookie, `HttpOnly`, `SameSite=Lax`, `Secure` behind HTTPS |
-| Session lifetime | 24-hour hard limit plus a sliding idle timeout |
+| Session lifetime | Absolute, 1–7 days from login (default 7); not extended by activity |
 | CSRF | Double-submit cookie on state-changing routes |
 | Anti-bot | Invisible honeypot plus a signed time-trap token on the public login |
 | Rate limiting | Per-route, per-client-IP limits on every endpoint |
@@ -71,8 +71,7 @@ username and the hash.
 | Cookie name | `fetchly_session` |
 | Signing | HMAC over the payload with `FETCHLY_SECRET_KEY` |
 | Flags | `HttpOnly`, `SameSite=Lax`, `Secure` when `FETCHLY_BEHIND_HTTPS=1` or the request is HTTPS |
-| Hard limit | 24 hours from login, not configurable |
-| Idle timeout | Sliding, `session_idle_minutes` (1–1440, default 60) |
+| Lifetime | Absolute, `session_max_days` (1–7, default 7), counted from login |
 | Invalidation | Bumping `session_version` invalidates every existing session at once |
 
 Cookie `Max-Age` is set to whichever expiry comes first, so the browser drops the cookie

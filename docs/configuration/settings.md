@@ -167,7 +167,7 @@ Automatic resolves to at that moment. See [Resources](resources.md).
 | Admin username | `admin_username` | Normalized on save |
 | Admin password | `admin_password_hash` | PBKDF2-HMAC-SHA256; only the hash is stored |
 | Enable authentication | `enable_authentication` | Cannot be enabled before credentials exist |
-| Session idle timeout | `session_idle_minutes` | `1`–`1440`, default `60` |
+| Session lifetime | `session_max_days` | `1`–`7` days, default `7`; absolute, counted from login |
 
 !!! warning "No credentials, no authentication"
     A fresh install has no account and authentication is off. Saving a username and

@@ -27,6 +27,8 @@ from ..bpm_cluster import cluster_bpms
 from ..common.rate_limit import limiter
 from ..db import (
     DOWNLOAD_OUTPUT_MODES,
+    SESSION_MAX_DAYS_MAX,
+    SESSION_MAX_DAYS_MIN,
     TERMINAL_JOB_STATUSES,
     delete_jobs_and_share_links,
     find_active_job_for_submission,
@@ -116,7 +118,7 @@ _RUNTIME_LIMIT_BOUNDS: dict[str, tuple[int, int]] = {
     "audio_analysis_max_minutes": (0, 240),
     "audio_analysis_timeout_minutes": (1, 60),
     "lalal_max_download_gib": (1, 100),
-    "session_idle_minutes": (1, 1440),
+    "session_max_days": (SESSION_MAX_DAYS_MIN, SESSION_MAX_DAYS_MAX),
 }
 
 _templates: "Jinja2Templates | None" = None
