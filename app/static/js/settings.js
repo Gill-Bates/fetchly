@@ -559,9 +559,14 @@ function validateSettings() {
         return { valid: false, error: "Max. uses per share link must be between 0 and 10000" };
     }
 
+    const sessionMaxDaysMin = SESSION_MAX_DAY_OPTIONS[0];
+    const sessionMaxDaysMax = SESSION_MAX_DAY_OPTIONS[SESSION_MAX_DAY_OPTIONS.length - 1];
     const sessionMaxDays = parseInt(String(form.get("session_max_days") || ""), 10);
-    if (!Number.isFinite(sessionMaxDays) || sessionMaxDays < 1 || sessionMaxDays > 7) {
-        return { valid: false, error: "Session lifetime must be between 1 and 7 days" };
+    if (!Number.isFinite(sessionMaxDays) || sessionMaxDays < sessionMaxDaysMin || sessionMaxDays > sessionMaxDaysMax) {
+        return {
+            valid: false,
+            error: `Session lifetime must be between ${sessionMaxDaysMin} and ${sessionMaxDaysMax} days`,
+        };
     }
 
     const outputMode = String(form.get("download_output_mode") || "");

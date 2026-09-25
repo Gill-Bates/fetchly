@@ -72,10 +72,10 @@ username and the hash.
 | Signing | HMAC over the payload with `FETCHLY_SECRET_KEY` |
 | Flags | `HttpOnly`, `SameSite=Lax`, `Secure` when `FETCHLY_BEHIND_HTTPS=1` or the request is HTTPS |
 | Lifetime | Absolute, `session_max_days` (1–7, default 7), counted from login |
-| Invalidation | Bumping `session_version` invalidates every existing session at once |
+| Invalidation | Bumping `session_version` invalidates every existing session at once; logout does this too |
 
-Cookie `Max-Age` is set to whichever expiry comes first, so the browser drops the cookie
-at the same moment the server stops honouring it.
+Cookie `Max-Age` matches the remaining lifetime, so the browser drops the cookie at the
+same moment the server stops honouring it.
 
 ## CSRF
 

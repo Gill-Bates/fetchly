@@ -20,7 +20,7 @@ from typing import Any, Final
 
 from fastapi import Request, Response
 
-from .db import SESSION_MAX_DAYS_MAX, SESSION_MAX_DAYS_MIN, get_settings
+from .db import SESSION_MAX_DAYS_MAX, SESSION_MAX_DAYS_MIN, get_settings, set_settings
 
 SESSION_COOKIE: Final = "fetchly_session"
 
@@ -120,6 +120,25 @@ def _get_session_version() -> int:
         logger.warning("Failed to parse cached session_version: %s", exc)
         return 0
     return max(0, version)
+
+
+def invalidate_current_session(username: str) -> None:
+    """Bump session_version so every outstanding token (including the one
+    belonging to this request) stops validating.
+
+    There is no server-side session store to delete a single token from -
+    tokens are stateless HMAC signatures. Logout therefore revokes by version
+    bump rather than by deleting a row; this invalidates every session for
+    every user at once (fetchly is single-admin, so that is the only user).
+    """
+    try:
+        settings = get_settings(include_internal=True)
+        next_version = int(settings.get("session_version", 0) or 0) + 1
+        set_settings({"session_version": next_version}, allow_internal=True)
+    except (sqlite3.Error, OSError, ValueError) as exc:
+        logger.warning("Failed to bump session_version on logout for %s: %s", username, exc)
+        return
+    refresh_session_settings_cache()
 
 
 def get_cached_authentication_enabled() -> bool:
@@ -236,13 +255,20 @@ def set_session_cookie(response: Response, token: str, request: Request) -> None
         value=token,
         max_age=max_age,
         httponly=True,
-        secure=_resolve_cookie_secure(request),
+        secure=resolve_cookie_secure(request),
         samesite="lax",
         path="/",
     )
 
 
-def _resolve_cookie_secure(request: Request | None = None, *, secure: bool | None = None) -> bool:
+def resolve_cookie_secure(request: Request | None = None, *, secure: bool | None = None) -> bool:
+    """Return True when a cookie should carry Secure.
+
+    Trusts FETCHLY_BEHIND_HTTPS in addition to the request scheme, since a
+    proxy that terminates TLS itself and is not in FORWARDED_ALLOW_IPS leaves
+    request.url.scheme reading "http" for an HTTPS-facing client. Shared with
+    middleware/csrf.py so the session and CSRF cookies agree on Secure.
+    """
     if secure is not None:
         return secure
     configured_secure = str(os.environ.get(_COOKIE_SECURE_ENV, "")).strip().lower() in {
@@ -265,7 +291,7 @@ def delete_session_cookie(
     response.delete_cookie(
         SESSION_COOKIE,
         path="/",
-        secure=_resolve_cookie_secure(request, secure=secure),
+        secure=resolve_cookie_secure(request, secure=secure),
         httponly=True,
         samesite="lax",
     )

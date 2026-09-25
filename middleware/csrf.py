@@ -8,11 +8,9 @@
 
 from __future__ import annotations
 
-import os
 import re
 import secrets
 from collections.abc import Awaitable, Callable
-from typing import Final
 from urllib.parse import parse_qs
 
 from fastapi import Request
@@ -20,15 +18,12 @@ from fastapi.responses import JSONResponse
 from starlette.datastructures import MutableHeaders
 from starlette.types import ASGIApp
 
+from app.session import resolve_cookie_secure
+
 SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
 # Characters that must not appear in a cookie name per RFC 6265.
 _BAD_COOKIE_NAME_CHARS = re.compile(r'[;=\s]')
-
-# Mirrors app/session.py's FETCHLY_BEHIND_HTTPS check, so the session cookie
-# and this one agree on Secure behind a proxy that terminates TLS itself
-# (request.url.scheme alone reads as "http" there).
-_COOKIE_SECURE_ENV: Final = "FETCHLY_BEHIND_HTTPS"
 
 
 def generate_csrf_token() -> str:
@@ -72,23 +67,6 @@ class CSRFMiddleware:
 
     def _path_protected(self, path: str) -> bool:
         return any(path == p or path.startswith(p + "/") for p in self._protected_paths)
-
-    @staticmethod
-    def _resolve_secure(request: Request) -> bool:
-        """Return True when the CSRF cookie should carry Secure.
-
-        Same rule as app/session.py's _resolve_cookie_secure(): trust
-        FETCHLY_BEHIND_HTTPS in addition to the request scheme, since a proxy
-        that terminates TLS itself and is not in FORWARDED_ALLOW_IPS leaves
-        request.url.scheme reading "http" for an HTTPS-facing client.
-        """
-        configured_secure = str(os.environ.get(_COOKIE_SECURE_ENV, "")).strip().lower() in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }
-        return configured_secure or request.url.scheme == "https"
 
     @staticmethod
     def _normalize_content_type(content_type: str) -> str:
@@ -219,7 +197,7 @@ class CSRFMiddleware:
 
         method = request.method
         path = request.url.path
-        secure = self._resolve_secure(request)
+        secure = resolve_cookie_secure(request)
 
         # A consumed body must be replayed for downstream handlers.
         body_cache: bytes | None = None

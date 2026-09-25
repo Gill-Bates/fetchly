@@ -115,3 +115,27 @@ class SessionLifetimeRouteTests(WebAppTestCase):
         response = self.client.get("/api/jobs")
 
         self.assertEqual(response.status_code, 401)
+
+    def test_logout_revokes_a_copied_session_cookie(self):
+        """A cookie copied before logout must stop working after it - tokens
+
+        are stateless, so this is only true if logout bumps session_version.
+        """
+        token = session.create_session("alice")
+        copied_client_cookies = self.client.cookies
+
+        self.client.cookies.set(session.SESSION_COOKIE, token)
+        self.assertEqual(self.client.get("/api/jobs").status_code, 200)
+
+        response = self.client.post(
+            "/logout",
+            headers={"X-CSRF-Token": self._csrf()},
+        )
+        self.assertEqual(response.status_code, 303)
+
+        # Simulate the "copied cookie" by validating the original token
+        # directly, bypassing the client's own (now-cleared) cookie jar.
+        self.assertIsNone(session.validate_session(token))
+
+        copied_client_cookies.set(session.SESSION_COOKIE, token)
+        self.assertEqual(self.client.get("/api/jobs").status_code, 401)

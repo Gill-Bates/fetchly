@@ -120,12 +120,12 @@ class SecureCookieResolutionTests(unittest.TestCase):
     def test_https_proxy_override_marks_cookies_secure_for_http_upstreams(self):
         request = type("R", (), {"url": type("U", (), {"scheme": "http"})()})()
         with patch.dict(os.environ, {"FETCHLY_BEHIND_HTTPS": "1"}):
-            self.assertTrue(session._resolve_cookie_secure(request))
+            self.assertTrue(session.resolve_cookie_secure(request))
 
     def test_plain_http_without_proxy_override_keeps_cookies_non_secure(self):
         request = type("R", (), {"url": type("U", (), {"scheme": "http"})()})()
         with patch.dict(os.environ, {"FETCHLY_BEHIND_HTTPS": ""}):
-            self.assertFalse(session._resolve_cookie_secure(request))
+            self.assertFalse(session.resolve_cookie_secure(request))
 
 
 class CredentialValidationTests(unittest.TestCase):

@@ -25,6 +25,7 @@ from ..session import (
     create_session,
     delete_session_cookie,
     get_cached_authentication_enabled,
+    invalidate_current_session,
     set_session_cookie,
     validate_session,
 )
@@ -193,6 +194,16 @@ def _require_templates() -> Jinja2Templates:
 
 
 def _do_logout(request: Request) -> RedirectResponse:
+    """Clear the cookie and revoke every outstanding session.
+
+    Tokens are stateless HMAC signatures, so there is no per-token row to
+    delete; bumping session_version is what makes a copied cookie useless
+    after logout, not just the cookie deletion on this response.
+    """
+    # Only meaningful with a real session to revoke; while authentication is
+    # off, current_user() always returns LOCAL_USER and there is no cookie.
+    if is_authentication_enabled() and request.cookies.get(SESSION_COOKIE):
+        invalidate_current_session(current_user(request) or "")
     response = RedirectResponse(url="/login", status_code=303)
     delete_session_cookie(response, request)
     return response

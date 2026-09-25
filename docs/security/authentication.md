@@ -103,7 +103,9 @@ invalidated and the user must log in again.
 
 Bumping the internal `session_version` invalidates all outstanding sessions at once.
 It is bumped automatically whenever the credentials change — the credential those
-sessions were issued against no longer exists.
+sessions were issued against no longer exists — and on every logout. Tokens are
+stateless HMAC signatures with nothing to delete server-side, so the version bump is
+also what makes a copied session cookie useless the moment its owner signs out.
 
 ## Authorization
 

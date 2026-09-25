@@ -4,6 +4,7 @@
 - ``New`` **Session lifetime** in Settings → Security is set in days (1-7, default 7) and replaces the former idle timeout in minutes. A login now stays valid for the configured number of days counted from sign-in, and is invalidated once it elapses regardless of activity.
 - ``Fix`` Stem separation no longer aborts a split on a single dropped connection or timeout while polling Lalal.ai for progress; it retries for about 45 seconds before giving up.
 - ``Security`` A login is no longer signed out early after a period of inactivity, and the previous 24-hour hard limit is gone. A session now lives for the full configured **Session lifetime** (up to 7 days, default 7) regardless of activity, which also extends how long a stolen session cookie stays usable. Change the admin password to invalidate every outstanding session immediately.
+- ``Security`` Logging out now revokes the session server-side instead of only clearing the cookie, so a copied session cookie stops working the moment its owner signs out.
 
 
 <details markdown="1">
