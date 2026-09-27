@@ -204,6 +204,34 @@
                     </div>
                     <div class="settings-grid-item settings-grid-item--titled">
                         <h2 class="settings-panel-title fw-semibold mb-3 d-flex align-items-center gap-1">
+                            <span class="material-symbols-outlined icon-inline" aria-hidden="true">download</span>
+                            Downloads
+                        </h2>
+                        <div class="ui-card h-100">
+                            <div>
+                                <div class="settings-section">
+                                    <div class="settings-switch-with-hint">
+                                        <div class="form-check form-switch">
+                                            <input class="form-check-input" type="checkbox" role="switch"
+                                                id="downloadAutoStart" name="download_auto_start" {{ 'checked' if
+                                                settings.download_auto_start | default(true) else '' }}>
+                                            <label class="form-check-label" for="downloadAutoStart">
+                                                Start Download after Processing
+                                            </label>
+                                        </div>
+                                        <small class="setting-hint setting-hint--with-icon">
+                                            <span class="material-symbols-outlined setting-hint-icon"
+                                                aria-hidden="true">info</span>
+                                            <span>Applies to new jobs only. When off, you start the download
+                                                manually from the job history.</span>
+                                        </small>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="settings-grid-item settings-grid-item--titled">
+                        <h2 class="settings-panel-title fw-semibold mb-3 d-flex align-items-center gap-1">
                             <span class="material-symbols-outlined icon-inline" aria-hidden="true">tune</span>
                             Runtime limits
                         </h2>
@@ -513,7 +541,7 @@
                                                     aria-live="polite"></p>
                                             </div>
 
-                                            <div class="lalal-tile-divider">
+                                            <div class="lalal-tile-divider settings-switch-with-hint">
                                                 <div class="form-check form-switch">
                                                     <input class="form-check-input" type="checkbox" role="switch"
                                                         id="lalalDurationGuard" name="lalalaai_duration_guard"
@@ -759,15 +787,42 @@
                         <div class="ui-card h-100">
                             <div>
                                 <div class="settings-section">
-                                    <label for="sessionIdleMinutes" class="form-label">Session idle timeout
-                                        (min)</label>
-                                    <input type="number" class="form-control ui-input" id="sessionIdleMinutes"
-                                        name="session_idle_minutes" min="1" max="1440"
-                                        value="{{ settings.session_idle_minutes | default(60) }}">
-                                    <small class="setting-hint setting-hint--with-icon">
+                                    <div class="settings-slider-header">
+                                        <label for="sessionMaxDays" class="form-label mb-0">Session lifetime
+                                            (days)</label>
+                                        <output class="ui-badge settings-slider-value" id="sessionMaxDaysValue"
+                                            for="sessionMaxDays"></output>
+                                    </div>
+                                    <div class="settings-range-control">
+                                        <input type="range" class="form-range settings-range" id="sessionMaxDays"
+                                            min="0" max="6" step="1" value="6"
+                                            data-session-max-days="{{ settings.session_max_days | default(7) }}"
+                                            aria-describedby="sessionMaxDaysValue sessionMaxDaysHint">
+                                        <div class="settings-range-ticks" aria-hidden="true">
+                                            <span class="settings-range-tick"></span>
+                                            <span class="settings-range-tick"></span>
+                                            <span class="settings-range-tick"></span>
+                                            <span class="settings-range-tick"></span>
+                                            <span class="settings-range-tick"></span>
+                                            <span class="settings-range-tick"></span>
+                                            <span class="settings-range-tick"></span>
+                                        </div>
+                                    </div>
+                                    <input type="hidden" id="sessionMaxDaysInput" name="session_max_days"
+                                        value="{{ settings.session_max_days | default(7) }}">
+                                    <div class="settings-range-labels" aria-hidden="true">
+                                        <span>1d</span>
+                                        <span>2d</span>
+                                        <span>3d</span>
+                                        <span>4d</span>
+                                        <span>5d</span>
+                                        <span>6d</span>
+                                        <span>7d</span>
+                                    </div>
+                                    <small class="setting-hint setting-hint--with-icon" id="sessionMaxDaysHint">
                                         <span class="material-symbols-outlined setting-hint-icon"
                                             aria-hidden="true">info</span>
-                                        <span>Signs an idle session out after this many minutes of inactivity.</span>
+                                        <span>How long a login stays valid, counted from sign-in.</span>
                                     </small>
                                 </div>
                             </div>

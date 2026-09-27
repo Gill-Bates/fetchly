@@ -25,6 +25,7 @@ Utilities here are imported across the app and provide a single source of truth 
 | `platform.py` | Platform quirks: YouTube, Instagram, TikTok, Facebook (format filters, cookie requirements) |
 | `youtube.py` | YouTube-specific handling |
 | `public_url.py` | `normalize_public_hostname()` and `build_public_base_url(request, public_hostname)` for share links |
+| `geoip.py` | Resolves a job's stored `client_ip` into country/city/ASN for the job detail page's "requester" tile; MaxMind GeoLite2 databases fetched on demand and cached under `DATA_DIR/geolite2` |
 | `template_filters.py` | Custom Jinja2 filters registered in `main.py` |
 | `assets.py` | `asset_url()` (the Jinja global that content-hashes `/static` URLs) and `VersionedStaticFiles` (the matching `Cache-Control` policy) |
 | `hidden_captcha.py` | Invisible anti-bot protection: honeypot field and signed token |

@@ -13,7 +13,7 @@ from unittest.mock import PropertyMock, patch
 
 from app import analysis_worker
 from app.audio_analysis import AudioAnalysisResult
-from app.db import get_audio_analysis_cache, get_job, insert_job
+from app.db import DOWNLOADABLE_STATUSES, get_audio_analysis_cache, get_job, insert_job
 from tests._support import IsolatedDbTestCase
 
 JOB = ("22222222-2222-2222-2222-222222222222", "https://example.com/a", "audio", "max")
@@ -88,6 +88,51 @@ class StopAnalysisWorkersTests(unittest.TestCase):
         analysis_worker.stop_analysis_workers(timeout=0.1)
 
         self.assertTrue(process.terminated)
+
+
+class WorkerLoopErrorHandlingTests(IsolatedDbTestCase):
+    """An analysis crash/timeout must not strand an already-downloaded file.
+
+    Regression coverage for the K1 review finding: the previous behavior
+    finalized the job as "error", which is outside DOWNLOADABLE_STATUSES
+    (app/db.py) and RETRYABLE_STATUSES treats "error" as a from-scratch
+    redownload (static/js/config.js) - so a perfectly good file became
+    unreachable and its only "fix" was to discard and redownload it.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.job_id = "33333333-3333-3333-3333-333333333333"
+        insert_job(self.job_id, "https://example.com/a", "audio", "max", "analysis")
+        patcher = patch.object(analysis_worker, "_status_callback", None)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _run_one_failing_job(self, exc: BaseException) -> None:
+        job = analysis_worker.AnalysisJob(job_id=self.job_id, file_path=Path(self._tmp.name) / "missing-ok.opus")
+        queue_obj = analysis_worker.get_analysis_queue()
+        queue_obj.put(job)
+        queue_obj.put(analysis_worker._SHUTDOWN_SENTINEL)
+
+        with patch.object(analysis_worker, "_handle_analysis_job", side_effect=exc):
+            analysis_worker._worker_loop()
+
+    def test_an_unexpected_exception_still_leaves_the_job_downloadable(self) -> None:
+        self._run_one_failing_job(RuntimeError("boom"))
+
+        job = get_job(self.job_id)
+        assert job is not None
+        self.assertEqual(job["status"], "done")
+        self.assertIn(job["status"], DOWNLOADABLE_STATUSES)
+        self.assertIsNotNone(job["finished_at"])
+
+    def test_an_analysis_timeout_still_leaves_the_job_downloadable(self) -> None:
+        self._run_one_failing_job(TimeoutError("Audio analysis exceeded time limit (300s)"))
+
+        job = get_job(self.job_id)
+        assert job is not None
+        self.assertEqual(job["status"], "done")
+        self.assertIn(job["status"], DOWNLOADABLE_STATUSES)
 
 
 class ApplyAnalysisTests(IsolatedDbTestCase):

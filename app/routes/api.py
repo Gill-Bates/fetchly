@@ -24,9 +24,11 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, Uplo
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 from ..bpm_cluster import cluster_bpms
-from ..common.rate_limit import limiter
+from ..common.rate_limit import get_rate_limit_ip, limiter
 from ..db import (
     DOWNLOAD_OUTPUT_MODES,
+    SESSION_MAX_DAYS_MAX,
+    SESSION_MAX_DAYS_MIN,
     TERMINAL_JOB_STATUSES,
     delete_jobs_and_share_links,
     find_active_job_for_submission,
@@ -49,6 +51,7 @@ from ..utils.cookie_status import cookie_file_is_usable
 from ..utils.cookies import default_cookie_file
 from ..utils.credentials import normalize_admin_username, validate_admin_password
 from ..utils.fs import get_data_dir, get_json_body, path_is_file
+from ..utils.geoip import build_requester_info
 from ..utils.host_stats import get_host_stats
 from ..utils.housekeeping import cleanup_job_directory
 from ..utils.platform import PLATFORM_COOKIE_FILENAMES, detect_platform, validate_media_url
@@ -79,7 +82,7 @@ from ..utils.youtube import (
     normalize_info_url,
 )
 from ..worker import cancel_job as cancel_worker_job
-from ..worker import clear_cancellation, get_job_queue, submit_download
+from ..worker import clear_cancellation, get_job_queue, is_job_active, submit_download
 from .auth import (
     get_csrf_token,
     has_admin_credentials,
@@ -108,6 +111,8 @@ _PERSISTED_CANCELLABLE_JOB_STATUSES = (
     "transcoding",
 )
 _RETRYABLE_JOB_STATUSES = frozenset({"error", "cancelled"})
+_QUEUE_FULL_DETAIL = "Job queue is full, please try again later"
+_LOW_MEMORY_DETAIL = "Server is low on memory, please try again later"
 _RUNTIME_LIMIT_BOUNDS: dict[str, tuple[int, int]] = {
     "download_worker_count": (0, 8),
     "download_timeout_minutes": (1, 240),
@@ -116,7 +121,7 @@ _RUNTIME_LIMIT_BOUNDS: dict[str, tuple[int, int]] = {
     "audio_analysis_max_minutes": (0, 240),
     "audio_analysis_timeout_minutes": (1, 60),
     "lalal_max_download_gib": (1, 100),
-    "session_idle_minutes": (1, 1440),
+    "session_max_days": (SESSION_MAX_DAYS_MIN, SESSION_MAX_DAYS_MAX),
 }
 
 _templates: "Jinja2Templates | None" = None
@@ -205,10 +210,11 @@ async def get_cached_stats() -> dict[str, int | float]:
         return cached
 
     async with _get_stats_lock():
-        now_ts = time()
+        # Re-check under the lock: the waiters queued up behind a single
+        # recompute must serve its result instead of each scanning again.
         cached = _stats_cache.get("data")
         cached_ts = float(_stats_cache.get("ts", 0.0) or 0.0)
-        if cached is not None and (now_ts - cached_ts) < _STATS_CACHE_TTL_SECONDS:
+        if cached is not None and (time() - cached_ts) < _STATS_CACHE_TTL_SECONDS:
             return cached
 
         stats = await asyncio.to_thread(get_stats)
@@ -321,6 +327,7 @@ async def index(request: Request) -> Response:
         "lalal_enabled": lalal_enabled,
         "lalal_duration_guard": lalal_duration_guard,
         "auth_enabled": bool(settings.get("enable_authentication", False)),
+        "download_auto_start": bool(settings.get("download_auto_start", True)),
         "csrf_token": get_csrf_token(request),
     })
 
@@ -441,7 +448,13 @@ async def api_job(request: Request, job_id: uuid.UUID, _user: str = Depends(requ
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    return job_to_dict(job)
+    result = job_to_dict(job)
+    # Resolved here, not in job_to_dict(): a single-job fetch is the
+    # dashboard's "Download details" modal opening for exactly one job, so
+    # the GeoIP lookup only ever runs for a job someone is actually looking
+    # at - GET /api/jobs (the bulk list) never carries this field.
+    result["requester"] = await asyncio.to_thread(build_requester_info, job["client_ip"])
+    return result
 
 
 @router.get("/api/stats/bpm-clusters")
@@ -1063,6 +1076,10 @@ async def api_set_settings(
         enabled = _parse_bool(payload["enable_job_history"], "enable_job_history")
         settings_to_update["enable_job_history"] = "true" if enabled else "false"
 
+    if "download_auto_start" in payload:
+        enabled = _parse_bool(payload["download_auto_start"], "download_auto_start")
+        settings_to_update["download_auto_start"] = "true" if enabled else "false"
+
     if "download_concurrent_fragments" in payload:
         settings_to_update["download_concurrent_fragments"] = _clamp_int(
             payload["download_concurrent_fragments"], 0, 16, "download_concurrent_fragments"
@@ -1176,6 +1193,17 @@ async def api_set_settings(
         raise HTTPException(status_code=500, detail="Internal server error") from exc
 
 
+async def _require_job_headroom() -> None:
+    """Reject a new job when the queue is full or memory headroom is gone.
+
+    Implements the documented ENABLE_BACKPRESSURE / MEMORY_THRESHOLD_MB policy.
+    """
+    if get_job_queue().full():
+        raise HTTPException(status_code=503, detail=_QUEUE_FULL_DETAIL)
+    if not await governor.can_accept_job_async():
+        raise HTTPException(status_code=503, detail=_LOW_MEMORY_DETAIL)
+
+
 # response_model=None: see api_set_settings - the 409 duplicate-job branch
 # returns a JSONResponse, so the union cannot be schema-generated.
 @router.post("/api/submit", response_model=None)
@@ -1188,7 +1216,11 @@ async def api_submit(
     confirm_duplicate: bool = Form(False),
     _user: str = Depends(require_user),
 ) -> dict[str, Any] | JSONResponse:
-    _ = request
+    # Resolved through the same trusted-proxy logic the rate limiter uses, so
+    # a deployment without a reverse proxy stores the real socket peer and one
+    # behind a correctly configured proxy stores the real original client -
+    # never an unverified X-Forwarded-For from an untrusted peer.
+    client_ip = get_rate_limit_ip(request)
     media_type = str(media_type).strip().lower()
     quality_value = str(quality).strip().lower()
 
@@ -1228,9 +1260,7 @@ async def api_submit(
         logger.debug("Metadata extraction skipped for submit (will be fetched by worker): %s", exc)
 
     job_id = str(uuid.uuid4())
-    job_queue = get_job_queue()
-    if job_queue.full():
-        raise HTTPException(status_code=503, detail="Job queue is full, please try again later")
+    await _require_job_headroom()
 
     settings = await asyncio.to_thread(get_settings)
     await asyncio.to_thread(
@@ -1246,6 +1276,10 @@ async def api_submit(
         # replaces it with the ffprobe value.
         duration_seconds=meta.get("duration_seconds"),
         include_in_history=bool(settings.get("enable_job_history", True)),
+        # get_rate_limit_ip() falls back to the literal "unknown" when no IP
+        # could be resolved at all; store NULL instead so the job page can
+        # tell "no requester recorded" from an actual address.
+        client_ip=client_ip if client_ip != "unknown" else None,
     )
     if not submit_download((job_id, clean_url, media_type, quality_value)):
         try:
@@ -1258,7 +1292,7 @@ async def api_submit(
             )
         except Exception:
             logger.exception("Failed to mark job %s as errored after queue overflow", job_id)
-        raise HTTPException(status_code=503, detail="Job queue is full, please try again later")
+        raise HTTPException(status_code=503, detail=_QUEUE_FULL_DETAIL)
     job = await asyncio.to_thread(get_job, job_id)
     if not job:
         # Row vanished between insert and read (retention sweep or manual
@@ -1333,9 +1367,19 @@ async def retry_job(
     if status not in _RETRYABLE_JOB_STATUSES:
         raise HTTPException(status_code=400, detail=f"Cannot retry job with status: {status}")
 
-    job_queue = get_job_queue()
-    if job_queue.full():
-        raise HTTPException(status_code=503, detail="Job queue is full, please try again later")
+    # A worker thread can still own this job even though its row already
+    # reads "error"/"cancelled" - e.g. cancelled while blocked on the
+    # transcode semaphore, with no subprocess left to kill. Re-enqueuing here
+    # would let a second thread start working the same job directory before
+    # the first one finishes unwinding (an ABA race). See
+    # app/worker.py::is_job_active.
+    if is_job_active(job_id_str):
+        raise HTTPException(
+            status_code=409,
+            detail="Job is still being processed by a worker; try again shortly",
+        )
+
+    await _require_job_headroom()
 
     requeued = await asyncio.to_thread(
         update_job_if_status,
@@ -1372,7 +1416,7 @@ async def retry_job(
             )
         except Exception:
             logger.exception("Failed to mark job %s as errored after retry queue overflow", job_id_str)
-        raise HTTPException(status_code=503, detail="Job queue is full, please try again later")
+        raise HTTPException(status_code=503, detail=_QUEUE_FULL_DETAIL)
 
     logger.info("Retry requested for job %s (was: %s)", job_id_str, status)
 

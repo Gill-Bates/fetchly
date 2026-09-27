@@ -155,6 +155,33 @@ _cancelled_jobs: set[str] = set()
 _active_lock = threading.Lock()
 _active_processes: dict[str, subprocess.Popen[str]] = {}
 
+# Job ids currently owned by a live worker thread: from the moment its row is
+# claimed into "processing" until process_job() returns, including any time
+# spent blocked on the transcode semaphore with no subprocess running. Retry
+# must not re-enqueue a job while an old attempt still holds this - see
+# app/routes/api.py::retry_job, which rejects the retry with 409 while the
+# id is present here rather than letting two threads work the same job
+# directory at once (an ABA race: cancel, then retry, while the first attempt
+# is still unwinding).
+_active_worker_jobs: set[str] = set()
+_active_worker_jobs_lock = threading.Lock()
+
+
+def _mark_job_active(job_id: str) -> None:
+    with _active_worker_jobs_lock:
+        _active_worker_jobs.add(job_id)
+
+
+def _mark_job_inactive(job_id: str) -> None:
+    with _active_worker_jobs_lock:
+        _active_worker_jobs.discard(job_id)
+
+
+def is_job_active(job_id: str) -> bool:
+    """True while a worker thread still owns *job_id*, start to finish."""
+    with _active_worker_jobs_lock:
+        return job_id in _active_worker_jobs
+
 
 _COMMAND_POLL_INTERVAL: Final = 1.0
 # yt-dlp emits no machine-readable progress by default. --newline plus this
@@ -308,6 +335,17 @@ class JobCancelledError(Exception):
 
 class ShutdownError(Exception):
     """Raised when a running command fails because the worker is shutting down."""
+
+
+class JobOwnershipLostError(Exception):
+    """Raised when a worker-owned status write fails because the row already
+    moved to a state another actor (cancel, retry) wrote.
+
+    Distinct from JobCancelledError: the in-memory cancel marker may not be
+    set (or may be for a different attempt), but the conditional writeback
+    failing is itself proof this thread no longer owns the job - continuing to
+    touch its files would race whichever thread does.
+    """
 
 
 class DownloadRuntimeLimits(NamedTuple):
@@ -512,6 +550,17 @@ def _transition_worker_status(job_id: str, status: str, message: str = "", **ext
     return False
 
 
+def _transition_worker_status_or_abort(job_id: str, status: str, message: str = "", **extra: Any) -> None:
+    """Like _transition_worker_status(), but raises when the row already moved.
+
+    A False return means a cancel or retry changed the job's status out from
+    under this attempt; silently continuing to download/transcode into the
+    same job directory would race whichever thread now owns it.
+    """
+    if not _transition_worker_status(job_id, status, message, **extra):
+        raise JobOwnershipLostError(f"Job {job_id} no longer owned by this worker attempt")
+
+
 def _signal_process_group(proc: subprocess.Popen[str], sig: signal.Signals) -> None:
     """Signal the child's process group.
 
@@ -647,18 +696,7 @@ def _run_cmd(
                 _check_shutdown()
 
                 if proc.returncode != 0:
-                    executable = cmd[0] if cmd else "command"
-                    stderr_tail = _stderr_tail(stderr_tmp)
-                    if stderr_tail:
-                        logger.warning(
-                            "%s failed with exit code %s. stderr tail: %s",
-                            executable,
-                            proc.returncode,
-                            stderr_tail,
-                        )
-                        raise RuntimeError(f"{executable} failed with exit code {proc.returncode}: {stderr_tail}")
-
-                    raise RuntimeError(f"{executable} failed with exit code {proc.returncode}")
+                    _raise_for_failed_command(cmd, proc.returncode, stderr_tmp)
             except Exception:
                 if proc.poll() is None:
                     _terminate_process(proc)
@@ -744,6 +782,26 @@ def _stderr_tail(stderr_tmp: Any, *, limit: int = 800) -> str:
         return _redact_urls(stderr_tmp.read()[-limit:].strip())
     except Exception:
         return ""
+
+
+def _raise_for_failed_command(cmd: list[str], returncode: int | None, stderr_tmp: Any) -> None:
+    """Raise a RuntimeError describing a non-zero exit, stderr tail included.
+
+    Shared by _run_cmd() and _run_cmd_streaming() so both report a failed
+    ffmpeg/yt-dlp call with the same message the UI stores on the job.
+    """
+    executable = cmd[0] if cmd else "command"
+    stderr_tail = _stderr_tail(stderr_tmp)
+    if stderr_tail:
+        logger.warning(
+            "%s failed with exit code %s. stderr tail: %s",
+            executable,
+            returncode,
+            stderr_tail,
+        )
+        raise RuntimeError(f"{executable} failed with exit code {returncode}: {stderr_tail}")
+
+    raise RuntimeError(f"{executable} failed with exit code {returncode}")
 
 
 def _read_progress_lines(pipe: Any, target_queue: queue.Queue[str | None]) -> None:
@@ -986,15 +1044,7 @@ def _run_cmd_streaming(
                 _check_shutdown()
 
                 if proc.returncode != 0:
-                    executable = cmd[0] if cmd else "command"
-                    stderr_tail = _stderr_tail(stderr_tmp)
-                    if stderr_tail:
-                        logger.warning(
-                            "%s failed with exit code %s. stderr tail: %s",
-                            executable, proc.returncode, stderr_tail,
-                        )
-                        raise RuntimeError(f"{executable} failed with exit code {proc.returncode}: {stderr_tail}")
-                    raise RuntimeError(f"{executable} failed with exit code {proc.returncode}")
+                    _raise_for_failed_command(cmd, proc.returncode, stderr_tmp)
             except Exception:
                 if proc.poll() is None:
                     _terminate_process(proc)
@@ -1482,7 +1532,7 @@ def _finalize_video_download(
         with governor.transcode_semaphore_sync:
             _check_cancellation(job_id)
             _check_shutdown()
-            _transition_worker_status(job_id, "transcoding", message, progress=0, eta_seconds=None)
+            _transition_worker_status_or_abort(job_id, "transcoding", message, progress=0, eta_seconds=None)
             _run_ffmpeg_transcode(
                 [
                     "ffmpeg",
@@ -1517,7 +1567,7 @@ def _finalize_video_download(
         if final != video:
             video.unlink(missing_ok=True)
         return final
-    except (JobCancelledError, ShutdownError):
+    except (JobCancelledError, ShutdownError, JobOwnershipLostError):
         raise
     except Exception:
         # The watermark is cosmetic and the compatibility promise is a
@@ -1645,7 +1695,7 @@ def _download_media(job_id: str, url: str, *, quality: str, media_type: str) -> 
     stem = _build_output_stem(job_id, clean_url, quality, media_type)
     if media_type == "audio":
         audio_message = "Downloading audio (lossless)"
-        _transition_worker_status(job_id, "downloading", audio_message)
+        _transition_worker_status_or_abort(job_id, "downloading", audio_message)
         cmd = _build_ytdlp_cmd(
             clean_url,
             str(job_dir / f"{stem}.source.%(ext)s"),
@@ -1671,7 +1721,7 @@ def _download_media(job_id: str, url: str, *, quality: str, media_type: str) -> 
         _, output_mode = _download_tuning()
         transcode_timeout = _download_runtime_limits().transcode_timeout_seconds
         max_message = "Downloading best video+audio"
-        _transition_worker_status(job_id, "downloading", max_message)
+        _transition_worker_status_or_abort(job_id, "downloading", max_message)
         cmd = _build_ytdlp_cmd(
             clean_url,
             str(job_dir / f"{stem}.%(ext)s"),
@@ -1703,7 +1753,7 @@ def _download_media(job_id: str, url: str, *, quality: str, media_type: str) -> 
 
     _check_cancellation(job_id)
     source_message = "Downloading source for transcoding"
-    _transition_worker_status(job_id, "downloading", source_message)
+    _transition_worker_status_or_abort(job_id, "downloading", source_message)
     _run_ytdlp_download(
         _build_ytdlp_cmd(
             clean_url,
@@ -1740,7 +1790,7 @@ def _download_media(job_id: str, url: str, *, quality: str, media_type: str) -> 
         with governor.transcode_semaphore_sync:
             _check_cancellation(job_id)
             _check_shutdown()
-            _transition_worker_status(job_id, "transcoding", transcode_message, progress=0, eta_seconds=None)
+            _transition_worker_status_or_abort(job_id, "transcoding", transcode_message, progress=0, eta_seconds=None)
             _run_ffmpeg_transcode(
                 [
                     "ffmpeg",
@@ -1918,6 +1968,13 @@ def process_job(job: Job) -> None:
             **measured,
         )
 
+    except JobOwnershipLostError:
+        # A worker-owned status write already failed once (see
+        # _transition_worker_status_or_abort): the row moved to a state this
+        # attempt does not own, so nothing further may be written here either -
+        # doing so could resurrect a status another thread's retry already
+        # replaced.
+        logger.info("Job %s: worker attempt no longer owns this job, stopping", job_id)
     except JobCancelledError:
         # Guarded, not unconditional: the cancel marker was observed before the
         # download was torn down, and a retry issued in that window has already
@@ -1957,6 +2014,7 @@ def worker() -> None:
         # The slot is free again the moment the job leaves the queue; from here
         # on its DB status guards against a second pickup.
         _release_queue_slot(job_id)
+        owns_job = False
         try:
             if _shutdown_event.is_set():
                 return
@@ -1971,6 +2029,11 @@ def worker() -> None:
             if not update_job_if_status(job_id, ("queued",), status="processing"):
                 logger.info("Skipping job %s because its state changed before worker pickup", job_id)
                 continue
+            # Claimed: this thread owns job_id until process_job() returns
+            # below, including any time spent blocked on the transcode
+            # semaphore. See is_job_active() and app/routes/api.py::retry_job.
+            _mark_job_active(job_id)
+            owns_job = True
             _emit(job_id, "processing", "Worker picked up job")
             process_job(job)
         except ShutdownError:
@@ -1985,6 +2048,8 @@ def worker() -> None:
         finally:
             with _cancel_lock:
                 _cancelled_jobs.discard(job_id)
+            if owns_job:
+                _mark_job_inactive(job_id)
             q.task_done()
 
 

@@ -94,3 +94,6 @@ site/
 .mkdocs-cache/
 docs/changelog.md
 docs/license.md
+
+# Local deploy/dev runbook with environment-specific secrets and paths
+setup.conf

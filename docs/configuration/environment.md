@@ -95,10 +95,10 @@ reason.
 
 | Variable | Description |
 |---|---|
-| `CPU_SEMAPHORE_LIMIT` | Concurrent CPU-bound operations |
 | `ANALYSIS_SEMAPHORE_LIMIT` | Concurrent BPM analyses |
-| `IO_SEMAPHORE_LIMIT` | Concurrent I/O-bound operations |
 | `TRANSCODE_SEMAPHORE_LIMIT` | Concurrent ffmpeg transcodes |
+| `CPU_SEMAPHORE_LIMIT` | Sizes the CPU semaphore. **Reserved:** no code path takes a slot from it today, so setting it changes nothing. |
+| `IO_SEMAPHORE_LIMIT` | Sizes the I/O semaphore. **Reserved:** no code path takes a slot from it today, so setting it changes nothing. |
 | `MEMORY_THRESHOLD_MB` | Memory headroom below which backpressure engages |
 | `ENABLE_BACKPRESSURE` | Whether to shed load under pressure |
 

@@ -24,7 +24,7 @@
 - **Stages:**
   - `ffmpeg` — fetches a static FFmpeg/FFprobe build from the BtbN FFmpeg-Builds release named by `FFMPEG_RELEASE_URL`. FFmpeg does **not** come from `apt-get`.
   - `essentia` — compiles essentia from source (`ESSENTIA_REPO`, `ESSENTIA_REF`) because upstream publishes no `linux/aarch64` wheel at all
-  - `builder` — builds the virtualenv, vendors WaveSurfer from unpkg's `@latest` alias (no version `ARG`, no hash pin — see "Vendoring WaveSurfer" below), installs yt-dlp / yt-dlp-ejs / Deno at the versions passed in
+  - `builder` — builds the virtualenv, installs yt-dlp / yt-dlp-ejs / Deno at the versions passed in. WaveSurfer is not fetched here any more — see "Vendoring WaveSurfer" below.
   - `runtime` — installs the few runtime apt packages, copies `ffmpeg`/`ffprobe`, the `/venv`, `deno` and the application source
 - **Adding a Python dependency:** add it to `pyproject.toml`. The builder reads `[project].dependencies` out of it with `tomllib` and installs that set without installing the project, so the layer stays cached across source-only changes. (`tools/pyproject-deps.py` is the release workflow's copy of the same step, not the builder's.)
 - **torch and torchaudio** are the only packages installed from `TORCH_CPU_INDEX`, with `--index-url` and `--no-deps` so that index is never merged into PyPI's namespace for the rest of the manifest — it is not a torch-only host, it also serves `jinja2`, `numpy`, `sympy`, `filelock`, `fsspec` and `setuptools`. Their own dependencies come from PyPI with everything else, and the stage asserts `torch.version.cuda is None` afterwards. `pyproject.toml` expresses the same split for resolvers: `[[tool.uv.index]] pytorch-cpu` is `explicit = true` and `[tool.uv.sources]` binds those two names to it, which is why `torchaudio` is listed in `[project.dependencies]` although nothing imports it — a source binding does not reach a purely transitive dependency.
@@ -35,51 +35,52 @@
 
 ### Vendoring WaveSurfer
 
-**Deliberate design decision: "latest is greatest", not a version pin.** The
-`builder` stage resolves `https://unpkg.com/wavesurfer.js@latest/package.json`
-through `ADD` and then downloads `wavesurfer.esm.js` and `regions.esm.js` from
-that one concrete version. There is no `WAVESURFER_VERSION` build `ARG` and no
-`WAVESURFER_ESM_SHA256` / `WAVESURFER_REGIONS_SHA256` hash pin — both existed in
-earlier revisions of this Dockerfile and were removed on purpose.
+**Vendored and pinned in git, not fetched at build time.**
+`app/static/vendor/wavesurfer/dist/wavesurfer.esm.js` and
+`dist/plugins/regions.esm.js` are committed to the repository (force-added
+past `.gitignore` — `.gitignore` still lists the directory, which is a known
+inconsistency, not a build concern) at **wavesurfer.js 7.12.6**. The `runtime`
+stage's `COPY --chmod=a+rX app ./app` copies them into the image verbatim; the
+`builder` stage no longer downloads anything for WaveSurfer, and
+`.dockerignore` no longer excludes the vendor directory from the build context.
+`docker/wavesurfer.version` is a small committed text file (`7.12.6`) copied to
+`/app/.wavesurfer_version`; `entrypoint.sh` reads it at container start and
+exports `WAVESURFER_VERSION` for `app/utils/version.py`'s
+`get_wavesurfer_version()`, unchanged from before.
 
-- **Why `ADD` and not three `curl` calls in one `RUN`:** a `RUN` layer has no
-  reason to be invalidated when upstream publishes — nothing in the build
-  context changed — so "every build takes the current release" only held for a
-  cold cache. `ADD` from a URL re-checks the remote and invalidates the layer
-  when the manifest changes. It is also the single resolution point: three
-  independent `@latest` lookups could straddle a release and vendor a bundle,
-  a plugin and a reported version from two different ones.
-
-- **Why:** a build-time version pin only freezes a known point in time and has
-  to be bumped by hand whenever upstream ships a fix — which is what prompted
-  this change: a stale pin left a real upstream fix release undeployed while
-  the Settings → System tile kept reporting "Update available". Always taking
-  `@latest` means a build always carries the current release, cached or not.
-- **What this trades away:** there is no build-time integrity check (SHA-256)
-  on the fetched files any more, and two builds run at different times can
-  vendor two different WaveSurfer versions from the same Dockerfile — this is
-  accepted, not an oversight.
-- **Do not expect the Trivy scan to cover it.** The image scan in
-  `.github/workflows/docker-build.yml` (not `ci.yml` — that workflow runs no
-  scanner) is configured `vuln-type: os,library`, and Trivy detects a Node
-  library from a `package.json` or a lockfile. The vendored bundle is two bare
-  `.esm.js` files under `app/static/vendor/wavesurfer/dist/` with no manifest
-  beside them, so it is invisible to that gate. A compromised or vulnerable
-  upstream release is caught by nothing in this pipeline — that is the residual
-  risk this decision accepts, and the reason to keep an eye on upstream
-  advisories by hand.
-- **How the version is still reported:** the `builder` stage resolves the
-  version unpkg actually served (`.../package.json`'s `"version"` field) into
-  `/build/wavesurfer.version`. The `runtime` stage copies that file to
-  `/app/.wavesurfer_version` (deliberately outside `app/static/`, so it is
-  never served), and `entrypoint.sh` reads it at container start and exports
-  `WAVESURFER_VERSION` — the same environment variable
-  `app/utils/version.py`'s `get_wavesurfer_version()` always read. No code in
-  `app/` changed for this.
-- **Pinning it back:** there is no build arg to override any more. An
-  operator who needs a frozen version has to reintroduce the `ARG`/hash pair
-  and the `sha256sum -c` step this change removed — that is the supported way
-  back, not a flag on today's Dockerfile.
+- **Why this replaced the previous "latest is greatest" design:** the
+  `builder` stage used to `ADD` `https://unpkg.com/wavesurfer.js@latest/package.json`
+  and then `curl` the resolved bundle and plugin with no version pin and no
+  integrity check. That is same-origin JavaScript running under
+  `script-src 'self'` — a compromised or tampered upstream release would be a
+  full XSS in the admin context, and the fetch had no checksum to catch it.
+  Vendoring removes that build-time network dependency and its trust surface
+  entirely: what ships is exactly what is reviewed and committed.
+- **What this trades away:** a real upstream fix release no longer reaches a
+  build automatically — that was the reason the download-at-build-time design
+  existed in the first place (a stale pin once left a fix undeployed while the
+  Settings → System tile kept reporting "Update available"). Bumping the
+  vendored version is now a manual, reviewed step (see below), not something a
+  plain rebuild picks up.
+- **`tests/test_csp_wavesurfer.py` now validates the exact bytes that ship.**
+  It pins the vendored bundle's SHA-256 and the CSP style-hash derived from it.
+  Because the build no longer overwrites `app/static/vendor/wavesurfer/` with a
+  fresh download, that test is a real guarantee about the shipped image, not
+  just about the repo checkout.
+- **Still not covered by the Trivy scan** in `.github/workflows/docker-build.yml`
+  (`vuln-type: os,library` needs a `package.json` or lockfile to detect a Node
+  library; the vendored bundle has neither). Pinning in git removes the
+  build-time fetch risk but does not add CVE scanning — watch upstream
+  advisories by hand before bumping the version.
+- **Bumping the version:** update both
+  `app/static/vendor/wavesurfer/dist/{wavesurfer.esm.js,plugins/regions.esm.js}`
+  and `docker/wavesurfer.version` together, open the trim view in a browser to
+  get the new CSP hash if `style-src` blocks the shadow-DOM stylesheet, update
+  `app/main.py::_WAVESURFER_STYLE_HASH` and the pins in
+  `tests/test_csp_wavesurfer.py`, and run `pytest tests/test_csp_wavesurfer.py -v`.
+  A major version bump (this is currently pinned one major behind upstream,
+  7.12.6 vs. 8.x) additionally needs manual verification against the
+  `regions` plugin API used in `app/static/js/trim.js`.
 
 ### Working on the Entrypoint
 - **`WORKERS` is fixed at 1 and enforced, not merely defaulted.** The job queue *and* the SSE subscriber registry live in process memory with no cross-process coordination. A second Gunicorn worker means the same job processed twice and clients subscribed to a process that never sees their job's events — a correctness failure, not a throughput trade-off. CPU parallelism comes from the governor's semaphores instead.

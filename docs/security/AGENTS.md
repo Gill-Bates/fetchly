@@ -60,7 +60,8 @@ fetchly uses double-submit CSRF tokens on all state-changing operations.
 
 ### Requirements
 - Browser cookies enabled
-- `SameSite=Lax` on the CSRF cookie
+- `SameSite=Lax` on the CSRF cookie, no `Max-Age` (a browser-session cookie, so it
+  cannot expire out from under a login left open across the full `session_max_days`)
 - `Secure` over HTTPS in production (set `FETCHLY_BEHIND_HTTPS=1`)
 
 ### Why the cookie is not HttpOnly
@@ -83,7 +84,7 @@ from `SameSite` plus the origin check, not from hiding the cookie.
 - **CSRF:** double-submit tokens on the `/login`, `/logout` and `/api` prefixes
 - **Brute force:** slowapi rate limiting (`5/minute` on the login POST, `20/minute` on the surrounding auth routes) plus the invisible anti-bot check
 - **Untrusted input:** submitted URLs reach yt-dlp as subprocess arguments — validation before that boundary is the relevant control
-- **Session handling:** stateless HMAC-SHA256 tokens with an idle timeout (`session_idle_minutes`); `Secure` when `FETCHLY_BEHIND_HTTPS=1`
+- **Session handling:** stateless HMAC-SHA256 tokens with an absolute lifetime (`session_max_days`, 1–7 days); `Secure` when `FETCHLY_BEHIND_HTTPS=1`
 
 ## Dependencies
 

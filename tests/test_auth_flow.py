@@ -104,3 +104,31 @@ class AuthFlowTests(WebAppTestCase):
         )
         self.assertEqual(response.status_code, 400)
         self.assertIn("at least 8", response.json()["detail"])
+
+    def test_logout_with_garbage_session_cookie_does_not_revoke_real_session(self):
+        """A cookie that merely exists but does not validate must not bump
+        session_version - otherwise anyone can force-logout the real admin by
+        POSTing /logout with a made-up fetchly_session value (CSRF protection
+        does not stop this, since it only blocks other origins).
+        """
+        from app.session import create_session, validate_session
+
+        self._post_settings(
+            {
+                "admin_username": "alice",
+                "admin_password": "correct-horse",
+                "enable_authentication": True,
+            }
+        )
+        real_token = create_session("alice")
+        self.assertEqual(validate_session(real_token), "alice")
+
+        self.client.cookies.set("fetchly_session", "garbage-not-a-real-token")
+        response = self.client.post(
+            "/logout", headers={"X-CSRF-Token": self._csrf()}
+        )
+        self.assertEqual(response.status_code, 303)
+
+        # The real admin's independently-issued session must still validate:
+        # logout must not have bumped session_version.
+        self.assertEqual(validate_session(real_token), "alice")

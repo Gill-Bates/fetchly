@@ -1,3 +1,17 @@
+## [1.3.1] - 2026-09-27
+
+- ``New`` Share a finished download with a **Share Link** (Settings → General → Sharing), with an optional use limit.
+- ``New`` Configurable **Session lifetime** (1-7 days) replaces the old idle timeout.
+- ``New`` A "Requester" tile (IP, country, network) is now also shown in the dashboard's job details, not just the job page.
+- ``New`` Downloads can start automatically once a job finishes processing.
+- ``Fix`` A BPM analysis failure after a successful download no longer blocks the file from being downloaded.
+- ``Fix`` More resilient stem separation polling, plus fixes for stuck jobs and race conditions around retry/cancel/SSE.
+- ``Security`` Logout, session handling, and CSRF are hardened against cookie/origin-based hijacking and forced log-outs.
+- ``Security`` Local binding now defaults to `127.0.0.1`; the waveform library is vendored instead of fetched from a CDN; GeoIP database downloads are integrity-checked.
+
+<details markdown="1">
+<summary>Previous versions...</summary>
+
 ## [1.3.0] - 2026-09-21
 
 - ``New`` A three-way video output slider (Source, H.264 (Recommended), or AV1) keeps matching source codecs without re-encoding; existing settings are preserved and changes apply to new downloads only. A new **Enable Job History** setting omits newly submitted jobs from the dashboard list, while retention now removes expired jobs completely, including files, history entries, share links, and statistics.
@@ -7,10 +21,6 @@
 - ``Security`` Docker Compose binds the published port to `127.0.0.1` by default, keeping an instance without an admin account off the network; set `FETCHLY_BIND=0.0.0.0` to expose it.
 - ``Security`` The container rejects system directories such as `/etc` and `/` as `TORCH_HOME`, preventing ownership or permission changes outside the cache directory.
 - ``Security`` Release builds take every dependency except the PyTorch CPU packages from PyPI alone, so no other package can be pulled from the PyTorch wheel index.
-
-
-<details markdown="1">
-<summary>Previous versions...</summary>
 
 ## [1.2.2] - 2026-09-20
 

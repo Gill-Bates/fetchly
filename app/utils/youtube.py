@@ -12,10 +12,11 @@ import logging
 import math
 import re
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from pathlib import Path
 from time import monotonic
-from typing import Any, TypedDict
+from typing import Any, Final, TypedDict
 from urllib.parse import parse_qs, urlparse, urlsplit, urlunsplit
 
 from .cookie_status import cookie_file_is_usable
@@ -48,7 +49,22 @@ _MAX_INFO_JSON_CHARS = 16 * 1024 * 1024
 # calling it in-process because a hung in-process call cannot be killed - it
 # would hold a slot in the shared asyncio thread pool forever; a subprocess
 # can be killed on timeout.
-_METADATA_SLOTS = asyncio.Semaphore(4)
+#
+# Metadata lookups get their own bounded thread pool rather than the asyncio
+# default executor. A caller's asyncio.wait_for() (see app/routes/api.py)
+# only cancels the *awaiting* coroutine - the yt-dlp call already submitted to
+# a thread keeps running to completion regardless, and YouTube can retry with
+# a second player client sequentially inside that same call (up to ~2 *
+# _SUBPROCESS_TIMEOUT_SECONDS). On the shared default executor that thread
+# would stay occupied - starving unrelated asyncio.to_thread() work (DB
+# calls, other routes) app-wide. A dedicated pool isolates the damage to
+# metadata lookups, and its worker count is what actually bounds concurrency:
+# a queued 6th lookup simply waits for a free thread, unlike a semaphore whose
+# release is tied to the caller giving up rather than the thread finishing.
+_METADATA_MAX_WORKERS: Final = 4
+_METADATA_EXECUTOR: Final = ThreadPoolExecutor(
+    max_workers=_METADATA_MAX_WORKERS, thread_name_prefix="fetchly-ytmeta"
+)
 
 
 class InfoPayload(TypedDict):
@@ -365,8 +381,8 @@ def load_video_info(url: str) -> InfoPayload | None:
 
 async def load_video_info_async(url: str) -> InfoPayload | None:
     """Async wrapper around :func:`load_video_info`."""
-    async with _METADATA_SLOTS:
-        return await asyncio.to_thread(load_video_info, url)
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_METADATA_EXECUTOR, load_video_info, url)
 
 
 def extract_video_meta(url: str) -> dict[str, object]:
@@ -410,8 +426,8 @@ def extract_video_meta(url: str) -> dict[str, object]:
 
 async def extract_video_meta_async(url: str) -> dict[str, object]:
     """Async wrapper around :func:`extract_video_meta`."""
-    async with _METADATA_SLOTS:
-        return await asyncio.to_thread(extract_video_meta, url)
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_METADATA_EXECUTOR, extract_video_meta, url)
 
 
 def empty_info_payload() -> InfoPayload:

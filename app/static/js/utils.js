@@ -141,11 +141,6 @@ export function buildTrimId(start, end) {
     return `${s}_${e}`;
 }
 
-// Regex for YouTube URL validation (exact video ID matching).
-// Exported for parity checks and low-level validation only; callers should prefer
-// isValidYouTubeUrl() or extractYouTubeVideoId(), which also normalize input.
-export const YOUTUBE_URL_REGEX = /^https:\/\/(?:www\.|m\.|music\.)?(?:youtube\.com\/(?:watch\?(?:[^#]*&)?v=|embed\/|v\/|shorts\/)|youtu\.be\/)[A-Za-z0-9_-]{11}(?:[?#&][^\s]*)?$/i;
-
 const SIZE_UNITS = Object.freeze([
     { unit: "TiB", divisor: 1_099_511_627_776, precision: 1 },
     { unit: "GiB", divisor: 1_073_741_824, precision: 1 },

@@ -199,19 +199,6 @@ function appendDropdownContent(element, iconName, label, trailingNode = null) {
     element.append(icon(iconName), labelEl);
 }
 
-function createDropdownLink(iconName, label, href, { download = false } = {}) {
-    const item = document.createElement("li");
-    const link = document.createElement("a");
-    link.className = "dropdown-item";
-    link.href = href;
-    if (download) {
-        link.setAttribute("download", "");
-    }
-    appendDropdownContent(link, iconName, label);
-    item.appendChild(link);
-    return item;
-}
-
 function createDropdownButton(iconName, label, dataset, {
     trailingNode = null,
     disabled = false,
@@ -284,12 +271,11 @@ function createDownloadOptionsToggle(className) {
     return toggle;
 }
 
-function createDownloadOptionsMenu(job, downloadHref) {
+function createDownloadOptionsMenu(job) {
     const jobId = getJobId(job);
     const jobType = job?.type || "";
     const menu = document.createElement("ul");
     menu.className = "dropdown-menu dropdown-menu-end";
-    menu.appendChild(createDropdownLink("download", "Download", downloadHref, { download: true }));
     menu.appendChild(createDropdownButton(
         "share",
         jobType === "audio" ? "Share Audio" : "Share Video",
@@ -317,7 +303,7 @@ function createDesktopDownloadAction(job) {
     const toggle = createDownloadOptionsToggle(
         "btn btn-primary btn-sm dropdown-toggle dropdown-toggle-split",
     );
-    const menu = createDownloadOptionsMenu(job, downloadBtn.href);
+    const menu = createDownloadOptionsMenu(job);
 
     btnGroup.append(downloadBtn, toggle, menu);
     return btnGroup;
@@ -331,7 +317,7 @@ function createMobileDownloadAction(job) {
     const toggle = createDownloadOptionsToggle(
         "btn jobs-mobile-action jobs-mobile-action--menu dropdown-toggle",
     );
-    const menu = createDownloadOptionsMenu(job, downloadBtn.href);
+    const menu = createDownloadOptionsMenu(job);
 
     const btnGroup = document.createElement("div");
     btnGroup.className = "btn-group jobs-mobile-action-group";

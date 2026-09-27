@@ -41,10 +41,8 @@ class SSEStreamingResponse(StreamingResponse):
     """StreamingResponse variant that treats graceful-shutdown cancellation as normal."""
 
     async def listen_for_disconnect(self, receive):
-        try:
+        with suppress(asyncio.CancelledError):
             await super().listen_for_disconnect(receive)
-        except asyncio.CancelledError:
-            logger.debug("SSE disconnect listener cancelled during shutdown")
 
 
 def publish_payload(payload: dict[str, Any]) -> None:
@@ -198,18 +196,22 @@ async def _sse_stream(request: Request, subscriber: asyncio.Queue[dict[str, Any]
 
 def _build_sse_response(
     request: Request,
-    subscriber: asyncio.Queue[dict[str, Any]],
-    cleanup: Callable[[], None],
+    subscribe: Callable[[], asyncio.Queue[dict[str, Any]]],
+    cleanup: Callable[[asyncio.Queue[dict[str, Any]]], None],
 ) -> StreamingResponse:
     async def _stream_with_cleanup():
+        # Subscribe inside the generator so registration and cleanup are
+        # paired by construction: if Starlette never drives this generator
+        # (e.g. the client disconnects before the first iteration), the
+        # subscriber is never registered either, and nothing leaks.
+        subscriber = subscribe()
         try:
             async for chunk in _sse_stream(request, subscriber):
                 yield chunk
         except asyncio.CancelledError:
-            logger.debug("SSE response cancelled during shutdown")
             return
         finally:
-            cleanup()
+            cleanup(subscriber)
 
     headers = {
         "Cache-Control": "no-cache",
@@ -226,11 +228,10 @@ async def sse_events(request: Request, _user: str = Depends(require_user)):
     if _active_connection_count() >= _MAX_SSE_CONNECTIONS:
         raise HTTPException(status_code=503, detail="Too many event streams")
 
-    subscriber = _subscribe_sse(_sse_connections)
     return _build_sse_response(
         request,
-        subscriber,
-        lambda: _unsubscribe_sse(_sse_connections, subscriber),
+        lambda: _subscribe_sse(_sse_connections),
+        lambda subscriber: _unsubscribe_sse(_sse_connections, subscriber),
     )
 
 
@@ -243,15 +244,14 @@ async def sse_job_events(job_id: uuid.UUID, request: Request, _user: str = Depen
 
     job_id_str = str(job_id)
     subscribers = _job_sse_connections[job_id_str]
-    subscriber = _subscribe_sse(subscribers)
 
-    def _cleanup() -> None:
+    def _cleanup(subscriber: asyncio.Queue[dict[str, Any]]) -> None:
         _unsubscribe_sse(subscribers, subscriber)
         _prune_empty_job_subscribers(job_id_str)
 
     return _build_sse_response(
         request,
-        subscriber,
+        lambda: _subscribe_sse(subscribers),
         _cleanup,
     )
 

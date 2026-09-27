@@ -207,8 +207,9 @@ reachable.
 
 ### Sessions log out sooner than expected
 
-Check **Settings → Security → Session idle timeout** — the window is sliding but still
-finite. The 24-hour hard limit is not configurable and applies regardless.
+Check **Settings → Security → Session lifetime** (1–7 days, default 7). It is absolute
+and counted from sign-in, so staying active does not extend it. A credential change also
+invalidates every outstanding session immediately.
 
 ### `403` on a POST from a script
 

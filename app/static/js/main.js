@@ -4,13 +4,13 @@
 //
 
 import { AUDIO_TYPE, CONFIG, DOWNLOADABLE_STATUSES, RETRYABLE_STATUSES, TERMINAL_STATUSES } from "./config.js";
-import { fetchJobs, fetchResolvedThumbnail, fetchStats, submitJob, fetchVideoInfo, toErrorMessage } from "./api.js";
+import { fetchJob, fetchJobs, fetchResolvedThumbnail, fetchStats, submitJob, fetchVideoInfo, toErrorMessage } from "./api.js";
 import { reportWarning } from "./errors.js";
 import { createTimeoutSignal, EMPTY_VALUE, getCsrfToken, humanSize, isValidMediaUrl, detectPlatform, platformPillLabel, PLATFORM, extractYouTubeVideoId, formatDuration, isSafeRedirect, subscribeToLalalProgress, triggerDownload } from "./utils.js";
 import { prependJob, loadMore, applyJobUpdate, getJobById, applyStoredJobTitleFilter, formatCreatedText, isMobileJobsView, buildDesktopEmptyState, buildMobileEmptyState, hasLimitedPlayback } from "./jobs.js";
 import { refreshCurrentJob, setCurrentJob } from "./current-job.js";
 import { EVENT_NAMES, dispatchJobUpdate, setEventStreamEnabled } from "./events.js";
-import { normalizeStatus } from "./ui.js";
+import { buildDownloadUrl, normalizeStatus } from "./ui.js";
 import { showToast } from "./toast.js";
 import { confirmModal } from "./confirm.js";
 import { initTrim } from "./trim.js";
@@ -64,6 +64,10 @@ let lastFocusedBeforeModal = null;
 let isLoadingMore = false;
 let isSubmitting = false;
 let pendingDuplicateFormData = null;
+// Jobs submitted in this page session that are still waiting to become
+// downloadable, while "Start Download after Processing" is on. Cleared as
+// soon as the automatic download fires - one shot per job, not per update.
+const autoStartPendingJobIds = new Set();
 let previewDebounceId = null;
 let previewAbortController = null;
 let previewRequestUrl = "";
@@ -72,6 +76,7 @@ let activeJobStatusFilter = "all";
 let activeTitleCell = null;
 let statsRefreshTimer = null;
 let detailInfoAbortController = null;
+let detailRequesterAbortController = null;
 let dropdownObserver = null;
 const inflightActions = new WeakSet();
 const actionTimers = new WeakMap();
@@ -890,6 +895,11 @@ function abortDetailInfoRequest() {
     detailInfoAbortController = null;
 }
 
+function abortDetailRequesterRequest() {
+    detailRequesterAbortController?.abort();
+    detailRequesterAbortController = null;
+}
+
 function formatDetailStatus(status) {
     const normalized = normalizeStatus(status);
     if (DETAIL_STATUS_LABELS[normalized]) {
@@ -986,6 +996,28 @@ function resetDetailFormats() {
         if (container) {
             container.replaceChildren();
         }
+    }
+}
+
+function resetDetailRequester() {
+    document.getElementById("mRequesterRow")?.classList.add("d-none");
+
+    const flag = document.getElementById("mRequesterFlag");
+    if (flag instanceof HTMLImageElement) {
+        flag.src = "";
+        flag.classList.add("d-none");
+    }
+
+    for (const id of ["mRequesterIp", "mRequesterCity", "mRequesterAsn"]) {
+        const el = document.getElementById(id);
+        if (el) {
+            el.textContent = "";
+            el.classList.add("d-none");
+        }
+    }
+
+    for (const id of ["mRequesterCitySep", "mRequesterAsnSep"]) {
+        document.getElementById(id)?.classList.add("d-none");
     }
 }
 
@@ -1190,6 +1222,7 @@ function populateDetailFromJob(job) {
     document.getElementById("mId")?.setAttribute("title", jobId);
     setDetailSourceActions(job.url, jobId);
     resetDetailFormats();
+    resetDetailRequester();
     setDetailThumbnail(job);
 
     const downloadBtn = document.getElementById("mDownloadBtn");
@@ -1235,6 +1268,70 @@ async function hydrateDetailMedia(job) {
     }
 }
 
+function populateDetailRequester(requester) {
+    const row = document.getElementById("mRequesterRow");
+    const ip = requester?.ip ? String(requester.ip) : "";
+    if (!row || !ip) {
+        return;
+    }
+
+    setText(document.getElementById("mRequesterIp"), ip);
+    document.getElementById("mRequesterIp")?.classList.remove("d-none");
+
+    const flag = document.getElementById("mRequesterFlag");
+    const country = requester?.country ? String(requester.country) : "";
+    if (flag instanceof HTMLImageElement && country) {
+        const code = country.toLowerCase();
+        flag.src = `https://cdn.jsdelivr.net/npm/flag-icons@7.3.2/flags/4x3/${encodeURIComponent(code)}.svg`;
+        flag.alt = `${country.toUpperCase()} flag`;
+        flag.title = country.toUpperCase();
+        flag.classList.remove("d-none");
+    }
+
+    const city = requester?.city ? String(requester.city) : "";
+    if (city) {
+        setText(document.getElementById("mRequesterCity"), city);
+        document.getElementById("mRequesterCity")?.classList.remove("d-none");
+        document.getElementById("mRequesterCitySep")?.classList.remove("d-none");
+    }
+
+    const asOrg = requester?.as_org ? String(requester.as_org) : "";
+    const asn = requester?.asn ? String(requester.asn) : "";
+    if (asOrg || asn) {
+        const label = asn ? `AS${asn}${asOrg ? ` ${asOrg}` : ""}` : asOrg;
+        setText(document.getElementById("mRequesterAsn"), label);
+        document.getElementById("mRequesterAsn")?.classList.remove("d-none");
+        document.getElementById("mRequesterAsnSep")?.classList.remove("d-none");
+    }
+
+    row.classList.remove("d-none");
+}
+
+async function hydrateDetailRequester(job) {
+    if (!job?.id) {
+        return;
+    }
+
+    abortDetailRequesterRequest();
+    const controller = new AbortController();
+    detailRequesterAbortController = controller;
+
+    try {
+        const data = await fetchJob(job.id, { signal: controller.signal });
+        if (controller.signal.aborted || activeDetailId !== String(job.id)) {
+            return;
+        }
+        populateDetailRequester(data?.requester);
+    } catch {
+        // Best-effort: the modal already shows everything from the cached
+        // job, so a failed refresh just leaves the requester tile hidden.
+    } finally {
+        if (detailRequesterAbortController === controller) {
+            detailRequesterAbortController = null;
+        }
+    }
+}
+
 function openDetail(jobId) {
     if (!jobId || !detailModalEl || !detailModal) return;
 
@@ -1245,6 +1342,7 @@ function openDetail(jobId) {
     populateDetailFromJob(job);
     detailModal.show();
     void hydrateDetailMedia(job);
+    void hydrateDetailRequester(job);
 }
 
 async function handleLalalSplit(btn) {
@@ -1479,6 +1577,17 @@ document.addEventListener(EVENT_NAMES.JOB_UPDATE, (event) => {
         }
     }
 
+    if (autoStartPendingJobIds.size > 0) {
+        const status = payload.status || "";
+        if (DOWNLOADABLE_STATUSES.has(status)) {
+            autoStartDownload(payload);
+        } else if (TERMINAL_STATUSES.has(status)) {
+            // Terminal but not downloadable (error/cancelled): nothing to
+            // start, and the id would otherwise linger forever.
+            autoStartPendingJobIds.delete(String(payload.id ?? ""));
+        }
+    }
+
     scheduleJobTitleFilter();
 });
 
@@ -1526,6 +1635,7 @@ if (detailModalEl) {
     detailModalEl.addEventListener("hidden.bs.modal", () => {
         activeDetailId = null;
         abortDetailInfoRequest();
+        abortDetailRequesterRequest();
         if (lastFocusedBeforeModal && document.body.contains(lastFocusedBeforeModal)) {
             lastFocusedBeforeModal.focus();
             return;
@@ -1550,12 +1660,42 @@ function describeDuplicateJob(existingJob) {
     return `${title} is already being processed. Do you want to start it again anyway?`;
 }
 
+function isDownloadAutoStartEnabled() {
+    return submitForm?.dataset.downloadAutoStart === "true";
+}
+
+/**
+ * Fire the browser download for a job that just became downloadable, once,
+ * on behalf of the "Start Download after Processing" setting.
+ * @param {object} job
+ */
+function autoStartDownload(job) {
+    const jobId = String(job?.id ?? "");
+    if (!jobId || !autoStartPendingJobIds.has(jobId)) {
+        return;
+    }
+
+    autoStartPendingJobIds.delete(jobId);
+    triggerDownload(buildDownloadUrl(jobId));
+    showToast("Download started automatically", "success", 2500);
+}
+
 function onSubmitSuccess(job) {
     // Claim the card before prependJob, or the list renders a second copy.
     setCurrentJob(job);
     prependJob(job);
     scheduleJobTitleFilter();
     showToast("Download job started", "success", 2500);
+
+    if (isDownloadAutoStartEnabled()) {
+        const jobId = String(job?.id ?? "");
+        if (jobId) {
+            autoStartPendingJobIds.add(jobId);
+            if (DOWNLOADABLE_STATUSES.has(job?.status || "")) {
+                autoStartDownload(job);
+            }
+        }
+    }
 
     submitForm.reset();
     typeSelect?.dispatchEvent(new Event("change"));
@@ -1716,9 +1856,19 @@ async function handleActionPost(btn, url, options = {}) {
         throw new Error("Action already in progress");
     }
 
+    // Dropdown items (Share, Lalal stem-split) stay inside an open menu after
+    // the click, so toggling the native `disabled` attribute triggers
+    // Bootstrap's `.dropdown-item:disabled` grey-out for the duration of the
+    // request and the success checkmark. The inflight WeakSet above already
+    // blocks re-entry synchronously, so disabling is redundant there and only
+    // produces a visible grey flash. Real buttons still disable normally.
+    const isDropdownItem = btn.classList.contains("dropdown-item");
+
     inflightActions.add(btn);  // Synchronous lock in same microtask
     const originalDisabled = btn.disabled;
-    btn.disabled = true;
+    if (!isDropdownItem) {
+        btn.disabled = true;
+    }
 
     const spinner = document.createElement("span");
     spinner.className = "spinner-border spinner-border-sm me-1";
@@ -1769,7 +1919,7 @@ async function handleActionPost(btn, url, options = {}) {
             if (successIcon.isConnected) {
                 successIcon.remove();
             }
-            if (btn.isConnected) {
+            if (btn.isConnected && !isDropdownItem) {
                 btn.disabled = originalDisabled;
             }
         }, 2000);
@@ -1778,7 +1928,7 @@ async function handleActionPost(btn, url, options = {}) {
         return data;
     } catch (err) {
         spinner.remove();
-        if (btn.isConnected) {
+        if (btn.isConnected && !isDropdownItem) {
             btn.disabled = originalDisabled;
         }
         throw err;

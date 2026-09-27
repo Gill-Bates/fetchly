@@ -331,37 +331,14 @@ RUN set -euo pipefail; \
     rm -f "/tmp/${archive}" /tmp/deno.sha256sum /tmp/deno-release-latest.txt; \
     deno --version
 
-# "latest is greatest" by design: no version ARG, no hash pin. Every build
-# resolves whatever unpkg's @latest alias serves for wavesurfer.js at that
-# moment, so a fix release never sits undeployed behind a stale pin. The
-# trade-off - no build-time integrity check, and no scanner that covers these
-# two files either - is spelled out in docker/AGENTS.md.
-#
-# The manifest comes in through ADD rather than curl for two reasons. It is the
-# cache key: a plain RUN with three @latest fetches inside it is a cache hit
-# forever - nothing in the build context changes when upstream publishes, so
-# "every build takes the current release" only held for a cold cache. ADD from a
-# URL re-checks the remote and invalidates this layer when the resolved manifest
-# changes. And it is the single resolution point: the bundle, the plugin and the
-# reported version are then all fetched from one concrete version instead of
-# three independent @latest lookups that can straddle a release.
-ADD https://unpkg.com/wavesurfer.js@latest/package.json /tmp/wavesurfer-package.json
-RUN set -euo pipefail; \
-    version="$(python -c 'import json; print(json.load(open("/tmp/wavesurfer-package.json"))["version"])')"; \
-    [[ -n "${version}" ]] || { echo "could not resolve a wavesurfer.js version from unpkg" >&2; exit 1; }; \
-    echo "Vendoring wavesurfer.js ${version}"; \
-    base="https://unpkg.com/wavesurfer.js@${version}/dist"; \
-    mkdir -p /build/static/vendor/wavesurfer/dist/plugins; \
-    curl --proto '=https' --tlsv1.2 -fsSL "${base}/wavesurfer.esm.js" \
-        --retry 5 --retry-delay 2 --connect-timeout 5 --max-time 300 \
-        -o /build/static/vendor/wavesurfer/dist/wavesurfer.esm.js; \
-    curl --proto '=https' --tlsv1.2 -fsSL "${base}/plugins/regions.esm.js" \
-        --retry 5 --retry-delay 2 --connect-timeout 5 --max-time 300 \
-        -o /build/static/vendor/wavesurfer/dist/plugins/regions.esm.js; \
-    test -s /build/static/vendor/wavesurfer/dist/wavesurfer.esm.js; \
-    test -s /build/static/vendor/wavesurfer/dist/plugins/regions.esm.js; \
-    printf '%s\n' "${version}" > /build/wavesurfer.version; \
-    rm -f /tmp/wavesurfer-package.json
+# WaveSurfer is no longer fetched here. It used to resolve unpkg's @latest
+# alias at build time with no version pin and no integrity check - a
+# same-origin script (served under style-src/script-src 'self') coming from an
+# unauthenticated, unverified network fetch on every build. It is now vendored
+# and pinned in git under app/static/vendor/wavesurfer/ instead, and the
+# runtime stage below copies that committed, checksum-tested bundle straight
+# into the image. See "Vendoring WaveSurfer" in docker/AGENTS.md for the pinned
+# version and how to bump it.
 
 FROM ${PYTHON_BASE} AS runtime
 
@@ -443,13 +420,17 @@ RUN test -s ./app/static/img/fetchly_watermark.png && \
 # so the manifest ships next to the source rather than a separate VERSION file.
 COPY pyproject.toml BUILD_INFO* ./
 COPY CHANGELOG.md ./
-COPY --from=builder /build/static/vendor/wavesurfer ./app/static/vendor/wavesurfer
-# No WAVESURFER_VERSION build ARG any more (see the builder-stage comment
-# above): the version actually resolved from unpkg's @latest alias at build
-# time is baked in as a plain file instead, outside app/static/ so it is never
-# served. entrypoint.sh reads it at container start and exports
-# WAVESURFER_VERSION for app/utils/version.py to report.
-COPY --from=builder /build/wavesurfer.version /app/.wavesurfer_version
+# app/static/vendor/wavesurfer/ is committed to git (force-added past
+# .gitignore) and came in with the `app` copy above once .dockerignore's
+# exclusion of that path was removed - it is no longer fetched at build time.
+# tests/test_csp_wavesurfer.py pins its sha256, so this is the exact bundle
+# that test validates.
+#
+# The version is a plain committed file rather than something resolved at
+# build time, outside app/static/ so it is never served. entrypoint.sh reads
+# it at container start and exports WAVESURFER_VERSION for
+# app/utils/version.py to report.
+COPY docker/wavesurfer.version /app/.wavesurfer_version
 COPY --chmod=755 docker/entrypoint.sh /entrypoint.sh
 
 RUN bash -n /entrypoint.sh && \

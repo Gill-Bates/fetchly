@@ -412,10 +412,15 @@ def _worker_loop() -> None:
                 if isinstance(exc, (SystemExit, KeyboardInterrupt, MemoryError)):
                     raise
                 logger.exception("Audio analysis failed for %s", job.job_id)
+                # The download itself already succeeded - only the BPM step
+                # failed. Finalizing as "error" would take the job out of
+                # DOWNLOADABLE_STATUSES (app/db.py) and mark it retryable
+                # from scratch (RETRYABLE_STATUSES, static/js/config.js),
+                # even though the file is sitting there ready to serve.
                 _finalize_job(
                     job.job_id,
-                    JobStatus.ERROR,
-                    "Audio analysis failed",
+                    JobStatus.DONE,
+                    "Finished (audio analysis failed)",
                 )
             finally:
                 with _queued_job_ids_lock:

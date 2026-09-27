@@ -8,7 +8,7 @@
 {% endblock %}
 
 {# This page does have a visible title, so it becomes the h1 rather than
-   sitting under a hidden one. Only the tag changes; .h2 keeps the type scale. #}
+sitting under a hidden one. Only the tag changes; .h2 keeps the type scale. #}
 {% block page_heading %}
 <h1 class="h2 m-0 d-flex align-items-center gap-2 fw-semibold mb-4">
     <span class="material-symbols-outlined" aria-hidden="true">monitoring</span>
@@ -95,6 +95,33 @@
 
                 <dt>Message</dt>
                 <dd><span id="message">{{ (job['message'] or '–') | e }}</span></dd>
+
+                {% if requester %}
+                <dt>Requester</dt>
+                <dd class="requester-tile">
+                    <span class="font-monospace">{{ requester['ip'] | e }}</span>
+                    {% if requester.get('country') %}
+                    <img class="requester-flag"
+                        src="https://cdn.jsdelivr.net/npm/flag-icons@7.3.2/flags/4x3/{{ requester['country'] | lower | e }}.svg"
+                        alt="{{ requester['country'] | upper | e }} flag" title="{{ requester['country'] | e }}"
+                        loading="lazy">
+                    {% endif %}
+                    {% if requester.get('city') %}
+                    <span class="detail-requester-sep" aria-hidden="true">&middot;</span>
+                    <span class="text-muted">{{ requester['city'] | e }}</span>
+                    {% endif %}
+                    {% if requester.get('as_org') %}
+                    <span class="detail-requester-sep" aria-hidden="true">&middot;</span>
+                    <span class="text-muted">
+                        {% if requester.get('asn') %}AS{{ requester['asn'] | e }}{% endif %}
+                        {{ requester['as_org'] | e }}
+                    </span>
+                    {% elif requester.get('asn') %}
+                    <span class="detail-requester-sep" aria-hidden="true">&middot;</span>
+                    <span class="text-muted">AS{{ requester['asn'] | e }}</span>
+                    {% endif %}
+                </dd>
+                {% endif %}
             </dl>
 
             <div class="mt-4">
@@ -108,8 +135,8 @@
         </div>
     </div>
 
-    <script id="jobStatusScript" type="module" src="{{ asset_url('/static/js/job.js') }}" data-job-id="{{ job['id'] | e }}"
-        data-initial-status="{{ job['status'] | e }}"></script>
+    <script id="jobStatusScript" type="module" src="{{ asset_url('/static/js/job.js') }}"
+        data-job-id="{{ job['id'] | e }}" data-initial-status="{{ job['status'] | e }}"></script>
     {% endif %}
 </div>
 {% endblock %}

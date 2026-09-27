@@ -19,6 +19,7 @@ class RuntimeSettingsTests(WebAppTestCase):
         settings = db.get_settings()
         expected = {
             "enable_job_history": True,
+            "download_auto_start": True,
             "download_concurrent_fragments": 0,
             "download_worker_count": 0,
             "download_timeout_minutes": 60,
@@ -35,6 +36,25 @@ class RuntimeSettingsTests(WebAppTestCase):
         self.assertEqual(settings_page.status_code, 200)
         self.assertIn('id="enableJobHistory"', settings_page.text)
         self.assertIn('name="enable_job_history" checked', settings_page.text)
+        self.assertIn('id="downloadAutoStart"', settings_page.text)
+        self.assertIn('name="download_auto_start" checked', settings_page.text)
+
+    def test_download_auto_start_setting_persists_and_reaches_the_dashboard(self) -> None:
+        response = self._post_settings({"download_auto_start": False})
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(db.get_settings()["download_auto_start"])
+        self.assertFalse(self.client.get("/api/settings").json()["download_auto_start"])
+
+        index_page = self.client.get("/")
+        self.assertEqual(index_page.status_code, 200)
+        self.assertIn('data-download-auto-start="false"', index_page.text)
+
+        response = self._post_settings({"download_auto_start": True})
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(db.get_settings()["download_auto_start"])
+
+        index_page = self.client.get("/")
+        self.assertIn('data-download-auto-start="true"', index_page.text)
 
     def test_settings_api_persists_runtime_limits(self) -> None:
         response = self._post_settings(

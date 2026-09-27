@@ -26,7 +26,8 @@
 
     <div class="ui-card mb-4" id="submitCard">
         <div>
-            <form id="submitForm" method="POST" action="/api/submit">
+            <form id="submitForm" method="POST" action="/api/submit"
+                data-download-auto-start="{{ download_auto_start | default(true) | tojson | forceescape }}">
                 <input type="hidden" name="csrf_token" value="{{ csrf_token | e }}">
                 <div class="row g-3 align-items-end">
                     <div class="col-12">
@@ -292,6 +293,15 @@
                                     aria-hidden="true">content_copy</span>
                                 Copy ID
                             </button>
+                        </div>
+                        <div class="detail-requester-row d-none" id="mRequesterRow">
+                            <span class="text-muted">Requester</span>
+                            <span class="font-monospace" id="mRequesterIp"></span>
+                            <img class="requester-flag d-none" id="mRequesterFlag" alt="" title="" loading="lazy">
+                            <span class="detail-requester-sep d-none" id="mRequesterCitySep" aria-hidden="true">&middot;</span>
+                            <span class="text-muted d-none" id="mRequesterCity"></span>
+                            <span class="detail-requester-sep d-none" id="mRequesterAsnSep" aria-hidden="true">&middot;</span>
+                            <span class="text-muted d-none" id="mRequesterAsn"></span>
                         </div>
                     </details>
                 </section>

@@ -56,7 +56,7 @@ on Safari, iOS, or most TVs.
 
 | Action | Availability |
 |---|---|
-| Download | Any downloadable status |
+| Download | Any downloadable status (automatic when **Start Download after Processing** is on) |
 | Open job page | Any job |
 | Cancel | While in flight |
 | Retry | After `error` |
@@ -78,6 +78,16 @@ the statistics, but is left out of the list. The choice is stored per job at sub
 so flipping the setting later never changes jobs that already exist. The **Show Job
 History** toggle on the dashboard is unrelated: it only collapses the list in your
 browser. See [Application Settings](../configuration/settings.md#general).
+
+## Starting the download automatically
+
+**Settings → General → Retention → Start Download after Processing** is on by default.
+Once a newly submitted job becomes downloadable, the browser starts the file download
+on its own — no extra click on **Download** needed. The job still appears in the job
+history exactly as before; only the extra click is skipped. Turning it off restores the
+previous behavior: the job waits in the list until you download it yourself. Like
+**Enable Job History**, this only applies to jobs submitted after the change. See
+[Application Settings](../configuration/settings.md#general).
 
 ## Phones and tablets
 

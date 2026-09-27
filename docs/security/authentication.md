@@ -59,7 +59,7 @@ sequenceDiagram
     participant B as Browser
     participant F as fetchly
     B->>F: GET /login
-    F-->>B: Form + CSRF cookie + anti-bot token + honeypot field
+    F-->>B: Form + CSRF cookie (browser-session, no Max-Age) + anti-bot token + honeypot field
     B->>F: POST /login (credentials, CSRF, token, honeypot)
     F->>F: CSRF check
     F->>F: Anti-bot check (honeypot, token signature, age)
@@ -78,33 +78,34 @@ which check tripped.
 | Property | Value |
 |---|---|
 | Cookie | `fetchly_session` |
-| Contents | Username, issue time, last activity, nonce, session version — HMAC-signed |
+| Contents | Username, issue time, nonce, session version — HMAC-signed |
 | `HttpOnly` | Yes |
 | `SameSite` | `Lax` |
 | `Secure` | When `FETCHLY_BEHIND_HTTPS=1` or the request arrived over HTTPS |
-| Hard limit | 24 hours from login (not configurable) |
-| Idle timeout | Sliding, `session_idle_minutes` (1–1440, default 60) |
+| Lifetime | Absolute, `session_max_days` (1–7, default 7), counted from login |
 
 A session is valid only while **all** of these hold:
 
 1. The signature verifies
-2. The hard 24-hour limit has not passed
-3. The last activity is within the idle timeout
-4. The embedded session version matches the current one
+2. The absolute lifetime since login has not elapsed
+3. The embedded session version matches the current one
 
-Cookie `Max-Age` is the smaller of the remaining hard and idle budgets, so the browser
-discards the cookie exactly when the server stops accepting it.
+Cookie `Max-Age` is the remaining lifetime, so the browser discards the cookie exactly
+when the server stops accepting it.
 
-### Idle timeout
+### Session lifetime
 
-**Settings → Security → Session idle timeout**, 1–1440 minutes, default 60. The window
-slides: each authenticated request refreshes it.
+**Settings → Security → Session lifetime**, 1–7 days, default 7. It is absolute and
+counted from sign-in: activity does not extend it. Once it elapses the session is
+invalidated and the user must log in again.
 
 ### Invalidating every session
 
 Bumping the internal `session_version` invalidates all outstanding sessions at once.
 It is bumped automatically whenever the credentials change — the credential those
-sessions were issued against no longer exists.
+sessions were issued against no longer exists — and on every logout. Tokens are
+stateless HMAC signatures with nothing to delete server-side, so the version bump is
+also what makes a copied session cookie useless the moment its owner signs out.
 
 ## Authorization
 

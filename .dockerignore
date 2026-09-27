@@ -95,8 +95,6 @@ venv/**
 *.log
 .coverage
 .coverage.*
-app/static/vendor/wavesurfer/
-app/static/vendor/wavesurfer/**
 cookies.txt
 coverage.xml
 htmlcov/

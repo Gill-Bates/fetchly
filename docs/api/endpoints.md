@@ -188,10 +188,10 @@ Every redeem failure returns the same `404` page. See
 | `POST /api/settings/watermark-logo` | 10/min | Install a logo (multipart `file`, PNG, max 2 MB) |
 | `DELETE /api/settings/watermark-logo` | 10/min | Remove it; the bundled artwork applies again |
 
-Writable keys: `retention_days`, `enable_authentication`, `admin_username`,
-`admin_password`, `download_concurrent_fragments`, `download_output_mode`,
+Writable keys: `retention_days`, `enable_job_history`, `download_auto_start`, `enable_authentication`,
+`admin_username`, `admin_password`, `download_concurrent_fragments`, `download_output_mode`,
 `video_watermark`, `lalalaai_duration_guard`, `share_link_max_uses`,
-`public_hostname`, plus the runtime limits — `session_idle_minutes`,
+`public_hostname`, plus the runtime limits — `session_max_days`,
 `download_worker_count`, `download_timeout_minutes`,
 `transcode_timeout_minutes`, `download_max_filesize_gib`,
 `audio_analysis_max_minutes`, `audio_analysis_timeout_minutes`,

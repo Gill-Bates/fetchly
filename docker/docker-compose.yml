@@ -17,6 +17,12 @@ services:
       TZ: ${TZ:-Etc/UTC}
       TIMEOUT: ${TIMEOUT:-60}
       FETCHLY_SECRET_KEY: "${FETCHLY_SECRET_KEY:?required - generate with head -c 32 /dev/urandom | base64}"
+      # Trusted reverse-proxy IPs/CIDRs for X-Forwarded-* (client IP, scheme).
+      # Defaults to loopback only, so a proxy on another host or a Docker
+      # network address (e.g. the bridge gateway) must be named explicitly,
+      # or the app sees the proxy's own IP instead of the real client's.
+      # Never set to "*" - fetchly refuses to start with a wildcard.
+      FORWARDED_ALLOW_IPS: ${FORWARDED_ALLOW_IPS:-127.0.0.1,::1}
     logging:
       driver: json-file
       options:

@@ -24,9 +24,6 @@ logger = logging.getLogger(__name__)
 
 _BANNER_LOCK_FILE = Path(tempfile.gettempdir()) / "fetchly_banner.lock"
 
-def _block_width(text: str) -> int:
-    return max((len(line) for line in text.splitlines()), default=0)
-
 
 def print_banner() -> None:
     build_short = BUILD_INFO[:7] if BUILD_INFO else "dev"

@@ -163,16 +163,6 @@ function formatBitrateText(value) {
     return Number.isFinite(bitrate) && bitrate > 0 ? `${Math.round(bitrate)} kbps` : EMPTY_VALUE;
 }
 
-export function formatCompactJobMeta(jobLike) {
-    const parts = [
-        jobLike?.type || "",
-        getQualityLabel(jobLike),
-        formatBpmCompact(jobLike?.bpm),
-        formatBitrateText(jobLike?.bitrate_kbps),
-    ].filter((part) => part && part !== EMPTY_VALUE);
-    return parts.join(" · ") || EMPTY_VALUE;
-}
-
 function formatMobileMediaLine(jobLike) {
     const parts = [
         getTypeLabel(jobLike),
@@ -1197,10 +1187,6 @@ function syncViewMode(force = false) {
         detail: { mobile: state.mobileView },
     }));
     return true;
-}
-
-export function syncMobileJobsList() {
-    syncViewMode();
 }
 
 /**

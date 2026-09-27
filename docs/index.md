@@ -3,8 +3,6 @@ hide:
   - navigation
 ---
 
-# fetchly
-
 <p align="center">
   <img src="assets/img/fetchly_black.svg" width="400" alt="fetchly Logo" class="fy-logo-light">
   <img src="assets/img/fetchly_white.svg" width="400" alt="fetchly Logo" class="fy-logo-dark">
@@ -37,7 +35,7 @@ a volume you control.
 
 <div class="grid cards" markdown>
 
--   :material-download:{ .lg .middle } **Download Everywhere**
+-   :material-download:{ .lg .middle } **Download**
 
     ---
 
@@ -46,7 +44,7 @@ a volume you control.
 
     [:octicons-arrow-right-24: Downloads](features/downloads.md)
 
--   :material-view-dashboard:{ .lg .middle } **Live Job Dashboard**
+-   :material-view-dashboard:{ .lg .middle } **Live Dashboard**
 
     ---
 
@@ -56,7 +54,7 @@ a volume you control.
 
     [:octicons-arrow-right-24: Job Dashboard](features/jobs.md)
 
--   :material-waveform:{ .lg .middle } **Waveform Trimming**
+-   :material-waveform:{ .lg .middle } **Trimming**
 
     ---
 
@@ -101,7 +99,7 @@ a volume you control.
 
     [:octicons-arrow-right-24: Platform Cookies](features/cookies.md)
 
--   :material-shield-lock:{ .lg .middle } **Hardened by Default**
+-   :material-shield-lock:{ .lg .middle } **Hardened**
 
     ---
 

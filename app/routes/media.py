@@ -32,6 +32,7 @@ from ..common.rate_limit import limiter
 from ..db import DOWNLOADABLE_STATUSES, get_job, get_settings
 from ..governor import governor
 from ..utils.fs import AUDIO_SOURCE_EXTENSIONS, path_is_file, resolve_within_root
+from ..utils.geoip import build_requester_info
 from .api import job_to_dict
 from .auth import get_csrf_token, require_html_auth, require_user_json
 
@@ -339,10 +340,16 @@ async def job_page(request: Request, job_id: uuid.UUID):
             status_code=404,
         )
 
+    requester = await asyncio.to_thread(build_requester_info, job["client_ip"])
     return templates.TemplateResponse(
         request=request,
         name="job.html",
-        context={"job": job_to_dict(job), "auth_enabled": auth_enabled, "csrf_token": csrf_token},
+        context={
+            "job": job_to_dict(job),
+            "requester": requester,
+            "auth_enabled": auth_enabled,
+            "csrf_token": csrf_token,
+        },
     )
 
 

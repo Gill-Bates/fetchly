@@ -74,11 +74,12 @@ from .routes.lalal import init_lalal
 from .routes.media import init_media, resolve_job_path
 from .routes.share import init_share
 from .routes.trim import init_trim
-from .session import SESSION_COOKIE, refresh_session_settings_cache, renew_session, set_session_cookie
+from .session import refresh_session_settings_cache, resolve_cookie_secure
 from .utils.assets import VersionedStaticFiles, asset_url
 from .utils.cookies import ensure_data_cookies_dir
 from .utils.duration import round_seconds
 from .utils.fs import get_data_dir
+from .utils.geoip import ensure_geoip_databases_async
 from .utils.housekeeping import cleanup_expired_jobs, cleanup_orphaned_directories, cleanup_thumbnail_cache
 from .utils.template_filters import register_filters
 from .utils.version import BUILD_INFO, VERSION
@@ -99,25 +100,28 @@ if not _SECRET_KEY:
 # No admin credentials come from the environment. fetchly starts with
 # authentication switched off and an empty account; the admin username and
 # password are created in Settings -> Security and stored in the database.
-_CSRF_COOKIE = "fetchly_csrf"
+def _resolve_csrf_cookie_name() -> str:
+    """__Host- enforces Secure, Path=/ and no Domain, closing the subdomain
+    cookie-tossing angle a plain double-submit cookie is otherwise open to.
+    It requires HTTPS, so it's only used when the deployment guarantees that.
+    ``resolve_cookie_secure()`` with no request only reflects
+    FETCHLY_BEHIND_HTTPS, not the per-request scheme fallback, so the name
+    stays stable across requests instead of flipping with the client scheme.
+    """
+    return "__Host-fetchly_csrf" if resolve_cookie_secure() else "fetchly_csrf"
+
+
+_CSRF_COOKIE = _resolve_csrf_cookie_name()
 _HOUSEKEEPING_INTERVAL = 3600  # Every hour
+# The P3TERX mirror refreshes its GeoLite2 build roughly daily; there is no
+# point checking more often than that.
+_GEOIP_REFRESH_INTERVAL = 86_400
 _ANALYSIS_BACKLOG_POLL_INTERVAL = 5.0
 # Only startup replays of a backlog larger than the queue leave jobs persisted
 # but unqueued, so this poll can be lazier than the analysis one.
 _DOWNLOAD_BACKLOG_POLL_INTERVAL = 15.0
 _EVENT_QUEUE_MAXSIZE = 10_000
 _SESSION_SETTINGS_REFRESH_INTERVAL = 60.0
-_SKIP_RENEW_EXACT = frozenset({
-    "/favicon.ico",
-    "/health",
-    "/login",
-    "/logout",
-})
-_SKIP_RENEW_PREFIXES = (
-    "/static",
-    "/thumbnail",
-    "/download",
-)
 
 templates = Jinja2Templates(directory=BASE_DIR / "templates")
 
@@ -134,14 +138,6 @@ templates.env.globals["LALAL_MAX_DURATION_MINUTES"] = LALAL_MAX_DURATION_MINUTES
 # eagerly as well as during lifespan. This keeps TestClient(app) usable for
 # login/logout checks even when startup events have not run yet.
 init_auth(templates, _SECRET_KEY)
-
-
-def _should_skip_session_renewal(request_path: str) -> bool:
-    if request_path in _SKIP_RENEW_EXACT:
-        return True
-    return any(
-        request_path == prefix or request_path.startswith(prefix + "/") for prefix in _SKIP_RENEW_PREFIXES
-    )
 
 
 def _governor_config_from_settings(settings: dict[str, Any]) -> GovernorConfig:
@@ -245,6 +241,28 @@ async def _housekeeping_daemon() -> None:
                 log.warning("Housekeeping failed: %s", exc)
     except asyncio.CancelledError:
         log.debug("Housekeeping daemon cancelled")
+
+
+async def _geoip_database_daemon() -> None:
+    """Best-effort startup + daily refresh of the GeoLite2 databases.
+
+    Never blocks or fails application startup: the job page's requester tile
+    (app/routes/media.py::_build_requester_info) simply omits country/ASN
+    data until a first successful download lands the files under
+    DATA_DIR/geolite2.
+    """
+    log = logging.getLogger("fetchly.geoip")
+    try:
+        while True:
+            try:
+                await ensure_geoip_databases_async()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.warning("GeoIP database check failed: %s", exc)
+            await asyncio.sleep(_GEOIP_REFRESH_INTERVAL)
+    except asyncio.CancelledError:
+        log.debug("GeoIP database daemon cancelled")
 
 
 async def _fill_download_queue() -> None:
@@ -475,6 +493,7 @@ async def lifespan(app: FastAPI):
     background_tasks: list[asyncio.Task[None]] = [
         asyncio.create_task(_event_broadcaster(event_queue), name="event_broadcaster"),
         asyncio.create_task(_housekeeping_daemon(), name="housekeeping_daemon"),
+        asyncio.create_task(_geoip_database_daemon(), name="geoip_database_daemon"),
         asyncio.create_task(_analysis_backlog_daemon(), name="analysis_backlog_daemon"),
         asyncio.create_task(_download_backlog_daemon(), name="download_backlog_daemon"),
         asyncio.create_task(_session_settings_refresh_daemon(), name="session_settings_refresh_daemon"),
@@ -539,59 +558,6 @@ async def _redoc_ui(request: Request) -> Response:
     return get_redoc_html(openapi_url="/openapi.json", title=f"{app.title} - ReDoc")
 
 
-class SessionRenewalMiddleware:
-    """Renew session cookies without BaseHTTPMiddleware's streaming-response wrapper."""
-
-    def __init__(self, app: ASGIApp) -> None:
-        self.app = app
-
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope.get("type") != "http":
-            await self.app(scope, receive, send)
-            return
-
-        request = Request(scope, receive=receive)
-        request_path = request.url.path
-        old_token = request.cookies.get(SESSION_COOKIE)
-        renewed_token: str | None = None
-
-        if old_token and not _should_skip_session_renewal(request_path):
-            renewed_token = await asyncio.to_thread(renew_session, old_token)
-            if renewed_token == old_token:
-                renewed_token = None
-
-        async def send_wrapper(message: Message) -> None:
-            if renewed_token and message.get("type") == "http.response.start":
-                status = int(message.get("status", 200))
-                if status < 400:
-                    try:
-                        response = Response()
-                        set_session_cookie(response, renewed_token, request)
-                    except ValueError:
-                        # renewed_token was computed from a session that was
-                        # live at request start, but the handler itself can
-                        # invalidate every outstanding session (e.g. a
-                        # password change bumping session_version - see
-                        # api_set_settings in app/routes/api.py) before this
-                        # response is sent. set_session_cookie correctly
-                        # refuses to reissue a now-invalid token; skip the
-                        # renewal instead of turning that into a 500, and
-                        # leave the handler's own cookie handling (if any) as
-                        # the source of truth.
-                        logger.debug(
-                            "Skipping session renewal: token invalidated during request handling",
-                            exc_info=True,
-                        )
-                    else:
-                        headers = MutableHeaders(scope=message)
-                        for key, value in response.raw_headers:
-                            if key == b"set-cookie":
-                                headers.append("set-cookie", value.decode("latin-1"))
-            await send(message)
-
-        await self.app(scope, receive, send_wrapper)
-
-
 # SHA-256 of the stylesheet WaveSurfer injects into its shadow root, so
 # style-src can allow that one sheet without opening up 'unsafe-inline'.
 # Refresh it (from the browser console's CSP error) whenever the vendored
@@ -612,7 +578,10 @@ class SecurityHeadersMiddleware:
         # waveform and interpolates the configured height (trim.js). Drift in
         # either fails tests/test_csp_wavesurfer.py.
         f"style-src 'self' '{_WAVESURFER_STYLE_HASH}'",
-        "img-src 'self' data: https://img.youtube.com https://i.ytimg.com",
+        # cdn.jsdelivr.net serves the flag-icons SVGs for the job page's
+        # requester country tile (app/templates/job.html); loaded live, not
+        # vendored, matching wirebuddy's approach for the same feature.
+        "img-src 'self' data: https://img.youtube.com https://i.ytimg.com https://cdn.jsdelivr.net",
         "font-src 'self'",
         "connect-src 'self'",
         "media-src 'self' blob:",
@@ -658,7 +627,6 @@ class OriginalClientMiddleware:
         await self.app(scope, receive, send)
 
 
-app.add_middleware(SessionRenewalMiddleware)
 app.add_middleware(
     CSRFMiddleware,
     csrf_cookie_name=_CSRF_COOKIE,

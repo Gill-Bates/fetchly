@@ -25,6 +25,7 @@ from ..session import (
     create_session,
     delete_session_cookie,
     get_cached_authentication_enabled,
+    invalidate_current_session,
     set_session_cookie,
     validate_session,
 )
@@ -193,6 +194,23 @@ def _require_templates() -> Jinja2Templates:
 
 
 def _do_logout(request: Request) -> RedirectResponse:
+    """Clear the cookie and revoke every outstanding session.
+
+    Tokens are stateless HMAC signatures, so there is no per-token row to
+    delete; bumping session_version is what makes a copied cookie useless
+    after logout, not just the cookie deletion on this response.
+    """
+    # Only meaningful with a real, currently-valid session to revoke.
+    # validate_session() checks the signature, expiry and session version -
+    # a merely-present cookie is not enough: session_version is bumped
+    # globally (fetchly is single-admin), so accepting any cookie value here
+    # would let an unauthenticated visitor force-logout the real admin by
+    # POSTing /logout with a garbage or expired fetchly_session cookie. CSRF
+    # protection alone does not stop this - it only blocks other origins,
+    # not a visitor calling the endpoint directly with their own valid
+    # CSRF pair.
+    if is_authentication_enabled() and validate_session(request.cookies.get(SESSION_COOKIE)):
+        invalidate_current_session(current_user(request) or "")
     response = RedirectResponse(url="/login", status_code=303)
     delete_session_cookie(response, request)
     return response

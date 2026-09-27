@@ -15,6 +15,7 @@ limits**.
 |---|---|---|---|---|
 | Retention | Retention | `retention_days` | `0`–`365` | `0` (unlimited) |
 | Enable Job History | Retention | `enable_job_history` | on/off | on |
+| Start Download after Processing | Retention | `download_auto_start` | on/off | on |
 | Public hostname | Sharing | `public_hostname` | hostname or IP | empty |
 | Share link max uses | Sharing | `share_link_max_uses` | `0`–`10000` | `0` (unlimited) |
 
@@ -30,6 +31,14 @@ submitted, so the setting applies to **new jobs only**: turning it off does not 
 jobs already in the list, and turning it on does not bring back jobs submitted while it
 was off. This is separate from the **Show Job History** toggle on the dashboard, which
 only collapses the list in your browser.
+
+**Start Download after Processing** — whether a finished download starts automatically
+in the browser, without an extra click. On (the default), the browser download begins
+as soon as the job becomes downloadable, and the job still enters the job history like
+any other. Off restores the previous behavior: the job sits in the history and the user
+downloads it manually. This only affects the browser-triggered download; the file still
+has to finish downloading and processing on the server first. Applies to **new jobs
+only**, the same as **Enable Job History**.
 
 **Share link max uses** — snapshotted onto each link at creation. Changing it never
 retroactively re-opens or closes links already handed out. See
@@ -167,7 +176,7 @@ Automatic resolves to at that moment. See [Resources](resources.md).
 | Admin username | `admin_username` | Normalized on save |
 | Admin password | `admin_password_hash` | PBKDF2-HMAC-SHA256; only the hash is stored |
 | Enable authentication | `enable_authentication` | Cannot be enabled before credentials exist |
-| Session idle timeout | `session_idle_minutes` | `1`–`1440`, default `60` |
+| Session lifetime | `session_max_days` | `1`–`7` days, default `7`; absolute, counted from login |
 
 !!! warning "No credentials, no authentication"
     A fresh install has no account and authentication is off. Saving a username and

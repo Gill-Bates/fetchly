@@ -29,6 +29,12 @@ class _IsolatedSettingsDb(IsolatedDbTestCase):
     def setUp(self):
         super().setUp()
 
+        # _templates/_SECRET_KEY are module globals (see auth.init_auth), so
+        # overwriting them here without restoring leaks into every later test
+        # in the same pytest process that needs the real ones - including
+        # anything that renders /login through auth.py's own templates.
+        original_templates, original_secret_key = auth._templates, auth._SECRET_KEY
+        self.addCleanup(auth.init_auth, original_templates, original_secret_key)
         auth.init_auth(object(), "test-auth-credentials-secret")
         # auth.is_authentication_enabled() reads the session-settings cache
         # rather than sqlite directly (see app/session.py); pick up this
@@ -120,12 +126,12 @@ class SecureCookieResolutionTests(unittest.TestCase):
     def test_https_proxy_override_marks_cookies_secure_for_http_upstreams(self):
         request = type("R", (), {"url": type("U", (), {"scheme": "http"})()})()
         with patch.dict(os.environ, {"FETCHLY_BEHIND_HTTPS": "1"}):
-            self.assertTrue(session._resolve_cookie_secure(request))
+            self.assertTrue(session.resolve_cookie_secure(request))
 
     def test_plain_http_without_proxy_override_keeps_cookies_non_secure(self):
         request = type("R", (), {"url": type("U", (), {"scheme": "http"})()})()
         with patch.dict(os.environ, {"FETCHLY_BEHIND_HTTPS": ""}):
-            self.assertFalse(session._resolve_cookie_secure(request))
+            self.assertFalse(session.resolve_cookie_secure(request))
 
 
 class CredentialValidationTests(unittest.TestCase):

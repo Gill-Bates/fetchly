@@ -4183,6 +4183,33 @@ td[data-label="Title"] {
     opacity: 0.6;
 }
 
+.detail-requester-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.4rem;
+    margin-top: 0.65rem;
+    font-size: 0.8rem;
+}
+
+/* Flex items default to min-width: auto, so an unbroken token (a full IPv6
+   address, a long ASN org name) would push past the row's own wrap and
+   overflow the modal instead of wrapping onto its own line. .requester-tile
+   is job.html's <dd> counterpart to this row (a dl/dd layout, not flex),
+   sharing the same overflow guard on its own children. */
+.detail-requester-row>*,
+.requester-tile>* {
+    min-width: 0;
+    overflow-wrap: anywhere;
+}
+
+/* Matches .lalal-status-sep: a separate span, not ::before, so the
+   separator is a real (but aria-hidden) DOM node main.js can toggle
+   alongside the field it introduces. */
+.detail-requester-sep {
+    opacity: 0.6;
+}
+
 /* Action Cell */
 
 .action-cell-wrap {
@@ -4437,6 +4464,13 @@ td:last-child {
     flex: 0 0 auto;
     opacity: 0.9;
     display: block;
+}
+
+.requester-flag {
+    width: 1.2em;
+    height: auto;
+    vertical-align: middle;
+    margin: 0 0.15rem;
 }
 
 .dropdown-provider-logo {

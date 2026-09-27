@@ -195,7 +195,7 @@ def main() -> None:
             [str(app_root / "app"), str(app_root / "middleware")],
         )
     use_colors = _should_use_colors(sys.stdout)
-    host = os.environ.get("HOST", "0.0.0.0")
+    host = os.environ.get("HOST", "127.0.0.1")
     port = _env_int("PORT", 8000)
     graceful_shutdown_timeout = _env_float("UVICORN_TIMEOUT_GRACEFUL_SHUTDOWN", 10.0)
     forwarded_allow_ips = _env_str(

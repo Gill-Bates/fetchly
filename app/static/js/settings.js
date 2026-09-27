@@ -201,10 +201,14 @@ const outputModeTableRowEls = document.querySelectorAll('[data-role="output-mode
 const watermarkCostEl = document.querySelector('[data-role="watermark-cost"]');
 const videoWatermarkEl = document.getElementById("videoWatermark");
 const enableJobHistoryEl = document.getElementById("enableJobHistory");
+const downloadAutoStartEl = document.getElementById("downloadAutoStart");
 const enableAuthenticationEl = document.getElementById("enableAuthentication");
 const retentionDaysEl = document.getElementById("retentionDays");
 const retentionDaysValueEl = document.getElementById("retentionDaysValue");
 const retentionDaysInputEl = document.getElementById("retentionDaysInput");
+const sessionMaxDaysEl = document.getElementById("sessionMaxDays");
+const sessionMaxDaysValueEl = document.getElementById("sessionMaxDaysValue");
+const sessionMaxDaysInputEl = document.getElementById("sessionMaxDaysInput");
 const shareLinkMaxUsesEl = document.getElementById("shareLinkMaxUses");
 const shareLinkMaxUsesValueEl = document.getElementById("shareLinkMaxUsesValue");
 const shareLinkMaxUsesInputEl = document.getElementById("shareLinkMaxUsesInput");
@@ -217,6 +221,8 @@ const credentialsSectionEl = document.getElementById("credentialsSection");
 
 const RETENTION_DAY_OPTIONS = [0, 7, 14, 30, 90, 180, 365];
 const SHARE_LINK_MAX_USE_OPTIONS = [0, 1, 10, 100, 1_000, 5_000, 10_000];
+// Mirrors SESSION_MAX_DAYS_MIN/MAX in app/db.py: 1-7 days, one tick per day.
+const SESSION_MAX_DAY_OPTIONS = [1, 2, 3, 4, 5, 6, 7];
 // Mirrors DOWNLOAD_OUTPUT_MODES in app/db.py, in slider order. The index is
 // what the range input carries; the mode string is what gets saved.
 const OUTPUT_MODE_OPTIONS = ["source", "universal", "av1"];
@@ -237,7 +243,6 @@ const RUNTIME_LIMITS = [
     ["audio_analysis_max_minutes", "BPM analysis track limit", 0, 240],
     ["audio_analysis_timeout_minutes", "BPM analysis timeout", 1, 60],
     ["lalal_max_download_gib", "Lalal result limit", 1, 100],
-    ["session_idle_minutes", "Session idle timeout", 1, 1440],
 ];
 
 let saveTimeoutId = null;
@@ -313,6 +318,15 @@ function updateRetentionDaysPreview() {
         RETENTION_DAY_OPTIONS,
         (days) => (days === 0 ? "Unlimited" : (days === 365 ? "1 year" : `${days} days`)),
         { inputEl: retentionDaysInputEl, valueEl: retentionDaysValueEl, fallbackIndex: 0 },
+    );
+}
+
+function updateSessionMaxDaysPreview() {
+    updateSliderPreview(
+        sessionMaxDaysEl,
+        SESSION_MAX_DAY_OPTIONS,
+        (days) => `${days} day${days === 1 ? "" : "s"}`,
+        { inputEl: sessionMaxDaysInputEl, valueEl: sessionMaxDaysValueEl, fallbackIndex: SESSION_MAX_DAY_OPTIONS.length - 1 },
     );
 }
 
@@ -546,6 +560,16 @@ function validateSettings() {
         return { valid: false, error: "Max. uses per share link must be between 0 and 10000" };
     }
 
+    const sessionMaxDaysMin = SESSION_MAX_DAY_OPTIONS[0];
+    const sessionMaxDaysMax = SESSION_MAX_DAY_OPTIONS[SESSION_MAX_DAY_OPTIONS.length - 1];
+    const sessionMaxDays = parseInt(String(form.get("session_max_days") || ""), 10);
+    if (!Number.isFinite(sessionMaxDays) || sessionMaxDays < sessionMaxDaysMin || sessionMaxDays > sessionMaxDaysMax) {
+        return {
+            valid: false,
+            error: `Session lifetime must be between ${sessionMaxDaysMin} and ${sessionMaxDaysMax} days`,
+        };
+    }
+
     const outputMode = String(form.get("download_output_mode") || "");
     if (!OUTPUT_MODE_OPTIONS.includes(outputMode)) {
         return { valid: false, error: "Video output format must be Source, H.264 or AV1" };
@@ -571,8 +595,10 @@ function validateSettings() {
         data: {
             retention_days: retention,
             enable_job_history: enableJobHistoryEl ? enableJobHistoryEl.checked : true,
+            download_auto_start: downloadAutoStartEl ? downloadAutoStartEl.checked : true,
             download_concurrent_fragments: fragments,
             share_link_max_uses: shareMaxUses,
+            session_max_days: sessionMaxDays,
             public_hostname: publicHostname,
             download_output_mode: outputMode,
             video_watermark: videoWatermarkEl ? videoWatermarkEl.checked : true,
@@ -1152,7 +1178,6 @@ const AUTO_SAVE_INPUT_SELECTOR = [
     '[name="audio_analysis_max_minutes"]',
     '[name="audio_analysis_timeout_minutes"]',
     '[name="lalal_max_download_gib"]',
-    '[name="session_idle_minutes"]',
 ].join(", ");
 
 function bindOutputModeSlider() {
@@ -1376,6 +1401,10 @@ function bindSettingsInputs() {
         scheduleAutoSave(0, "Job history updated");
     });
 
+    downloadAutoStartEl?.addEventListener("change", () => {
+        scheduleAutoSave(0, "Auto-start setting updated");
+    });
+
     enableAuthenticationEl?.addEventListener("change", async () => {
         if (enableAuthenticationEl.checked) {
             // No account = nobody could log in; hold the flag until credentials
@@ -1431,6 +1460,21 @@ function bindRetentionSlider() {
         scheduleAutoSave(0, "Retention updated");
     });
     updateRetentionDaysPreview();
+}
+
+function bindSessionMaxDaysSlider() {
+    const savedDays = Number.parseInt(sessionMaxDaysEl?.dataset.sessionMaxDays || "", 10);
+    const exactIndex = SESSION_MAX_DAY_OPTIONS.indexOf(savedDays);
+    const closestIndex = closestOptionIndex(SESSION_MAX_DAY_OPTIONS, savedDays);
+
+    if (sessionMaxDaysEl) {
+        sessionMaxDaysEl.value = String(exactIndex >= 0 ? exactIndex : closestIndex);
+    }
+    sessionMaxDaysEl?.addEventListener("input", updateSessionMaxDaysPreview);
+    sessionMaxDaysEl?.addEventListener("change", () => {
+        scheduleAutoSave(0, "Session lifetime updated");
+    });
+    updateSessionMaxDaysPreview();
 }
 
 function bindShareLinkMaxUsesSlider() {
@@ -2324,6 +2368,7 @@ function init() {
     });
 
     bindRetentionSlider();
+    bindSessionMaxDaysSlider();
     bindShareLinkMaxUsesSlider();
     bindSettingsInputs();
     bindOutputModeSlider();

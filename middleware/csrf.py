@@ -11,17 +11,41 @@ from __future__ import annotations
 import re
 import secrets
 from collections.abc import Awaitable, Callable
-from urllib.parse import parse_qs
+from typing import Final
+from urllib.parse import parse_qs, urlparse
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
 from starlette.datastructures import MutableHeaders
 from starlette.types import ASGIApp
 
+from app.session import resolve_cookie_secure
+
 SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+# Sec-Fetch-Site values that indicate the request came from this app's own
+# origin, or from a context with no meaningful site at all (typed URL,
+# bookmark). "same-site" is deliberately excluded: a sibling subdomain that
+# can toss a same-site cookie is exactly the gap the double-submit check
+# alone does not close.
+_SAME_ORIGIN_FETCH_SITES = frozenset({"same-origin", "none"})
 
 # Characters that must not appear in a cookie name per RFC 6265.
 _BAD_COOKIE_NAME_CHARS = re.compile(r'[;=\s]')
+
+_DEFAULT_PORTS: Final[dict[str, int]] = {"http": 80, "https": 443}
+
+
+def _effective_port(scheme: str, port: int | None) -> int | None:
+    """Normalize an explicit default port to None, matching browser Origin/Referer.
+
+    A proxy that forwards ``Host: example.com:443`` makes request.url.port
+    read 443, while a compliant browser's own Origin header omits the default
+    port entirely (RFC 6454). Comparing the raw values would flag every such
+    same-origin request as cross-site.
+    """
+    default = _DEFAULT_PORTS.get(scheme.lower())
+    return None if port == default else port
 
 
 def generate_csrf_token() -> str:
@@ -32,7 +56,11 @@ def generate_csrf_token() -> str:
 class CSRFMiddleware:
     """Double-submit cookie CSRF middleware for selected state-changing routes."""
 
-    _COOKIE_MAX_AGE = 3600
+    # No Max-Age: a browser-session cookie that lives as long as the tab does.
+    # A fixed Max-Age shorter than the login's own lifetime (session_max_days,
+    # now up to 7 days) would silently expire the CSRF cookie under a tab left
+    # open longer than that, while the login itself was still valid - every
+    # write in that tab would then 403 until the next reload.
     _COOKIE_SAMESITE = "lax"
     _COOKIE_PATH = "/"
 
@@ -61,6 +89,38 @@ class CSRFMiddleware:
 
     def _path_protected(self, path: str) -> bool:
         return any(path == p or path.startswith(p + "/") for p in self._protected_paths)
+
+    @staticmethod
+    def _is_cross_site(request: Request) -> bool:
+        """Return True when Sec-Fetch-Site or Origin/Referer show this request
+        did not originate from the app's own origin.
+
+        This is additive to the double-submit token check, not a replacement:
+        a same-site subdomain that can set a matching CSRF cookie value would
+        still pass the token comparison, so the token alone does not stop it.
+        Absence of every signal is treated as unknown, not as a pass - but the
+        double-submit token check downstream still has to succeed either way.
+        """
+        fetch_site = request.headers.get("sec-fetch-site")
+        if fetch_site is not None:
+            return fetch_site.strip().lower() not in _SAME_ORIGIN_FETCH_SITES
+
+        request_host = (request.url.hostname or "").lower()
+        request_port = _effective_port(request.url.scheme, request.url.port)
+        for header_name in ("origin", "referer"):
+            value = request.headers.get(header_name)
+            if not value:
+                continue
+            parsed = urlparse(value)
+            if not parsed.hostname:
+                # e.g. "Origin: null" from a sandboxed/redirected context -
+                # not distinguishable from same-origin, but not verifiable
+                # either, so it cannot be trusted as a pass.
+                return True
+            origin_port = _effective_port(parsed.scheme, parsed.port)
+            return parsed.hostname.lower() != request_host or origin_port != request_port
+
+        return False
 
     @staticmethod
     def _normalize_content_type(content_type: str) -> str:
@@ -150,7 +210,6 @@ class CSRFMiddleware:
                 key=self._csrf_cookie_name,
                 value=set_cookie_value,
                 path=self._COOKIE_PATH,
-                max_age=self._COOKIE_MAX_AGE,
                 httponly=False,
                 secure=secure,
                 samesite=self._COOKIE_SAMESITE,  # type: ignore[arg-type]
@@ -161,7 +220,6 @@ class CSRFMiddleware:
         """Serialize the CSRF cookie for direct header injection."""
         parts = [
             f"{self._csrf_cookie_name}={value}",
-            f"Max-Age={self._COOKIE_MAX_AGE}",
             f"Path={self._COOKIE_PATH}",
             f"SameSite={self._COOKIE_SAMESITE.capitalize()}",
         ]
@@ -193,13 +251,24 @@ class CSRFMiddleware:
 
         method = request.method
         path = request.url.path
-        secure = request.url.scheme == "https"
+        secure = resolve_cookie_secure(request)
 
         # A consumed body must be replayed for downstream handlers.
         body_cache: bytes | None = None
         body_consumed = False
 
         if method not in SAFE_METHODS and self._path_protected(path):
+            if self._is_cross_site(request):
+                await self._reject(
+                    "Cross-origin request rejected",
+                    scope=scope,
+                    receive=receive,
+                    send=send,
+                    set_cookie_value=csrf_cookie if is_new_cookie else None,
+                    secure=secure,
+                )
+                return
+
             sent_token = request.headers.get("X-CSRF-Token")  # JS fetch path
             if not sent_token:  # traditional form submit
                 content_type = self._normalize_content_type(request.headers.get("content-type", ""))

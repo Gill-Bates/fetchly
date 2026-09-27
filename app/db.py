@@ -20,6 +20,13 @@ from .utils.public_url import normalize_public_hostname
 
 logger = logging.getLogger(__name__)
 
+# Shared with app/session.py and app/routes/api.py so the allowed range for
+# session_max_days is defined once. Lives here, not in session.py, because
+# session.py already imports get_settings from this module - the reverse
+# import would be circular.
+SESSION_MAX_DAYS_MIN: Final = 1
+SESSION_MAX_DAYS_MAX: Final = 7
+
 __all__ = [
     "COMPLETED_STATUSES",
     "DB_PATH",
@@ -90,7 +97,7 @@ _MAX_QUERY_LIMIT: Final[int] = 2_000
 # into the file (PRAGMA user_version) and refuses to open a file stamped higher,
 # so rolling a deployment back to an older image fails fast instead of silently
 # writing against a schema it does not understand.
-_SCHEMA_VERSION: Final[int] = 2
+_SCHEMA_VERSION: Final[int] = 3
 
 # job_id deletions are chunked so a large retention sweep never trips SQLite's
 # bound-parameter ceiling (SQLITE_MAX_VARIABLE_NUMBER) or holds one oversized
@@ -126,6 +133,10 @@ _SETTINGS_DEFAULTS: Final[dict[str, str]] = {
     # Each job snapshots the value at submission time, so changing it never
     # changes the visibility of an existing job.
     "enable_job_history": "true",
+    # On by default: a finished download starts automatically in the browser
+    # instead of waiting for the user to click Download. Applies to newly
+    # submitted jobs only, mirroring enable_job_history above.
+    "download_auto_start": "true",
     "login_required": "false",
     # Off on a fresh install, and no credentials exist to go with it. The admin
     # account is created in Settings -> Security; authentication cannot be
@@ -133,7 +144,9 @@ _SETTINGS_DEFAULTS: Final[dict[str, str]] = {
     # app/routes/api.py::api_set_settings).
     "enable_authentication": "false",
     "admin_username": "",
-    "session_idle_minutes": "60",
+    # Absolute session lifetime in days, counted from login. The session is
+    # invalidated once it elapses - there is no sliding renewal past it.
+    "session_max_days": "7",
     # 0 means "Automatic": sized per download from the host's CPU quota and
     # free memory (app/governor.py::recommended_concurrent_fragments).
     "download_concurrent_fragments": "0",
@@ -299,11 +312,14 @@ def with_finished_at(status: str, extra: dict[str, Any]) -> dict[str, Any]:
 _SETTINGS_TYPES: Final[dict[str, Callable[[object], Any]]] = {
     "retention_days": lambda value: _parse_bounded_int(value, minimum=0, maximum=365),
     "enable_job_history": _parse_bool,
+    "download_auto_start": _parse_bool,
     "statistics_reset_at": str,
     "login_required": _parse_bool,
     "enable_authentication": _parse_bool,
     "admin_username": lambda value: normalize_admin_username(value if isinstance(value, str) else ""),
-    "session_idle_minutes": lambda value: _parse_bounded_int(value, minimum=1, maximum=24 * 60),
+    "session_max_days": lambda value: _parse_bounded_int(
+        value, minimum=SESSION_MAX_DAYS_MIN, maximum=SESSION_MAX_DAYS_MAX
+    ),
     "session_version": _parse_nonnegative_int,
     "download_concurrent_fragments": lambda value: _parse_bounded_int(value, minimum=0, maximum=16),
     "download_worker_count": lambda value: _parse_bounded_int(value, minimum=0, maximum=8),
@@ -458,7 +474,8 @@ def init_db() -> None:
                 bpm INTEGER CHECK (bpm IS NULL OR bpm > 0),
                 bpm_confidence REAL CHECK (bpm_confidence IS NULL OR bpm_confidence >= 0),
                 audio_hash TEXT,
-                lalal_split_done INTEGER NOT NULL DEFAULT 0 CHECK (lalal_split_done IN (0, 1))
+                lalal_split_done INTEGER NOT NULL DEFAULT 0 CHECK (lalal_split_done IN (0, 1)),
+                client_ip TEXT
             )
         """)
 
@@ -511,6 +528,15 @@ def init_db() -> None:
         )
         con.execute("DELETE FROM settings WHERE key = 'download_mp4_preset'")
 
+        # "session_idle_minutes" (a sliding idle timeout) became
+        # "session_max_days" (an absolute lifetime from login) when the hard
+        # 24h limit was dropped in favor of a single configurable deadline.
+        # The two settings have no compatible conversion - an idle-minutes
+        # value says nothing about how many days a login should stay valid -
+        # so the old row is just dropped and the new one starts at its
+        # default. No-op once migrated (the old row no longer exists).
+        con.execute("DELETE FROM settings WHERE key = 'session_idle_minutes'")
+
         # The boolean "download_compatible_output" became the three-way
         # "download_output_mode" when AV1 joined H.264/AAC as an output target.
         # On meant "guarantee H.264/AAC" (now "universal"); off meant "pass the
@@ -539,6 +565,12 @@ def init_db() -> None:
                 "ALTER TABLE jobs ADD COLUMN include_in_history "
                 "INTEGER NOT NULL DEFAULT 1 CHECK (include_in_history IN (0, 1))"
             )
+        if "client_ip" not in job_columns:
+            # Added for the job detail page's requester tile (IP/ASN/country,
+            # resolved at render time via app/utils/geoip.py). NULL on jobs
+            # submitted before this column existed - the tile is simply
+            # omitted for those.
+            con.execute("ALTER TABLE jobs ADD COLUMN client_ip TEXT")
 
         con.execute("CREATE INDEX IF NOT EXISTS idx_jobs_created_at_id ON jobs(created_at DESC, id DESC)")
         con.execute(
@@ -578,12 +610,19 @@ def insert_job(
     video_meta_hover: str | None = None,
     duration_seconds: float | None = None,
     include_in_history: bool = True,
+    client_ip: str | None = None,
 ) -> None:
     """Insert a queued job row.
 
     ``duration_seconds`` is the runtime the source reported at submit time, so
     the job list can show a length while the download is still running. The
     worker overwrites it with the ffprobe reading of the finished file.
+
+    ``client_ip`` is the requester's IP as resolved by
+    ``app.common.rate_limit.get_rate_limit_ip`` at submission time (already
+    proxy-aware); stored as-is and never updated afterwards. Country/ASN are
+    not persisted - they are resolved from this address at render time via
+    ``app.utils.geoip``.
     """
     _validate_status(status)
     # The column's CHECK constraint rejects negatives, and an unusable reading
@@ -596,9 +635,9 @@ def insert_job(
             """
             INSERT INTO jobs (
                 id, url, type, quality, status, video_title, video_meta_hover,
-                duration_seconds, include_in_history
+                duration_seconds, include_in_history, client_ip
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 job_id,
@@ -610,6 +649,7 @@ def insert_job(
                 video_meta_hover,
                 duration,
                 int(include_in_history),
+                client_ip,
             ),
         )
         con.commit()

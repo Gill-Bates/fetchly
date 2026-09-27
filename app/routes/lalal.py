@@ -751,10 +751,6 @@ async def lalal_split(
         loop.call_soon_threadsafe(queue_event, payload)
 
     try:
-        stem_type = StemType.VOCALS
-        download_stem = True
-        download_backing = True
-
         async with _processing_attempt(lock_file, vocals_path, instrumental_path):
             cached_response = await _get_cached_split_response(
                 job_id_str,
@@ -778,9 +774,9 @@ async def lalal_split(
                         results = await client.process_file(
                             upload_path,
                             output_dir,
-                            stem=stem_type,
-                            download_stem=download_stem,
-                            download_backing=download_backing,
+                            stem=StemType.VOCALS,
+                            download_stem=True,
+                            download_backing=True,
                             progress_callback=sync_progress_callback,
                         )
                     finally:

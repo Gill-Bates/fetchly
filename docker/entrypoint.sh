@@ -65,11 +65,11 @@ readonly -a REQUIRED_DIRS=(
     "${TORCH_HOME}"
 )
 
-# "latest is greatest": the Dockerfile bakes in whatever unpkg's @latest
-# alias resolved to at build time (no version ARG, no hash pin - a deliberate
-# trade-off, see docker/AGENTS.md), and writes it here rather than into a
-# build ARG so app/utils/version.py can still report it without a rebuild
-# changing what "current" means.
+# WaveSurfer is vendored and pinned in git (see docker/AGENTS.md); the
+# Dockerfile copies the committed docker/wavesurfer.version file to
+# /app/.wavesurfer_version rather than baking the version into an ENV, so
+# app/utils/version.py can report it without a rebuild changing what "current"
+# means.
 if [[ -z "${WAVESURFER_VERSION:-}" ]] && [[ -r /app/.wavesurfer_version ]]; then
     WAVESURFER_VERSION="$(tr -d ' \t\r\n' < /app/.wavesurfer_version)"
 fi

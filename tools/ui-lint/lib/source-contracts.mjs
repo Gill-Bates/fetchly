@@ -76,7 +76,7 @@ export const SOURCE_CONTRACT_MESSAGES = Object.freeze({
     jobsInfiniteScrollNotObserverBased: 'jobs infinite scroll is not driven by an IntersectionObserver rooted at the local scroller',
     jobsPagingOffsetContractBroken: 'jobs pagination offset is not monotonic across row trimming',
     jobsDesktopFileSizePlacementBroken: 'desktop job file size must share the Media metadata line and stay out of Status',
-    jobsMobileShareActionMissing: 'mobile downloadable jobs must expose the shared Download and Share menu',
+    jobsMobileShareActionMissing: 'mobile downloadable jobs must expose the same Share/Details dropdown menu as desktop',
     settingsSaveToastContractBroken: 'settings autosave must stay quiet, while errors use toasts and no inline save-status row is rendered',
     settingsHintContractBroken: 'settings explanation hints must use the info-icon hint style',
     settingsHintSpacingContractBroken: 'settings explanation hints must share the global 4px spacing rule',
@@ -165,8 +165,8 @@ export async function getJobsSourceContractMetrics() {
                 /function createMobileDownloadAction\(job\)\s*\{([\s\S]*?)\n\}/,
             )?.[1] || '';
             const mobileSharesDesktopDownloadMenu = (
-                /createDownloadOptionsMenu\(job,\s*downloadBtn\.href\)/.test(mobileDownloadActionSource)
-                && /function createDownloadOptionsMenu\(job,\s*downloadHref\)[\s\S]*?["']share["'][\s\S]*?action:\s*["']share-job["']/.test(uiJsSource)
+                /createDownloadOptionsMenu\(job\)/.test(mobileDownloadActionSource)
+                && /function createDownloadOptionsMenu\(job\)[\s\S]*?["']share["'][\s\S]*?action:\s*["']share-job["']/.test(uiJsSource)
                 && /return createMobileDownloadAction\(action\.job\)/.test(uiJsSource)
             );
 
