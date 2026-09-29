@@ -112,7 +112,7 @@ node --test tests/js/confirm-modal.test.mjs     # full output for one file
 
 ---
 
-**Last Updated:** 2026-09-19  
+**Last Updated:** 2026-09-29  
 **Framework:** `node:test` + `node:assert/strict`  
 **Runtime:** Node.js, no browser  
-**Files:** 17 test suites + `helpers/fake-dom.mjs`
+**Files:** 18 test suites + `helpers/fake-dom.mjs`

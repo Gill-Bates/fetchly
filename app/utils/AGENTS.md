@@ -126,7 +126,7 @@ Tests are unittest-style classes; subclass the helpers in `tests/_support.py` ra
 
 ---
 
-**Last Updated:** 2026-09-20  
+**Last Updated:** 2026-09-29  
 **Language:** Python 3.13+  
 **Key Dependencies:** yt-dlp, FFmpeg, httpx, markdown/nh3  
 **Design:** Stateless helpers; configuration comes from the settings table or the environment

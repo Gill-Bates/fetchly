@@ -11,7 +11,7 @@ directory on your data volume.
 | YouTube | :material-check: | :material-check: | `youtube.com`, `youtu.be` |
 | TikTok | :material-check: | :material-check: | `tiktok.com` |
 | Instagram | :material-check: | :material-check: | `instagram.com` |
-| Facebook | :material-check: | :material-check: | `facebook.com`, `fb.watch` |
+| Facebook | :material-check: | :material-check: | `facebook.com`, `fb.watch` (videos, reels, stories, share links) |
 
 The platform is detected from the URL and decides which cookie jar (if any) is passed
 to yt-dlp. URLs that match no known platform are rejected at submit time.
