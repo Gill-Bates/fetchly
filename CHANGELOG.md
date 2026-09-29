@@ -1,3 +1,11 @@
+## [1.3.2] - 2026-xx-xx
+
+- ``Fix`` Facebook Story links (`facebook.com/stories/<set id>/<story id>`) are now accepted instead of being rejected as an invalid Facebook URL.
+
+
+<details markdown="1">
+<summary>Previous versions...</summary>
+
 ## [1.3.1] - 2026-09-27
 
 - ``New`` Share a finished download with a **Share Link** (Settings → General → Sharing), with an optional use limit.

@@ -11,6 +11,7 @@
 | `conftest.py` | Imports `tests._support` for its side effect: `FETCHLY_SECRET_KEY` is set before pytest imports any test module. **Defines no fixtures.** |
 | `_support.py` | Shared setup: the secret-key bootstrap plus `IsolatedDbTestCase` and `WebAppTestCase` base classes |
 | `test_auth_credentials.py`, `test_auth_flow.py` | Admin credential handling, login/logout, session behavior |
+| `test_csrf.py` | The double-submit CSRF token check and the additive Sec-Fetch-Site/Origin/Referer cross-site rejection |
 | `test_cookie_files.py`, `test_cookie_import.py`, `test_cookie_routes.py`, `test_cookie_status.py` | Netscape parsing, per-platform storage, routes, usability reporting |
 | `test_bpm_beat_this.py`, `test_bpm_naming.py`, `test_bpm_normalization.py` | Tempo detection, the `_94bpm` tag folded into download filenames, octave/half-time normalization |
 | `test_watermark.py`, `test_watermark_logo.py` | FFmpeg compositing and uploaded-logo validation |
@@ -22,6 +23,7 @@
 | `test_changelog.py`, `test_version_source.py` | Changelog rendering; version source and the no-`==`-pins rule |
 | `test_duration.py`, `test_job_duration.py` | Duration parsing and job duration reporting |
 | `test_lalal_minutes.py`, `test_lalal_policy.py`, `test_lalal_route_safety.py` | Lalal.ai quota, policy guards, route safety |
+| `test_platform_urls.py` | Platform URL validation edge cases in `app/utils/platform.py`: Facebook Story links, YouTube Shorts |
 | `test_public_url.py` | Share-link host normalization and base-URL construction |
 | `test_remove_all_jobs.py` | Bulk job deletion |
 | `test_housekeeping_retention.py` | The retention sweep: `purge_old_jobs` batching, and that an expired job loses its row, its directory and its share links together while `0` days sweeps nothing |
@@ -43,14 +45,16 @@
 | `test_client_ip_geoip.py` | Client-IP-to-GeoIP resolution backing the job detail "requester" tile |
 | `test_lalal_wait_for_completion.py` | Lalal.ai completion polling |
 | `test_memory_backpressure.py` | Governor memory-threshold backpressure |
+| `test_metadata_executor_isolation.py` | A metadata lookup that outlives its `asyncio.wait_for()` timeout keeps running on a dedicated executor instead of starving the shared default one |
+| `test_sse_events.py` | SSE subscriber lifecycle: registration must not outlive an abandoned stream |
 
-45 Python test files in total.
+49 Python test files in total.
 
 ## Subdirectories
 
 | Directory | Purpose |
 | --- | --- |
-| `js/` | 17 `node:test` suites (`*.test.mjs`): UI contracts, accessibility, layout stability, device profiles, console severity, network findings, audit result summaries, element-id contracts, toast/modal/CSRF/redirect safety |
+| `js/` | 18 `node:test` suites (`*.test.mjs`): UI contracts, accessibility, layout stability, device profiles, console severity, network findings, audit result summaries, element-id contracts, toast/modal/CSRF/redirect safety, media URL validation |
 | `js/helpers/` | `fake-dom.mjs` — the shared fake DOM |
 
 ## For AI Agents
@@ -159,7 +163,7 @@ pytest tests/test_worker_hardening.py --pdb
 
 ---
 
-**Last Updated:** 2026-09-21  
+**Last Updated:** 2026-09-29  
 **Python:** pytest runner, unittest-style classes, no fixtures  
 **JavaScript:** `node:test` + `node:assert/strict`  
-**Counts:** 45 Python files, 17 JavaScript files
+**Counts:** 49 Python files, 18 JavaScript files

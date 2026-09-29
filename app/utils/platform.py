@@ -55,6 +55,9 @@ _TIKTOK_SHARE_CODE_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 # Facebook numeric object IDs; share/reel codes are alphanumeric instead.
 _FACEBOOK_ID_RE = re.compile(r"^[0-9]{6,}$")
 _FACEBOOK_CODE_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+# Story IDs are base64 of an internal token, so they may carry "=" padding -
+# literal in a pasted URL, percent-encoded when the browser copied it.
+_FACEBOOK_STORY_RE = re.compile(r"^[A-Za-z0-9_-]+(?:=|%3[Dd]){0,2}$")
 _FACEBOOK_PAGE_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
 
@@ -157,7 +160,7 @@ def _validate_facebook_url(url: str) -> tuple[bool, str]:
     parsed = urlparse(url)
     host = (parsed.hostname or "").lower()
     segments = [seg for seg in (parsed.path or "").strip("/").split("/") if seg]
-    error = "Invalid Facebook URL. Expected a Facebook video, reel, or share link."
+    error = "Invalid Facebook URL. Expected a Facebook video, reel, story, or share link."
 
     # Short share hosts: fb.watch/<code>, fb.gg/<code>
     if host in _FACEBOOK_EXACT_HOSTS:
@@ -178,6 +181,14 @@ def _validate_facebook_url(url: str) -> tuple[bool, str]:
     # /reel/<id>
     if segments[0] == "reel" and len(segments) >= 2 and _FACEBOOK_CODE_RE.fullmatch(segments[1]):
         return True, ""
+
+    # /stories/<set id> and /stories/<set id>/<story id>
+    if segments[0] == "stories":
+        if len(segments) >= 2 and _FACEBOOK_ID_RE.fullmatch(segments[1]) and (
+            len(segments) == 2 or _FACEBOOK_STORY_RE.fullmatch(segments[2])
+        ):
+            return True, ""
+        return False, error
 
     # /share/v/<code>, /share/r/<code>
     if segments[0] == "share" and len(segments) >= 3 and segments[1] in {"v", "r"}:

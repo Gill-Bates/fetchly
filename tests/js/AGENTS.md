@@ -18,6 +18,7 @@ These run in plain Node.js with no browser. Two groups live here: tests of `app/
 | `limited-playback.test.mjs` | The **Limited playback** marker: which codec/container combinations the job list flags as unplayable on Safari, iOS and TVs |
 | `safe-redirect.test.mjs` | Redirect safety: origin validation against a stubbed `window.location` |
 | `format-helpers.test.mjs` | Format description parsing and quality/codec naming. Self-contained — it stubs `document` and does not import an `app/static/js/format-helpers.js` module (no such file exists). |
+| `media-url-validation.test.mjs` | `isValidMediaUrl()` / `detectPlatform()` edge cases mirrored from `tests/test_platform_urls.py`: Facebook Story links, YouTube Shorts |
 | `config-contract.test.mjs` | Reads `app/static/js/config.js` as text, re-imports it per case with a stubbed `documentElement.dataset`, and asserts both the Lalal duration bootstrap contract and the exported status sets |
 | `ui-lint-axe.test.mjs` | Unit tests for `tools/ui-lint/lib/axe.mjs` (tag selection, violation handling, and both failure modes via the injectable `loadAxeBuilder` loader) |
 | `ui-lint-devices.test.mjs` | Unit tests for the device-profile logic in `tools/ui-lint/run-ui-lint.mjs` |

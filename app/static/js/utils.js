@@ -456,6 +456,12 @@ export function isValidMediaUrl(url) {
             if (segments[0] === "reel") {
                 return segments.length >= 2 && fbCode.test(segments[1]);
             }
+            // /stories/<set id> and /stories/<set id>/<story id>; a story id is
+            // base64, so it may carry literal or percent-encoded "=" padding.
+            if (segments[0] === "stories") {
+                if (segments.length < 2 || !/^[0-9]{6,}$/.test(segments[1])) return false;
+                return segments.length === 2 || /^[A-Za-z0-9_-]+(?:=|%3[Dd]){0,2}$/.test(segments[2]);
+            }
             // /share/v/<code>, /share/r/<code>
             if (segments[0] === "share") {
                 return segments.length >= 3 && ["v", "r"].includes(segments[1]) && fbCode.test(segments[2]);
