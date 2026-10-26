@@ -15,9 +15,9 @@ import subprocess
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
-from typing import Any, Final, NamedTuple
+from typing import IO, Any, Final, NamedTuple
 
 from ..audio.naming import SOURCE_MARKER
 from ..db import (
@@ -651,23 +651,29 @@ def _unregister_active_process(job_id: str, proc: subprocess.Popen[str]) -> None
             _active_processes.pop(job_id, None)
 
 
-def _run_cmd(
-    cmd: list[str],
-    *,
-    timeout: int,
-    capture_stdout: bool = False,
-    job_id: str | None = None,
-) -> str:
-    logger.debug("Executing command: %s", " ".join(cmd))
+def _check_job_alive(job_id: str | None) -> None:
+    """Raise if the job was cancelled (when there is one) or shutdown began."""
     if job_id is not None:
         _check_cancellation(job_id)
     _check_shutdown()
 
-    started = time.monotonic()
-    stdout_value = ""
-    stdout_collected = False
+
+@contextlib.contextmanager
+def _supervised_process(
+    cmd: list[str],
+    *,
+    job_id: str | None,
+    stdout: int,
+    bufsize: int = -1,
+) -> Iterator[subprocess.Popen[str]]:
+    """Run *cmd* under the shared worker subprocess lifecycle.
+
+    Owns the stderr temp file, job registration, the cancel/shutdown checks
+    right after start and after the caller's loop, the non-zero exit error,
+    error mapping, and termination/cleanup. The caller only drives the wait.
+    """
     proc: subprocess.Popen[str] | None = None
-    stderr_tmp: tempfile._TemporaryFileWrapper[str] | None = None
+    stderr_tmp: IO[str] | None = None
     try:
         # Closed in the matching finally: the handle has to outlive the
         # `with subprocess.Popen(...)` block it is passed into.
@@ -676,55 +682,25 @@ def _run_cmd(
         )
         with subprocess.Popen(
             cmd,
-            stdout=subprocess.PIPE if capture_stdout else subprocess.DEVNULL,
+            stdout=stdout,
             # Keep stderr in a temp file for diagnostics without PIPE deadlocks.
             stderr=stderr_tmp,
             start_new_session=True,
             text=True,
             encoding="utf-8",
             errors="replace",
+            bufsize=bufsize,
         ) as process:
             proc = process
             try:
                 if job_id is not None:
                     _register_active_process(job_id, proc)
-                    # A cancel request can arrive between Popen and registration.
-                    _check_cancellation(job_id)
-                _check_shutdown()
+                # A cancel request can arrive between Popen and registration.
+                _check_job_alive(job_id)
 
-                while proc.poll() is None:
-                    if job_id is not None:
-                        _check_cancellation(job_id)
-                    _check_shutdown()
+                yield proc
 
-                    elapsed = time.monotonic() - started
-                    remaining = timeout - elapsed
-                    if remaining <= 0:
-                        raise RuntimeError(f"Command timed out after {timeout}s")
-
-                    try:
-                        poll_timeout = min(_COMMAND_POLL_INTERVAL, remaining)
-                        if capture_stdout:
-                            stdout_value, _ = proc.communicate(timeout=poll_timeout)
-                            stdout_collected = True
-                        else:
-                            proc.wait(timeout=poll_timeout)
-                    except subprocess.TimeoutExpired:
-                        continue
-
-                if capture_stdout and not stdout_collected:
-                    # The child can exit in the race window between a
-                    # TimeoutExpired and the next poll(), which ends the loop
-                    # without any completed communicate(). Drain the pipe once
-                    # more so callers (ffprobe) do not see an empty result -
-                    # communicate() resumes from the partially read buffers.
-                    with contextlib.suppress(subprocess.TimeoutExpired):
-                        stdout_value, _ = proc.communicate(timeout=_COMMAND_POLL_INTERVAL)
-
-                if job_id is not None:
-                    _check_cancellation(job_id)
-                _check_shutdown()
-
+                _check_job_alive(job_id)
                 if proc.returncode != 0:
                     _raise_for_failed_command(cmd, proc.returncode, stderr_tmp)
             except Exception:
@@ -750,6 +726,56 @@ def _run_cmd(
                 logger.debug("Could not close temporary stderr file", exc_info=True)
         if job_id is not None and proc is not None:
             _unregister_active_process(job_id, proc)
+
+
+def _remaining_or_timeout(started: float, timeout: int) -> float:
+    """Seconds left of *timeout*; raises once the deadline has passed."""
+    remaining = timeout - (time.monotonic() - started)
+    if remaining <= 0:
+        raise RuntimeError(f"Command timed out after {timeout}s")
+    return remaining
+
+
+def _run_cmd(
+    cmd: list[str],
+    *,
+    timeout: int,
+    capture_stdout: bool = False,
+    job_id: str | None = None,
+) -> str:
+    logger.debug("Executing command: %s", " ".join(cmd))
+    _check_job_alive(job_id)
+
+    started = time.monotonic()
+    stdout_value = ""
+    stdout_collected = False
+    with _supervised_process(
+        cmd,
+        job_id=job_id,
+        stdout=subprocess.PIPE if capture_stdout else subprocess.DEVNULL,
+    ) as proc:
+        while proc.poll() is None:
+            _check_job_alive(job_id)
+            remaining = _remaining_or_timeout(started, timeout)
+
+            try:
+                poll_timeout = min(_COMMAND_POLL_INTERVAL, remaining)
+                if capture_stdout:
+                    stdout_value, _ = proc.communicate(timeout=poll_timeout)
+                    stdout_collected = True
+                else:
+                    proc.wait(timeout=poll_timeout)
+            except subprocess.TimeoutExpired:
+                continue
+
+        if capture_stdout and not stdout_collected:
+            # The child can exit in the race window between a
+            # TimeoutExpired and the next poll(), which ends the loop
+            # without any completed communicate(). Drain the pipe once
+            # more so callers (ffprobe) do not see an empty result -
+            # communicate() resumes from the partially read buffers.
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                stdout_value, _ = proc.communicate(timeout=_COMMAND_POLL_INTERVAL)
 
     return stdout_value if capture_stdout else ""
 
@@ -995,111 +1021,56 @@ def _run_cmd_streaming(
     file so its tail can be surfaced without a second pipe to deadlock on.
     """
     logger.debug("Executing command with progress: %s", " ".join(cmd))
-    _check_cancellation(job_id)
-    _check_shutdown()
+    _check_job_alive(job_id)
 
     started = time.monotonic()
-    proc: subprocess.Popen[str] | None = None
-    stderr_tmp: tempfile._TemporaryFileWrapper[str] | None = None
     progress_lines: queue.Queue[str | None] = queue.Queue(maxsize=500)
     reader_thread: threading.Thread | None = None
 
+    # Joined after the supervised cleanup: the reader touches only its own pipe
+    # and queue, so stderr close and unregister need not wait for it.
     try:
-        # Closed in the matching finally: the handle has to outlive the
-        # `with subprocess.Popen(...)` block it is passed into.
-        stderr_tmp = tempfile.NamedTemporaryFile(  # noqa: SIM115
-            mode="w+", encoding="utf-8", errors="replace", delete=True
-        )
-        with subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=stderr_tmp,
-            start_new_session=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            bufsize=1,
-        ) as process:
-            proc = process
-            try:
-                _register_active_process(job_id, proc)
-                # A cancel request can arrive between Popen and registration.
-                _check_cancellation(job_id)
-                _check_shutdown()
+        with _supervised_process(cmd, job_id=job_id, stdout=subprocess.PIPE, bufsize=1) as proc:
+            if proc.stdout is not None:
+                reader_thread = threading.Thread(
+                    target=_read_progress_lines,
+                    args=(proc.stdout, progress_lines),
+                    daemon=True,
+                )
+                reader_thread.start()
 
-                if proc.stdout is not None:
-                    reader_thread = threading.Thread(
-                        target=_read_progress_lines,
-                        args=(proc.stdout, progress_lines),
-                        daemon=True,
-                    )
-                    reader_thread.start()
+            while proc.poll() is None:
+                _check_job_alive(job_id)
+                remaining = _remaining_or_timeout(started, timeout)
 
-                while proc.poll() is None:
-                    _check_cancellation(job_id)
-                    _check_shutdown()
+                try:
+                    line = progress_lines.get(timeout=min(_COMMAND_POLL_INTERVAL, remaining))
+                except queue.Empty:
+                    continue
 
-                    elapsed = time.monotonic() - started
-                    remaining = timeout - elapsed
-                    if remaining <= 0:
-                        raise RuntimeError(f"Command timed out after {timeout}s")
+                if line is None:
+                    continue
 
-                    try:
-                        line = progress_lines.get(timeout=min(_COMMAND_POLL_INTERVAL, remaining))
-                    except queue.Empty:
-                        continue
+                _handle_progress_line(job_id, line, on_line)
 
-                    if line is None:
-                        continue
-
-                    _handle_progress_line(job_id, line, on_line)
-
-                # The child can exit with lines still queued: a command that
-                # finishes inside one poll interval would otherwise have its
-                # last - and possibly only - progress update dropped. Let the
-                # reader finish off the closed pipe first, then drain; the queue
-                # is bounded, so this cannot run away.
-                if reader_thread is not None:
-                    reader_thread.join(timeout=_COMMAND_POLL_INTERVAL)
-                while True:
-                    try:
-                        pending = progress_lines.get_nowait()
-                    except queue.Empty:
-                        break
-                    if pending is None:
-                        break
-                    _handle_progress_line(job_id, pending, on_line)
-
-                _check_cancellation(job_id)
-                _check_shutdown()
-
-                if proc.returncode != 0:
-                    _raise_for_failed_command(cmd, proc.returncode, stderr_tmp)
-            except Exception:
-                if proc.poll() is None:
-                    _terminate_process(proc)
-                raise
-    except (JobCancelledError, ShutdownError, RuntimeError):
-        raise
-    except Exception as exc:
-        if _shutdown_event.is_set():
-            raise ShutdownError("Shutdown requested") from exc
-        logger.exception("Command failed: %s", " ".join(cmd))
-        # Named, not generic: this is what the user sees, and "ffmpeg not
-        # found" is a very different problem from "permission denied".
-        raise RuntimeError(f"Command execution failed: {exc}") from exc
+            # The child can exit with lines still queued: a command that
+            # finishes inside one poll interval would otherwise have its
+            # last - and possibly only - progress update dropped. Let the
+            # reader finish off the closed pipe first, then drain; the queue
+            # is bounded, so this cannot run away.
+            if reader_thread is not None:
+                reader_thread.join(timeout=_COMMAND_POLL_INTERVAL)
+            while True:
+                try:
+                    pending = progress_lines.get_nowait()
+                except queue.Empty:
+                    break
+                if pending is None:
+                    break
+                _handle_progress_line(job_id, pending, on_line)
     finally:
-        if proc is not None and proc.poll() is None:
-            _terminate_process(proc)
         if reader_thread is not None:
             reader_thread.join(timeout=0.2)
-        if stderr_tmp is not None:
-            try:
-                stderr_tmp.close()
-            except Exception:
-                logger.debug("Could not close temporary stderr file", exc_info=True)
-        if proc is not None:
-            _unregister_active_process(job_id, proc)
 
 
 def _run_ffmpeg_transcode(
