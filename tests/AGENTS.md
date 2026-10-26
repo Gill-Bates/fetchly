@@ -43,6 +43,7 @@
 | `test_assets.py` | Content-hash cache busting for `/static` assets: the `?v=` token is derived from the file, the URL it decorates resolves, and the token changes when the file does |
 | `test_share_links.py` | Share-token entropy (≥128 bits), per-job distinctness, and what the redeem regex accepts — including shorter legacy tokens |
 | `test_rate_limit_client_ip.py` | Client-IP resolution behind a trusted proxy: forwarded chains, bracketed IPv6, and malformed entries falling back to the socket peer |
+| `test_rate_limiter.py` | The sliding-window limiter: no boundary burst, rejections not recorded, per-route budgets, LRU eviction under key flood (no lockout of new clients), IPv6 /64 sharing, spoofed `X-Forwarded-For` cannot hit a victim's bucket, and the exact set of rate-limited routes |
 | `test_audio_source_header.py` | `X-Audio-Quality` on `/audio-source/{job_id}` reports storage provenance, not codec quality |
 | `test_analysis_worker.py` | Analysis submission: what a completed analysis writes back, and staying responsive while waiting on the child process |
 | `test_governor_semaphores.py` | `SharedSemaphore`: one budget per workload across worker threads and the event loop, cancellation safety, and the `*_sync` accessors returning the same object |
@@ -57,7 +58,7 @@
 | `test_submit_duplicates.py` | `insert_job_unless_active_duplicate`: parallel identical inserts create one job, `confirm_duplicate` still allows a second, a queue-full rejection leaves no blocking row, headroom is checked before the metadata lookup |
 | `test_thumbnail_fallback_bound.py` | The yt-dlp thumbnail fallback never exceeds its concurrency budget, answers `503` when saturated, and keeps its slot until the subprocess ends |
 
-57 Python test files in total.
+58 Python test files in total.
 
 ## Subdirectories
 
@@ -175,4 +176,4 @@ pytest tests/test_worker_hardening.py --pdb
 **Last Updated:** 2026-10-26  
 **Python:** pytest runner, unittest-style classes, no fixtures  
 **JavaScript:** `node:test` + `node:assert/strict`  
-**Counts:** 57 Python files, 22 JavaScript files
+**Counts:** 58 Python files, 22 JavaScript files

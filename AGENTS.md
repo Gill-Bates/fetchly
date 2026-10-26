@@ -36,7 +36,7 @@ fetchly is a full-stack application that enables users to download, analyze, tri
 - **Real-time:** Server-Sent Events. `/app/routes/events.py` returns `text/event-stream`; `/app/static/js/events.js` consumes it with `EventSource`.
 
 ### Testing
-- **Python tests:** `/tests/test_*.py` — 57 files. pytest is the runner, but the tests are **unittest-style classes**; there are no pytest fixtures. Subclass `IsolatedDbTestCase` or `WebAppTestCase` from `/tests/_support.py`.
+- **Python tests:** `/tests/test_*.py` — 58 files. pytest is the runner, but the tests are **unittest-style classes**; there are no pytest fixtures. Subclass `IsolatedDbTestCase` or `WebAppTestCase` from `/tests/_support.py`.
 - **JavaScript tests:** `/tests/js/*.test.mjs` — 22 files using `node:test` + `node:assert/strict` with the shared fake DOM in `/tests/js/helpers/fake-dom.mjs`
 - **UI audit:** `/tools/ui-lint/` — a separate Playwright suite run via `npm run ui-lint`, not part of `npm test`
 - **CI gate:** ruff (`ruff check` and `ruff format --check`), pytest, ESLint, Stylelint, source contracts, and `node --test` must all pass
@@ -73,7 +73,7 @@ python run.py       # Dev server on http://127.0.0.1:8000
 
 ### Testing
 ```bash
-pytest                    # Run all Python tests (57 files)
+pytest                    # Run all Python tests (58 files)
 npm test                  # node --test over tests/js/*.test.mjs (22 files)
 npm run lint              # ESLint + Stylelint + source contracts
 npm run ui-lint           # Playwright UI audit (needs: npm run ui-lint:install)

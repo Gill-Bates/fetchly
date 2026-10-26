@@ -12,8 +12,6 @@ import uuid
 from pathlib import Path
 from unittest.mock import patch
 
-from starlette.requests import Request
-
 from app import db
 from app.routes import api
 
@@ -48,8 +46,7 @@ class RemoveAllJobsTests(unittest.TestCase):
                     )
                     connection.commit()
 
-                request = Request({"type": "http", "method": "POST", "path": "/api/jobs/remove-all"})
-                result = asyncio.run(api.api_remove_all_jobs(request, "test-user"))
+                result = asyncio.run(api.api_remove_all_jobs("test-user"))
 
                 self.assertEqual(result["jobs_deleted"], 2)
                 self.assertEqual(result["files_deleted"], 2)
@@ -86,11 +83,9 @@ class RemoveAllJobsTests(unittest.TestCase):
                     db.insert_job(job_id, "https://example.com/video", "video", "max", "queued")
                     (jobs_root / job_id).mkdir(parents=True)
 
-                request = Request({"type": "http", "method": "POST", "path": "/api/jobs/remove-all"})
-
                 async def run() -> None:
                     loop_thread = threading.get_ident()
-                    await api.api_remove_all_jobs(request, "test-user")
+                    await api.api_remove_all_jobs("test-user")
                     self.assertEqual(len(cancel_threads), len(job_ids))
                     self.assertTrue(all(ident != loop_thread for ident in cancel_threads))
 

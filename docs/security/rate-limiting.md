@@ -45,6 +45,8 @@ everyone else. See [Reverse Proxy](../configuration/reverse-proxy.md).
     Clients behind the same NAT or proxy appear as one address and share one budget. Behind
     a reverse proxy, `FORWARDED_ALLOW_IPS` must contain the proxy; otherwise every user
     shares the proxy's bucket and a single abusive client throttles everybody.
+    The proxy must also send `X-Forwarded-For` (or `X-Real-IP`); without it the client
+    cannot be told apart from the proxy.
 
 ## Limits by route
 
