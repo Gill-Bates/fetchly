@@ -1,5 +1,8 @@
 ## [1.3.3] - 2026-xx-xx
 
+- ``New`` Rate-limited requests now answer `429` with a `Retry-After` header.
+- ``Security`` Rate limits use a sliding window, so they can no longer be doubled at a window boundary; counters are kept per client IP (IPv6 per /64) and route only, with no account lockout, so one client cannot lock out others. Behind a reverse proxy, set `FORWARDED_ALLOW_IPS` to the proxy's address, otherwise all clients share one counter.
+- ``Change`` The `slowapi` dependency is replaced by a built-in limiter, removing four packages from the image.
 - ``Change`` The image builds a CPU-only Essentia from upstream master (resolved once per release for both architectures), with only the audio libraries BPM analysis needs, and checks tempo detection on amd64 and arm64.
 
 
