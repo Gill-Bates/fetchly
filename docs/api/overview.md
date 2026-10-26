@@ -68,7 +68,8 @@ The full list is in [Endpoints](endpoints.md).
 ### CSRF
 
 `/login`, `/logout`, and every state-changing route under `/api/*` are CSRF-protected
-with a double-submit cookie (`fetchly_csrf`) — not just `/api/submit`. Send the token
+with a double-submit cookie (`fetchly_csrf`, or `__Host-fetchly_csrf` behind HTTPS; see
+[CSRF](authentication.md#csrf)) — not just `/api/submit`. Send the token
 back either in the `X-CSRF-Token` header or, for form bodies, as a `csrf_token` field.
 A mismatch returns `403`. Safe methods (`GET`, `HEAD`, `OPTIONS`) are never checked.
 
@@ -104,7 +105,7 @@ JAR=$(mktemp)
 
 # 1. Fetch the login page: sets the CSRF cookie and embeds the anti-bot token
 curl -sc "$JAR" "$BASE/login" -o /tmp/login.html
-CSRF=$(awk '$6=="fetchly_csrf"{print $7}' "$JAR")
+CSRF=$(awk '$6 ~ /^(__Host-)?fetchly_csrf$/ {print $7}' "$JAR")
 CAPTCHA=$(grep -oP 'name="captcha_token"[^>]*value="\K[^"]+' /tmp/login.html)
 
 # 2. Log in. POST /login takes JSON; wait ~1 s, because a submission that

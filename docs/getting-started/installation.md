@@ -32,7 +32,7 @@ services:
       - "${FETCHLY_BIND:-127.0.0.1}:${FETCHLY_PORT:-8000}:8000"
     environment:
       LOG_LEVEL: ${LOG_LEVEL:-info}
-      TZ: ${TZ:-Etc/UTC}
+      TZ: Etc/UTC
       TIMEOUT: ${TIMEOUT:-60}
       FETCHLY_SECRET_KEY: "${FETCHLY_SECRET_KEY:?required}"
     logging:
@@ -50,7 +50,6 @@ Create an `.env` file next to it:
 
 ```bash title=".env"
 FETCHLY_SECRET_KEY=<output of: openssl rand -base64 32>
-TZ=Europe/Berlin
 LOG_LEVEL=info
 ```
 
@@ -142,7 +141,7 @@ the download survives container recreation as long as the volume does.
     # re-run your original docker run command
     ```
 
-The database schema migrates automatically at startup. **Settings → System** shows the
+The database schema is created at startup; databases from older releases are not migrated, and startup stops with an error naming the database file to remove if its schema does not match. **Settings → System** shows the
 running version alongside the latest published release and the versions of the bundled
 tools.
 

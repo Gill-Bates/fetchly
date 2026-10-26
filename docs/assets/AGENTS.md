@@ -16,7 +16,7 @@ Assets here are referenced by documentation files via relative paths (e.g., `![a
 | `img/fetchly_white.svg` | Fetchly logo (white variant): used on dark backgrounds |
 | `img/screen_1.jpeg`, `screen_2.jpeg` | Screenshots of fetchly dashboard and features: used in getting-started docs |
 | `img/lalal_ai.svg` | Lalal.ai service logo: used in stem separation documentation |
-| `img/social/` | Social media icons: YouTube, TikTok, Instagram, Facebook (light/dark variants) |
+| `img/social/` | Social media icons: YouTube, TikTok, Instagram, Facebook (plain, `_black` and `_white` variants) |
 | `img/social/*_black.svg`, `*_white.svg` | Platform logos in different color schemes for theme compatibility |
 
 ## For AI Agents
@@ -75,8 +75,8 @@ Assets here are referenced by documentation files via relative paths (e.g., `![a
 
 ### Testing Assets in Documentation
 ```bash
-cd /opt/fetchly
-mkdocs serve                    # Preview at http://localhost:8000
+# from the repo root
+mkdocs serve -f docs/mkdocs.yml   # Preview at http://127.0.0.1:8000
 # Navigate to pages using assets
 # Verify images load correctly in light and dark modes
 ```
@@ -90,7 +90,7 @@ mkdocs serve                    # Preview at http://localhost:8000
 
 ---
 
-**Last Updated:** 2026-09-19  
+**Last Updated:** 2026-10-26  
 **Formats:** SVG (logos), PNG (screenshots), JPEG (photos)  
 **Color Schemes:** Light/dark variants for theme support  
 **Optimization:** svgo for SVG, imagemin for raster formats

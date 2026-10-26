@@ -55,7 +55,7 @@ The documentation site is the single source of truth for users and developers: h
 - **Pass the config path relative to the repo root, always.** `docs_dir: .` means the config file sits in its own documentation root, and MkDocs rejects that combination whenever it can see it — `cd docs && mkdocs build` and `mkdocs build -f /abs/path/docs/mkdocs.yml` both abort with "the `docs_dir` should not be the parent directory of the config file". The relative `-f docs/mkdocs.yml` invocation used by the workflow and by every command in this guide is the one form that passes
 - **`AGENTS.md` files are never published.** They live inside `docs_dir`, so `exclude_docs:` in `mkdocs.yml` filters them out by name at any depth. Nothing to do when adding a new one
 - **Broken heading anchors fail the build.** `validation.links.anchors: warn` plus the workflow's `--strict` turns `page.md#no-such-heading` into a build error rather than an INFO line
-- **Deployment:** GitHub Pages, via `.github/workflows/docs-build.yml` on push to `main` (path-filtered to `docs/**`, `CHANGELOG.md`, `LICENSE`, `pyproject.toml`, `tools/pyproject-deps.py` and the workflow itself)
+- **Deployment:** GitHub Pages, via `.github/workflows/docs-build.yml` on push to `main` (path-filtered to `docs/**`, `CHANGELOG.md`, `LICENSE`, `pyproject.toml`, `tools/pyproject-deps.py` and the workflow itself), after a completed release workflow, or manually. Pull requests and the weekly schedule only build and scan; they never deploy
 - **Theme:** Material for MkDocs (https://squidfunk.github.io/mkdocs-material/); customization via `mkdocs.yml` and `stylesheets/`
 
 ### Common Patterns
@@ -91,7 +91,7 @@ The documentation site is the single source of truth for users and developers: h
 - `../CHANGELOG.md` — Release notes linked from docs
 
 ### External
-- **MkDocs:** mkdocs (site generator), mkdocs-material (theme), mkdocs-git-revision-date-localized-plugin (last-updated dates), mkdocs-minify-plugin (optimize HTML), mkdocs-redirects (handle old URLs)
+- **MkDocs:** mkdocs (site generator), mkdocs-material (theme), mkdocs-git-revision-date-localized-plugin (last-updated dates), mkdocs-minify-plugin (optimize HTML); mkdocs-redirects is in the `docs` extra but not configured under `plugins:`
 - **Python:** Python 3.13+ to run mkdocs
 - **CI/CD:** GitHub Pages (hosting), `.github/workflows/docs-build.yml` (auto-deploy on main push)
 
@@ -148,7 +148,7 @@ mkdocs build -f docs/mkdocs.yml --verbose    # Show detailed build output
 
 ---
 
-**Last Updated:** 2026-09-19  
+**Last Updated:** 2026-10-26  
 **Site Generator:** MkDocs Material  
 **Hosted:** GitHub Pages (https://gill-bates.github.io/fetchly/)  
 **Build Trigger:** Push to `main` via `.github/workflows/docs-build.yml`  

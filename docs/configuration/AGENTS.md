@@ -12,7 +12,7 @@ Pages here guide administrators through configuring fetchly for production: netw
 | --- | --- |
 | `environment.md` | Environment variables: complete reference (`FETCHLY_SECRET_KEY`, `DATA_DIR`, `WORKERS`, `FORWARDED_ALLOW_IPS`, `FETCHLY_BEHIND_HTTPS`, `LOG_LEVEL`, …), defaults, when to set. This page is the authoritative env-var reference for the whole repo — other docs should link to it rather than restate it. |
 | `reverse-proxy.md` | Reverse proxy setup: Nginx, Caddy, Apache examples; SSL/TLS termination, header forwarding, rate limiting at proxy level |
-| `storage.md` | Data storage: database location, media file location, log location, backup strategy, cleanup policies |
+| `storage.md` | Data storage: full `DATA_DIR` layout (which entries are lazy, which are safe to delete), retention and housekeeping sweep, backup and restore |
 | `resources.md` | Resource allocation: CPU/memory requirements, tuning for low-resource systems, monitoring resource usage |
 | `settings.md` | Runtime settings: stored in database, accessible via web UI, persistent across restarts, overridable by env vars |
 
@@ -44,7 +44,7 @@ Signing key for session cookies and the invisible anti-bot token. It signs; it d
 - **Default:** None (the application refuses to start)
 - **Example:** `openssl rand -base64 32`
 - **When to set:** At first startup
-- **Impact if not set:** The app exits at import time — `app/session.py` and `app/main.py` require it
+- **Impact if not set:** The app exits at import time — `app/auth/session.py` and `app/main.py` require it
 ```
 
 ### Configuration Examples
@@ -169,14 +169,16 @@ snapshot.
 
 ### Media Files Backup
 ```bash
-# Mirror to backup storage
-rsync -av "$DATA_DIR/downloads/" /mnt/backup/downloads/
+# Mirror to backup storage. Job media lives in per-job UUID directories
+# under DATA_DIR/jobs/.
+rsync -av --exclude 'thumb-cache/' --exclude 'watermark-cache/' --exclude '.cache/' \
+  "$DATA_DIR/" /mnt/backup/data/
 ```
 ```
 
 ---
 
-**Last Updated:** 2026-09-19  
+**Last Updated:** 2026-10-26  
 **Audience:** System administrators, DevOps engineers  
 **Scope:** Configuration, deployment, resource tuning  
 **Examples:** Tested on actual systems  

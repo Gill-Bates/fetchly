@@ -81,10 +81,12 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           # Matches ARG PYTHON_BASE=python:3.13-slim in docker/Dockerfile and
           # requires-python in pyproject.toml.
@@ -93,7 +95,7 @@ jobs:
           cache-dependency-path: pyproject.toml
 
       - name: Set up Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: '22'
           cache: npm
@@ -133,7 +135,7 @@ jobs:
         run: npm ci --prefix tools/ui-lint --no-audit --no-fund
 
       - name: Cache Playwright engines
-        uses: actions/cache@v4
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ~/.cache/ms-playwright
           # The playwright version pins the engine revisions, so the lockfile
@@ -164,7 +166,8 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$AUDIT_OUTPUT_DIR"
-          export FETCHLY_SECRET_KEY="$(python -c 'import base64, secrets; print(base64.b64encode(secrets.token_bytes(32)).decode())')"
+          FETCHLY_SECRET_KEY="$(python -c 'import base64, secrets; print(base64.b64encode(secrets.token_bytes(32)).decode())')"
+          export FETCHLY_SECRET_KEY
           export HOST=127.0.0.1
           export PORT=8000
           export LOG_LEVEL=INFO
@@ -228,7 +231,7 @@ jobs:
 
       - name: Upload audit results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ui-audit-${{ github.run_id }}
           # results.json carries the element-level detail behind every finding,

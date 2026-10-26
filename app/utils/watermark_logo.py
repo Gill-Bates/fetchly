@@ -35,6 +35,7 @@ import hashlib
 import json
 import logging
 import subprocess
+import tempfile
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -48,6 +49,7 @@ __all__ = [
     "LogoRejectedError",
     "LogoStatus",
     "custom_logo_path",
+    "inspect_custom_logo",
     "logo_status",
     "remove_custom_logo",
     "store_custom_logo",
@@ -79,10 +81,20 @@ MAX_LOGO_ASPECT: Final[float] = 20.0
 # are usable: a fully opaque logo would sit on the video as a solid rectangle.
 # A palette PNG (pal8) is in here because its palette may carry transparency;
 # whether it actually does is what _has_visible_transparency() then decides.
-_ALPHA_PIXEL_FORMATS: Final[frozenset[str]] = frozenset({
-    "rgba", "bgra", "argb", "abgr", "ya8", "ya16be", "ya16le",
-    "rgba64be", "rgba64le", "pal8",
-})
+_ALPHA_PIXEL_FORMATS: Final[frozenset[str]] = frozenset(
+    {
+        "rgba",
+        "bgra",
+        "argb",
+        "abgr",
+        "ya8",
+        "ya16be",
+        "ya16le",
+        "rgba64be",
+        "rgba64le",
+        "pal8",
+    }
+)
 
 _PROBE_TIMEOUT_SECONDS: Final[int] = 20
 
@@ -110,23 +122,35 @@ def custom_logo_path() -> Path:
     return get_data_dir() / _LOGO_DIRNAME / _LOGO_FILENAME
 
 
+def _fingerprint(data: bytes) -> str:
+    """Short content hash; part of the watermark render cache key."""
+    return hashlib.sha256(data).hexdigest()[:16]
+
+
 def _probe_png(path: Path) -> tuple[int, int, str]:
     """``(width, height, pix_fmt)`` of a PNG, or raise LogoRejectedError."""
     cmd = [
         "ffprobe",
-        "-v", "error",
-        "-select_streams", "v:0",
-        "-show_entries", "stream=codec_name,width,height,pix_fmt",
-        "-of", "json",
+        "-v",
+        "error",
+        "-select_streams",
+        "v:0",
+        "-show_entries",
+        "stream=codec_name,width,height,pix_fmt",
+        "-of",
+        "json",
         str(path),
     ]
     try:
-        completed = subprocess.run(
-            cmd, check=True, capture_output=True, timeout=_PROBE_TIMEOUT_SECONDS
-        )
+        completed = subprocess.run(cmd, check=True, capture_output=True, timeout=_PROBE_TIMEOUT_SECONDS)
         streams = json.loads(completed.stdout or "{}").get("streams")
         stream = streams[0] if isinstance(streams, list) and streams else {}
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, json.JSONDecodeError, OSError) as exc:
+    except (
+        subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
+        json.JSONDecodeError,
+        OSError,
+    ) as exc:
         logger.info("Rejected watermark logo: not decodable (%s)", exc)
         raise LogoRejectedError("That file is not a readable image.") from exc
 
@@ -156,8 +180,10 @@ def _has_visible_transparency(path: Path) -> bool:
     """
     cmd = [
         "ffmpeg",
-        "-v", "error",
-        "-i", str(path),
+        "-v",
+        "error",
+        "-i",
+        str(path),
         # "format=rgba" first, so this holds for every PNG a user can export:
         # alphaextract has no plane to take from a palette image at all, and on
         # a 16-bit one it reports alpha on a 0-65535 scale that the comparison
@@ -166,13 +192,19 @@ def _has_visible_transparency(path: Path) -> bool:
         # "file=-" puts the reading on stdout: metadata=print otherwise logs at
         # info level, which "-v error" swallows - and a silent probe would read
         # as "no transparency found" for every image.
-        "-vf", "format=rgba,alphaextract,signalstats,metadata=print:key=lavfi.signalstats.YMIN:file=-",
-        "-f", "null",
+        "-vf",
+        "format=rgba,alphaextract,signalstats,metadata=print:key=lavfi.signalstats.YMIN:file=-",
+        "-f",
+        "null",
         "-",
     ]
     try:
         completed = subprocess.run(
-            cmd, check=True, capture_output=True, timeout=_PROBE_TIMEOUT_SECONDS, text=True
+            cmd,
+            check=True,
+            capture_output=True,
+            timeout=_PROBE_TIMEOUT_SECONDS,
+            text=True,
         )
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
         # An image whose alpha cannot be read is rejected: we cannot verify
@@ -212,9 +244,7 @@ def validate_logo_bytes(data: bytes, target: Path) -> LogoStatus:
 
         width, height, pix_fmt = _probe_png(staged)
         if width < MIN_LOGO_PIXELS or height < MIN_LOGO_PIXELS:
-            raise LogoRejectedError(
-                f"That image is smaller than {MIN_LOGO_PIXELS}x{MIN_LOGO_PIXELS} pixels."
-            )
+            raise LogoRejectedError(f"That image is smaller than {MIN_LOGO_PIXELS}x{MIN_LOGO_PIXELS} pixels.")
         if width > MAX_LOGO_PIXELS or height > MAX_LOGO_PIXELS:
             raise LogoRejectedError(f"That image is larger than {MAX_LOGO_PIXELS} pixels on a side.")
 
@@ -223,13 +253,9 @@ def validate_logo_bytes(data: bytes, target: Path) -> LogoStatus:
             raise LogoRejectedError("That image is too elongated to sit in a video corner.")
 
         if pix_fmt not in _ALPHA_PIXEL_FORMATS:
-            raise LogoRejectedError(
-                "That image has no transparency; it would cover the video with a solid box."
-            )
+            raise LogoRejectedError("That image has no transparency; it would cover the video with a solid box.")
         if not _has_visible_transparency(staged):
-            raise LogoRejectedError(
-                "Every pixel of that image is opaque; it would cover the video with a solid box."
-            )
+            raise LogoRejectedError("Every pixel of that image is opaque; it would cover the video with a solid box.")
 
         staged.replace(target)
         return LogoStatus(
@@ -237,7 +263,7 @@ def validate_logo_bytes(data: bytes, target: Path) -> LogoStatus:
             width=width,
             height=height,
             bytes=len(data),
-            fingerprint=hashlib.sha256(data).hexdigest()[:16],
+            fingerprint=_fingerprint(data),
         )
     finally:
         staged.unlink(missing_ok=True)
@@ -246,7 +272,12 @@ def validate_logo_bytes(data: bytes, target: Path) -> LogoStatus:
 def store_custom_logo(data: bytes) -> LogoStatus:
     """Validate and install an uploaded logo, replacing any previous one."""
     status = validate_logo_bytes(data, custom_logo_path())
-    logger.info("Installed a custom watermark logo (%dx%d, %d bytes)", status.width, status.height, status.bytes)
+    logger.info(
+        "Installed a custom watermark logo (%dx%d, %d bytes)",
+        status.width,
+        status.height,
+        status.bytes,
+    )
     return status
 
 
@@ -264,26 +295,42 @@ def remove_custom_logo() -> bool:
     return True
 
 
-def logo_status() -> LogoStatus:
-    """Describe the logo currently in use, bundled or custom."""
-    path = custom_logo_path()
-    try:
-        raw = path.read_bytes()
-    except (FileNotFoundError, OSError):
-        return LogoStatus(custom=False)
+def inspect_custom_logo() -> tuple[bytes, LogoStatus] | None:
+    """Read the stored custom logo once and describe exactly those bytes.
 
+    Dimensions and fingerprint come from one private copy of one read, so a
+    concurrent upload cannot mix two logos in the result. ``None`` when no
+    usable custom logo is stored.
+    """
     try:
-        width, height, _ = _probe_png(path)
-    except LogoRejectedError:
-        # Present but unreadable: report it as absent so the UI offers a fresh
-        # upload rather than a broken preview. watermark.py ignores it too.
-        logger.warning("The stored custom watermark logo is not readable; ignoring it")
-        return LogoStatus(custom=False)
+        raw = custom_logo_path().read_bytes()
+    except OSError:
+        return None
 
-    return LogoStatus(
+    with tempfile.TemporaryDirectory(prefix="fetchly-logo-") as scratch:
+        copy = Path(scratch) / _LOGO_FILENAME
+        try:
+            copy.write_bytes(raw)
+            width, height, _ = _probe_png(copy)
+        except OSError as exc:
+            logger.warning("Could not inspect the stored custom watermark logo: %s", exc)
+            return None
+        except LogoRejectedError:
+            # Present but unreadable: report it as absent so the UI offers a
+            # fresh upload rather than a broken preview. watermark.py ignores it too.
+            logger.warning("The stored custom watermark logo is not readable; ignoring it")
+            return None
+
+    return raw, LogoStatus(
         custom=True,
         width=width,
         height=height,
         bytes=len(raw),
-        fingerprint=hashlib.sha256(raw).hexdigest()[:16],
+        fingerprint=_fingerprint(raw),
     )
+
+
+def logo_status() -> LogoStatus:
+    """Describe the logo currently in use, bundled or custom."""
+    inspected = inspect_custom_logo()
+    return inspected[1] if inspected is not None else LogoStatus(custom=False)

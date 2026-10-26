@@ -87,13 +87,21 @@ be echoed back in the request.
 
 The public `POST /login` carries an invisible check with no user interaction: a
 CSS-hidden honeypot field and an HMAC-signed time-trap token. See
-[Anti-Bot Protection](anti-bot.md).
+[Anti-Bot Protection](anti-bot.md). It is a bot signal; the login rate limit is what
+bounds password guessing.
 
 ## Rate limiting
 
 Every route carries a limit, keyed on client IP. The strictest sit on login (5/minute),
 settings writes (5/minute), Lalal.ai operations (5/minute), and bulk deletion
 (2/minute). See [Rate Limiting](rate-limiting.md).
+
+## GeoIP data
+
+The job detail "requester" tile resolves IPs with GeoLite2 databases downloaded from a
+third-party mirror that publishes no checksum or signature, so the download is validated
+by parsing it, not authenticated. The result is display-only and feeds no access
+decision.
 
 ## Secrets handling
 

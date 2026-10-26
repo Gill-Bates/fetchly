@@ -8,26 +8,31 @@ These run in plain Node.js with no browser. Two groups live here: tests of `app/
 
 ## Key Files
 
-| File | Purpose |
-| --- | --- |
-| `toast.test.mjs` | Toast notifications: creation, deduplication, timer scheduling, and the auto-dismiss callback through to removal (both the `transitionend` path and the fallback timer) |
-| `confirm-modal.test.mjs` | Confirmation dialog: buttons, callbacks, focus handling, and the `data-bs-dismiss` wiring that makes close/cancel resolve as cancelled |
-| `csrf-token.test.mjs` | Client-side CSRF contract: `getCsrfToken()` cookie/form/meta precedence, plus `submitJob()` sending the token as the `X-CSRF-Token` header |
-| `cookie-paste-modal.test.mjs` | Cookie import UI: paste validation, format detection, errors |
-| `watermark-logo.test.mjs` | Logo validation: SVG inspection, PNG inspection, rasterization, size limits |
-| `limited-playback.test.mjs` | The **Limited playback** marker: which codec/container combinations the job list flags as unplayable on Safari, iOS and TVs |
-| `safe-redirect.test.mjs` | Redirect safety: origin validation against a stubbed `window.location` |
-| `format-helpers.test.mjs` | Format description parsing and quality/codec naming. Self-contained — it stubs `document` and does not import an `app/static/js/format-helpers.js` module (no such file exists). |
-| `config-contract.test.mjs` | Reads `app/static/js/config.js` as text, re-imports it per case with a stubbed `documentElement.dataset`, and asserts both the Lalal duration bootstrap contract and the exported status sets |
-| `ui-lint-axe.test.mjs` | Unit tests for `tools/ui-lint/lib/axe.mjs` (tag selection, violation handling, and both failure modes via the injectable `loadAxeBuilder` loader) |
-| `ui-lint-devices.test.mjs` | Unit tests for the device-profile logic in `tools/ui-lint/run-ui-lint.mjs` |
-| `ui-lint-element-ids.test.mjs` | Unit tests for `markupElementIds` / `unresolvedElementIds` in `tools/ui-lint/lib/source-contracts.mjs`: ids a script looks up must exist in the markup, ids a script creates must not be reported |
-| `ui-lint-result-summary.test.mjs` | Unit tests for `formatResultSummary` in `tools/ui-lint/run-ui-lint.mjs`: count metrics must print as numbers, and a metric that was never measured must not be reported as a finding |
-| `ui-lint-layout-shift.test.mjs` | Unit tests for `tools/ui-lint/lib/layout-shift.mjs` |
-| `ui-lint-console-severity.test.mjs` | Unit tests for `tools/ui-lint/lib/console-severity.mjs` |
-| `ui-lint-health.test.mjs` | Unit tests for `tools/ui-lint/lib/ui-health.mjs` |
-| `ui-lint-network-findings.test.mjs` | `isEventStreamCancellation` in `tools/ui-lint/run-ui-lint.mjs`: each browser engine's wording for a cancelled `/events` stream must not count as an application network failure, while a stream that genuinely could not connect still must |
-| `helpers/fake-dom.mjs` | `installFakeDom({ withBootstrap })` — the shared fake DOM used by the frontend tests |
+| File                                | Purpose                                                                                                                                                                                                                                                                             |
+| ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `update-status.test.mjs`            | Settings → System update cells: checking / up to date / update available / check unavailable per component, one shared icon+label table, identical badge markup per component and the shared badge CSS contract                                                                                                                                                                          |
+| `toast.test.mjs`                    | Toast notifications: creation, deduplication, timer scheduling, and the auto-dismiss callback through to removal (both the `transitionend` path and the fallback timer)                                                                                                             |
+| `confirm-modal.test.mjs`            | Confirmation dialog: buttons, callbacks, focus handling, and the `data-bs-dismiss` wiring that makes close/cancel resolve as cancelled                                                                                                                                              |
+| `csrf-token.test.mjs`               | Client-side CSRF contract: `getCsrfToken()` cookie/form/meta precedence, plus `submitJob()` sending the token as the `X-CSRF-Token` header                                                                                                                                          |
+| `shared-helpers.test.mjs`           | Shared UI helpers: `toErrorMessage()` error shapes, `parseUtcTimestamp()`, the dashboard stat-tile formatting (`splitSize()`, `statParts()`) used by main.js and settings.js, `isSameTrimSelection()` (a pending Lalal result only applies to the selection it was started for), `resetLalalLabel()` and `releaseLalalRun()` (stale Done labels, run ownership) |
+| `cookie-paste-modal.test.mjs`       | Cookie import UI: paste validation, format detection, errors                                                                                                                                                                                                                        |
+| `watermark-logo.test.mjs`           | Logo validation: SVG inspection, PNG inspection, rasterization, size limits                                                                                                                                                                                                         |
+| `limited-playback.test.mjs`         | The **Limited playback** marker: which codec/container combinations the job list flags as unplayable on Safari, iOS and TVs                                                                                                                                                         |
+| `safe-redirect.test.mjs`            | Redirect safety: origin validation against a stubbed `window.location`                                                                                                                                                                                                              |
+| `format-helpers.test.mjs`           | Format description parsing and quality/codec naming. Self-contained — it stubs `document` and does not import an `app/static/js/format-helpers.js` module (no such file exists).                                                                                                    |
+| `media-url-validation.test.mjs`     | `isValidMediaUrl()` / `detectPlatform()` edge cases mirrored from `tests/test_platform_urls.py`: Facebook Story links, YouTube Shorts                                                                                                                                               |
+| `config-contract.test.mjs`          | Reads `app/static/js/config.js` as text, re-imports it per case with a stubbed `documentElement.dataset`, and asserts both the Lalal duration bootstrap contract and the exported status sets                                                                                       |
+| `ui-lint-axe.test.mjs`              | Unit tests for `tools/ui-lint/lib/axe.mjs` (tag selection, violation handling, and both failure modes via the injectable `loadAxeBuilder` loader)                                                                                                                                   |
+| `ui-lint-devices.test.mjs`          | Unit tests for the device-profile logic in `tools/ui-lint/run-ui-lint.mjs`                                                                                                                                                                                                          |
+| `ui-lint-element-ids.test.mjs`      | Unit tests for `markupElementIds` / `unresolvedElementIds` in `tools/ui-lint/lib/source-contracts.mjs`: ids a script looks up must exist in the markup, ids a script creates must not be reported                                                                                   |
+| `ui-lint-result-summary.test.mjs`   | Unit tests for `formatResultSummary` in `tools/ui-lint/run-ui-lint.mjs`: count metrics must print as numbers, and a metric that was never measured must not be reported as a finding                                                                                                |
+| `ui-lint-layout-shift.test.mjs`     | Unit tests for `tools/ui-lint/lib/layout-shift.mjs`                                                                                                                                                                                                                                 |
+| `ui-lint-console-severity.test.mjs` | Unit tests for `tools/ui-lint/lib/console-severity.mjs`                                                                                                                                                                                                                             |
+| `ui-lint-health.test.mjs`           | Unit tests for `tools/ui-lint/lib/ui-health.mjs`                                                                                                                                                                                                                                    |
+| `ui-lint-network-findings.test.mjs` | `isEventStreamCancellation` in `tools/ui-lint/run-ui-lint.mjs`: each browser engine's wording for a cancelled `/events` stream must not count as an application network failure, while a stream that genuinely could not connect still must                                         |
+| `events-reconcile.test.mjs`         | `events.js` against fake `EventSource`/rAF/fetch: one snapshot reconcile after a hidden tab returns, a snapshot never overwrites a newer live update (bounded re-run), and same-frame updates drop stale progress                                                                   |
+| `job-page-reconcile.test.mjs`       | `job.js` standalone job page: a snapshot requested before a live update, or after a terminal state, is dropped                                                                                                                                                                      |
+| `helpers/fake-dom.mjs`              | `installFakeDom({ withBootstrap })` — the shared fake DOM used by the frontend tests                                                                                                                                                                                                |
 
 ## For AI Agents
 
@@ -111,7 +116,7 @@ node --test tests/js/confirm-modal.test.mjs     # full output for one file
 
 ---
 
-**Last Updated:** 2026-09-19  
+**Last Updated:** 2026-10-26  
 **Framework:** `node:test` + `node:assert/strict`  
 **Runtime:** Node.js, no browser  
-**Files:** 17 test suites + `helpers/fake-dom.mjs`
+**Files:** 22 test suites + `helpers/fake-dom.mjs`

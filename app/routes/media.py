@@ -27,11 +27,23 @@ from typing import TYPE_CHECKING
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 
-from ..bpm_naming import tagged_download_name
-from ..common.rate_limit import limiter
+from ..audio.naming import SOURCE_MARKER, tagged_download_name
+from ..audio.tags import (
+    build_mp3_transcode_cmd,
+    ensure_bpm_tag_async,
+    find_cover,
+    mp3_path_for_source,
+)
+from ..auth.rate_limit import limiter
 from ..db import DOWNLOADABLE_STATUSES, get_job, get_settings
-from ..governor import governor
-from ..utils.fs import AUDIO_SOURCE_EXTENSIONS, path_is_file, resolve_within_root
+from ..runtime.governor import governor
+from ..utils.fs import (
+    AUDIO_SOURCE_EXTENSIONS,
+    get_data_dir,
+    job_dir,
+    path_is_file,
+    resolve_within_root,
+)
 from ..utils.geoip import build_requester_info
 from .api import job_to_dict
 from .auth import get_csrf_token, require_html_auth, require_user_json
@@ -70,7 +82,6 @@ _NOSNIFF_HEADER = {"X-Content-Type-Options": "nosniff"}
 
 @dataclass(slots=True, frozen=True)
 class MediaContext:
-    data_dir: Path
     base_dir: Path
     templates: Jinja2Templates
 
@@ -82,12 +93,11 @@ _transcode_locks_guard = threading.Lock()
 
 
 def init_media(
-    data_dir: Path,
     base_dir: Path,
     templates: Jinja2Templates,
 ) -> None:
     global _MEDIA_CONTEXT
-    context = MediaContext(data_dir=data_dir, base_dir=base_dir, templates=templates)
+    context = MediaContext(base_dir=base_dir, templates=templates)
     if _MEDIA_CONTEXT is not None and context != _MEDIA_CONTEXT:
         raise RuntimeError("Media module already initialized with a different context")
     _MEDIA_CONTEXT = context
@@ -97,10 +107,6 @@ def _require_media_context() -> MediaContext:
     if _MEDIA_CONTEXT is None:
         raise RuntimeError("Media module not initialized: call init_media() first")
     return _MEDIA_CONTEXT
-
-
-def _require_data_dir() -> Path:
-    return _require_media_context().data_dir
 
 
 def _require_base_dir() -> Path:
@@ -163,8 +169,7 @@ async def _get_ready_job_file(job_id: uuid.UUID) -> tuple[dict[str, object], Pat
 
 
 async def _get_thumbnail_path(job_id: uuid.UUID) -> Path:
-    data_dir = _require_data_dir()
-    thumb_path = data_dir / str(job_id) / "thumbnail.jpg"
+    thumb_path = job_dir(str(job_id)) / "thumbnail.jpg"
     if not await path_is_file(thumb_path):
         raise HTTPException(status_code=404, detail="not found")
     return thumb_path
@@ -181,7 +186,7 @@ def resolve_job_path(raw_filename: str | None) -> Path:
 
     file_path = Path(str(raw_filename).strip())
     try:
-        return resolve_within_root(file_path, _require_data_dir())
+        return resolve_within_root(file_path, get_data_dir())
     except OSError as exc:
         raise HTTPException(status_code=404, detail="not found") from exc
     except ValueError as exc:
@@ -194,7 +199,7 @@ def is_internal_audio_source(file_path: Path) -> bool:
     Describes storage provenance, not codec quality (some kept-as-is codecs
     are still lossy).
     """
-    return file_path.stem.endswith(".source") and file_path.suffix.lower() in AUDIO_SOURCE_EXTENSIONS
+    return file_path.stem.endswith(SOURCE_MARKER) and file_path.suffix.lower() in AUDIO_SOURCE_EXTENSIONS
 
 
 def get_mp3_cache_path(source_path: Path) -> Path:
@@ -202,8 +207,7 @@ def get_mp3_cache_path(source_path: Path) -> Path:
 
     Example: 'track.source.opus' -> 'track.mp3'
     """
-    stem = source_path.stem.removesuffix(".source")
-    return source_path.parent / f"{stem}.mp3"
+    return mp3_path_for_source(source_path)
 
 
 def needs_browser_audio_fallback(file_path: Path) -> bool:
@@ -226,9 +230,40 @@ async def stop_ffmpeg_process(proc: asyncio.subprocess.Process) -> None:
         await asyncio.shield(proc.wait())
 
 
-async def transcode_to_mp3(source_path: Path, output_path: Path) -> Path:
+async def _run_mp3_ffmpeg(cmd: list[str]) -> tuple[int, bytes]:
+    """Run one ffmpeg command to completion; never leaves the process behind."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError("ffmpeg not found") from exc
+
+    try:
+        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=600)
+    except BaseException:
+        # BaseException catches CancelledError (client
+        # disconnect / shutdown), which would else orphan ffmpeg.
+        await stop_ffmpeg_process(proc)
+        raise
+    return proc.returncode or 0, stderr or b""
+
+
+async def transcode_to_mp3(
+    source_path: Path,
+    output_path: Path,
+    *,
+    fetchly_tags: bool = False,
+    bpm: object = None,
+) -> Path:
     """Transcode an internal audio source to MP3 (ffmpeg -q:a 0, ~320kbps VBR)
     and cache it at ``output_path``.
+
+    ``fetchly_tags`` adds the Fetchly comment, the job's thumbnail as front
+    cover and, when known, TBPM. A cover that cannot be embedded is dropped
+    with a warning instead of failing the MP3.
 
     Raises RuntimeError (ffmpeg missing/failed/timed out) or OSError.
     """
@@ -249,43 +284,46 @@ async def transcode_to_mp3(source_path: Path, output_path: Path) -> Path:
                 return output_path
 
             temp_path = output_path.with_name(f"{output_path.name}.tmp.{uuid.uuid4().hex[:8]}")
-            cmd = [
-                "ffmpeg",
-                "-y",
-                "-i", str(source_path),
-                "-vn",
-                "-codec:a", "libmp3lame",
-                "-q:a", "0",
-                "-map_metadata", "0",
-                "-f", "mp3",
-                str(temp_path),
-            ]
+            cover = await asyncio.to_thread(find_cover, source_path.parent) if fetchly_tags else None
             try:
                 async with governor.transcode_semaphore:
                     if await _mp3_cache_is_valid(output_path, source_path):
                         return output_path
 
-                    try:
-                        proc = await asyncio.create_subprocess_exec(
-                            *cmd,
-                            stdout=asyncio.subprocess.DEVNULL,
-                            stderr=asyncio.subprocess.PIPE,
+                    if fetchly_tags:
+                        cmd = build_mp3_transcode_cmd(source_path, temp_path, cover=cover, bpm=bpm)
+                    else:
+                        cmd = [
+                            "ffmpeg",
+                            "-y",
+                            "-i",
+                            str(source_path),
+                            "-vn",
+                            "-codec:a",
+                            "libmp3lame",
+                            "-q:a",
+                            "0",
+                            "-map_metadata",
+                            "0",
+                            "-f",
+                            "mp3",
+                            str(temp_path),
+                        ]
+                    returncode, stderr = await _run_mp3_ffmpeg(cmd)
+                    if returncode != 0 and cover is not None:
+                        logger.warning(
+                            "Embedding the cover into %s failed, retrying without it: %s",
+                            output_path.name,
+                            stderr.decode(errors="replace")[-300:],
                         )
-                    except FileNotFoundError as exc:
-                        raise RuntimeError("ffmpeg not found") from exc
+                        await asyncio.to_thread(temp_path.unlink, missing_ok=True)
+                        cmd = build_mp3_transcode_cmd(source_path, temp_path, cover=None, bpm=bpm)
+                        returncode, stderr = await _run_mp3_ffmpeg(cmd)
 
-                    try:
-                        _, stderr = await asyncio.wait_for(proc.communicate(), timeout=600)
-                    except BaseException:
-                        # BaseException catches CancelledError (client
-                        # disconnect / shutdown), which would else orphan ffmpeg.
-                        await stop_ffmpeg_process(proc)
-                        raise
-
-                    if proc.returncode != 0:
+                    if returncode != 0:
                         logger.error(
                             "FFmpeg transcode failed: %s",
-                            stderr.decode(errors="replace") if stderr else "unknown error",
+                            (stderr.decode(errors="replace") if stderr else "unknown error"),
                         )
                         raise RuntimeError("Audio transcoding failed")
 
@@ -308,13 +346,23 @@ async def transcode_to_mp3(source_path: Path, output_path: Path) -> Path:
                 _transcode_lock_refs[output_path] = next_ref_count
 
 
-async def _ensure_mp3(file_path: Path) -> Path:
-    """Return an MP3 path, transcoding the source when the cache is missing."""
-    mp3_path = get_mp3_cache_path(file_path)
-    if await _mp3_cache_is_valid(mp3_path, file_path):
-        return mp3_path
+async def _ensure_mp3(file_path: Path, bpm: object = None) -> Path:
+    """Return a tagged MP3 path, transcoding the source when the cache is missing.
 
-    await transcode_to_mp3(file_path, mp3_path)
+    A cached MP3 made before the tempo was known gets its TBPM now; a tagging
+    failure is logged and the untagged file is served.
+    """
+    mp3_path = get_mp3_cache_path(file_path)
+    if not await _mp3_cache_is_valid(mp3_path, file_path):
+        await transcode_to_mp3(file_path, mp3_path, fetchly_tags=True, bpm=bpm)
+    try:
+        # A stream copy, but still an ffmpeg process: stay inside the transcode
+        # budget. Cancelling the await now kills the ffmpeg process instead of
+        # orphaning it on the worker thread until the timeout.
+        async with governor.transcode_semaphore:
+            await ensure_bpm_tag_async(mp3_path, bpm)
+    except (RuntimeError, OSError) as exc:
+        logger.warning("Could not write BPM tag into %s: %s", mp3_path.name, exc)
     return mp3_path
 
 
@@ -336,7 +384,12 @@ async def job_page(request: Request, job_id: uuid.UUID):
         return templates.TemplateResponse(
             request=request,
             name="job.html",
-            context={"job": None, "job_id": job_id_str, "auth_enabled": auth_enabled, "csrf_token": csrf_token},
+            context={
+                "job": None,
+                "job_id": job_id_str,
+                "auth_enabled": auth_enabled,
+                "csrf_token": csrf_token,
+            },
             status_code=404,
         )
 
@@ -367,7 +420,7 @@ async def build_job_file_response(job_id: uuid.UUID) -> Response:
 
     if job["type"] == "audio" and is_internal_audio_source(file_path):
         try:
-            mp3_path = await _ensure_mp3(file_path)
+            mp3_path = await _ensure_mp3(file_path, job["bpm"])
         except (RuntimeError, OSError) as exc:
             logger.error("Failed to transcode audio for job %s: %s", job_id, exc)
             return JSONResponse(status_code=500, content={"error": "Audio transcoding failed"})
@@ -414,13 +467,16 @@ async def audio_source(request: Request, job_id: uuid.UUID, _user: str = Depends
         return JSONResponse(status_code=exc.status_code, content={"error": exc.detail})
 
     if job["type"] != "audio":
-        return JSONResponse(status_code=400, content={"error": "Audio source is only available for audio jobs"})
+        return JSONResponse(
+            status_code=400,
+            content={"error": "Audio source is only available for audio jobs"},
+        )
 
     provenance = "source" if is_internal_audio_source(file_path) else "converted"
 
     if needs_browser_audio_fallback(file_path):
         try:
-            mp3_path = await _ensure_mp3(file_path)
+            mp3_path = await _ensure_mp3(file_path, job["bpm"])
         except (RuntimeError, OSError) as exc:
             logger.error("Failed to transcode audio source for job %s: %s", job_id, exc)
             return JSONResponse(status_code=500, content={"error": "Audio transcoding failed"})
@@ -430,7 +486,10 @@ async def audio_source(request: Request, job_id: uuid.UUID, _user: str = Depends
             filename=mp3_path.name,
             media_type="audio/mpeg",
             content_disposition_type="inline",
-            headers={**_NOSNIFF_HEADER, "X-Audio-Quality": f"{provenance}-mp3-fallback"},
+            headers={
+                **_NOSNIFF_HEADER,
+                "X-Audio-Quality": f"{provenance}-mp3-fallback",
+            },
         )
 
     media_type = _AUDIO_MIME_TYPES.get(file_path.suffix.lower(), "application/octet-stream")

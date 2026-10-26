@@ -22,8 +22,7 @@ from app.utils import cookies
 from tests._support import WebAppTestCase
 
 SIGNED_IN_HEADER = (
-    "VISITOR_INFO1_LIVE=abc; __Secure-3PSID=g.a000xyz; __Secure-3PAPISID=aG5YCo; "
-    "LOGIN_INFO=AFmmF2s:QUQ3MjN"
+    "VISITOR_INFO1_LIVE=abc; __Secure-3PSID=g.a000xyz; __Secure-3PAPISID=aG5YCo; LOGIN_INFO=AFmmF2s:QUQ3MjN"
 )
 
 
@@ -89,8 +88,7 @@ class CookieRouteTests(WebAppTestCase):
     def test_an_expired_jar_is_reported_as_expired(self):
         past = int(time()) - 86_400
         self._stored().write_text(
-            "# Netscape HTTP Cookie File\n"
-            f".youtube.com\tTRUE\t/\tTRUE\t{past}\t__Secure-3PSID\tvalue\n",
+            f"# Netscape HTTP Cookie File\n.youtube.com\tTRUE\t/\tTRUE\t{past}\t__Secure-3PSID\tvalue\n",
             encoding="utf-8",
         )
 
@@ -120,7 +118,7 @@ class CookieRouteTests(WebAppTestCase):
     def test_an_oversized_paste_is_refused_by_byte_length(self):
         # 100k emoji are only 100k characters but 400k bytes - a character
         # limit alone lets a paste through at several times its intended size.
-        oversized = "\U0001F36A" * 100_000
+        oversized = "\U0001f36a" * 100_000
         self.assertLess(len(oversized), 256 * 1024)
         self.assertGreater(len(oversized.encode("utf-8")), 256 * 1024)
 

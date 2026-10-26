@@ -8,13 +8,14 @@ import logging
 import os
 import re
 import sys
+import time
 from copy import copy
 from pathlib import Path
 from typing import ClassVar, TextIO
 
 import uvicorn
 
-from app.common.rate_limit import validate_trusted_proxy_hosts
+from app.auth.rate_limit import validate_trusted_proxy_hosts
 from app.utils.banner import print_banner_once
 from app.utils.fs import get_data_dir
 
@@ -24,6 +25,9 @@ _VALID_LOG_LEVELS = frozenset(logging.getLevelNamesMapping())
 class RedactingFormatter(logging.Formatter):
     """Formatter that redacts sensitive data from the final log line."""
 
+    # Server logs have no viewer locale; UTC keeps them comparable across hosts.
+    converter = time.gmtime
+
     SENSITIVE_PATTERNS = (
         (
             re.compile(
@@ -32,7 +36,10 @@ class RedactingFormatter(logging.Formatter):
             ),
             r"\g<key>***REDACTED***",
         ),
-        (re.compile(r"(authorization:\s*)(bearer\s+)?([^\s]+)", re.IGNORECASE), r"\1\2***REDACTED***"),
+        (
+            re.compile(r"(authorization:\s*)(bearer\s+)?([^\s]+)", re.IGNORECASE),
+            r"\1\2***REDACTED***",
+        ),
         (re.compile(r"(x-api-key:\s*)([^\s]+)", re.IGNORECASE), r"\1***REDACTED***"),
     )
 
@@ -58,7 +65,7 @@ def _env_paths(name: str, default: list[str]) -> list[str]:
     if raw is None:
         return default
     values = [part.strip() for part in raw.split(",") if part.strip()]
-    return values if values else default
+    return values or default
 
 
 def _env_int(name: str, default: int) -> int:
@@ -113,10 +120,10 @@ class ColoredRedactingFormatter(RedactingFormatter):
     RESET = "\x1b[0m"
     TIMESTAMP_COLOR = "\x1b[90m"  # dark gray
     LEVEL_COLORS: ClassVar[dict[int, str]] = {
-        logging.DEBUG: "\x1b[36m",     # cyan
-        logging.INFO: "\x1b[32m",      # green
-        logging.WARNING: "\x1b[33m",   # yellow
-        logging.ERROR: "\x1b[31m",     # red
+        logging.DEBUG: "\x1b[36m",  # cyan
+        logging.INFO: "\x1b[32m",  # green
+        logging.WARNING: "\x1b[33m",  # yellow
+        logging.ERROR: "\x1b[31m",  # red
         logging.CRITICAL: "\x1b[1;31m",  # bold red
     }
 
@@ -136,7 +143,7 @@ class ColoredRedactingFormatter(RedactingFormatter):
 
         timestamp = getattr(colored, "asctime", None)
         if timestamp and message.startswith(timestamp):
-            message = f"{self.TIMESTAMP_COLOR}{timestamp}{self.RESET}{message[len(timestamp):]}"
+            message = f"{self.TIMESTAMP_COLOR}{timestamp}{self.RESET}{message[len(timestamp) :]}"
 
         return message
 
@@ -156,7 +163,7 @@ def _build_log_config(*, log_level: str, use_colors: bool) -> dict[str, object]:
             "redacted": {
                 "()": ColoredRedactingFormatter,
                 "format": "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-                "datefmt": "%Y-%m-%d %H:%M:%S",
+                "datefmt": "%Y-%m-%dT%H:%M:%SZ",
                 "use_colors": use_colors,
             },
         },
@@ -166,9 +173,21 @@ def _build_log_config(*, log_level: str, use_colors: bool) -> dict[str, object]:
         },
         "root": {"handlers": ["default"], "level": log_level},
         "loggers": {
-            "uvicorn": {"handlers": ["default"], "level": log_level, "propagate": False},
-            "uvicorn.error": {"handlers": ["default"], "level": log_level, "propagate": False},
-            "uvicorn.access": {"handlers": ["access"], "level": log_level, "propagate": False},
+            "uvicorn": {
+                "handlers": ["default"],
+                "level": log_level,
+                "propagate": False,
+            },
+            "uvicorn.error": {
+                "handlers": ["default"],
+                "level": log_level,
+                "propagate": False,
+            },
+            "uvicorn.access": {
+                "handlers": ["access"],
+                "level": log_level,
+                "propagate": False,
+            },
         },
     }
 

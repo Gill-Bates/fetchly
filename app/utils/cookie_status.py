@@ -109,8 +109,7 @@ def domain_matches(domain: str, allowed: tuple[str, ...]) -> bool:
         return False
     normalized = domain.lower().lstrip(".")
     return any(
-        normalized == candidate.lstrip(".") or normalized.endswith("." + candidate.lstrip("."))
-        for candidate in allowed
+        normalized == candidate.lstrip(".") or normalized.endswith("." + candidate.lstrip(".")) for candidate in allowed
     )
 
 
@@ -132,9 +131,7 @@ def missing_login_cookies(names: tuple[str, ...] | list[str], platform: str) -> 
     empty when the jar carries a usable session.
     """
     present = set(names)
-    return tuple(
-        group[0] for group in PLATFORM_REQUIRED_COOKIES.get(platform, ()) if not present & set(group)
-    )
+    return tuple(group[0] for group in PLATFORM_REQUIRED_COOKIES.get(platform, ()) if not present & set(group))
 
 
 def _is_unexpired(cookie: http.cookiejar.Cookie, now: int) -> bool:
@@ -171,7 +168,7 @@ def analyze_cookie_file(path: Path, platform: str) -> CookieAnalysis:
     jar = http.cookiejar.MozillaCookieJar(str(path))
     try:
         jar.load(ignore_discard=True, ignore_expires=True)
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - any parse failure marks the jar invalid
         logger.warning("Cookie file for %s failed to parse (%s): %s", platform, path, exc)
         return CookieAnalysis(
             platform=platform,

@@ -8,6 +8,9 @@
 
 import unittest
 import uuid
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event, Lock
+from unittest.mock import patch
 
 from app import db
 from app.routes.share import _TOKEN_RE
@@ -67,6 +70,51 @@ class ShareLinkIdempotencyTests(IsolatedDbTestCase):
         first = db.create_share_link(job_id, 0)
         for _ in range(5):
             self.assertEqual(db.create_share_link(job_id, 0), first)
+
+    def test_concurrent_creation_reuses_one_limited_link(self) -> None:
+        job_id = self._job()
+        first_ready = Event()
+        release_first = Event()
+        second_started = Event()
+        second_ready = Event()
+        lock = Lock()
+        calls = 0
+        generate = db.secrets.token_urlsafe
+
+        def slow_first_token(nbytes: int) -> str:
+            nonlocal calls
+            with lock:
+                calls += 1
+                call = calls
+            if call == 1:
+                first_ready.set()
+                self.assertTrue(release_first.wait(5), "first token generation was not released")
+            else:
+                second_ready.set()
+            return generate(nbytes)
+
+        def create_second() -> str:
+            second_started.set()
+            return db.create_share_link(job_id, 1)
+
+        with patch.object(db.secrets, "token_urlsafe", side_effect=slow_first_token):
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                first = executor.submit(db.create_share_link, job_id, 1)
+                try:
+                    self.assertTrue(
+                        first_ready.wait(5),
+                        "first create never reached token generation",
+                    )
+                    second = executor.submit(create_second)
+                    self.assertTrue(second_started.wait(5), "second create never started")
+                    second_ready.wait(0.5)
+                finally:
+                    release_first.set()
+                self.assertEqual(first.result(timeout=5), second.result(timeout=5))
+
+        with db.get_db() as connection:
+            count = connection.execute("SELECT COUNT(*) FROM share_links WHERE job_id = ?", (job_id,)).fetchone()[0]
+        self.assertEqual(count, 1)
 
     def test_creation_never_advances_use_count(self) -> None:
         job_id = self._job()

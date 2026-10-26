@@ -18,7 +18,7 @@ import test from "node:test";
 globalThis.document = {
     cookie: "",
     readyState: "loading",
-    documentElement: { dataset: { lalalMaxDurationSeconds: "600" } },
+    documentElement: { dataset: { lalalMaxDurationSeconds: "600", statusContract: "{\"downloadable\":[\"analysis\",\"analysis_done\",\"done\"],\"cancellable\":[\"downloading\",\"processing\",\"queued\",\"transcoding\"],\"retryable\":[\"cancelled\",\"error\"],\"terminal\":[\"analysis_done\",\"cancelled\",\"done\",\"error\"],\"progress\":[\"downloading\",\"transcoding\"],\"meta\":{\"analysis\":{\"label\":\"Analyzing\",\"color\":\"primary\"},\"analysis_done\":{\"label\":\"Done\",\"color\":\"success\"},\"cancelled\":{\"label\":\"Cancelled\",\"color\":\"secondary\"},\"done\":{\"label\":\"Done\",\"color\":\"success\"},\"downloading\":{\"label\":\"Downloading\",\"color\":\"primary\"},\"error\":{\"label\":\"Error\",\"color\":\"danger\"},\"processing\":{\"label\":\"Preparing\",\"color\":\"primary\"},\"queued\":{\"label\":\"Queued\",\"color\":\"primary\"},\"transcoding\":{\"label\":\"Transcoding\",\"color\":\"primary\"}}}" } },
     addEventListener() { },
     querySelector() {
         return null;

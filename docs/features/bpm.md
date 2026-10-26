@@ -74,6 +74,18 @@ Files keep their plain names on disk deliberately — the MP3 cache and the Lala
 lookup both key off them. A job with no usable tempo, and every video job, keeps its
 name unchanged.
 
+## ID3 tag (TBPM)
+
+The MP3 you download also carries the tempo inside the file: the whole-number `TBPM`
+frame (93.6 becomes `94`), which players and DJ software read. The analysis runs after
+the download, so the tag is written when the MP3 is served: a copy made before the
+result arrived gets `TBPM` added in place on the next download, with cover and comment
+kept (stream copy, no re-encode). A job with no usable tempo gets no `TBPM` frame.
+
+The analysis cache key is a hash of the stored **source** file, never of the MP3, so
+tagging cannot change the key or invalidate cached results. Stored filenames stay
+untouched; only the download name carries the `_94bpm` tag.
+
 ## Tempo distribution
 
 `GET /api/stats/bpm-clusters` groups every detected tempo into 5-BPM buckets, sorted by

@@ -67,8 +67,10 @@ Gunicorn itself remains fixed at one process.
 
 **Parallel fragments per download** is yt-dlp's `--concurrent-fragments`, which applies
 to fragmented DASH/HLS sources and is ignored for progressive single-file downloads.
-`Automatic` sizes it per download from the host's CPU quota and free memory; the UI
-shows what that resolves to on this host right now. Higher values use more CPU.
+`Automatic` (`0`) sizes it per download from the host's CPU quota and free memory,
+between 2 and 8 fragments, so a small or currently loaded host backs off on its own.
+The settings page names the value Automatic resolves to at that moment. Higher values
+use more CPU. See [Resources](resources.md).
 
 **Maximum source download size** is passed straight through as yt-dlp's own
 `--max-filesize` flag. It bounds the size of the file yt-dlp fetches from the
@@ -84,7 +86,7 @@ The **Processing** tab is split into panels: **Output format** and **Watermark**
 | Setting | Panel | Key | Range | Default |
 |---|---|---|---|---|
 | Video output format | Output format | `download_output_mode` | `source`, `universal`, `av1` | `universal` |
-| Show Watermark | Watermark | `video_watermark` | on/off | on |
+| Show Watermark | Watermark | `video_watermark` | on/off | off |
 | Custom logo | Watermark | *(file, not a setting)* | SVG or PNG upload | built-in logo |
 
 **Video output format** — a three-position slider that decides what `max` quality
@@ -119,9 +121,9 @@ mode keeps that format for good. The mode is read when a download starts, which 
 job still sitting in the queue picks up the new value, and retrying a failed or
 cancelled job re-downloads it under the current mode.
 
-Upgraded installs keep their previous behaviour: the old `download_compatible_output`
-switch maps to `universal` when it was on and `source` when it was off (and an install
-still on the older `download_mp4_preset` migrates the whole way in one start).
+A fresh install starts on `universal`. Databases from older releases are not migrated, so
+settings stored under earlier names (`download_compatible_output`, `download_mp4_preset`)
+are ignored.
 
 The watermark burns an overlay into the picture, which costs a video encode in every
 mode — but the encode targets the mode's own codec, so the watermark never changes the
@@ -163,11 +165,8 @@ The file lives at `data/logo/watermark-logo.png`, and the badge is laid out from
 image's proportions. Full detail in
 [Downloads → Your own logo](../features/downloads.md#your-own-logo).
 
-**Parallel fragments per download** — parallel fragment downloads for DASH/HLS sources;
-ignored for progressive single-file downloads. `Automatic` (`0`) sizes the value per download
-from the host's CPU quota and free memory, between 2 and 8 fragments, so a small or
-currently loaded host backs off on its own. The settings page names the value
-Automatic resolves to at that moment. See [Resources](resources.md).
+**Parallel fragments per download** is a General setting; see
+[Runtime limits](#runtime-limits).
 
 ## Security
 
@@ -253,9 +252,23 @@ there is no undo, and share links to those jobs stop working immediately.
 ### Update checks
 
 `GET /api/updates` compares each component against the source the image actually
-installs it from — GitHub releases for the packages, the rolling BtbN build for ffmpeg.
-Answers are cached for 24 hours, in memory and in `update_check.json` on the data
-volume, so a page reload never triggers another network round trip.
+installs it from — GitHub releases for the packages, the newest BtbN autobuild of the
+installed stable series for ffmpeg (compared build by build, e.g. `n9.0.2-12-…` against
+`n9.0.2-36-…`). Each component reports `status` as `current`, `available` or `unknown`,
+and Settings → System shows every state as the same badge: **Up to date** (green),
+**Update available** (amber, links to the release), **Check unavailable** (grey) and
+**Checking…** while the request runs. Answers are cached for 24 hours, in memory and in
+`update_check.json` on the data volume, so a page reload never triggers another network
+round trip.
+
+**Check unavailable** means fetchly could not compare: either the upstream source could not
+be read (no network, GitHub rate limit of 60 requests per hour per IP, timeout, oversized
+answer) or the installed version is unknown. The response's `reason` field tells which one:
+`latest_unknown` or `installed_unknown` (the badge tooltip shows it). A failed lookup is
+cached for only 15 minutes, and only the components that failed are asked again; one
+failing component never changes the answer of the others. The installed WaveSurfer.js
+version comes from `WAVESURFER_VERSION`, else from the pin file shipped with the image
+(`/app/.wavesurfer_version`, `docker/wavesurfer.version` in a checkout).
 
 !!! info "Update check unavailable"
     If the fetchly release check reports as unavailable, the GitHub release source

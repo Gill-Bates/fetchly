@@ -23,11 +23,11 @@ readonly HOST="${HOST:-${UVICORN_HOST:-0.0.0.0}}"
 readonly PORT="${PORT:-${UVICORN_PORT:-8000}}"
 # Fixed at 1, and enforced below rather than merely defaulted: the job queue
 # and the SSE subscriber registry live in process memory with no cross-process
-# coordination (app/worker.py, app/main.py). A second Gunicorn worker means the
+# coordination (app/workers/worker.py, app/main.py). A second Gunicorn worker means the
 # same job processed twice and clients subscribed to a process that never sees
 # their job's events - a correctness failure, not a throughput trade-off, so
 # there is no supported value other than 1 until an external queue and pub/sub
-# exist. CPU parallelism comes from the Governor's semaphores (app/governor.py)
+# exist. CPU parallelism comes from the Governor's semaphores (app/runtime/governor.py)
 # and is unaffected.
 readonly WORKERS="${WORKERS:-${UVICORN_WORKERS:-1}}"
 readonly TIMEOUT="${TIMEOUT:-60}"
@@ -37,10 +37,11 @@ readonly TIMEOUT="${TIMEOUT:-60}"
 # the orchestrator's kill grace period (docker-compose stop_grace_period: 20s)
 # so the checkpoint actually completes on `docker restart` / `docker stop`.
 readonly GRACEFUL_TIMEOUT="${GRACEFUL_TIMEOUT:-15}"
-readonly LOG_LEVEL="$(printf '%s' "${LOG_LEVEL:-info}" | tr '[:upper:]' '[:lower:]')"
+LOG_LEVEL="$(printf '%s' "${LOG_LEVEL:-info}" | tr '[:upper:]' '[:lower:]')"
+readonly LOG_LEVEL
 # Loopback only, matching Gunicorn's own default. A wider default would let any
 # workload that can reach this container forge X-Forwarded-For and thereby
-# choose its own rate-limit bucket (app/common/rate_limit.py keys on client IP,
+# choose its own rate-limit bucket (app/auth/rate_limit.py keys on client IP,
 # which also gates the login endpoint). Operators terminating TLS on another
 # host must name that proxy explicitly, e.g.
 #   FORWARDED_ALLOW_IPS=10.30.0.1
@@ -60,16 +61,15 @@ readonly ACCESS_LOG_FORMAT="${ACCESS_LOG_FORMAT:-[%(t)s] %(h)s \"%(r)s\" %(s)s %
 # done the same to /.
 readonly -a REQUIRED_DIRS=(
     "${DATA_DIR}"
-    "${DATA_DIR}/downloads"
+    "${DATA_DIR}/jobs"
     "${DATA_DIR}/cookies"
     "${TORCH_HOME}"
 )
 
-# WaveSurfer is vendored and pinned in git (see docker/AGENTS.md); the
-# Dockerfile copies the committed docker/wavesurfer.version file to
-# /app/.wavesurfer_version rather than baking the version into an ENV, so
-# app/utils/version.py can report it without a rebuild changing what "current"
-# means.
+# WaveSurfer is fetched unpinned at build time (see docker/AGENTS.md); the
+# Dockerfile writes the resolved version to /app/.wavesurfer_version rather than
+# baking it into an ENV, so app/utils/version.py can report the version the
+# build actually fetched without the value being hard-coded into the image.
 if [[ -z "${WAVESURFER_VERSION:-}" ]] && [[ -r /app/.wavesurfer_version ]]; then
     WAVESURFER_VERSION="$(tr -d ' \t\r\n' < /app/.wavesurfer_version)"
 fi
@@ -93,7 +93,7 @@ validate_positive_int() {
     local name="$1"
     local value="$2"
 
-    if ! [[ "${value}" =~ ^[0-9]+$ ]] || [[ "${value}" -lt 1 ]]; then
+    if ! [[ "${value}" =~ ^0*[1-9][0-9]*$ ]]; then
         fail "${name} must be a positive integer, got: ${value}"
     fi
 }
@@ -101,8 +101,8 @@ validate_positive_int() {
 # DATA_DIR and TORCH_HOME are operator-supplied and both reach a chown/chmod
 # that runs as root - DATA_DIR a recursive one - so a value like DATA_DIR=/ or
 # TORCH_HOME=/etc would rewrite ownership and permissions across the container,
-# and across the host for a bind mount. Reject anything that is not an absolute
-# path outside the system directories before that can happen.
+# and across the host for a bind mount. Resolve symlinks and reject system
+# directories and their descendants before that can happen.
 validate_managed_dir() {
     local name="$1"
     local path="$2"
@@ -113,7 +113,12 @@ validate_managed_dir() {
     resolved="$(realpath -m -- "${path}")" || fail "cannot resolve ${name}: ${path}"
 
     case "${resolved}" in
-        /|/app|/bin|/boot|/dev|/etc|/home|/lib|/opt|/proc|/root|/run|/sbin|/srv|/sys|/tmp|/usr|/var|/venv)
+        /var/lib/fetchly|/var/lib/fetchly/*)
+            ;;
+        /|/app|/bin|/boot|/dev|/etc|/home|/lib|/opt|/proc|/root|/run|/sbin|/srv|/sys|/tmp|/usr|/var|/venv|\
+        /bin/*|/boot/*|/dev/*|/etc/*|/home/*|/lib/*|/opt/*|/proc/*|/root/*|/run/*|/sbin/*|/sys/*|/usr/*|/venv/*|\
+        /var/log|/var/log/*|/var/cache|/var/cache/*|/var/spool|/var/spool/*|/var/lib|/var/lib/*|\
+        /app/app|/app/app/*|/app/middleware|/app/middleware/*)
             fail "refusing to use ${resolved} as ${name}: chown/chmod would damage the system"
             ;;
     esac
@@ -124,9 +129,13 @@ validate_config() {
     # Not covered by DATA_DIR's check when an operator points it elsewhere, and
     # it reaches the same privileged chown/chmod in bootstrap().
     validate_managed_dir "TORCH_HOME" "${TORCH_HOME}"
+    validate_managed_dir "jobs" "${DATA_DIR}/jobs"
+    validate_managed_dir "cookies" "${DATA_DIR}/cookies"
 
     validate_positive_int "PORT" "${PORT}"
-    (( PORT <= 65535 )) || fail "PORT must be between 1 and 65535, got: ${PORT}"
+    [[ "${PORT}" =~ ^0*([1-9][0-9]{0,4})$ ]] || fail "PORT must be between 1 and 65535, got: ${PORT}"
+    local port_value="${BASH_REMATCH[1]}"
+    (( 10#${port_value} <= 65535 )) || fail "PORT must be between 1 and 65535, got: ${PORT}"
 
     validate_positive_int "TIMEOUT" "${TIMEOUT}"
     validate_positive_int "GRACEFUL_TIMEOUT" "${GRACEFUL_TIMEOUT}"
@@ -134,7 +143,7 @@ validate_config() {
 
     # See the WORKERS comment above: any other value is an incorrect operating
     # mode, so fail loudly at start instead of corrupting job state later.
-    (( WORKERS == 1 )) || fail \
+    [[ "${WORKERS}" =~ ^0*1$ ]] || fail \
         "WORKERS must be 1 (got ${WORKERS}): the job queue and SSE subscribers are process-local"
 
     # Gunicorn's own accepted set (--log-level); it does not include "trace".
@@ -145,6 +154,15 @@ validate_config() {
 }
 
 bootstrap() {
+    local app_uid
+    if [[ "$(id -u)" -eq 0 ]]; then
+        if ! id "${APP_USER}" >/dev/null 2>&1; then
+            fail "User ${APP_USER} does not exist"
+        fi
+        app_uid="$(id -u "${APP_USER}")"
+        [[ "${app_uid}" != 0 ]] || fail "APP_USER must not be root"
+    fi
+
     log "Initializing ${DATA_DIR} ..."
 
     local dir
@@ -153,18 +171,11 @@ bootstrap() {
     done
 
     if [[ "$(id -u)" -eq 0 ]]; then
-        if ! id "${APP_USER}" >/dev/null 2>&1; then
-            fail "User ${APP_USER} does not exist"
-        fi
-
-        local app_uid
-        app_uid="$(id -u "${APP_USER}")"
-
         # Recursive pass first: cheapest way to cover a fresh volume in one
-        # shot. Skipped once DATA_DIR and downloads already carry the right
-        # owner, so an existing, possibly large downloads tree is not walked
-        # on every restart.
-        if [[ "$(stat -c %u "${DATA_DIR}")" != "${app_uid}" ]] || [[ "$(stat -c %u "${DATA_DIR}/downloads")" != "${app_uid}" ]]; then
+        # shot. Skipped once DATA_DIR and its jobs tree already carry the right
+        # owner, so an existing, possibly large jobs tree is not walked on
+        # every restart.
+        if [[ "$(stat -c %u "${DATA_DIR}")" != "${app_uid}" ]] || [[ "$(stat -c %u "${DATA_DIR}/jobs")" != "${app_uid}" ]]; then
             local chown_err
             if ! chown_err="$(chown -R -- "${APP_USER}:${APP_USER}" "${DATA_DIR}" 2>&1)"; then
                 log "WARNING: chown of ${DATA_DIR} failed: ${chown_err}"
@@ -248,7 +259,7 @@ exec gunicorn app.main:app \
     --bind "${HOST}:${PORT}" \
     --workers "${WORKERS}" \
     --worker-class uvicorn_worker.UvicornWorker \
-    --logger-class app.gunicorn_logging.FetchlyGunicornLogger \
+    --logger-class app.runtime.gunicorn_logging.FetchlyGunicornLogger \
     --log-level "${LOG_LEVEL}" \
     --timeout "${TIMEOUT}" \
     --graceful-timeout "${GRACEFUL_TIMEOUT}" \

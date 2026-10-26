@@ -11,11 +11,17 @@ does not fit on disk, credentials quoted back in an error message, a worker
 pool that starts a second time on top of itself.
 """
 
+import subprocess
+import tempfile
 import threading
 import unittest
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
-from app import worker
-from app.worker import _redact_urls, sanitize_filename
+from app.utils import youtube
+from app.workers import worker
+from app.workers.worker import _redact_urls, sanitize_filename
+from tests._support import WebAppTestCase
 
 
 class SanitizeFilenameTests(unittest.TestCase):
@@ -106,3 +112,70 @@ class WorkerLifecycleTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+FB_URL = "https://www.facebook.com/share/v/1JwvpZAKbv/?mibextid=wwXIfr"
+AUTH_ERRORS = (
+    "ERROR: [facebook] 1JwvpZAKbv: Cannot parse data; please report this issue",
+    "ERROR: [youtube] abc: Private video. Sign in if you've been granted access",
+    "ERROR: [instagram] x: Login required. Use --cookies-from-browser or --cookies",
+    "ERROR: [tiktok] x: This content isn't available, try again later",
+    "ERROR: [facebook] x: You must be logged in to view this video",
+)
+
+
+class AuthRequiredErrorTests(unittest.TestCase):
+    def _message(self, raw: str, cookie_path: Path) -> str:
+        with patch.object(worker, "_resolve_cookie_file", return_value=cookie_path):
+            return worker._user_facing_error(FB_URL, RuntimeError(f"yt-dlp failed with exit code 1: {raw}"))
+
+    def test_private_or_login_gated_failures_point_to_the_cookie_upload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for raw in AUTH_ERRORS:
+                with self.subTest(raw=raw):
+                    message = self._message(raw, Path(tmp) / "facebook_cookies.txt")
+                    self.assertIn("requires authentication", message)
+                    self.assertIn("Upload a cookie file", message)
+                    self.assertIn("Settings", message)
+
+    def test_unrelated_failures_stay_generic(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            message = self._message("ERROR: HTTP Error 500", Path(tmp) / "facebook_cookies.txt")
+        self.assertTrue(message.startswith("Job failed:"))
+
+
+class InfoAuthFailureTests(WebAppTestCase):
+    def _run_info(self, stderr: str):
+        proc = MagicMock()
+        proc.__enter__.return_value = proc
+        proc.communicate.return_value = ("", stderr)
+        proc.returncode = 1
+        with (
+            patch.object(youtube.subprocess, "Popen", return_value=proc) as popen,
+            patch.object(youtube, "_cache_bucket", return_value=object()),
+        ):
+            return popen, self.client.get("/api/info", params={"url": FB_URL})
+
+    def test_private_video_yields_a_clear_login_required_payload(self):
+        youtube._cached_load_video_info.cache_clear()
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch("app.workers.worker._resolve_cookie_file", return_value=Path(tmp) / "facebook_cookies.txt"),
+        ):
+            popen, response = self._run_info(AUTH_ERRORS[0])
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertTrue(body["unavailable"])
+        self.assertEqual(body["reason"], "login_required")
+        self.assertIn("Upload a cookie file", body["message"])
+        # One bounded attempt on a non-YouTube platform: no retry loop.
+        self.assertEqual(popen.call_count, 1)
+
+    def test_the_loader_raises_only_after_the_last_client_failed(self):
+        proc = MagicMock()
+        proc.__enter__.return_value = proc
+        proc.communicate.return_value = ("", "Sign in to confirm you're not a bot")
+        proc.returncode = 1
+        with patch.object(subprocess, "Popen", return_value=proc), self.assertRaises(youtube.AuthRequiredError):
+            youtube._load_video_info_uncached("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+        self.assertEqual(proc.communicate.call_count, 2)

@@ -15,7 +15,7 @@ import tempfile
 import uuid
 from pathlib import Path
 from time import time
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, NoReturn, Protocol
 from urllib.parse import quote
 from weakref import WeakKeyDictionary
 
@@ -23,38 +23,53 @@ import httpx
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, Response
 
-from ..bpm_cluster import cluster_bpms
-from ..common.rate_limit import get_rate_limit_ip, limiter
+from ..audio.cluster import cluster_bpms
+from ..auth.credentials import normalize_admin_username, validate_admin_password
+from ..auth.rate_limit import get_rate_limit_ip, limiter
+from ..auth.session import delete_session_cookie, refresh_session_settings_cache
 from ..db import (
+    CANCELLABLE_JOB_STATUSES,
     DOWNLOAD_OUTPUT_MODES,
-    SESSION_MAX_DAYS_MAX,
-    SESSION_MAX_DAYS_MIN,
+    RETRYABLE_JOB_STATUSES,
+    SETTING_INT_BOUNDS,
     TERMINAL_JOB_STATUSES,
     delete_jobs_and_share_links,
     find_active_job_for_submission,
     get_job,
     get_settings,
     get_stats,
-    insert_job,
+    insert_job_unless_active_duplicate,
+    list_active_jobs,
     list_completed_bpms,
     list_job_ids,
     paginate_jobs,
     set_settings,
+    to_iso_utc,
     update_job,
     update_job_if_status,
     utc_timestamp,
 )
-from ..governor import governor
-from ..session import delete_session_cookie, refresh_session_settings_cache
+from ..integrations.lalal.policy import LALAL_MINUTES_UNKNOWN, minutes_from_setting
+from ..runtime.governor import governor
+from ..utils.boolean import parse_bool_text
 from ..utils.changelog import get_changelog_html
-from ..utils.cookie_status import cookie_file_is_usable
+from ..utils.cookie_args import cookie_args_for_url
 from ..utils.cookies import default_cookie_file
-from ..utils.credentials import normalize_admin_username, validate_admin_password
-from ..utils.fs import get_data_dir, get_json_body, path_is_file
+from ..utils.fs import (
+    get_data_dir,
+    get_json_body,
+    jobs_dir,
+    path_is_file,
+    thumb_cache_dir,
+)
 from ..utils.geoip import build_requester_info
 from ..utils.host_stats import get_host_stats
 from ..utils.housekeeping import cleanup_job_directory
-from ..utils.platform import PLATFORM_COOKIE_FILENAMES, detect_platform, validate_media_url
+from ..utils.platform import (
+    PLATFORM_COOKIE_FILENAMES,
+    detect_platform,
+    validate_media_url,
+)
 from ..utils.public_url import normalize_public_hostname
 from ..utils.template_filters import is_lalala_configured, public_settings
 from ..utils.updates import get_update_status
@@ -76,13 +91,21 @@ from ..utils.watermark_logo import (
     store_custom_logo,
 )
 from ..utils.youtube import (
+    AuthRequiredError,
     empty_info_payload,
     extract_video_meta_async,
     load_video_info_async,
     normalize_info_url,
 )
-from ..worker import cancel_job as cancel_worker_job
-from ..worker import clear_cancellation, get_job_queue, is_job_active, submit_download
+from ..workers.worker import (
+    auth_required_message,
+    clear_cancellation,
+    get_job_queue,
+    get_progress_snapshot,
+    is_job_active,
+    submit_download,
+)
+from ..workers.worker import cancel_job as cancel_worker_job
 from .auth import (
     get_csrf_token,
     has_admin_credentials,
@@ -104,41 +127,30 @@ router = APIRouter(tags=["api"])
 _ALLOWED_MEDIA_TYPES = frozenset({"audio", "video"})
 _ALLOWED_QUALITIES = frozenset({"max", "medium", "small"})
 _STATS_CACHE_TTL_SECONDS = 60.0
-_PERSISTED_CANCELLABLE_JOB_STATUSES = (
-    "queued",
-    "processing",
-    "downloading",
-    "transcoding",
-)
-_RETRYABLE_JOB_STATUSES = frozenset({"error", "cancelled"})
 _QUEUE_FULL_DETAIL = "Job queue is full, please try again later"
 _LOW_MEMORY_DETAIL = "Server is low on memory, please try again later"
-_RUNTIME_LIMIT_BOUNDS: dict[str, tuple[int, int]] = {
-    "download_worker_count": (0, 8),
-    "download_timeout_minutes": (1, 240),
-    "transcode_timeout_minutes": (1, 480),
-    "download_max_filesize_gib": (1, 100),
-    "audio_analysis_max_minutes": (0, 240),
-    "audio_analysis_timeout_minutes": (1, 60),
-    "lalal_max_download_gib": (1, 100),
-    "session_max_days": (SESSION_MAX_DAYS_MIN, SESSION_MAX_DAYS_MAX),
-}
 
 _templates: "Jinja2Templates | None" = None
+_thumb_extraction_capacity: asyncio.Semaphore | None = None
 _stats_cache: dict[str, Any] = {"data": None, "ts": 0.0}
 _stats_locks: "WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Lock]" = WeakKeyDictionary()
 
 
 def init_api(templates: "Jinja2Templates") -> None:
-    global _templates
+    global _templates, _thumb_extraction_capacity
     _templates = templates
-
+    _thumb_extraction_capacity = asyncio.Semaphore(_THUMB_EXTRACTION_MAX_CONCURRENT)
 
 
 def _require_templates() -> "Jinja2Templates":
     if _templates is None:
         raise RuntimeError("API module not initialized: call init_api() first")
     return _templates
+
+
+def _invalidate_stats_cache() -> None:
+    _stats_cache["data"] = None
+    _stats_cache["ts"] = 0.0
 
 
 def _get_stats_lock() -> asyncio.Lock:
@@ -152,8 +164,8 @@ def _get_stats_lock() -> asyncio.Lock:
 
 def _remove_job_artifacts(job_ids: list[str]) -> list[str]:
     """Remove only the job directories identified by the database snapshot."""
-    data_dir = get_data_dir()
-    return [job_id for job_id in job_ids if not cleanup_job_directory(job_id, data_dir)]
+    per_job_root = jobs_dir()
+    return [job_id for job_id in job_ids if not cleanup_job_directory(job_id, per_job_root)]
 
 
 def _cancel_worker_jobs(job_ids: list[str]) -> None:
@@ -168,7 +180,10 @@ def _clamp_int(value: Any, min_value: int, max_value: int, name: str) -> int:
     except (TypeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=f"{name} must be an integer") from exc
     if not (min_value <= int_value <= max_value):
-        raise HTTPException(status_code=400, detail=f"{name} must be between {min_value} and {max_value}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"{name} must be between {min_value} and {max_value}",
+        )
     return int_value
 
 
@@ -177,8 +192,13 @@ class JobRecord(Protocol):
 
 
 def job_to_dict(job: JobRecord) -> dict[str, Any]:
-    """Convert a job record to a JSON-serializable dict."""
+    """Convert a job record to a JSON-serializable dict.
+
+    A running download/transcode also carries its last live ``progress`` and
+    ``eta_seconds`` (worker memory, not the database).
+    """
     return {
+        **get_progress_snapshot(job["id"], job["status"]),
         "id": job["id"],
         "url": job["url"],
         "platform": detect_platform(job["url"]),
@@ -187,8 +207,8 @@ def job_to_dict(job: JobRecord) -> dict[str, Any]:
         "type": job["type"],
         "quality": job["quality"],
         "status": job["status"],
-        "created_at": job["created_at"],
-        "finished_at": job["finished_at"],
+        "created_at": to_iso_utc(job["created_at"]),
+        "finished_at": to_iso_utc(job["finished_at"]),
         "message": job["message"],
         "filesize_bytes": job["filesize_bytes"],
         "duration_seconds": job["duration_seconds"],
@@ -253,8 +273,7 @@ async def api_reset_stats(request: Request, _user: str = Depends(require_user)) 
             {"statistics_reset_at": utc_timestamp()},
             allow_internal=True,
         )
-        _stats_cache["data"] = None
-        _stats_cache["ts"] = 0.0
+        _invalidate_stats_cache()
 
     return {"ok": True, "message": "Statistics reset"}
 
@@ -284,19 +303,23 @@ async def api_remove_all_jobs(request: Request, _user: str = Depends(require_use
 
     failed_cleanup = await asyncio.to_thread(_remove_job_artifacts, job_ids)
     if failed_cleanup:
-        logger.error("Refusing to remove jobs after %d artifact cleanup failure(s)", len(failed_cleanup))
+        logger.error(
+            "Refusing to remove jobs after %d artifact cleanup failure(s)",
+            len(failed_cleanup),
+        )
         raise HTTPException(
             status_code=500,
             detail="Could not remove every job file; no jobs or shared links were deleted",
         )
 
     async with _get_stats_lock():
-        jobs_deleted, share_links_deleted = await asyncio.to_thread(
+        deleted_ids, share_links_deleted = await asyncio.to_thread(
             delete_jobs_and_share_links,
             job_ids,
+            terminal_only=False,
         )
-        _stats_cache["data"] = None
-        _stats_cache["ts"] = 0.0
+        jobs_deleted = len(deleted_ids)
+        _invalidate_stats_cache()
 
     return {
         "ok": True,
@@ -317,25 +340,33 @@ async def index(request: Request) -> Response:
 
     raw_jobs = await asyncio.to_thread(paginate_jobs, limit=50, offset=0)
     jobs = [job_to_dict(job) for job in raw_jobs]
+    # Separate from the history page: a job submitted with history disabled is
+    # not in paginate_jobs() but must still be found again after a reload.
+    raw_active = await asyncio.to_thread(list_active_jobs)
+    active_jobs = [job_to_dict(job) for job in raw_active]
     stats = await get_cached_stats()
     settings = await asyncio.to_thread(get_settings, include_secrets=True)
     lalal_enabled = is_lalala_configured(settings)
-    lalal_duration_guard = str(settings.get("lalalaai_duration_guard", "true")).lower() in ("true", "1", "yes")
-    return templates.TemplateResponse(request=request, name="index.html", context={
-        "jobs": jobs,
-        "stats": stats,
-        "lalal_enabled": lalal_enabled,
-        "lalal_duration_guard": lalal_duration_guard,
-        "auth_enabled": bool(settings.get("enable_authentication", False)),
-        "download_auto_start": bool(settings.get("download_auto_start", True)),
-        "csrf_token": get_csrf_token(request),
-    })
+    lalal_duration_guard = bool(settings.get("lalalaai_duration_guard", True))
+    return templates.TemplateResponse(
+        request=request,
+        name="index.html",
+        context={
+            "jobs": jobs,
+            "active_jobs": active_jobs,
+            "stats": stats,
+            "lalal_enabled": lalal_enabled,
+            "lalal_duration_guard": lalal_duration_guard,
+            "auth_enabled": bool(settings.get("enable_authentication", False)),
+            "download_auto_start": bool(settings.get("download_auto_start", True)),
+            "csrf_token": get_csrf_token(request),
+        },
+    )
 
 
 def _cached_lalal_minutes(settings: dict[str, Any]) -> float | None:
     """Return the last known Lalal.ai balance, or None when it is unknown."""
-    minutes = float(settings.get("lalalaai_minutes_left", -1) or -1)
-    return minutes if minutes >= 0 else None
+    return minutes_from_setting(settings.get("lalalaai_minutes_left", LALAL_MINUTES_UNKNOWN))
 
 
 @router.get("/settings", response_class=HTMLResponse)
@@ -468,10 +499,7 @@ async def api_bpm_clusters(
     safe_limit = min(max(1, limit), 2000)
     bpms = await asyncio.to_thread(list_completed_bpms, safe_limit)
     clusters = await asyncio.to_thread(cluster_bpms, bpms)
-    return [
-        {"bpm": bpm_bucket, "count": count}
-        for bpm_bucket, count in clusters
-    ]
+    return [{"bpm": bpm_bucket, "count": count} for bpm_bucket, count in clusters]
 
 
 async def _tiktok_oembed_thumbnail(url: str) -> str | None:
@@ -485,7 +513,7 @@ async def _tiktok_oembed_thumbnail(url: str) -> str | None:
         data = resp.json()
         thumb = str(data.get("thumbnail_url") or "").strip()
         return thumb or None
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - oEmbed is best-effort; any failure falls back to no thumbnail
         logger.debug("TikTok oEmbed failed for %s: %s", url, exc)
         return None
 
@@ -575,6 +603,13 @@ async def api_info(request: Request, url: str, _user: str = Depends(require_user
             "unavailable": False,
         }
 
+    except AuthRequiredError as exc:
+        logger.info("Video info needs authentication for URL %s", url)
+        payload: dict[str, Any] = dict(empty_info_payload())
+        payload["platform"] = detect_platform(url)
+        payload["reason"] = "login_required"
+        payload["message"] = await asyncio.to_thread(auth_required_message, url, str(exc))
+        return payload
     except TimeoutError:
         logger.warning("Video info extraction timed out for URL %s", url)
         return empty_info_payload()
@@ -586,30 +621,41 @@ async def api_info(request: Request, url: str, _user: str = Depends(require_user
         return empty_info_payload()
 
 
-_THUMBNAIL_ALLOWED_SUFFIXES: frozenset[str] = frozenset({
-    # TikTok CDN domains
-    ".tiktokcdn.com",
-    ".tiktokcdn-us.com",
-    ".ttwstatic.com",
-    ".tiktokv.com",
-    ".byteimg.com",
-    ".ibyteimg.com",
-    ".muscdn.com",
-    # Instagram / Facebook CDN domains
-    ".cdninstagram.com",
-    ".fbcdn.net",
-    ".facebook.com",
-})
+_THUMBNAIL_ALLOWED_SUFFIXES: frozenset[str] = frozenset(
+    {
+        # TikTok CDN domains
+        ".tiktokcdn.com",
+        ".tiktokcdn-us.com",
+        ".ttwstatic.com",
+        ".tiktokv.com",
+        ".byteimg.com",
+        ".ibyteimg.com",
+        ".muscdn.com",
+        # Instagram / Facebook CDN domains
+        ".cdninstagram.com",
+        ".fbcdn.net",
+        ".facebook.com",
+    }
+)
 _THUMBNAIL_MAX_BYTES = 2 * 1024 * 1024  # 2 MiB
-_THUMBNAIL_ALLOWED_TYPES: frozenset[str] = frozenset({
-    "image/jpeg",
-    "image/png",
-    "image/webp",
-})
-_THUMB_CACHE_DIR = get_data_dir() / "thumb-cache"
+_THUMBNAIL_ALLOWED_TYPES: frozenset[str] = frozenset(
+    {
+        "image/jpeg",
+        "image/png",
+        "image/webp",
+    }
+)
+_THUMB_CACHE_DIR = thumb_cache_dir()
 _THUMB_CACHE_KEY_RE = re.compile(r"^[a-f0-9]{64}$")
 _THUMB_EXTRACTION_TIMEOUT_SECONDS = 30
+# Fixed, endpoint-specific budget for yt-dlp thumbnail subprocesses (not
+# cgroup-scaled): each one is a full yt-dlp process, so keep it small.
+_THUMB_EXTRACTION_MAX_CONCURRENT = 2
+_THUMB_EXTRACTION_WAIT_SECONDS = 2.0
+_THUMB_BUSY_DETAIL = "Thumbnail lookups are busy, please try again shortly"
 _THUMB_ALLOWED_EXTENSIONS: frozenset[str] = frozenset({".jpg", ".jpeg", ".png", ".webp"})
+
+
 def _thumbnail_signature_matches(data: bytes, content_type: str) -> bool:
     """Reject payloads whose bytes do not match their declared raster type."""
     if content_type == "image/jpeg":
@@ -634,26 +680,12 @@ def _is_allowed_thumbnail_url(url: str) -> bool:
             return False
         host = (parsed.host or "").lower()
         return any(host == s.lstrip(".") or host.endswith(s) for s in _THUMBNAIL_ALLOWED_SUFFIXES)
-    except Exception:
+    except Exception:  # noqa: BLE001 - any parse failure means the URL is not allowed
         return False
 
 
 def _thumb_cache_key(url: str) -> str:
     return hashlib.sha256(url.encode("utf-8")).hexdigest()
-
-
-def _cookies_args_for_url(url: str) -> list[str]:
-    """Cookie args for a thumbnail fetch, gated like a download: a usable jar
-    only (an expired one is still sent by yt-dlp and answered worse than
-    anonymous). Same rule in app/worker.py and app/utils/youtube.py.
-    """
-    platform = detect_platform(url)
-    if not platform:
-        return []
-    cookie_path = _resolve_cookie_file(platform)
-    if cookie_path and cookie_file_is_usable(cookie_path, platform):
-        return ["--cookies", str(cookie_path)]
-    return []
 
 
 def _resolve_cookie_file(platform: str) -> Path | None:
@@ -732,31 +764,31 @@ async def _fetch_thumbnail_payload(url: str) -> tuple[bytes, str]:
             httpx.AsyncClient(timeout=8.0, follow_redirects=False) as client,
             client.stream("GET", url, headers={"User-Agent": "fetchly"}) as resp,
         ):
-                if 300 <= resp.status_code < 400:
-                    raise HTTPException(status_code=502, detail="Thumbnail redirects are not accepted")
-                if resp.status_code != 200:
-                    raise HTTPException(status_code=502, detail="Thumbnail fetch failed")
+            if 300 <= resp.status_code < 400:
+                raise HTTPException(status_code=502, detail="Thumbnail redirects are not accepted")
+            if resp.status_code != 200:
+                raise HTTPException(status_code=502, detail="Thumbnail fetch failed")
 
-                content_type = resp.headers.get("content-type", "").split(";", 1)[0].strip().lower()
-                if content_type not in _THUMBNAIL_ALLOWED_TYPES:
-                    raise HTTPException(status_code=502, detail="Unsupported thumbnail type")
+            content_type = resp.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+            if content_type not in _THUMBNAIL_ALLOWED_TYPES:
+                raise HTTPException(status_code=502, detail="Unsupported thumbnail type")
 
-                content_length = resp.headers.get("content-length")
-                if content_length is not None:
-                    try:
-                        declared_length = int(content_length)
-                        if declared_length < 0:
-                            raise HTTPException(status_code=502, detail="Invalid thumbnail size")
-                        if declared_length > _THUMBNAIL_MAX_BYTES:
-                            raise HTTPException(status_code=502, detail="Thumbnail too large")
-                    except ValueError as exc:
-                        raise HTTPException(status_code=502, detail="Invalid thumbnail size") from exc
-
-                data = bytearray()
-                async for chunk in resp.aiter_bytes():
-                    if len(data) + len(chunk) > _THUMBNAIL_MAX_BYTES:
+            content_length = resp.headers.get("content-length")
+            if content_length is not None:
+                try:
+                    declared_length = int(content_length)
+                    if declared_length < 0:
+                        raise HTTPException(status_code=502, detail="Invalid thumbnail size")
+                    if declared_length > _THUMBNAIL_MAX_BYTES:
                         raise HTTPException(status_code=502, detail="Thumbnail too large")
-                    data.extend(chunk)
+                except ValueError as exc:
+                    raise HTTPException(status_code=502, detail="Invalid thumbnail size") from exc
+
+            data = bytearray()
+            async for chunk in resp.aiter_bytes():
+                if len(data) + len(chunk) > _THUMBNAIL_MAX_BYTES:
+                    raise HTTPException(status_code=502, detail="Thumbnail too large")
+                data.extend(chunk)
     except httpx.RequestError as exc:
         logger.warning("Thumbnail fetch failed for %s: %s", url, exc)
         raise HTTPException(status_code=502, detail="Thumbnail unavailable") from exc
@@ -788,7 +820,7 @@ def _extract_thumbnail_with_ytdlp(url: str) -> tuple[bytes, str] | None:
             "--write-thumbnail",
             "--convert-thumbnails",
             "jpg",
-            *_cookies_args_for_url(url),
+            *cookie_args_for_url(url),
             "-o",
             out_template,
             "--",
@@ -809,8 +841,7 @@ def _extract_thumbnail_with_ytdlp(url: str) -> tuple[bytes, str] | None:
 
         tmp_path = Path(tmp_dir)
         candidates = sorted(
-            p for p in tmp_path.glob("thumb.*")
-            if p.is_file() and p.suffix.lower() in _THUMB_ALLOWED_EXTENSIONS
+            p for p in tmp_path.glob("thumb.*") if p.is_file() and p.suffix.lower() in _THUMB_ALLOWED_EXTENSIONS
         )
         if not candidates:
             return None
@@ -826,6 +857,32 @@ def _extract_thumbnail_with_ytdlp(url: str) -> tuple[bytes, str] | None:
         if not data:
             return None
         return data, _content_type_from_suffix(thumb_path.suffix)
+
+
+async def _extract_thumbnail_bounded(info_url: str) -> tuple[bytes, str] | None:
+    """Run the yt-dlp thumbnail fallback inside a small fixed concurrency budget.
+
+    A saturated budget answers 503 quickly instead of queueing unboundedly. The
+    slot is released when the worker thread ends, not when the request is
+    cancelled, because cancelling ``to_thread`` does not stop the subprocess
+    (it is killed by its own timeout).
+    """
+    global _thumb_extraction_capacity
+    if _thumb_extraction_capacity is None:
+        _thumb_extraction_capacity = asyncio.Semaphore(_THUMB_EXTRACTION_MAX_CONCURRENT)
+    capacity = _thumb_extraction_capacity
+    try:
+        async with asyncio.timeout(_THUMB_EXTRACTION_WAIT_SECONDS):
+            await capacity.acquire()
+    except TimeoutError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=_THUMB_BUSY_DETAIL,
+            headers={"Retry-After": "5"},
+        ) from exc
+    task = asyncio.ensure_future(asyncio.to_thread(_extract_thumbnail_with_ytdlp, info_url))
+    task.add_done_callback(lambda _task: capacity.release())
+    return await asyncio.shield(task)
 
 
 @router.get("/api/thumbnail/resolve")
@@ -865,8 +922,12 @@ async def api_thumbnail_resolve(
             info = await asyncio.wait_for(load_video_info_async(info_url), timeout=20.0)
             if info:
                 thumbnail_url = str(info.get("thumbnail") or "").strip()
-        except Exception as exc:
-            logger.debug("Metadata lookup failed while resolving thumbnail for %s: %s", info_url, exc)
+        except Exception as exc:  # noqa: BLE001 - best-effort lookup falls through to yt-dlp extraction
+            logger.debug(
+                "Metadata lookup failed while resolving thumbnail for %s: %s",
+                info_url,
+                exc,
+            )
 
     data: bytes | None = None
     content_type = "image/jpeg"
@@ -877,7 +938,7 @@ async def api_thumbnail_resolve(
             data = None
 
     if data is None:
-        extracted = await asyncio.to_thread(_extract_thumbnail_with_ytdlp, info_url)
+        extracted = await _extract_thumbnail_bounded(info_url)
         if extracted is not None:
             data, content_type = extracted
 
@@ -964,9 +1025,7 @@ def _logo_status_payload(status: LogoStatus) -> dict[str, Any]:
 
 @router.get("/api/settings/watermark-logo")
 @limiter.limit("60/minute")
-async def api_watermark_logo_status(
-    request: Request, _user: str = Depends(require_user)
-) -> dict[str, Any]:
+async def api_watermark_logo_status(request: Request, _user: str = Depends(require_user)) -> dict[str, Any]:
     """Whether a custom watermark logo is installed, and its size."""
     _ = request
     return _logo_status_payload(await asyncio.to_thread(logo_status))
@@ -1030,9 +1089,7 @@ async def api_watermark_logo_upload(
 
 @router.delete("/api/settings/watermark-logo")
 @limiter.limit("10/minute")
-async def api_watermark_logo_delete(
-    request: Request, _user: str = Depends(require_user)
-) -> dict[str, Any]:
+async def api_watermark_logo_delete(request: Request, _user: str = Depends(require_user)) -> dict[str, Any]:
     """Drop the custom logo; the bundled fetchly artwork applies again."""
     _ = request
     try:
@@ -1046,11 +1103,9 @@ def _parse_bool(value: Any, name: str) -> bool:
     if isinstance(value, bool):
         return value
     if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized in {"true", "1", "yes", "on"}:
-            return True
-        if normalized in {"false", "0", "no", "off"}:
-            return False
+        parsed = parse_bool_text(value)
+        if parsed is not None:
+            return parsed
     raise HTTPException(status_code=400, detail=f"{name} must be a boolean")
 
 
@@ -1069,9 +1124,6 @@ async def api_set_settings(
     settings_to_update: dict[str, Any] = {}
     credentials_changed = False
 
-    if "retention_days" in payload:
-        settings_to_update["retention_days"] = _clamp_int(payload["retention_days"], 0, 365, "retention_days")
-
     if "enable_job_history" in payload:
         enabled = _parse_bool(payload["enable_job_history"], "enable_job_history")
         settings_to_update["enable_job_history"] = "true" if enabled else "false"
@@ -1080,25 +1132,13 @@ async def api_set_settings(
         enabled = _parse_bool(payload["download_auto_start"], "download_auto_start")
         settings_to_update["download_auto_start"] = "true" if enabled else "false"
 
-    if "download_concurrent_fragments" in payload:
-        settings_to_update["download_concurrent_fragments"] = _clamp_int(
-            payload["download_concurrent_fragments"], 0, 16, "download_concurrent_fragments"
-        )
-
-    if "share_link_max_uses" in payload:
-        settings_to_update["share_link_max_uses"] = _clamp_int(
-            payload["share_link_max_uses"], 0, 10000, "share_link_max_uses"
-        )
-
-    for key, (min_value, max_value) in _RUNTIME_LIMIT_BOUNDS.items():
+    for key, (min_value, max_value) in SETTING_INT_BOUNDS.items():
         if key in payload:
             settings_to_update[key] = _clamp_int(payload[key], min_value, max_value, key)
 
     if "public_hostname" in payload:
         try:
-            settings_to_update["public_hostname"] = normalize_public_hostname(
-                str(payload["public_hostname"] or "")
-            )
+            settings_to_update["public_hostname"] = normalize_public_hostname(str(payload["public_hostname"] or ""))
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=f"Public hostname: {exc}") from exc
 
@@ -1147,9 +1187,7 @@ async def api_set_settings(
             )
             # Invalidate every existing session: the credential they were
             # issued against no longer exists.
-            settings_to_update["session_version"] = (
-                int(current_settings.get("session_version", 0) or 0) + 1
-            )
+            settings_to_update["session_version"] = int(current_settings.get("session_version", 0) or 0) + 1
             credentials_changed = True
 
         if want_authentication is not None:
@@ -1160,6 +1198,12 @@ async def api_set_settings(
                 raise HTTPException(
                     status_code=400,
                     detail="Set a username and password before enabling authentication",
+                )
+            if want_authentication != auth_was_enabled:
+                # A cookie that survives an off/on cycle must not become valid again.
+                settings_to_update.setdefault(
+                    "session_version",
+                    int(current_settings.get("session_version", 0) or 0) + 1,
                 )
             settings_to_update["enable_authentication"] = "true" if want_authentication else "false"
 
@@ -1177,9 +1221,7 @@ async def api_set_settings(
                 if not auth_was_enabled
                 else "Credentials updated. Please log in again."
             )
-            response = JSONResponse(
-                content={"ok": True, "message": message, "redirect": "/login"}
-            )
+            response = JSONResponse(content={"ok": True, "message": message, "redirect": "/login"})
             delete_session_cookie(response, request)
             return response
 
@@ -1193,6 +1235,21 @@ async def api_set_settings(
         raise HTTPException(status_code=500, detail="Internal server error") from exc
 
 
+async def _reject_queue_overflow(job_id: str, stage: str) -> NoReturn:
+    """Mark a job that lost the race for the last queue slot as failed, then answer 503."""
+    try:
+        await asyncio.to_thread(
+            update_job,
+            job_id,
+            status="error",
+            message=f"Queue full at {stage} time",
+            finished_at=utc_timestamp(),
+        )
+    except Exception:
+        logger.exception("Failed to mark job %s as errored after %s queue overflow", job_id, stage)
+    raise HTTPException(status_code=503, detail=_QUEUE_FULL_DETAIL)
+
+
 async def _require_job_headroom() -> None:
     """Reject a new job when the queue is full or memory headroom is gone.
 
@@ -1202,6 +1259,14 @@ async def _require_job_headroom() -> None:
         raise HTTPException(status_code=503, detail=_QUEUE_FULL_DETAIL)
     if not await governor.can_accept_job_async():
         raise HTTPException(status_code=503, detail=_LOW_MEMORY_DETAIL)
+
+
+def _duplicate_job_response(existing_job: JobRecord) -> JSONResponse:
+    """Build the documented ``409 duplicate_job`` answer."""
+    return JSONResponse(
+        status_code=409,
+        content={"detail": "duplicate_job", "existing_job": job_to_dict(existing_job)},
+    )
 
 
 # response_model=None: see api_set_settings - the 409 duplicate-job branch
@@ -1225,7 +1290,10 @@ async def api_submit(
     quality_value = str(quality).strip().lower()
 
     if media_type not in _ALLOWED_MEDIA_TYPES:
-        raise HTTPException(status_code=400, detail=f"Invalid type. Allowed: {', '.join(sorted(_ALLOWED_MEDIA_TYPES))}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid type. Allowed: {', '.join(sorted(_ALLOWED_MEDIA_TYPES))}",
+        )
     if quality_value not in _ALLOWED_QUALITIES:
         raise HTTPException(
             status_code=400,
@@ -1242,34 +1310,42 @@ async def api_submit(
     # rather than silently making a second job. Errored/cancelled don't count
     # (find_active_job_for_submission), so a retry is never blocked; the
     # frontend re-submits with confirm_duplicate=true on confirmation.
+    # Cheap fast path only; the authoritative check is the atomic one at insert.
     if not confirm_duplicate:
-        existing_job = await asyncio.to_thread(
-            find_active_job_for_submission, clean_url, media_type, quality_value
-        )
+        existing_job = await asyncio.to_thread(find_active_job_for_submission, clean_url, media_type, quality_value)
         if existing_job is not None:
-            return JSONResponse(
-                status_code=409,
-                content={"detail": "duplicate_job", "existing_job": job_to_dict(existing_job)},
-            )
+            return _duplicate_job_response(existing_job)
+
+    # Reject before the (up to 8 s) metadata lookup; re-checked right before the
+    # insert because headroom can change while the lookup runs.
+    await _require_job_headroom()
 
     # Best-effort metadata; job creation must not block on it.
-    meta: dict[str, object] = {"video_title": None, "video_meta_hover": None, "duration_seconds": None}
+    meta: dict[str, object] = {
+        "video_title": None,
+        "video_meta_hover": None,
+        "duration_seconds": None,
+    }
     try:
         meta = await asyncio.wait_for(extract_video_meta_async(clean_url), timeout=8.0)
-    except Exception as exc:
-        logger.debug("Metadata extraction skipped for submit (will be fetched by worker): %s", exc)
+    except Exception as exc:  # noqa: BLE001 - job creation must not block on metadata
+        logger.debug(
+            "Metadata extraction skipped for submit (will be fetched by worker): %s",
+            exc,
+        )
 
     job_id = str(uuid.uuid4())
     await _require_job_headroom()
 
     settings = await asyncio.to_thread(get_settings)
-    await asyncio.to_thread(
-        insert_job,
+    existing_job = await asyncio.to_thread(
+        insert_job_unless_active_duplicate,
         job_id,
         clean_url,
         media_type,
         quality_value,
         "queued",
+        allow_duplicate=confirm_duplicate,
         video_title=meta["video_title"],
         video_meta_hover=meta["video_meta_hover"],
         # Source runtime, so the job shows a length while queued; the worker
@@ -1281,18 +1357,10 @@ async def api_submit(
         # tell "no requester recorded" from an actual address.
         client_ip=client_ip if client_ip != "unknown" else None,
     )
+    if existing_job is not None:
+        return _duplicate_job_response(existing_job)
     if not submit_download((job_id, clean_url, media_type, quality_value)):
-        try:
-            await asyncio.to_thread(
-                update_job,
-                job_id,
-                status="error",
-                message="Queue full at submission time",
-                finished_at=utc_timestamp(),
-            )
-        except Exception:
-            logger.exception("Failed to mark job %s as errored after queue overflow", job_id)
-        raise HTTPException(status_code=503, detail=_QUEUE_FULL_DETAIL)
+        await _reject_queue_overflow(job_id, "submission")
     job = await asyncio.to_thread(get_job, job_id)
     if not job:
         # Row vanished between insert and read (retention sweep or manual
@@ -1322,7 +1390,7 @@ async def cancel_job(
     cancelled = await asyncio.to_thread(
         update_job_if_status,
         job_id_str,
-        _PERSISTED_CANCELLABLE_JOB_STATUSES,
+        CANCELLABLE_JOB_STATUSES,
         status="cancelled",
         message="Cancelled by user",
         finished_at=utc_timestamp(),
@@ -1364,7 +1432,7 @@ async def retry_job(
         raise HTTPException(status_code=404, detail="Job not found")
 
     status = job["status"] or ""
-    if status not in _RETRYABLE_JOB_STATUSES:
+    if status not in RETRYABLE_JOB_STATUSES:
         raise HTTPException(status_code=400, detail=f"Cannot retry job with status: {status}")
 
     # A worker thread can still own this job even though its row already
@@ -1372,7 +1440,7 @@ async def retry_job(
     # transcode semaphore, with no subprocess left to kill. Re-enqueuing here
     # would let a second thread start working the same job directory before
     # the first one finishes unwinding (an ABA race). See
-    # app/worker.py::is_job_active.
+    # app/workers/worker.py::is_job_active.
     if is_job_active(job_id_str):
         raise HTTPException(
             status_code=409,
@@ -1406,17 +1474,7 @@ async def retry_job(
     clear_cancellation(job_id_str)
 
     if not submit_download((job_id_str, str(job["url"]), str(job["type"]), str(job["quality"]))):
-        try:
-            await asyncio.to_thread(
-                update_job,
-                job_id_str,
-                status="error",
-                message="Queue full at retry time",
-                finished_at=utc_timestamp(),
-            )
-        except Exception:
-            logger.exception("Failed to mark job %s as errored after retry queue overflow", job_id_str)
-        raise HTTPException(status_code=503, detail=_QUEUE_FULL_DETAIL)
+        await _reject_queue_overflow(job_id_str, "retry")
 
     logger.info("Retry requested for job %s (was: %s)", job_id_str, status)
 

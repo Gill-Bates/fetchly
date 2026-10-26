@@ -64,7 +64,6 @@ class HostStats(TypedDict):
     uptime: UptimeStats | None
 
 
-
 def _storage_usage(path: Path) -> StorageStats | None:
     """Return disk usage for the filesystem holding the download directory."""
     probe = path
@@ -86,7 +85,6 @@ def _storage_usage(path: Path) -> StorageStats | None:
         "free": usage.free,
         "percent": percent,
     }
-
 
 
 def _read_cpu_jiffies() -> tuple[int, int] | None:
@@ -160,7 +158,6 @@ async def _sample_cpu_percent() -> float | None:
     return _cpu_percent_between(current, second)
 
 
-
 def _read_meminfo() -> dict[str, int]:
     """Parse /proc/meminfo into a {label: bytes} mapping."""
     info: dict[str, int] = {}
@@ -201,7 +198,6 @@ def _memory_usage() -> MemoryStats | None:
     }
 
 
-
 def _read_uptime_seconds() -> float | None:
     try:
         with Path("/proc/uptime").open(encoding="utf-8") as handle:
@@ -231,7 +227,6 @@ def _format_uptime(seconds: float) -> str:
     if minutes:
         return f"{minutes}m"
     return "<1m"
-
 
 
 async def get_host_stats(data_dir: Path) -> HostStats:

@@ -156,12 +156,29 @@ def get_js_runtime_version() -> str:
     return match.group(1) if match else "unavailable"
 
 
+# The pin is a committed text file: docker/wavesurfer.version in the checkout,
+# copied to /app/.wavesurfer_version in the image.
+_WAVESURFER_VERSION_FILES = (".wavesurfer_version", "docker/wavesurfer.version")
+_WAVESURFER_VERSION_RE = re.compile(r"^\d+(?:\.\d+)*(?:[-+][0-9A-Za-z.-]+)?$")
+
+
 @lru_cache(maxsize=1)
 def get_wavesurfer_version() -> str:
-    """WaveSurfer.js version from ENV WAVESURFER_VERSION (set in the Docker
-    runtime stage; the vendored bundle has no marker), else 'unavailable'.
+    """WaveSurfer.js version: ENV WAVESURFER_VERSION (exported by the container
+    entrypoint), else the committed pin file, else 'unavailable'.
+
+    The file fallback covers every start that bypasses the entrypoint (local
+    dev server, ``docker exec``, a custom command); the vendored bundle has no
+    marker of its own.
     """
-    return os.environ.get("WAVESURFER_VERSION") or "unavailable"
+    env_value = (os.environ.get("WAVESURFER_VERSION") or "").strip()
+    if env_value:
+        return env_value
+    for name in _WAVESURFER_VERSION_FILES:
+        value = _read_file(name)
+        if value and _WAVESURFER_VERSION_RE.fullmatch(value):
+            return value
+    return "unavailable"
 
 
 # VERSION and BUILD_INFO are lazy: I/O is deferred to first attribute access.

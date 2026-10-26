@@ -7,7 +7,7 @@
 import math
 import unittest
 
-from app.bpm_normalization import normalize_bpm
+from app.audio.normalization import normalize_bpm
 
 
 class NormalizeBpmTests(unittest.TestCase):

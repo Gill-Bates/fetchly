@@ -31,7 +31,10 @@ On submit the token must:
 | Not be **younger than 1 second** | A form submitted implausibly fast after being served |
 
 Tokens are valid until expiry and are **not** single-use — a legitimate user who
-mistypes their password and retries is not punished for it.
+mistypes their password and retries is not punished for it. The flip side: the
+time-trap screens the first submit, not every retry, so this check is a **bot signal**,
+not the brute-force boundary. That is the per-IP [rate limit](rate-limiting.md) on
+`POST /login`.
 
 ## Uniform rejection
 

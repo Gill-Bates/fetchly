@@ -96,7 +96,7 @@ class RenderedAssetReferenceTests(WebAppTestCase):
     def test_stylesheet_matches_the_file_on_disk(self) -> None:
         """The regression itself: the page's CSS URL must address this CSS."""
         response = self.client.get("/")
-        token = re.search(r'/static/style\.css\?v=([0-9a-f]+)', response.text)
+        token = re.search(r"/static/style\.css\?v=([0-9a-f]+)", response.text)
         self.assertIsNotNone(token, "the dashboard does not link style.css")
 
         served = self.client.get(f"/static/style.css?v={token.group(1)}")

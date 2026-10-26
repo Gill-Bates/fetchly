@@ -3,11 +3,11 @@
 // Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 //
 
-import { AUDIO_TYPE, CONFIG, DOWNLOADABLE_STATUSES, RETRYABLE_STATUSES, TERMINAL_STATUSES } from "./config.js";
+import { AUDIO_TYPE, CONFIG, DOWNLOADABLE_STATUSES, RETRYABLE_STATUSES, STATUS_META, TERMINAL_STATUSES } from "./config.js";
 import { fetchJob, fetchJobs, fetchResolvedThumbnail, fetchStats, submitJob, fetchVideoInfo, toErrorMessage } from "./api.js";
 import { reportWarning } from "./errors.js";
-import { createTimeoutSignal, EMPTY_VALUE, getCsrfToken, humanSize, isValidMediaUrl, detectPlatform, platformPillLabel, PLATFORM, extractYouTubeVideoId, formatDuration, isSafeRedirect, subscribeToLalalProgress, triggerDownload } from "./utils.js";
-import { prependJob, loadMore, applyJobUpdate, getJobById, applyStoredJobTitleFilter, formatCreatedText, isMobileJobsView, buildDesktopEmptyState, buildMobileEmptyState, hasLimitedPlayback } from "./jobs.js";
+import { createTimeoutSignal, EMPTY_VALUE, getCsrfToken, humanSize, isValidMediaUrl, parseUtcTimestamp, statParts, detectPlatform, PLATFORM, extractYouTubeVideoId, formatDuration, isSafeRedirect, localizeValues, subscribeToLalalProgress, triggerDownload } from "./utils.js";
+import { createPlatformPill, prependJob, loadMore, applyJobUpdate, getJobById, applyStoredJobTitleFilter, formatCreatedText, isMobileJobsView, buildDesktopEmptyState, buildMobileEmptyState, hasLimitedPlayback } from "./jobs.js";
 import { refreshCurrentJob, setCurrentJob } from "./current-job.js";
 import { EVENT_NAMES, dispatchJobUpdate, setEventStreamEnabled } from "./events.js";
 import { buildDownloadUrl, normalizeStatus } from "./ui.js";
@@ -86,29 +86,27 @@ const COMPACT_NUMBER_FORMATTER = new Intl.NumberFormat(undefined, {
     notation: "compact",
     maximumFractionDigits: 1,
 });
-const DETAIL_DATE_FORMATTER = new Intl.DateTimeFormat("en-GB", {
+const DETAIL_DATE_FORMATTER = new Intl.DateTimeFormat(undefined, {
     day: "2-digit",
     month: "short",
     year: "numeric",
     hour: "2-digit",
     minute: "2-digit",
 });
-// "Done" here matches STATUS_META's label (ui.js) and status_label() in
-// app/utils/template_filters.py so the job detail modal never disagrees with
-// the jobs list pill for the same status. In-flight statuses collapse to the
-// single "Processing" label on purpose: the modal shows one coarse phase,
-// the pill shows the finer-grained one.
-const DETAIL_STATUS_LABELS = Object.freeze({
-    analysis: "Processing",
-    analysis_done: "Done",
-    cancelled: "Cancelled",
-    done: "Done",
-    downloading: "Processing",
-    error: "Error",
-    processing: "Processing",
-    queued: "Queued",
-    transcoding: "Processing",
-});
+// The job detail modal shows one coarse phase, so the in-flight statuses
+// collapse to a single "Processing" label on purpose while the pill keeps the
+// finer-grained one. Every other label is taken from the shared STATUS_META
+// (config.js, ultimately status_label() in app/utils/template_filters.py) so
+// the modal never disagrees with the jobs list pill for the same status.
+const DETAIL_COLLAPSED_LABEL = "Processing";
+const DETAIL_COLLAPSED_STATUSES = new Set(["analysis", "downloading", "processing", "transcoding"]);
+
+function detailStatusLabel(status) {
+    if (DETAIL_COLLAPSED_STATUSES.has(status)) {
+        return DETAIL_COLLAPSED_LABEL;
+    }
+    return STATUS_META[status]?.label ?? null;
+}
 
 function readMobileJobHistoryPreference() {
     try {
@@ -218,28 +216,7 @@ function hideTitlePopover() {
  * @param {string | null | undefined} text
  */
 function setText(el, text) {
-    if (el) el.textContent = text ?? "–";
-}
-
-function renderStatParts(statKey, value) {
-    switch (statKey) {
-        case "total_bytes": {
-            const rendered = humanSize(value);
-            const match = /^(.+?)\s+([^\s]+)$/.exec(rendered);
-            return match
-                ? { value: match[1], unit: match[2] }
-                : { value: rendered, unit: "" };
-        }
-        case "total_jobs":
-            return { value: String(Math.max(0, Math.trunc(Number(value) || 0))), unit: "" };
-        case "total_minutes":
-        case "total_lalal_minutes": {
-            const rounded = Math.round(Math.max(0, Number(value) || 0) * 10) / 10;
-            return { value: String(rounded), unit: "" };
-        }
-        default:
-            return { value: String(value ?? 0), unit: "" };
-    }
+    if (el) el.textContent = text ?? EMPTY_VALUE;
 }
 
 function applyDashboardStats(stats) {
@@ -254,7 +231,7 @@ function applyDashboardStats(stats) {
             continue;
         }
 
-        const rendered = renderStatParts(statKey, stats[statKey]);
+        const rendered = statParts(statKey, stats[statKey]);
         valueNode.textContent = rendered.value;
         if (unitNode instanceof HTMLElement) {
             unitNode.textContent = rendered.unit;
@@ -578,9 +555,9 @@ function setError(message) {
 
 function resetVideoMeta() {
     setVideoMetaLoading(false);
-    setText(metaTitle, "–");
-    setText(metaSummary, "–");
-    setText(metaFormats, "–");
+    setText(metaTitle, EMPTY_VALUE);
+    setText(metaSummary, EMPTY_VALUE);
+    setText(metaFormats, EMPTY_VALUE);
 }
 
 function setVideoMetaLoading(isLoading) {
@@ -697,7 +674,7 @@ function getPreviewCreator(channel, uploader) {
         : `${primary} / ${secondary}`;
 }
 
-function formatPreviewViewCount(viewCount) {
+function formatViewCount(viewCount) {
     const numeric = Number(viewCount);
     if (!Number.isFinite(numeric) || numeric <= 0) {
         return "";
@@ -709,7 +686,7 @@ function renderPreviewSummary(info) {
     const parts = [
         getPreviewCreator(info?.channel, info?.uploader),
         formatDuration(info?.duration),
-        formatPreviewViewCount(info?.view_count),
+        formatViewCount(info?.view_count),
     ].filter((part) => part && part !== EMPTY_VALUE);  // drop a live stream's dash
     setText(metaSummary, parts.join(" • ") || "Unknown source");
 }
@@ -723,7 +700,7 @@ function renderPreviewFormats(formats, totalFormats = 0, isTruncated = false) {
     metaFormats.replaceChildren();
 
     if (!Array.isArray(formats) || formats.length === 0) {
-        metaFormats.textContent = "–";
+        metaFormats.textContent = EMPTY_VALUE;
         return;
     }
 
@@ -745,7 +722,7 @@ function renderPreviewFormats(formats, totalFormats = 0, isTruncated = false) {
         .filter(Boolean);
 
     if (items.length === 0) {
-        metaFormats.textContent = "–";
+        metaFormats.textContent = EMPTY_VALUE;
         return;
     }
 
@@ -819,6 +796,13 @@ async function updateVideoPreview() {
         if (controller.signal.aborted || currentUrl !== url) {
             return;
         }
+        if (info?.reason === "login_required" && info.message) {
+            // Private or login-gated source: say so instead of showing blanks.
+            setText(metaTitle, "Login required");
+            setText(metaSummary, String(info.message));
+            setText(metaFormats, EMPTY_VALUE);
+            return;
+        }
         setText(metaTitle, info.title);
         renderPreviewSummary(info);
         renderPreviewFormats(info.formats, info.formats_total, info.formats_truncated);
@@ -831,6 +815,9 @@ async function updateVideoPreview() {
                 const resolved = await fetchResolvedThumbnail(url, { signal: controller.signal });
                 thumbnailSrc = typeof resolved.thumbnail_url === "string" ? resolved.thumbnail_url.trim() : "";
             } catch (resolveError) {
+                if (controller.signal.aborted) {
+                    return;
+                }
                 reportWarning("Thumbnail resolve failed", {
                     module: "main",
                     action: "updateVideoPreview",
@@ -838,6 +825,10 @@ async function updateVideoPreview() {
                 });
             }
 
+            // The input may have changed while the thumbnail was resolving.
+            if (controller.signal.aborted || (urlInput?.value.trim() || "") !== url) {
+                return;
+            }
             if (!thumbnailSrc && info.thumbnail) {
                 thumbnailSrc = `/api/thumbnail-proxy?url=${encodeURIComponent(info.thumbnail)}`;
             }
@@ -860,7 +851,7 @@ async function updateVideoPreview() {
         resetVideoMeta();
         setText(metaTitle, "Metadata unavailable");
         setText(metaSummary, "Enter a valid public YouTube, TikTok, Instagram, or Facebook URL to load preview metadata.");
-        setText(metaFormats, "–");
+        setText(metaFormats, EMPTY_VALUE);
     } finally {
         if (previewAbortController === controller) {
             previewAbortController = null;
@@ -902,8 +893,9 @@ function abortDetailRequesterRequest() {
 
 function formatDetailStatus(status) {
     const normalized = normalizeStatus(status);
-    if (DETAIL_STATUS_LABELS[normalized]) {
-        return DETAIL_STATUS_LABELS[normalized];
+    const label = detailStatusLabel(normalized);
+    if (label) {
+        return label;
     }
 
     const raw = normalized.replaceAll("_", " ");
@@ -914,8 +906,7 @@ function formatDetailDate(value) {
     const text = value == null ? "" : String(value).trim();
     if (!text) return "";
 
-    const sqliteUtc = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
-    const date = new Date(sqliteUtc.test(text) ? `${text.replace(" ", "T")}Z` : text);
+    const date = parseUtcTimestamp(text);
     return Number.isNaN(date.getTime()) ? "" : DETAIL_DATE_FORMATTER.format(date);
 }
 
@@ -965,15 +956,6 @@ function setDetailSourceActions(url, jobId) {
     }
 }
 
-function formatDetailViewCount(viewCount) {
-    const count = Number(viewCount);
-    if (!Number.isFinite(count) || count <= 0) {
-        return "";
-    }
-
-    return `${COMPACT_NUMBER_FORMATTER.format(count)} views`;
-}
-
 function setDetailChip(id, text) {
     const chip = document.getElementById(id);
     if (!(chip instanceof HTMLElement)) {
@@ -981,7 +963,7 @@ function setDetailChip(id, text) {
     }
 
     const value = typeof text === "string" ? text.trim() : "";
-    const hasValue = Boolean(value) && value !== "–";
+    const hasValue = Boolean(value) && value !== EMPTY_VALUE;
     chip.textContent = hasValue ? value : "";
     chip.classList.toggle("d-none", !hasValue);
 }
@@ -1123,7 +1105,7 @@ function setDetailMetaLine({ channel, uploader, duration, viewCount }) {
     const parts = [
         creator,
         duration ? formatDuration(duration) : "",
-        formatDetailViewCount(viewCount),
+        formatViewCount(viewCount),
     ].filter(Boolean);
     metaLine.textContent = parts.join(" • ") || "Unknown source";
 }
@@ -1135,19 +1117,8 @@ function renderDetailTitle(job, text) {
     }
     titleEl.replaceChildren();
 
-    const platform = job?.platform || detectPlatform(job?.url || "");
-    const label = platformPillLabel(platform);
-    if (label) {
-        const pill = document.createElement("span");
-        pill.className = `platform-pill platform-pill--${platform}`;
-        pill.title = label;
-        pill.setAttribute("role", "img");
-        pill.setAttribute("aria-label", label);
-
-        const icon = document.createElement("span");
-        icon.className = `platform-pill__icon platform-pill__icon--${platform}`;
-        icon.setAttribute("aria-hidden", "true");
-        pill.appendChild(icon);
+    const pill = createPlatformPill(job);
+    if (pill) {
         titleEl.appendChild(pill);
     }
 
@@ -1227,7 +1198,7 @@ function populateDetailFromJob(job) {
 
     const downloadBtn = document.getElementById("mDownloadBtn");
     if (downloadBtn instanceof HTMLAnchorElement) {
-        downloadBtn.href = `/download/${encodeURIComponent(job.id)}`;
+        downloadBtn.href = buildDownloadUrl(job.id);
     }
     updateOpenDetailStatus(job);
 }
@@ -1938,6 +1909,7 @@ async function handleActionPost(btn, url, options = {}) {
     }
 }
 
+localizeValues(document);
 initMobileJobHistoryToggle();
 // events.js owns reconnect, visibility and BFCache handling from here on.
 setEventStreamEnabled(true);

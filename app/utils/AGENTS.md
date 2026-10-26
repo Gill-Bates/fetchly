@@ -2,7 +2,7 @@
 
 # app/utils/ — Utility Modules
 
-**Purpose:** Reusable helpers for version detection, credentials, file handling, media processing, cookie management, and platform-specific quirks.
+**Purpose:** Reusable helpers for version detection, file handling, media processing, cookie management, and platform-specific quirks.
 
 Utilities here are imported across the app and provide a single source of truth for operations like watermark rendering, cookie validation, platform detection and public-URL construction.
 
@@ -10,8 +10,8 @@ Utilities here are imported across the app and provide a single source of truth 
 
 | File | Purpose |
 | --- | --- |
-| `version.py` | Reads the version from `pyproject.toml`; exposes it to the UI and `/api/info` |
-| `updates.py` | Checks GitHub releases for a newer version; backs `/api/updates` and the Settings → System update tile |
+| `version.py` | Reads the version from `pyproject.toml`; exposes it to the UI and `/api/info`; the WaveSurfer version comes from `WAVESURFER_VERSION`, else the committed pin file |
+| `updates.py` | Checks GitHub releases (and BtbN ffmpeg autobuilds) for newer versions, reporting `status` and a `reason` per component; a failed lookup is cached for 15 min and retried for the failed components only; backs `/api/updates` and the Settings → System update tile |
 | `changelog.py` | Renders `CHANGELOG.md` for display (markdown → sanitized HTML) |
 | `host_stats.py` | Host metrics for the Settings → System tiles: CPU, memory, uptime, storage. Reads `/proc` and the filesystem directly. |
 | `watermark.py` | Watermark compositing onto video via FFmpeg |
@@ -19,18 +19,17 @@ Utilities here are imported across the app and provide a single source of truth 
 | `cookie_import.py` | Parses and normalizes cookies from multiple formats: Netscape files, request headers (cURL/fetch/PowerShell), JSON extensions |
 | `cookies.py` | Per-platform cookie file locations and storage under `DATA_DIR` |
 | `cookie_status.py` | Reports whether a platform's cookie file exists and is usable |
-| `credentials.py` | Admin username normalization and credential checks |
 | `duration.py` | Media duration parsing and rounding (`round_seconds`) |
 | `fs.py` | Filesystem helpers, notably `get_data_dir()` — the `DATA_DIR` env var, else `./data` |
 | `platform.py` | Platform quirks: YouTube, Instagram, TikTok, Facebook (format filters, cookie requirements) |
-| `youtube.py` | YouTube-specific handling |
+| `youtube.py` | yt-dlp metadata lookup and URL normalization/validation; raises `AuthRequiredError` for login-gated or private sources (`worker.auth_required_message()` turns it into the user text) |
 | `public_url.py` | `normalize_public_hostname()` and `build_public_base_url(request, public_hostname)` for share links |
-| `geoip.py` | Resolves a job's stored `client_ip` into country/city/ASN for the job detail page's "requester" tile; MaxMind GeoLite2 databases fetched on demand and cached under `DATA_DIR/geolite2` |
+| `geoip.py` | Resolves a job's stored `client_ip` into country/city/ASN for the job detail page's "requester" tile; MaxMind GeoLite2 databases fetched on demand from a third-party mirror and cached under `DATA_DIR/geolite2`; display-only (no auth decision), and the download has no authenticated integrity check — only a parse check |
 | `template_filters.py` | Custom Jinja2 filters registered in `main.py` |
 | `assets.py` | `asset_url()` (the Jinja global that content-hashes `/static` URLs) and `VersionedStaticFiles` (the matching `Cache-Control` policy) |
-| `hidden_captcha.py` | Invisible anti-bot protection: honeypot field and signed token |
+| `hidden_captcha.py` | Invisible anti-bot signal: honeypot field and signed time-trap token. Not a brute-force control — tokens are reusable; the `POST /login` rate limit (5/minute per IP, `routes/auth.py`) is that boundary |
 | `banner.py` | Startup ASCII banner |
-| `housekeeping.py` | Filesystem side of the retention sweep: expired job directories, orphaned directories, thumbnail cache. The matching **database** purge is `db.purge_old_jobs()`, called from `main.py::_run_housekeeping_once` — this module never touches SQLite |
+| `housekeeping.py` | Filesystem side of the retention sweep: expired job directories, orphaned directories, thumbnail and watermark caches (7-day TTL). `cleanup_expired_jobs()` deletes the directories of the IDs a selector returns and returns the IDs it cleaned; `main.py::_run_housekeeping_once` then removes only those rows via `db.delete_jobs_and_share_links()` (which skips jobs that became active again and returns the IDs it deleted), so a failed deletion is retried next sweep. This module never touches SQLite |
 | `__init__.py` | Package init |
 
 ## For AI Agents
@@ -44,7 +43,7 @@ Utilities here are imported across the app and provide a single source of truth 
 
 ### Working with External Services
 - **yt-dlp / FFmpeg:** subprocesses. Ruff's `S603`/`S607` are deliberately ignored because binaries are resolved from `PATH` with no shell; keep it that way.
-- **Lalal.ai:** credentials come from the `settings` table; the HTTP calls live in `app/lalal.py`
+- **Lalal.ai:** credentials come from the `settings` table; the HTTP calls live in `app/integrations/lalal/client.py`
 - **GitHub API:** `updates.py` for the release check
 
 ### Common Patterns
@@ -81,7 +80,7 @@ Utilities here are imported across the app and provide a single source of truth 
 ## Dependencies
 
 ### Internal
-- Imported by `/app/main.py`, `/app/routes/`, `/app/worker.py`, `/app/analysis_worker.py`, `/app/db.py`
+- Imported by `/app/main.py`, `/app/routes/`, `/app/workers/`, `/app/db.py`
 
 ### External
 - **FFmpeg:** watermark rendering (subprocess)
@@ -91,7 +90,7 @@ Utilities here are imported across the app and provide a single source of truth 
 - **Jinja2:** filter registration
 - **Standard library:** `pathlib`, `hmac`, `secrets`, `subprocess`
 
-No psutil. No argon2 — session tokens are HMAC-SHA256, signed in `app/session.py`.
+No psutil. No argon2 — session tokens are HMAC-SHA256, signed in `app/auth/session.py`.
 
 ## Manual
 
@@ -126,7 +125,7 @@ Tests are unittest-style classes; subclass the helpers in `tests/_support.py` ra
 
 ---
 
-**Last Updated:** 2026-09-20  
+**Last Updated:** 2026-10-26  
 **Language:** Python 3.13+  
 **Key Dependencies:** yt-dlp, FFmpeg, httpx, markdown/nh3  
 **Design:** Stateless helpers; configuration comes from the settings table or the environment

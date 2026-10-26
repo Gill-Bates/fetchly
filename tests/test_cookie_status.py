@@ -42,9 +42,7 @@ class AnalyzeCookieFileTests(unittest.TestCase):
         self.assertEqual(consent_only.status, "valid")
         self.assertTrue(consent_only.is_usable)
         self.assertFalse(consent_only.is_authenticated)
-        self.assertEqual(
-            consent_only.missing_login_cookies, ("LOGIN_INFO", "SAPISID")
-        )
+        self.assertEqual(consent_only.missing_login_cookies, ("LOGIN_INFO", "SAPISID"))
         # "valid" but not authenticated is the one case needs_update diverges
         # from a plain expired/invalid check (see the Settings-tile drift
         # this guards against).
@@ -117,7 +115,7 @@ class WorkerCookieGateTests(unittest.TestCase):
     """The download path must ignore a jar it would only get blocked with."""
 
     def run_with_jar(self, text: str) -> list[str]:
-        from app import worker
+        from app.workers import worker
 
         with tempfile.TemporaryDirectory() as temp_dir:
             cookie_dir = Path(temp_dir) / "cookies"
@@ -143,6 +141,79 @@ class WorkerCookieGateTests(unittest.TestCase):
 
     def test_an_unreadable_jar_is_left_out(self) -> None:
         self.assertEqual(self.run_with_jar("this is not a cookie file\n"), [])
+
+
+class CookieGateCallerParityTests(unittest.TestCase):
+    """Download, thumbnail and metadata calls share one "usable jar only" rule."""
+
+    YT_URL = "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+
+    def args_per_caller(self, url: str, text: str | None) -> dict[str, list[str]]:
+        from app.routes import api
+        from app.utils import youtube
+        from app.workers import worker
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cookie_dir = Path(temp_dir) / "cookies"
+            cookie_dir.mkdir()
+            if text is not None:
+                (cookie_dir / "youtube_cookies.txt").write_text(text, encoding="utf-8")
+            with patch.object(cookies, "_DATA_COOKIES_DIR", cookie_dir):
+                ytdlp_cmd = youtube._build_yt_dlp_cmd(url)
+                info_args = (
+                    ytdlp_cmd[ytdlp_cmd.index("--cookies") : ytdlp_cmd.index("--cookies") + 2]
+                    if "--cookies" in ytdlp_cmd
+                    else []
+                )
+                return {
+                    "worker": worker._cookies_args_for_url(url),
+                    "thumbnail": api.cookie_args_for_url(url),
+                    "info": info_args,
+                }
+
+    def assert_all_callers(self, url: str, text: str | None, *, passed: bool) -> None:
+        results = self.args_per_caller(url, text)
+        for caller, args in results.items():
+            with self.subTest(caller=caller):
+                if passed:
+                    self.assertEqual(args[0], "--cookies")
+                    self.assertTrue(args[1].endswith("youtube_cookies.txt"))
+                else:
+                    self.assertEqual(args, [])
+
+    def test_authenticated_jar_reaches_every_caller(self) -> None:
+        self.assert_all_callers(self.YT_URL, signed_in(expires=FUTURE), passed=True)
+
+    def test_expired_jar_reaches_no_caller(self) -> None:
+        self.assert_all_callers(self.YT_URL, signed_in(expires=PAST), passed=False)
+
+    def test_jar_without_login_cookies_reaches_no_caller(self) -> None:
+        consent_only = jar(row("PREF", expires=FUTURE), row("VISITOR_INFO1_LIVE", expires=FUTURE))
+        self.assert_all_callers(self.YT_URL, consent_only, passed=False)
+
+    def test_missing_jar_reaches_no_caller(self) -> None:
+        self.assert_all_callers(self.YT_URL, None, passed=False)
+
+    def test_unknown_platform_reaches_no_caller(self) -> None:
+        self.assert_all_callers("https://example.com/video", signed_in(expires=FUTURE), passed=False)
+
+    def test_worker_still_warns_about_a_group_readable_jar(self) -> None:
+        import os
+
+        from app.workers import worker
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cookie_dir = Path(temp_dir) / "cookies"
+            cookie_dir.mkdir()
+            jar_path = cookie_dir / "youtube_cookies.txt"
+            jar_path.write_text(signed_in(expires=FUTURE), encoding="utf-8")
+            os.chmod(jar_path, 0o644)
+            with (
+                patch.object(cookies, "_DATA_COOKIES_DIR", cookie_dir),
+                self.assertLogs(worker.logger, "WARNING") as logs,
+            ):
+                worker._cookies_args_for_url(self.YT_URL)
+        self.assertTrue(any("group/world accessible" in line for line in logs.output))
 
 
 if __name__ == "__main__":

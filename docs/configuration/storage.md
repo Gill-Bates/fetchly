@@ -10,19 +10,45 @@ $DATA_DIR/
 ├── jobs.db               # SQLite (WAL): jobs, settings, share links, analysis cache
 ├── jobs.db-wal
 ├── jobs.db-shm
-├── <job-uuid>/           # One directory per job
-│   ├── <title>.source.<ext>
-│   ├── <title>.mp3
-│   ├── thumbnail.jpg
-│   ├── trim_<start>_<end>.wav
-│   └── trim_<...>_vocals.mp3
+├── jobs/                 # Parent of all per-job directories
+│   └── <job-uuid>/       # One directory per job
+│       ├── <title>.source.<ext>
+│       ├── <title>.mp3
+│       ├── thumbnail.jpg
+│       ├── trim_<start>_<end>.wav
+│       └── trim_<...>_vocals.mp3
 ├── cookies/              # Per-platform Netscape jars, mode 0600
-├── logo/                 # Your uploaded watermark logo, if any
+├── logo/                 # Your uploaded watermark logo (watermark-logo.png), if any
 ├── thumb-cache/          # Cached remote thumbnails
 ├── watermark-cache/      # Rendered video watermark badges
+├── geolite2/             # GeoLite2-City.mmdb and GeoLite2-ASN.mmdb for requester lookups
 ├── update_check.json     # Cached upstream release check
 └── .cache/torch/         # beat_this model checkpoint (~81 MB)
 ```
+
+Job media lives in the per-job UUID directories under `DATA_DIR/jobs/`. The sibling
+caches and credential directories (`cookies/`, `thumb-cache/`, `watermark-cache/`,
+`geolite2/`, `.cache/`) stay directly under `DATA_DIR`.
+
+!!! warning "Breaking change in 1.3.2"
+    Per-job directories moved from `DATA_DIR/<uuid>/` to `DATA_DIR/jobs/<uuid>/`, and the
+    unused `downloads/` directory is gone. In line with the 1.3.2 no-migration policy, an
+    old `DATA_DIR` is not carried over: job directories written by an earlier release stay
+    at the old top-level location and are invisible to this version. Start 1.3.2 with a
+    fresh `DATA_DIR`.
+
+Several entries appear only after first use: `thumb-cache/` with the first thumbnail,
+`watermark-cache/` with the first rendered badge, `geolite2/` after the first successful
+database download, `logo/` after you upload a logo, and `update_check.json` after the
+first update check. `jobs.db`, `jobs/` and `cookies/` exist from startup.
+
+| Entry | Safe to delete? |
+|---|---|
+| `thumb-cache/`, `watermark-cache/`, `update_check.json` | Yes. Recreated on demand. |
+| `geolite2/` | Yes. Downloaded again by the next refresh. Until then requester country and ASN are not shown. |
+| `.cache/torch/` | Yes, while no BPM analysis runs. The ~81 MB checkpoint is downloaded again on the next analysis. |
+| `jobs/<job-uuid>/` | Not by hand while the job exists. Retention and the orphan sweep manage these (see below); a directory removed by hand leaves a job row without its files. |
+| `jobs.db*`, `cookies/`, `logo/` | No. Settings, history, credentials and your logo. |
 
 !!! danger "This directory is a credentials store"
     `cookies/` holds live, signed-in sessions for your own platform accounts, and
@@ -43,18 +69,19 @@ and its numbers leave the statistics.
 A background task runs **every hour** and, in one pass:
 
 1. Reads the current retention setting. `0` means unlimited, and the sweep stops here
-2. Deletes the **job rows** past their retention age, in bounded batches, and keeps the
-   deleted ids for the next two steps
+2. Selects the jobs past their retention age
 3. Deletes those jobs' **directories** on disk
-4. Deletes their **share links** — their targets are gone, so the links could only 404
+4. Deletes the **job rows** and their **share links** — but only for jobs whose
+   directory was actually removed. Their targets are gone, so the links could only 404
    from here on, and the table would otherwise grow without bound
-5. Removes thumbnail cache entries older than **7 days**
+5. Removes thumbnail cache entries and rendered watermark badges older than **7 days**
 6. Removes **orphaned directories** — directories on disk with no matching job row
 
-!!! info "Why the row goes first"
-    Deleting the row before the files means an interruption leaves an orphaned
-    directory, which step 6 collects on the next pass. The reverse order would leave a
-    job in the history whose file is already gone — visible, clickable and broken.
+!!! info "Why the files go first"
+    A job whose directory could not be deleted keeps its row and its share links, so
+    the next pass retries it. Deleting the row first would forget the job while its
+    files stay on disk, leaving them to the orphan sweep in step 6 without their history
+    entry or share links.
 
 !!! info "The orphan sweep has a grace period"
     Step 6 only removes directories with no corresponding job record, and it skips
@@ -63,10 +90,10 @@ A background task runs **every hour** and, in one pass:
 
 ## Manual cleanup
 
-| Action | Where | Effect |
-|---|---|---|
-| Remove all jobs | Settings → System | Removes every row and every directory |
-| Delete a trim | Job page | Removes trim outputs, keeps the source |
+| Action          | Where             | Effect                                 |
+| --------------- | ----------------- | -------------------------------------- |
+| Remove all jobs | Settings → System | Removes every row and every directory  |
+| Delete a trim   | Job page          | Removes trim outputs, keeps the source |
 
 There is no per-job delete action in the UI or API — only the bulk
 **Remove all jobs** action and the automatic retention sweep remove job rows and their
@@ -96,8 +123,8 @@ SQLite in WAL mode. On a clean shutdown the WAL is checkpointed and the database
 closed, which is why the container's `stop_grace_period` must stay above
 `GRACEFUL_TIMEOUT` — a kill mid-checkpoint leaves the WAL to be replayed on next start.
 
-The schema migrates forward automatically at startup; there is no manual migration
-step.
+The schema is created at startup if it is missing. There is no migration: a database
+written by an older release is not upgraded. At startup an existing database whose tables lack expected columns stops the app with a `DatabaseSchemaError` that names the missing column and the database path. Remove `jobs.db` (including `jobs.db-wal` and `jobs.db-shm`) and restart to recreate it; jobs and settings are lost, so back them up first if needed.
 
 ## Backup and restore
 

@@ -19,9 +19,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import PropertyMock, patch
 
-from app import worker
 from app.db import DOWNLOAD_OUTPUT_MODES
 from app.utils.watermark import VideoWatermark
+from app.workers import worker
 
 
 class OutputModeResolutionTests(unittest.TestCase):
@@ -30,9 +30,7 @@ class OutputModeResolutionTests(unittest.TestCase):
             for watermark in (False, True):
                 with self.subTest(mode=mode, watermark=watermark):
                     self.assertEqual(
-                        worker._output_mode(
-                            {"video_watermark": watermark, "download_output_mode": mode}
-                        ),
+                        worker._output_mode({"video_watermark": watermark, "download_output_mode": mode}),
                         mode,
                     )
 
@@ -47,9 +45,7 @@ class OutputModeResolutionTests(unittest.TestCase):
 
     def test_an_unknown_mode_falls_back_to_the_default(self):
         self.assertEqual(
-            worker._output_mode(
-                {"video_watermark": False, "download_output_mode": "vp9-please"}
-            ),
+            worker._output_mode({"video_watermark": False, "download_output_mode": "vp9-please"}),
             worker._DEFAULT_OUTPUT_MODE,
         )
 
@@ -99,10 +95,10 @@ class TargetVideoCodecTests(unittest.TestCase):
 
         self.assertEqual(_SETTINGS_DEFAULTS["download_output_mode"], worker._DEFAULT_OUTPUT_MODE)
         self.assertIn(worker._DEFAULT_OUTPUT_MODE, DOWNLOAD_OUTPUT_MODES)
-        # A stock install produces H.264/AAC: the default mode says so outright,
-        # and the watermark would have forced it regardless.
+        # A stock install produces H.264/AAC: the default mode says so outright.
+        # The watermark is off by default, so it forces no extra encode.
         self.assertEqual(_SETTINGS_DEFAULTS["download_output_mode"], "universal")
-        self.assertEqual(_SETTINGS_DEFAULTS["video_watermark"], "true")
+        self.assertEqual(_SETTINGS_DEFAULTS["video_watermark"], "false")
 
     def test_the_worker_and_the_database_agree_on_the_vocabulary(self):
         self.assertEqual(
@@ -160,13 +156,15 @@ class FinalizeVideoDownloadTests(unittest.TestCase):
     def setUp(self):
         self.badge = VideoWatermark(path=Path("/tmp/badge.png"), width=179, height=67, margin=18)
 
-    def _run(self, *, mode, watermark, codecs, suffix=".mp4"):
+    def _run(self, *, mode, watermark, codecs, suffix=".mp4", failure=None):
         """Return the ffmpeg argv the finalize step would run, or None."""
         video = Path(f"/tmp/job/Title (maxQuality){suffix}")
         captured: list[list[str]] = []
 
         def fake_transcode(cmd, **_kwargs):
             captured.append(cmd)
+            if failure is not None:
+                raise failure
 
         with (
             # The governor is configured at application startup, not in a unit test.
@@ -187,9 +185,7 @@ class FinalizeVideoDownloadTests(unittest.TestCase):
             patch.object(Path, "replace"),
             patch.object(Path, "unlink"),
         ):
-            worker._finalize_video_download(
-                "job-1", video, output_mode=mode, transcode_timeout_seconds=60
-            )
+            worker._finalize_video_download("job-1", video, output_mode=mode, transcode_timeout_seconds=60)
         return captured[0] if captured else None
 
     def test_an_already_universal_file_is_never_touched(self):
@@ -240,6 +236,15 @@ class FinalizeVideoDownloadTests(unittest.TestCase):
         # Audio was already fine, so it is not touched.
         self.assertEqual(cmd[cmd.index("-c:a") + 1], "copy")
 
+    def test_required_conversion_failure_is_reported(self):
+        for mode, codecs in (("universal", ("vp9", "opus")), ("av1", ("h264", "aac"))):
+            with self.subTest(mode=mode), self.assertRaises(RuntimeError):
+                self._run(mode=mode, watermark=False, codecs=codecs, failure=RuntimeError("ffmpeg failed"))
+
+    def test_optional_watermark_failure_keeps_the_source(self):
+        cmd = self._run(mode="source", watermark=True, codecs=("h264", "aac"), failure=RuntimeError("ffmpeg failed"))
+        self.assertIsNotNone(cmd)
+
     def test_only_incompatible_audio_leaves_the_video_untouched(self):
         # The expensive half of the work is skipped: this is a stream copy.
         cmd = self._run(mode="universal", watermark=False, codecs=("h264", "opus"))
@@ -288,9 +293,7 @@ class FinalizeVideoDownloadTests(unittest.TestCase):
     def test_an_already_av1_file_is_never_touched(self):
         for codec in ("av1", "av01"):
             with self.subTest(codec=codec):
-                self.assertIsNone(
-                    self._run(mode="av1", watermark=False, codecs=(codec, "opus"), suffix=".webm")
-                )
+                self.assertIsNone(self._run(mode="av1", watermark=False, codecs=(codec, "opus"), suffix=".webm"))
 
     def test_a_non_av1_source_is_encoded_with_libsvtav1(self):
         cmd = self._run(mode="av1", watermark=False, codecs=("h264", "aac"))

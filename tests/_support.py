@@ -8,12 +8,12 @@
 
 Two duplicated setup sequences were previously copy-pasted across ~20 test
 files: a ``FETCHLY_SECRET_KEY`` bootstrap that has to run before any
-``app.*`` import (session.py/main.py require it at import time), and a
+``app.*`` import (auth/session.py/main.py require it at import time), and a
 6-step "isolated throwaway SQLite database" dance repeated with a
 non-obvious memoization gotcha (``db._database_path_prepared``).
 
 This module must be imported before any ``app.*`` import in a test file that
-touches ``app.session``/``app.main`` (directly or transitively): the
+touches ``app.auth.session``/``app.main`` (directly or transitively): the
 ``os.environ.setdefault`` call below has to run first. ``tests/conftest.py``
 imports this module for every pytest run, so a test file that only needs the
 secret key (not the DB isolation classes) no longer needs its own
@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import os
 
-# Must run before any `from app import ...`: app/session.py and app/main.py
+# Must run before any `from app import ...`: app/auth/session.py and app/main.py
 # raise RuntimeError at import time if this is unset. One shared value is
 # enough - no test asserts anything about the key's content, only that
 # signing/verification is consistent within one test process.
@@ -87,10 +87,10 @@ class WebAppTestCase(IsolatedDbTestCase):
 
         from fastapi.testclient import TestClient
 
-        from app.common.rate_limit import limiter
+        from app.auth.rate_limit import limiter
+        from app.auth.session import refresh_session_settings_cache
         from app.main import app, templates
         from app.routes.api import init_api
-        from app.session import refresh_session_settings_cache
 
         init_api(templates)
         refresh_session_settings_cache()

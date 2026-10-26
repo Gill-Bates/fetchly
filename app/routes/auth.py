@@ -18,9 +18,8 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..common.rate_limit import limiter
-from ..db import get_settings
-from ..session import (
+from ..auth.rate_limit import limiter
+from ..auth.session import (
     SESSION_COOKIE,
     create_session,
     delete_session_cookie,
@@ -29,6 +28,7 @@ from ..session import (
     set_session_cookie,
     validate_session,
 )
+from ..db import get_settings
 from ..utils.hidden_captcha import (
     HONEYPOT_FIELD_NAME,
     CaptchaOutcome,
@@ -45,9 +45,7 @@ router = APIRouter()
 
 # One generic message for every Hidden_Captcha failure (honeypot, bad/expired
 # token, too-fast submit) so a caller cannot tell which check tripped.
-_CAPTCHA_REJECTED_MESSAGE = (
-    "We couldn't verify your submission. Please reload the page and try again."
-)
+_CAPTCHA_REJECTED_MESSAGE = "We couldn't verify your submission. Please reload the page and try again."
 
 # Stand-in principal while authentication is off - the auth dependencies just
 # need some stable truthy value. Never a login name (the real one comes from
@@ -131,9 +129,7 @@ def verify_login(username: str, password: str) -> bool:
         # Authentication is on but no account exists - an inconsistent state
         # the settings API prevents. Fail closed; recovering means clearing
         # enable_authentication in the settings table.
-        logger.error(
-            "Authentication is enabled but no admin account is stored; login is impossible"
-        )
+        logger.error("Authentication is enabled but no admin account is stored; login is impossible")
         return False
 
     # The salt is derived from the username, so the candidate hash has to be

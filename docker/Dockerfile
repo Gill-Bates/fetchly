@@ -89,23 +89,35 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 ARG TARGETARCH
 ARG ESSENTIA_REPO=https://github.com/MTG/essentia.git
-# Upstream's current master, not a frozen commit. Which is also what makes this
-# stage work at all on amd64: essentia only bumped its bundled ffmpeg from
-# 2.8.12 (2017) to 7.1.1 in December 2025, and the 2017 tree's x86 inline
-# assembly no longer assembles under a current gcc - `operand type mismatch for
-# 'shr'` out of libavcodec/x86/mathops.h. Anything older than that bump cannot
-# be compiled here on x86 at all, whatever its version number says.
+# Pinned, not master's HEAD. The upper bound and the lower bound are both hard:
+#
+# Lower: essentia only bumped its bundled ffmpeg from 2.8.12 (2017) to 7.1.1 in
+# December 2025. The 2017 tree's x86 inline assembly no longer assembles under a
+# current gcc - `operand type mismatch for 'shr'` out of
+# libavcodec/x86/mathops.h - so anything older than that bump cannot be compiled
+# here on x86 at all, whatever its version number says. dc91e47e carries
+# ffmpeg-7.1.1 and clears this bound.
+#
+# Upper: the master merge after dc91e47e (33108c70, PR #1488 feat/onnx-predict,
+# 2026-10-22) added onnxruntime 1.22.1 to essentia's always-run static
+# 3rd-party chain (build_3rdparty_static_debian.sh -> build_onnx.sh) and builds
+# it with --use_cuda. That aborts on any host without a CUDA toolkit
+# ("cuda_home and cudnn_home paths must be specified and valid ... valid=False"),
+# which is every build host here - this is a CPU-only image and fetchly uses
+# essentia only for RhythmExtractor2013, never onnx inference. dc91e47e is the
+# merge's first parent, before build_onnx.sh exists, so no onnx step runs and no
+# CUDA toolkit is needed.
 #
 # The release workflow resolves this ref to one commit SHA and passes that same
-# SHA to both architecture builds, so 'latest' is picked once per release
-# rather than twice - see .github/workflows/docker-build.yml. A plain
-# `docker build` just takes master's HEAD.
-ARG ESSENTIA_REF=master
+# SHA to both architecture builds - see .github/workflows/docker-build.yml. With
+# a pinned ref that resolution is deterministic rather than whatever upstream
+# master happens to be at release time.
+ARG ESSENTIA_REF=dc91e47ed634e0b152d3d0229ec86751bb315473
 
 COPY docker/apt-no-distro-media.pref /etc/apt/preferences.d/no-distro-media
 
-# Cache buster: ESSENTIA_REF is a moving ref by default, so nothing in the
-# build context changes when upstream lands a commit. This feed does.
+# Cache key tied to ESSENTIA_REF: the atom feed of a pinned commit is stable, so
+# this layer caches until the pin changes and re-invalidates when it does.
 ADD https://github.com/MTG/essentia/commits/${ESSENTIA_REF}.atom /tmp/essentia-ref.atom
 
 # Both architectures compile essentia here; neither installs it from PyPI.
@@ -331,14 +343,34 @@ RUN set -euo pipefail; \
     rm -f "/tmp/${archive}" /tmp/deno.sha256sum /tmp/deno-release-latest.txt; \
     deno --version
 
-# WaveSurfer is no longer fetched here. It used to resolve unpkg's @latest
-# alias at build time with no version pin and no integrity check - a
-# same-origin script (served under style-src/script-src 'self') coming from an
-# unauthenticated, unverified network fetch on every build. It is now vendored
-# and pinned in git under app/static/vendor/wavesurfer/ instead, and the
-# runtime stage below copies that committed, checksum-tested bundle straight
-# into the image. See "Vendoring WaveSurfer" in docker/AGENTS.md for the pinned
-# version and how to bump it.
+# WaveSurfer is fetched here at build time, deliberately unpinned ("latest is
+# greatest"): the newest release reaches every build with no manual bump. It is
+# same-origin JavaScript served under script-src 'self', fetched over TLS from
+# unpkg with no checksum - an accepted trade for staying current (see
+# "Vendoring WaveSurfer" in docker/AGENTS.md). essentia, by contrast, stays
+# pinned. unpkg's @latest alias redirects package.json to the resolved version;
+# that version is captured into /wavesurfer/version so app/utils/version.py can
+# report it without a rebuild changing what "current" means. The runtime stage
+# overlays both files onto the committed app/static/vendor/wavesurfer/ tree,
+# which stays in git as the local-dev fallback.
+ARG WAVESURFER_VERSION=latest
+ADD https://unpkg.com/wavesurfer.js@${WAVESURFER_VERSION}/package.json /tmp/wavesurfer-package.json
+RUN set -euo pipefail; \
+    resolved="$(python -c 'import json,sys; print(json.load(open("/tmp/wavesurfer-package.json"))["version"])')"; \
+    [[ -n "${resolved}" ]] || { echo "could not resolve wavesurfer.js version" >&2; exit 1; }; \
+    echo "Fetching wavesurfer.js ${resolved} (requested: ${WAVESURFER_VERSION})"; \
+    mkdir -p /wavesurfer/dist/plugins; \
+    base="https://unpkg.com/wavesurfer.js@${resolved}"; \
+    curl --proto '=https' --tlsv1.2 -fsSL --retry 5 --retry-delay 2 \
+        --connect-timeout 5 --max-time 120 \
+        -o /wavesurfer/dist/wavesurfer.esm.js "${base}/dist/wavesurfer.esm.js"; \
+    curl --proto '=https' --tlsv1.2 -fsSL --retry 5 --retry-delay 2 \
+        --connect-timeout 5 --max-time 120 \
+        -o /wavesurfer/dist/plugins/regions.esm.js "${base}/dist/plugins/regions.esm.js"; \
+    test -s /wavesurfer/dist/wavesurfer.esm.js; \
+    test -s /wavesurfer/dist/plugins/regions.esm.js; \
+    printf '%s\n' "${resolved}" > /wavesurfer/version; \
+    rm -f /tmp/wavesurfer-package.json
 
 FROM ${PYTHON_BASE} AS runtime
 
@@ -379,10 +411,15 @@ RUN python -m pip check && \
     deno --version | head -n 1 && \
     [[ "$(command -v ffmpeg)" == "/usr/local/bin/ffmpeg" ]]
 
+# soundfile and beat_this.preprocessing are the audio-decode smoke check:
+# since TorchAudio 2.9 beat_this decodes via the optional TorchCodec backend and
+# falls back to soundfile, so importing both proves the decode path the image
+# actually uses is present. python -m pip check above already validated the
+# resolved set.
 RUN python <<'PYCHECK'
 import importlib
 
-for name in ("beat_this.inference",):
+for name in ("soundfile", "beat_this.preprocessing", "beat_this.inference"):
     try:
         importlib.import_module(name)
     except Exception as exc:
@@ -410,6 +447,11 @@ RUN useradd -u 1000 -m --no-log-init appuser
 # anyway: this file already mandates BuildKit via TARGETARCH.
 COPY --chmod=a+rX app ./app
 COPY --chmod=a+rX middleware ./middleware
+# Overlay the freshly fetched WaveSurfer bundle over the committed one so the
+# image serves the build-time @latest version, not the git fallback. Same
+# served path (app/static/vendor/wavesurfer/dist/...), so trim.js imports it
+# unchanged.
+COPY --from=builder --chmod=a+rX /wavesurfer/dist /app/app/static/vendor/wavesurfer/dist
 RUN test -s ./app/static/img/fetchly_watermark.png && \
     test -s ./app/static/fonts/roboto-flex.ttf && \
     ffmpeg -hide_banner -v error \
@@ -420,23 +462,18 @@ RUN test -s ./app/static/img/fetchly_watermark.png && \
 # so the manifest ships next to the source rather than a separate VERSION file.
 COPY pyproject.toml BUILD_INFO* ./
 COPY CHANGELOG.md ./
-# app/static/vendor/wavesurfer/ is committed to git (force-added past
-# .gitignore) and came in with the `app` copy above once .dockerignore's
-# exclusion of that path was removed - it is no longer fetched at build time.
-# tests/test_csp_wavesurfer.py pins its sha256, so this is the exact bundle
-# that test validates.
-#
-# The version is a plain committed file rather than something resolved at
-# build time, outside app/static/ so it is never served. entrypoint.sh reads
-# it at container start and exports WAVESURFER_VERSION for
-# app/utils/version.py to report.
-COPY docker/wavesurfer.version /app/.wavesurfer_version
+# The version of the WaveSurfer bundle the builder actually fetched, outside
+# app/static/ so it is never served. entrypoint.sh reads it at container start
+# and exports WAVESURFER_VERSION for app/utils/version.py to report, so the
+# Settings -> System tile tracks the build-time @latest fetch rather than a
+# stale committed pin.
+COPY --from=builder /wavesurfer/version /app/.wavesurfer_version
 COPY --chmod=755 docker/entrypoint.sh /entrypoint.sh
 
 RUN bash -n /entrypoint.sh && \
     ! grep -q $'\r' /entrypoint.sh
 
-RUN mkdir -p /app/data/downloads /app/data/cookies && \
+RUN mkdir -p /app/data/jobs /app/data/cookies && \
     chown -R appuser:appuser /app/data
 
 ENV DATA_DIR=/app/data \

@@ -46,7 +46,7 @@ request is made for it. It is cached with the validation state (`lalalaai_minute
 - `GET /api/lalal/status?force_refresh=1`, which the tile calls after you connect
 
 An account whose balance cannot be determined shows no number at all rather than `0` —
-"unknown" and "nothing left" are different answers.
+"unknown" and "nothing left" are different answers. An exhausted account is shown as `0m 00s`.
 
 ## Splitting a track
 

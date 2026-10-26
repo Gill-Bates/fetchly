@@ -2,7 +2,9 @@
 <html lang="en" data-bs-theme="dark" data-csrf-cookie-name="{{ CSRF_COOKIE_NAME | e }}"
     data-lalal-enabled="{{ lalal_enabled | default(false) | tojson | forceescape }}"
     data-lalal-duration-guard="{{ lalal_duration_guard | default(true) | tojson | forceescape }}"
-    data-lalal-max-duration-seconds="{{ LALAL_MAX_DURATION_SECONDS }}">
+    data-lalal-max-duration-seconds="{{ LALAL_MAX_DURATION_SECONDS }}"
+    data-wavesurfer-csp-nonce="{{ request.state.wavesurfer_csp_nonce | default('', true) | e }}"
+    data-status-contract="{{ status_contract() | tojson | forceescape }}">
 
 <head>
     <meta charset="UTF-8">

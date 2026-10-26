@@ -10,11 +10,12 @@
  * so a fresh download stays visible when the mobile jobs list is collapsed.
  *
  * Holds exactly one job (starting another releases the previous back into the
- * list); memory-only, so a reload clears it. Mobile/tablet only - the desktop
+ * list). After a reload the server hands over its active jobs and the newest
+ * one is restored here; nothing is kept in browser storage. Mobile/tablet only - the desktop
  * table already shows a new job as its first row.
  */
 
-import { buildJobCard, getJobById, isMobileJobsView, patchJobCard, setDetachedJobId } from "./jobs.js";
+import { buildJobCard, getJobById, isMobileJobsView, patchJobCard, prependJob, setDetachedJobId } from "./jobs.js";
 
 let currentJobId = null;
 let currentNode = null;
@@ -51,6 +52,44 @@ export function setCurrentJob(job) {
     currentNode = buildJobCard(job);
     card.replaceChildren(currentNode);
     card.classList.remove("d-none");
+}
+
+/**
+ * Rebuild the card from the active jobs the server rendered into the page.
+ * Older active jobs stay in the list; one that history skipped is added to it.
+ * @param {unknown} jobs - newest first
+ */
+export function restoreCurrentJob(jobs) {
+    if (!Array.isArray(jobs)) {
+        return;
+    }
+
+    const active = jobs.filter((job) => job && typeof job === "object" && job.id != null);
+    // Oldest first, so the newest ends up at the top of the list.
+    for (const job of [...active].reverse()) {
+        if (!getJobById(String(job.id))) {
+            prependJob(job);
+        }
+    }
+    if (active.length > 0) {
+        setCurrentJob(getJobById(String(active[0].id)) || active[0]);
+    }
+}
+
+function readActiveJobs() {
+    const node = document.getElementById("activeJobsBootstrapData");
+    try {
+        return JSON.parse(node?.textContent || "[]");
+    } catch {
+        return [];
+    }
+}
+
+// jobs.js seeds its store on DOM ready; restore only after that.
+if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", () => restoreCurrentJob(readActiveJobs()));
+} else {
+    restoreCurrentJob(readActiveJobs());
 }
 
 // Crossing the breakpoint moves the job between the card and the list.

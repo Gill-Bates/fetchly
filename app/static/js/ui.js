@@ -3,7 +3,7 @@
 // Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 //
 
-import { CANCELLABLE_STATUSES, DOWNLOADABLE_STATUSES, LALAL_MAX_DURATION_MINUTES, LALAL_MAX_DURATION_SECONDS, RETRYABLE_STATUSES } from "./config.js";
+import { CANCELLABLE_STATUSES, DOWNLOADABLE_STATUSES, LALAL_MAX_DURATION_MINUTES, LALAL_MAX_DURATION_SECONDS, PROGRESS_STATUSES, RETRYABLE_STATUSES, STATUS_META } from "./config.js";
 import { EMPTY_VALUE, humanSize } from "./utils.js";
 
 export const ACTION_CATEGORY = Object.freeze({
@@ -13,26 +13,12 @@ export const ACTION_CATEGORY = Object.freeze({
     DETAIL: "detail",
 });
 
-// One label per phase. Keep in sync with status_label() in
-// app/utils/template_filters.py so the pill text does not jump on the first SSE update.
-export const STATUS_META = Object.freeze({
-    analysis: { color: "primary", label: "Analyzing" },
-    analysis_done: { color: "success", label: "Done" },
-    cancelled: { color: "secondary", label: "Cancelled" },
-    done: { color: "success", label: "Done" },
-    downloading: { color: "primary", label: "Downloading" },
-    error: { color: "danger", label: "Error" },
-    processing: { color: "primary", label: "Preparing" },
-    queued: { color: "primary", label: "Queued" },
-    transcoding: { color: "primary", label: "Transcoding" },
-});
+// STATUS_META (one { label, color } per phase) is re-exported from config.js,
+// which reads it from the server-rendered status contract; the labels match
+// status_label() in app/utils/template_filters.py so the pill text does not
+// jump on the first SSE update.
+export { STATUS_META };
 
-// Statuses whose status events actually carry a progress percentage (see
-// worker.py's _emit() call sites). Matches PROGRESS_BEARING_STATUSES in
-// jobs.js - kept as two names because they serve different call sites
-// (label text here, stored-progress reset there), but must list the same
-// statuses.
-const PROGRESS_STATUSES = new Set(["downloading", "transcoding"]);
 
 /** @param {string | null | undefined} status @returns {string} canonical form */
 export function normalizeStatus(status) {

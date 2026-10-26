@@ -13,26 +13,34 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import Any, Final
 
-from .utils.credentials import normalize_admin_username
+from .auth.credentials import normalize_admin_username
+from .utils.boolean import parse_bool_text
 from .utils.duration import round_seconds
 from .utils.fs import get_data_dir
 from .utils.public_url import normalize_public_hostname
 
 logger = logging.getLogger(__name__)
 
-# Shared with app/session.py and app/routes/api.py so the allowed range for
-# session_max_days is defined once. Lives here, not in session.py, because
-# session.py already imports get_settings from this module - the reverse
+# Shared with app/auth/session.py and app/routes/api.py so the allowed range for
+# session_max_days is defined once. Lives here, not in auth/session.py, because
+# auth/session.py already imports get_settings from this module - the reverse
 # import would be circular.
 SESSION_MAX_DAYS_MIN: Final = 1
 SESSION_MAX_DAYS_MAX: Final = 7
 
 __all__ = [
+    "ACTIVE_JOB_STATUSES",
+    "CANCELLABLE_JOB_STATUSES",
     "COMPLETED_STATUSES",
     "DB_PATH",
     "DOWNLOADABLE_STATUSES",
     "DOWNLOAD_OUTPUT_MODES",
+    "PROGRESS_STATUSES",
+    "RETRYABLE_JOB_STATUSES",
+    "SETTING_INT_BOUNDS",
     "TERMINAL_JOB_STATUSES",
+    "WORKER_OWNED_STATUSES",
+    "DatabaseSchemaError",
     "cancel_interrupted_jobs",
     "claim_next_queued_job",
     "close_db",
@@ -50,6 +58,7 @@ __all__ = [
     "init_db",
     "insert_job",
     "job_exists",
+    "list_active_jobs",
     "list_completed_bpms",
     "list_expired_job_ids",
     "list_job_ids",
@@ -59,6 +68,7 @@ __all__ = [
     "now_iso",
     "paginate_jobs",
     "set_settings",
+    "setting_default",
     "update_job",
     "update_job_if_status",
     "upsert_audio_analysis_cache",
@@ -93,12 +103,6 @@ _UPDATEABLE_COLUMNS: Final[frozenset[str]] = frozenset(
 
 _MAX_QUERY_LIMIT: Final[int] = 2_000
 
-# Bumped only when a schema change needs data migration. init_db() stamps this
-# into the file (PRAGMA user_version) and refuses to open a file stamped higher,
-# so rolling a deployment back to an older image fails fast instead of silently
-# writing against a schema it does not understand.
-_SCHEMA_VERSION: Final[int] = 3
-
 # job_id deletions are chunked so a large retention sweep never trips SQLite's
 # bound-parameter ceiling (SQLITE_MAX_VARIABLE_NUMBER) or holds one oversized
 # write transaction.
@@ -116,12 +120,10 @@ _JOB_STATUSES: Final[frozenset[str]] = frozenset(
         "cancelled",
     }
 )
-_JOB_STATUS_SQL_VALUES: Final[str] = ", ".join(
-    f"'{status}'" for status in sorted(_JOB_STATUSES)
-)
+_JOB_STATUS_SQL_VALUES: Final[str] = ", ".join(f"'{status}'" for status in sorted(_JOB_STATUSES))
 
 # Allowed values of the "download_output_mode" setting, in the order the
-# settings slider presents them. app/worker.py maps each to a format-selection
+# settings slider presents them. app/workers/worker.py maps each to a format-selection
 # preference and a post-processing target; app/static/js/settings.js mirrors
 # this list for the slider ticks.
 DOWNLOAD_OUTPUT_MODES: Final[tuple[str, ...]] = ("source", "universal", "av1")
@@ -148,7 +150,7 @@ _SETTINGS_DEFAULTS: Final[dict[str, str]] = {
     # invalidated once it elapses - there is no sliding renewal past it.
     "session_max_days": "7",
     # 0 means "Automatic": sized per download from the host's CPU quota and
-    # free memory (app/governor.py::recommended_concurrent_fragments).
+    # free memory (app/runtime/governor.py::recommended_concurrent_fragments).
     "download_concurrent_fragments": "0",
     # Startup-only worker-pool size for the next application boot. 0 means
     # "auto-detect from CPU quota".
@@ -171,14 +173,14 @@ _SETTINGS_DEFAULTS: Final[dict[str, str]] = {
     # The watermark burns an overlay in, which always costs a video encode, but
     # that encode targets the mode's own codec - for "source" the codec the
     # download arrived in - so the watermark never changes the stored mode's
-    # promise. See app/worker.py::_output_mode and ::_target_video_codec.
+    # promise. See app/workers/worker.py::_output_mode and ::_target_video_codec.
     "download_output_mode": "universal",
     # Burns the fetchly logo into the bottom-right corner of every downloaded
-    # video, with the public hostname underneath when one is configured. On by
+    # video, with the public hostname underneath when one is configured. Off by
     # default; costs nothing on the capped qualities (the overlay rides along
     # in the transcode that already runs) but adds an encoder pass to "max".
     # See app/utils/watermark.py.
-    "video_watermark": "true",
+    "video_watermark": "false",
     # 0 disables the duration gate so any track length is analyzed.
     "audio_analysis_max_minutes": "15",
     "audio_analysis_timeout_minutes": "5",
@@ -206,12 +208,10 @@ _SETTINGS_DEFAULTS: Final[dict[str, str]] = {
 
 
 def _parse_bool(value: object) -> bool:
-    normalized = str(value).strip().lower()
-    if normalized in {"true", "1", "yes", "on"}:
-        return True
-    if normalized in {"false", "0", "no", "off"}:
-        return False
-    raise ValueError(f"Invalid boolean value: {value!r}")
+    parsed = parse_bool_text(str(value))
+    if parsed is None:
+        raise ValueError(f"Invalid boolean value: {value!r}")
+    return parsed
 
 
 def _parse_bounded_int(value: object, *, minimum: int, maximum: int) -> int:
@@ -268,6 +268,24 @@ def utc_timestamp() -> str:
     return datetime.now(UTC).replace(microsecond=0).strftime("%Y-%m-%d %H:%M:%S")
 
 
+def to_iso_utc(value: object) -> str | None:
+    """Return a stored timestamp as ISO-8601 UTC with a ``Z`` suffix.
+
+    Stored values are naive ``YYYY-MM-DD HH:MM:SS`` text that is UTC by
+    convention, so a missing offset is read as UTC; an explicit offset is
+    converted. Empty or unparseable input returns ``None``.
+    """
+    if value is None or value == "":
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).strip())
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
 def now_iso() -> str:
     """Return the current UTC timestamp as ISO-8601 with an offset.
 
@@ -280,11 +298,13 @@ def now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
-_INTERNAL_SETTINGS_KEYS: Final[frozenset[str]] = frozenset({
-    "admin_password_hash",
-    "session_version",
-    "statistics_reset_at",
-})
+_INTERNAL_SETTINGS_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "admin_password_hash",
+        "session_version",
+        "statistics_reset_at",
+    }
+)
 _SECRET_SETTINGS_KEYS: Final[frozenset[str]] = frozenset({"lalalaai_auth_key"})
 # User-writable keys only; internal keys need allow_internal=True in set_settings.
 _ALLOWED_SETTINGS_KEYS: Final[frozenset[str]] = frozenset(_SETTINGS_DEFAULTS)
@@ -295,7 +315,25 @@ COMPLETED_STATUSES: Final[frozenset[str]] = frozenset({"done", "analysis_done"})
 DOWNLOADABLE_STATUSES: Final[frozenset[str]] = COMPLETED_STATUSES | frozenset({"analysis"})
 # All terminal statuses (no further transitions possible).
 TERMINAL_JOB_STATUSES: Final[frozenset[str]] = COMPLETED_STATUSES | frozenset({"error", "cancelled"})
-_RECOVERABLE_IN_FLIGHT_STATUSES: Final[frozenset[str]] = frozenset({"processing", "downloading", "transcoding"})
+# Every non-terminal status: the job is still queued or being worked on.
+ACTIVE_JOB_STATUSES: Final[frozenset[str]] = _JOB_STATUSES - TERMINAL_JOB_STATUSES
+# The statuses a worker thread owns: while the row holds one of these, that
+# thread is the only writer, so a conditional update on them tells "still my
+# job" from "cancelled or retried in the meantime". Also what a restart strands.
+WORKER_OWNED_STATUSES: Final[tuple[str, ...]] = (
+    "processing",
+    "downloading",
+    "transcoding",
+)
+# A job can be cancelled before a worker ever picks it up, or while one owns it.
+CANCELLABLE_JOB_STATUSES: Final[tuple[str, ...]] = ("queued", *WORKER_OWNED_STATUSES)
+# Terminal without a result: the user may submit the job again.
+RETRYABLE_JOB_STATUSES: Final[frozenset[str]] = TERMINAL_JOB_STATUSES - COMPLETED_STATUSES
+# Statuses whose SSE events carry a live progress percentage; any other status
+# drops it. app/workers/worker.py::_PROGRESS_BEARING_STATUSES is the writer and
+# mirrors this set (it may not import a new db constant, so the agreement is
+# guarded by tests/test_status_mapping_parity.py).
+PROGRESS_STATUSES: Final[frozenset[str]] = frozenset({"downloading", "transcoding"})
 
 
 def with_finished_at(status: str, extra: dict[str, Any]) -> dict[str, Any]:
@@ -309,27 +347,48 @@ def with_finished_at(status: str, extra: dict[str, Any]) -> dict[str, Any]:
         return {**extra, "finished_at": utc_timestamp()}
     return extra
 
+
+# Inclusive (minimum, maximum) of every integer setting. The settings API
+# validates against this table and the stored-value parsers are built from it.
+SETTING_INT_BOUNDS: Final[dict[str, tuple[int, int]]] = {
+    "retention_days": (0, 365),
+    "session_max_days": (SESSION_MAX_DAYS_MIN, SESSION_MAX_DAYS_MAX),
+    "download_concurrent_fragments": (0, 16),
+    "download_worker_count": (0, 8),
+    "download_timeout_minutes": (1, 240),
+    "transcode_timeout_minutes": (1, 480),
+    "download_max_filesize_gib": (1, 100),
+    "audio_analysis_max_minutes": (0, 240),
+    "audio_analysis_timeout_minutes": (1, 60),
+    "lalal_max_download_gib": (1, 100),
+    "share_link_max_uses": (0, 10000),
+}
+
+
+def _bounded_int_parser(key: str) -> Callable[[object], int]:
+    minimum, maximum = SETTING_INT_BOUNDS[key]
+    return lambda value: _parse_bounded_int(value, minimum=minimum, maximum=maximum)
+
+
 _SETTINGS_TYPES: Final[dict[str, Callable[[object], Any]]] = {
-    "retention_days": lambda value: _parse_bounded_int(value, minimum=0, maximum=365),
+    "retention_days": _bounded_int_parser("retention_days"),
     "enable_job_history": _parse_bool,
     "download_auto_start": _parse_bool,
     "statistics_reset_at": str,
     "login_required": _parse_bool,
     "enable_authentication": _parse_bool,
     "admin_username": lambda value: normalize_admin_username(value if isinstance(value, str) else ""),
-    "session_max_days": lambda value: _parse_bounded_int(
-        value, minimum=SESSION_MAX_DAYS_MIN, maximum=SESSION_MAX_DAYS_MAX
-    ),
+    "session_max_days": _bounded_int_parser("session_max_days"),
     "session_version": _parse_nonnegative_int,
-    "download_concurrent_fragments": lambda value: _parse_bounded_int(value, minimum=0, maximum=16),
-    "download_worker_count": lambda value: _parse_bounded_int(value, minimum=0, maximum=8),
-    "download_timeout_minutes": lambda value: _parse_bounded_int(value, minimum=1, maximum=240),
-    "transcode_timeout_minutes": lambda value: _parse_bounded_int(value, minimum=1, maximum=480),
-    "download_max_filesize_gib": lambda value: _parse_bounded_int(value, minimum=1, maximum=100),
+    "download_concurrent_fragments": _bounded_int_parser("download_concurrent_fragments"),
+    "download_worker_count": _bounded_int_parser("download_worker_count"),
+    "download_timeout_minutes": _bounded_int_parser("download_timeout_minutes"),
+    "transcode_timeout_minutes": _bounded_int_parser("transcode_timeout_minutes"),
+    "download_max_filesize_gib": _bounded_int_parser("download_max_filesize_gib"),
     "download_output_mode": _parse_output_mode,
     "video_watermark": _parse_bool,
-    "audio_analysis_max_minutes": lambda value: _parse_bounded_int(value, minimum=0, maximum=240),
-    "audio_analysis_timeout_minutes": lambda value: _parse_bounded_int(value, minimum=1, maximum=60),
+    "audio_analysis_max_minutes": _bounded_int_parser("audio_analysis_max_minutes"),
+    "audio_analysis_timeout_minutes": _bounded_int_parser("audio_analysis_timeout_minutes"),
     "lalalaai_email": str,
     "lalalaai_auth_key": str,
     "lalalaai_auth_checked_at": _parse_nonnegative_int,
@@ -337,10 +396,15 @@ _SETTINGS_TYPES: Final[dict[str, Callable[[object], Any]]] = {
     "lalalaai_minutes_left": _parse_minutes_left,
     "lalalaai_auth_last_error": str,
     "lalalaai_duration_guard": _parse_bool,
-    "lalal_max_download_gib": lambda value: _parse_bounded_int(value, minimum=1, maximum=100),
-    "share_link_max_uses": lambda value: _parse_bounded_int(value, minimum=0, maximum=10000),
+    "lalal_max_download_gib": _bounded_int_parser("lalal_max_download_gib"),
+    "share_link_max_uses": _bounded_int_parser("share_link_max_uses"),
     "public_hostname": lambda value: normalize_public_hostname(value if isinstance(value, str) else ""),
 }
+
+
+def setting_default(key: str) -> Any:
+    """The parsed default of a setting, for callers that must fall back when the table is unreadable."""
+    return _SETTINGS_TYPES.get(key, str)(_SETTINGS_DEFAULTS[key])
 
 
 def _configure_connection(con: sqlite3.Connection) -> None:
@@ -425,179 +489,185 @@ def close_db() -> None:
             logger.warning("WAL checkpoint on shutdown was incomplete: %s", tuple(row))
         else:
             logger.debug("WAL checkpoint on shutdown complete")
-    except Exception as exc:
+    # Shutdown checkpoint failure must not mask shutdown.
+    except Exception as exc:  # noqa: BLE001
         logger.warning("WAL checkpoint failed: %s", exc)
     finally:
         if con is not None:
             con.close()
 
 
-def init_db() -> None:
-    """Create the schema for a fresh deployment and stamp its version.
+# SQLITE_CORRUPT and SQLITE_NOTADB (primary result codes).
+_UNREADABLE_SQLITE_CODES: Final[frozenset[int]] = frozenset({11, 26})
+_MAX_LISTED_MISSING_COLUMNS: Final = 5
 
-    No versioned migration runner: a single schema, every table created with
-    ``IF NOT EXISTS``. The ``PRAGMA user_version`` guard below is the only
-    cross-version safety - it stops an older build from opening a newer file.
+
+class DatabaseSchemaError(RuntimeError):
+    """The existing database file does not match the schema this release expects."""
+
+
+def _create_tables(con: sqlite3.Connection) -> None:
+    con.execute(
+        f"""
+        CREATE TABLE IF NOT EXISTS jobs (
+            id TEXT PRIMARY KEY,
+            url TEXT NOT NULL,
+            type TEXT,
+            quality TEXT,
+            status TEXT NOT NULL CHECK (
+                status IN ({_JOB_STATUS_SQL_VALUES})
+            ),
+            filename TEXT,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            include_in_history INTEGER NOT NULL DEFAULT 1 CHECK (include_in_history IN (0, 1)),
+            finished_at TEXT,
+            duration_seconds REAL CHECK (duration_seconds IS NULL OR duration_seconds >= 0),
+            filesize_bytes INTEGER CHECK (filesize_bytes IS NULL OR filesize_bytes >= 0),
+            message TEXT,
+            codec TEXT,
+            bitrate_kbps INTEGER CHECK (bitrate_kbps IS NULL OR bitrate_kbps >= 0),
+            video_title TEXT,
+            video_meta_hover TEXT,
+            bpm INTEGER CHECK (bpm IS NULL OR bpm > 0),
+            bpm_confidence REAL CHECK (bpm_confidence IS NULL OR bpm_confidence >= 0),
+            audio_hash TEXT,
+            lalal_split_done INTEGER NOT NULL DEFAULT 0 CHECK (lalal_split_done IN (0, 1)),
+            client_ip TEXT
+        )
     """
-    with get_db() as con:
-        _configure_database(con)
+    )
 
-        schema_version = int(con.execute("PRAGMA user_version").fetchone()[0])
-        if schema_version > _SCHEMA_VERSION:
-            raise RuntimeError(
-                f"jobs.db was written by a newer Fetchly (schema v{schema_version}; "
-                f"this build supports v{_SCHEMA_VERSION}). Refusing to start so a "
-                "rolled-back deployment cannot write against a schema it does not "
-                "understand."
-            )
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS audio_analysis_cache (
+            hash TEXT PRIMARY KEY,
+            bpm INTEGER CHECK (bpm IS NULL OR bpm > 0),
+            bpm_confidence REAL CHECK (bpm_confidence IS NULL OR bpm_confidence >= 0),
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """
+    )
 
-        con.execute(f"""
-            CREATE TABLE IF NOT EXISTS jobs (
-                id TEXT PRIMARY KEY,
-                url TEXT NOT NULL,
-                type TEXT,
-                quality TEXT,
-                status TEXT NOT NULL CHECK (
-                    status IN ({_JOB_STATUS_SQL_VALUES})
-                ),
-                filename TEXT,
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                include_in_history INTEGER NOT NULL DEFAULT 1 CHECK (include_in_history IN (0, 1)),
-                finished_at TEXT,
-                duration_seconds REAL CHECK (duration_seconds IS NULL OR duration_seconds >= 0),
-                filesize_bytes INTEGER CHECK (filesize_bytes IS NULL OR filesize_bytes >= 0),
-                message TEXT,
-                codec TEXT,
-                bitrate_kbps INTEGER CHECK (bitrate_kbps IS NULL OR bitrate_kbps >= 0),
-                video_title TEXT,
-                video_meta_hover TEXT,
-                bpm INTEGER CHECK (bpm IS NULL OR bpm > 0),
-                bpm_confidence REAL CHECK (bpm_confidence IS NULL OR bpm_confidence >= 0),
-                audio_hash TEXT,
-                lalal_split_done INTEGER NOT NULL DEFAULT 0 CHECK (lalal_split_done IN (0, 1)),
-                client_ip TEXT
-            )
-        """)
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS share_links (
+            token TEXT PRIMARY KEY,
+            job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            max_uses INTEGER NOT NULL DEFAULT 0 CHECK (max_uses >= 0),
+            use_count INTEGER NOT NULL DEFAULT 0 CHECK (use_count >= 0)
+        )
+    """
+    )
 
-        con.execute("""
-            CREATE TABLE IF NOT EXISTS audio_analysis_cache (
-                hash TEXT PRIMARY KEY,
-                bpm INTEGER CHECK (bpm IS NULL OR bpm > 0),
-                bpm_confidence REAL CHECK (bpm_confidence IS NULL OR bpm_confidence >= 0),
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
+    con.execute(
+        """
+        CREATE TABLE IF NOT EXISTS settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+    """
+    )
 
-        con.execute("""
-            CREATE TABLE IF NOT EXISTS share_links (
-                token TEXT PRIMARY KEY,
-                job_id TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                max_uses INTEGER NOT NULL DEFAULT 0 CHECK (max_uses >= 0),
-                use_count INTEGER NOT NULL DEFAULT 0 CHECK (use_count >= 0)
-            )
-        """)
 
-        con.execute("""
-            CREATE TABLE IF NOT EXISTS settings (
-                key TEXT PRIMARY KEY,
-                value TEXT
-            )
-        """)
+def _create_indexes(con: sqlite3.Connection) -> None:
+    con.execute("CREATE INDEX IF NOT EXISTS idx_jobs_created_at_id ON jobs(created_at DESC, id DESC)")
+    con.execute(
+        "CREATE INDEX IF NOT EXISTS idx_jobs_history_created_at "
+        "ON jobs(created_at DESC, id DESC) WHERE include_in_history = 1"
+    )
+    con.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status_finished_at ON jobs(status, finished_at)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status_created_at ON jobs(status, created_at DESC)")
+    con.execute(
+        "CREATE INDEX IF NOT EXISTS idx_jobs_audio_analysis "
+        "ON jobs(type, status, created_at) WHERE filename IS NOT NULL"
+    )
+    con.execute("CREATE INDEX IF NOT EXISTS idx_jobs_url_type_quality ON jobs(url, type, quality, created_at DESC)")
+    con.execute("CREATE INDEX IF NOT EXISTS idx_share_links_job_id ON share_links(job_id, created_at DESC)")
 
-        # One-off normalisation: earlier builds wrote finished_at via
-        # datetime.isoformat() ("...T...+00:00" with microseconds), which does
-        # not sort lexically against the "YYYY-MM-DD HH:MM:SS" form the rest of
-        # the code (and CURRENT_TIMESTAMP) uses. Rewrite the stragglers so the
-        # retention/stats queries below can range-scan finished_at directly
-        # instead of wrapping it in datetime(). No-op once every row is
-        # canonical, so it is safe to run on every start.
-        con.execute(
-            "UPDATE jobs SET finished_at = strftime('%Y-%m-%d %H:%M:%S', finished_at) "
-            "WHERE finished_at IS NOT NULL AND finished_at LIKE '%T%'"
+
+def _table_columns(con: sqlite3.Connection) -> dict[str, list[str]]:
+    tables = [
+        r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")
+    ]
+    return {t: [r[1] for r in con.execute(f'PRAGMA table_info("{t}")')] for t in tables}
+
+
+def _verify_schema(con: sqlite3.Connection) -> None:
+    """Fail with an actionable error when an existing database predates this schema.
+
+    The expected columns come from the CREATE statements themselves (applied to
+    a throwaway in-memory database), so they cannot drift from ``_create_tables``.
+    Only tables already present are checked (a missing one is simply created
+    afterwards); extra tables or columns in the file are tolerated.
+    """
+    reference = sqlite3.connect(":memory:")
+    try:
+        _create_tables(reference)
+        expected = _table_columns(reference)
+    finally:
+        reference.close()
+    actual = _table_columns(con)
+    problems = [
+        f"{table}.{column}"
+        for table, columns in expected.items()
+        if table in actual
+        for column in columns
+        if column not in actual[table]
+    ]
+    if problems:
+        shown = ", ".join(problems[:_MAX_LISTED_MISSING_COLUMNS])
+        if len(problems) > _MAX_LISTED_MISSING_COLUMNS:
+            shown += f", ... and {len(problems) - _MAX_LISTED_MISSING_COLUMNS} more"
+        raise DatabaseSchemaError(
+            "The schema of the existing database does not match this version of fetchly: "
+            f"missing {shown}. Databases from older releases are no longer migrated. "
+            f"{_remove_database_hint()}"
         )
 
-        # "download_mp4_preset" became "download_compatible_output" when the
-        # setting stopped being a yt-dlp format-sort preset and became a
-        # promise about the output. Same meaning, so the stored choice carries
-        # over; without this an upgraded install would silently fall back to
-        # the new default. No-op once migrated (the old row is dropped).
-        con.execute(
-            "INSERT OR IGNORE INTO settings (key, value) "
-            "SELECT 'download_compatible_output', value FROM settings WHERE key = 'download_mp4_preset'"
-        )
-        con.execute("DELETE FROM settings WHERE key = 'download_mp4_preset'")
 
-        # "session_idle_minutes" (a sliding idle timeout) became
-        # "session_max_days" (an absolute lifetime from login) when the hard
-        # 24h limit was dropped in favor of a single configurable deadline.
-        # The two settings have no compatible conversion - an idle-minutes
-        # value says nothing about how many days a login should stay valid -
-        # so the old row is just dropped and the new one starts at its
-        # default. No-op once migrated (the old row no longer exists).
-        con.execute("DELETE FROM settings WHERE key = 'session_idle_minutes'")
+def _remove_database_hint() -> str:
+    return (
+        f"Database file: {DB_PATH.resolve()}. "
+        "Remove the database file (jobs.db, including jobs.db-wal and jobs.db-shm) and restart the app; "
+        "it will be recreated. Note: jobs and settings are lost - back them up first if needed."
+    )
 
-        # The boolean "download_compatible_output" became the three-way
-        # "download_output_mode" when AV1 joined H.264/AAC as an output target.
-        # On meant "guarantee H.264/AAC" (now "universal"); off meant "pass the
-        # source through" (now "source"). Runs after the migration above, so an
-        # install still on "download_mp4_preset" upgrades in one start. No-op
-        # once migrated (the old row is dropped).
-        con.execute(
-            "INSERT OR IGNORE INTO settings (key, value) "
-            "SELECT 'download_output_mode', "
-            "       CASE WHEN LOWER(TRIM(value)) IN ('true', '1', 'yes', 'on') "
-            "            THEN 'universal' ELSE 'source' END "
-            "FROM settings WHERE key = 'download_compatible_output'"
-        )
-        con.execute("DELETE FROM settings WHERE key = 'download_compatible_output'")
 
-        # Jobs need a database row while they are being processed even when
-        # history is disabled. This per-job snapshot keeps that lifecycle
-        # intact and makes the setting forward-only. Existing jobs retain the
-        # historical behavior through the default of 1.
-        job_columns = {
-            str(row["name"])
-            for row in con.execute("PRAGMA table_info(jobs)").fetchall()
-        }
-        if "include_in_history" not in job_columns:
-            con.execute(
-                "ALTER TABLE jobs ADD COLUMN include_in_history "
-                "INTEGER NOT NULL DEFAULT 1 CHECK (include_in_history IN (0, 1))"
-            )
-        if "client_ip" not in job_columns:
-            # Added for the job detail page's requester tile (IP/ASN/country,
-            # resolved at render time via app/utils/geoip.py). NULL on jobs
-            # submitted before this column existed - the tile is simply
-            # omitted for those.
-            con.execute("ALTER TABLE jobs ADD COLUMN client_ip TEXT")
+def _is_unreadable_database(exc: sqlite3.DatabaseError) -> bool:
+    """True for "not a database"/corruption, not for locked, busy or I/O errors."""
+    if isinstance(exc, sqlite3.OperationalError):
+        return False
+    code = getattr(exc, "sqlite_errorcode", None)
+    if isinstance(code, int):
+        return (code & 0xFF) in _UNREADABLE_SQLITE_CODES
+    message = str(exc).lower()
+    return "file is not a database" in message or "malformed" in message
 
-        con.execute("CREATE INDEX IF NOT EXISTS idx_jobs_created_at_id ON jobs(created_at DESC, id DESC)")
-        con.execute(
-            "CREATE INDEX IF NOT EXISTS idx_jobs_history_created_at "
-            "ON jobs(created_at DESC, id DESC) WHERE include_in_history = 1"
-        )
-        con.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status_finished_at ON jobs(status, finished_at)")
-        con.execute("CREATE INDEX IF NOT EXISTS idx_jobs_status_created_at ON jobs(status, created_at DESC)")
-        con.execute(
-            "CREATE INDEX IF NOT EXISTS idx_jobs_audio_analysis "
-            "ON jobs(type, status, created_at) WHERE filename IS NOT NULL"
-        )
-        con.execute("CREATE INDEX IF NOT EXISTS idx_jobs_url_type_quality ON jobs(url, type, quality, created_at DESC)")
-        con.execute("CREATE INDEX IF NOT EXISTS idx_share_links_job_id ON share_links(job_id, created_at DESC)")
-        # Redundant with the composite indexes above: every query that filters
-        # `status` also constrains a column covered by (status, ...); retention
-        # and stats always filter `status` alongside `finished_at`; and no query
-        # touches `created_at` without also ordering by it. Dropped where an
-        # older database still carries them.
-        con.execute("DROP INDEX IF EXISTS idx_jobs_status")
-        con.execute("DROP INDEX IF EXISTS idx_jobs_finished_at")
-        con.execute("DROP INDEX IF EXISTS idx_jobs_created_at")
 
-        if schema_version != _SCHEMA_VERSION:
-            con.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
+def init_db() -> None:
+    """Create the schema on a fresh deployment and verify an existing one.
 
-        con.commit()
+    Every table and index is created with ``IF NOT EXISTS``. There is no
+    migration path: a database written by an older release is not upgraded and
+    raises :class:`DatabaseSchemaError` instead of failing later in SQL. A file
+    that is not a SQLite database or is corrupt raises it too; it is never
+    modified or removed automatically.
+    """
+    try:
+        with get_db() as con:
+            _configure_database(con)
+            # Verify before creating anything, so a rejected database is left untouched.
+            _verify_schema(con)
+            _create_tables(con)
+            _create_indexes(con)
+            con.commit()
+    except sqlite3.DatabaseError as exc:
+        if not _is_unreadable_database(exc):
+            raise
+        raise DatabaseSchemaError(
+            f"The database file is not a valid SQLite database ({exc}). {_remove_database_hint()}"
+        ) from exc
 
 
 def insert_job(
@@ -619,10 +689,44 @@ def insert_job(
     worker overwrites it with the ffprobe reading of the finished file.
 
     ``client_ip`` is the requester's IP as resolved by
-    ``app.common.rate_limit.get_rate_limit_ip`` at submission time (already
+    ``app.auth.rate_limit.get_rate_limit_ip`` at submission time (already
     proxy-aware); stored as-is and never updated afterwards. Country/ASN are
     not persisted - they are resolved from this address at render time via
     ``app.utils.geoip``.
+    """
+    _insert_job_row(
+        job_id,
+        url,
+        job_type,
+        quality,
+        status,
+        video_title=video_title,
+        video_meta_hover=video_meta_hover,
+        duration_seconds=duration_seconds,
+        include_in_history=include_in_history,
+        client_ip=client_ip,
+    )
+
+
+def _insert_job_row(
+    job_id: str,
+    url: str,
+    job_type: str,
+    quality: str,
+    status: str,
+    *,
+    video_title: str | None,
+    video_meta_hover: str | None,
+    duration_seconds: float | None,
+    include_in_history: bool,
+    client_ip: str | None,
+    unless_duplicate: bool = False,
+) -> sqlite3.Row | None:
+    """Insert one job row; with *unless_duplicate*, check and insert atomically.
+
+    The duplicate lookup and the INSERT share one ``BEGIN IMMEDIATE`` write
+    transaction, so two concurrent submitters cannot both pass the check. Returns
+    the blocking job when the insert was skipped, otherwise ``None``.
     """
     _validate_status(status)
     # The column's CHECK constraint rejects negatives, and an unusable reading
@@ -631,6 +735,12 @@ def insert_job(
     if duration is None or duration <= 0:
         duration = None
     with get_db() as con:
+        if unless_duplicate:
+            con.execute("BEGIN IMMEDIATE")
+            existing = _find_active_duplicate(con, url, job_type, quality)
+            if existing is not None:
+                con.rollback()
+                return existing
         con.execute(
             """
             INSERT INTO jobs (
@@ -653,12 +763,50 @@ def insert_job(
             ),
         )
         con.commit()
+    return None
 
 
-def update_job(job_id: str, **fields: Any) -> bool:
-    if not fields:
-        return False
+def insert_job_unless_active_duplicate(
+    job_id: str,
+    url: str,
+    job_type: str,
+    quality: str,
+    status: str,
+    *,
+    allow_duplicate: bool = False,
+    video_title: str | None = None,
+    video_meta_hover: str | None = None,
+    duration_seconds: float | None = None,
+    include_in_history: bool = True,
+    client_ip: str | None = None,
+) -> sqlite3.Row | None:
+    """Insert a job unless an equivalent one is already active or finished.
 
+    Returns ``None`` when the row was inserted, or the existing job (see
+    :func:`find_active_job_for_submission`) when the insert was refused.
+    ``allow_duplicate`` skips the check, for an explicitly confirmed duplicate.
+    """
+    return _insert_job_row(
+        job_id,
+        url,
+        job_type,
+        quality,
+        status,
+        video_title=video_title,
+        video_meta_hover=video_meta_hover,
+        duration_seconds=duration_seconds,
+        include_in_history=include_in_history,
+        client_ip=client_ip,
+        unless_duplicate=not allow_duplicate,
+    )
+
+
+def _job_assignments(fields: dict[str, Any]) -> tuple[str, list[Any]]:
+    """Validate *fields* and return the ``SET`` clause with its bound values.
+
+    Column names are allow-listed here, which is what makes it safe to put
+    them into the SQL text; values always stay bound.
+    """
     unknown_fields = set(fields) - _UPDATEABLE_COLUMNS
     if unknown_fields:
         raise ValueError(f"Unknown fields: {sorted(unknown_fields)}")
@@ -666,12 +814,20 @@ def update_job(job_id: str, **fields: Any) -> bool:
         raise ValueError("Invalid column name")
     if "status" in fields:
         _validate_status(fields["status"])
+    return ", ".join(f"{k}=?" for k in fields), list(fields.values())
 
-    keys = ", ".join(f"{k}=?" for k in fields)
-    values = [*fields.values(), job_id]
+
+def update_job(job_id: str, **fields: Any) -> bool:
+    if not fields:
+        return False
+
+    keys, values = _job_assignments(fields)
 
     with get_db() as con:
-        cursor = con.execute(f"UPDATE jobs SET {keys} WHERE id=?", values)  # noqa: S608  # identifiers are allow-listed above; values stay bound
+        cursor = con.execute(
+            f"UPDATE jobs SET {keys} WHERE id=?",  # noqa: S608  # identifiers are allow-listed above; values stay bound
+            (*values, job_id),
+        )
         con.commit()
         return cursor.rowcount == 1
 
@@ -682,23 +838,13 @@ def update_job_if_status(job_id: str, expected_statuses: tuple[str, ...], **fiel
     if not fields:
         return False
 
-    unknown_fields = set(fields) - _UPDATEABLE_COLUMNS
-    if unknown_fields:
-        raise ValueError(f"Unknown fields: {sorted(unknown_fields)}")
-    if not all(column.isidentifier() for column in fields):
-        raise ValueError("Invalid column name")
-    safe_fields = fields
-    if "status" in safe_fields:
-        _validate_status(safe_fields["status"])
-
-    keys = ", ".join(f"{k}=?" for k in safe_fields)
+    keys, values = _job_assignments(fields)
     placeholders = _in_placeholders(expected_statuses)
-    values = [*safe_fields.values(), job_id, *expected_statuses]
 
     with get_db() as con:
         cursor = con.execute(
             f"UPDATE jobs SET {keys} WHERE id=? AND status IN ({placeholders})",  # noqa: S608  # identifiers are allow-listed above; values stay bound
-            values,
+            (*values, job_id, *expected_statuses),
         )
         con.commit()
         return bool(cursor.rowcount)
@@ -812,7 +958,7 @@ def claim_next_queued_job() -> sqlite3.Row | None:
 
 def cancel_interrupted_jobs() -> int:
     """Mark stale in-flight jobs as cancelled after an application restart."""
-    placeholders = _in_placeholders(_RECOVERABLE_IN_FLIGHT_STATUSES)
+    placeholders = _in_placeholders(WORKER_OWNED_STATUSES)
     message = "Cancelled because the application restarted during processing"
     finished_at = utc_timestamp()
 
@@ -825,7 +971,7 @@ def cancel_interrupted_jobs() -> int:
                 finished_at=?
             WHERE status IN ({placeholders})
             """,  # noqa: S608  # identifiers are allow-listed above; values stay bound
-            ("cancelled", message, finished_at, *_RECOVERABLE_IN_FLIGHT_STATUSES),
+            ("cancelled", message, finished_at, *WORKER_OWNED_STATUSES),
         )
         con.commit()
         return max(cursor.rowcount, 0)
@@ -833,9 +979,7 @@ def cancel_interrupted_jobs() -> int:
 
 def get_job(job_id: str) -> sqlite3.Row | None:
     with get_db() as con:
-        return con.execute(
-            "SELECT * FROM jobs WHERE id=?", (job_id,)
-        ).fetchone()
+        return con.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
 
 
 def find_active_job_for_submission(url: str, job_type: str, quality: str) -> sqlite3.Row | None:
@@ -847,15 +991,20 @@ def find_active_job_for_submission(url: str, job_type: str, quality: str) -> sql
     gets flagged as a duplicate.
     """
     with get_db() as con:
-        return con.execute(
-            """
-            SELECT * FROM jobs
-            WHERE url = ? AND type = ? AND quality = ? AND status NOT IN ('error', 'cancelled')
-            ORDER BY created_at DESC, id DESC
-            LIMIT 1
-            """,
-            (url, job_type, quality),
-        ).fetchone()
+        return _find_active_duplicate(con, url, job_type, quality)
+
+
+def _find_active_duplicate(con: sqlite3.Connection, url: str, job_type: str, quality: str) -> sqlite3.Row | None:
+    retryable = tuple(sorted(RETRYABLE_JOB_STATUSES))
+    return con.execute(
+        f"""
+        SELECT * FROM jobs
+        WHERE url = ? AND type = ? AND quality = ? AND status NOT IN ({_in_placeholders(retryable)})
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1
+        """,  # noqa: S608  # identifiers are allow-listed above; values stay bound
+        (url, job_type, quality, *retryable),
+    ).fetchone()
 
 
 def create_share_link(job_id: str, max_uses: int) -> str:
@@ -870,6 +1019,7 @@ def create_share_link(job_id: str, max_uses: int) -> str:
         raise ValueError("max_uses must be a non-negative integer")
 
     with get_db() as con:
+        con.execute("BEGIN IMMEDIATE")
         existing = con.execute(
             """
             SELECT token FROM share_links
@@ -906,9 +1056,7 @@ def create_share_link(job_id: str, max_uses: int) -> str:
 
 def get_share_link(token: str) -> sqlite3.Row | None:
     with get_db() as con:
-        return con.execute(
-            "SELECT * FROM share_links WHERE token = ?", (token,)
-        ).fetchone()
+        return con.execute("SELECT * FROM share_links WHERE token = ?", (token,)).fetchone()
 
 
 def consume_share_link(token: str) -> bool:
@@ -944,7 +1092,7 @@ def delete_share_links_for_jobs(job_ids: list[str]) -> int:
     deleted = 0
     with get_db() as con:
         for start in range(0, len(job_ids), _DELETE_BATCH_SIZE):
-            batch = job_ids[start:start + _DELETE_BATCH_SIZE]
+            batch = job_ids[start : start + _DELETE_BATCH_SIZE]
             placeholders = ",".join("?" * len(batch))
             cursor = con.execute(
                 f"DELETE FROM share_links WHERE job_id IN ({placeholders})",  # noqa: S608  # identifiers are allow-listed above; values stay bound
@@ -962,8 +1110,14 @@ def list_job_ids() -> list[str]:
     return [str(row["id"]) for row in rows]
 
 
-def delete_jobs_and_share_links(job_ids: list[str]) -> tuple[int, int]:
+def delete_jobs_and_share_links(job_ids: list[str], *, terminal_only: bool = True) -> tuple[list[str], int]:
     """Delete selected jobs and invalidate their share links atomically.
+
+    Return ``(deleted_ids, links_deleted)``. With ``terminal_only`` (default) a
+    job that is no longer terminal - for example one retried after the caller
+    selected it - is skipped and keeps its row and share links; only the IDs
+    actually deleted are returned. ``terminal_only=False`` is for an explicit
+    bulk removal that has already cancelled the workers.
 
     The explicit link deletion supports databases created before the foreign-key
     cascade was added. Callers clean the corresponding filesystem artifacts
@@ -971,27 +1125,33 @@ def delete_jobs_and_share_links(job_ids: list[str]) -> tuple[int, int]:
     records and their links intact for a safe retry.
     """
     if not job_ids:
-        return (0, 0)
+        return ([], 0)
 
     job_ids = list(dict.fromkeys(job_ids))
-    jobs_deleted = 0
+    statuses = tuple(sorted(TERMINAL_JOB_STATUSES))
+    status_clause = f" AND status IN ({_in_placeholders(statuses)})" if terminal_only else ""
+    status_params: tuple[Any, ...] = statuses if terminal_only else ()
+    deleted_ids: list[str] = []
     links_deleted = 0
     with get_db() as con:
         for start in range(0, len(job_ids), _DELETE_BATCH_SIZE):
-            batch = job_ids[start:start + _DELETE_BATCH_SIZE]
+            batch = tuple(job_ids[start : start + _DELETE_BATCH_SIZE])
             placeholders = ",".join("?" * len(batch))
+            # The first write takes the write lock, so the status cannot change
+            # between the link delete and the job delete below.
+            owned_ids = f"SELECT id FROM jobs WHERE id IN ({placeholders}){status_clause}"  # noqa: S608  # identifiers are allow-listed above; values stay bound
             links_cursor = con.execute(
-                f"DELETE FROM share_links WHERE job_id IN ({placeholders})",  # noqa: S608  # identifiers are allow-listed above; values stay bound
-                tuple(batch),
+                f"DELETE FROM share_links WHERE job_id IN ({owned_ids})",  # noqa: S608  # identifiers are allow-listed above; values stay bound
+                (*batch, *status_params),
             )
-            jobs_cursor = con.execute(
-                f"DELETE FROM jobs WHERE id IN ({placeholders})",  # noqa: S608  # identifiers are allow-listed above; values stay bound
-                tuple(batch),
-            )
+            rows = con.execute(
+                f"DELETE FROM jobs WHERE id IN ({placeholders}){status_clause} RETURNING id",  # noqa: S608  # identifiers are allow-listed above; values stay bound
+                (*batch, *status_params),
+            ).fetchall()
             links_deleted += max(links_cursor.rowcount, 0)
-            jobs_deleted += max(jobs_cursor.rowcount, 0)
+            deleted_ids.extend(str(row["id"]) for row in rows)
         con.commit()
-    return (jobs_deleted, links_deleted)
+    return (deleted_ids, links_deleted)
 
 
 def job_exists(job_id: str) -> bool:
@@ -1031,13 +1191,31 @@ def paginate_jobs(limit: int = 50, offset: int = 0) -> list[sqlite3.Row]:
         ).fetchall()
 
 
+def list_active_jobs(limit: int = 50) -> list[sqlite3.Row]:
+    """Non-terminal jobs, newest first, regardless of ``include_in_history``.
+
+    Lets a reloaded dashboard find a running job even when job history was
+    disabled at submission and paginate_jobs() therefore skips it.
+    """
+    limit = _validate_limit(limit)
+    statuses = tuple(sorted(ACTIVE_JOB_STATUSES))
+    with get_db() as con:
+        return con.execute(
+            f"""
+            SELECT * FROM jobs
+            WHERE status IN ({_in_placeholders(statuses)})
+            ORDER BY created_at DESC, id DESC
+            LIMIT ?
+            """,  # noqa: S608  # placeholders only; status values stay bound
+            (*statuses, limit),
+        ).fetchall()
+
+
 def get_stats() -> dict[str, int | float]:
     """Aggregated KPIs for jobs that reached a completed state."""
     placeholders = _in_placeholders(COMPLETED_STATUSES)
     with get_db() as con:
-        reset_row = con.execute(
-            "SELECT value FROM settings WHERE key='statistics_reset_at'"
-        ).fetchone()
+        reset_row = con.execute("SELECT value FROM settings WHERE key='statistics_reset_at'").fetchone()
         reset_at = str(reset_row["value"] or "").strip() if reset_row else ""
         reset_clause = ""
         query_params: tuple[Any, ...] = tuple(COMPLETED_STATUSES)
@@ -1050,7 +1228,8 @@ def get_stats() -> dict[str, int | float]:
             reset_clause = " AND finished_at > datetime(?)"
             query_params += (reset_at,)
 
-        row = con.execute(f"""
+        row = con.execute(
+            f"""
             SELECT
                 COUNT(*)                        AS total_jobs,
                 COALESCE(SUM(duration_seconds) / 60, 0) AS total_minutes,
@@ -1062,7 +1241,9 @@ def get_stats() -> dict[str, int | float]:
             FROM jobs
             WHERE status IN ({placeholders})
               {reset_clause}
-        """, query_params).fetchone()  # noqa: S608  # identifiers are allow-listed above; values stay bound
+        """,  # noqa: S608 - identifiers are allow-listed above; values stay bound
+            query_params,
+        ).fetchone()
 
     return {
         "total_jobs": row["total_jobs"] or 0,
@@ -1072,6 +1253,14 @@ def get_stats() -> dict[str, int | float]:
     }
 
 
+def _validate_keep_days(keep_days: int) -> int:
+    if isinstance(keep_days, bool) or not isinstance(keep_days, int):
+        raise TypeError("keep_days must be a non-negative integer")
+    if keep_days < 0:
+        raise ValueError("keep_days must be non-negative")
+    return keep_days
+
+
 def list_expired_job_ids(keep_days: int) -> list[str]:
     """Return terminal job IDs whose retention window has elapsed.
 
@@ -1079,11 +1268,7 @@ def list_expired_job_ids(keep_days: int) -> list[str]:
     for the housekeeping sweep, which deletes the DB rows outright; this is
     kept for callers that only need to inspect what would expire.
     """
-    if isinstance(keep_days, bool) or not isinstance(keep_days, int):
-        raise TypeError("keep_days must be a non-negative integer")
-    if keep_days < 0:
-        raise ValueError("keep_days must be non-negative")
-    if keep_days == 0:
+    if _validate_keep_days(keep_days) == 0:
         return []
 
     statuses = tuple(sorted(TERMINAL_JOB_STATUSES))
@@ -1105,19 +1290,14 @@ def list_expired_job_ids(keep_days: int) -> list[str]:
 def purge_old_jobs(keep_days: int, *, batch_size: int = _MAX_QUERY_LIMIT) -> list[str]:
     """Delete terminal jobs older than *keep_days*, in bounded batches.
 
-    Returns deleted IDs so callers can clean up filesystem artifacts. Fresh
-    databases cascade the delete to share_links; older ones rely on the caller
-    also invoking delete_share_links_for_jobs().
+    Return deleted IDs for filesystem cleanup. Fresh databases cascade the
+    delete to share_links; older ones rely on the caller also invoking
+    delete_share_links_for_jobs().
 
-    Wired into the housekeeping sweep in main.py (_run_housekeeping_once),
-    which is the single caller responsible for treating keep_days == 0 as
-    "unlimited retention" and skipping the sweep - this function has no such
-    special case and will happily purge every terminal job for keep_days == 0.
+    A retention of zero keeps every job, matching list_expired_job_ids().
     """
-    if isinstance(keep_days, bool) or not isinstance(keep_days, int):
-        raise TypeError("keep_days must be a non-negative integer")
-    if keep_days < 0:
-        raise ValueError("keep_days must be non-negative")
+    if _validate_keep_days(keep_days) == 0:
+        return []
     batch_size = _validate_limit(batch_size)
 
     statuses = tuple(sorted(TERMINAL_JOB_STATUSES))

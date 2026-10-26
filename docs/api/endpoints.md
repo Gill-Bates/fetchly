@@ -51,7 +51,10 @@ Form-encoded, CSRF-protected. 10/minute. Like every other mutating route under
 | `confirm_duplicate` | `true` to accept a duplicate |
 
 Returns the created job. `409` with `{"detail": "duplicate_job", "existing_job": {...}}`
-when an active or completed job already matches. `503` when the queue is full.
+when an active or completed job already matches; the check and the insert are one
+atomic database step, so parallel submits of the same link create only one job (unless
+`confirm_duplicate` is `true`). `503` when the queue is full or memory headroom is low;
+that check runs before the metadata probe, so a rejected submit does no lookup work.
 
 The metadata probe runs with an 8 s budget and fills `video_title` and
 `duration_seconds` on the new row, so the job carries a title and a length before the
@@ -111,7 +114,8 @@ shows while the retry runs.
 | `GET /api/jobs/{job_id}/events` | 30/min | One job |
 
 `text/event-stream`, keep-alive every 5 s, 32-event queue per client, 200 concurrent
-connections maximum.
+connections maximum. The limit is reserved before the stream starts, so parallel
+connects cannot exceed it; further requests get `503`.
 
 ## Media
 
@@ -125,7 +129,8 @@ connections maximum.
 | `GET /api/thumbnail-proxy` | 30/min | Proxy a remote thumbnail |
 
 Thumbnail routes validate the content type against the actual bytes, and only fetch
-from allow-listed hosts.
+from allow-listed hosts. The `yt-dlp` fallback of `/api/thumbnail/resolve` runs at most
+two processes at once; when both are busy the endpoint answers `503` with `Retry-After`.
 
 ## Trimming
 
@@ -221,7 +226,7 @@ Writable keys: `retention_days`, `enable_job_history`, `download_auto_start`, `e
 | `GET /api/stats` | 30/min | Aggregate dashboard counters (short-TTL cache) |
 | `POST /api/stats/reset` | 5/min | Stamp a reset marker; job history is kept |
 | `GET /api/stats/bpm-clusters` | 30/min | `limit` 1–2000; 5-BPM buckets, count-sorted |
-| `GET /api/updates` | 30/min | Version check for fetchly and bundled components (24 h cache) |
+| `GET /api/updates` | 30/min | Version check for fetchly and bundled components (24 h cache, 15 min after a failed lookup) |
 | `GET /api/system/host` | 60/min | Host storage, CPU, RAM, uptime |
 
 ## Error shape

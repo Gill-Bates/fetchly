@@ -13,8 +13,6 @@ class MobileSettingsLayoutTests(unittest.TestCase):
         stylesheet = Path(__file__).resolve().parents[1] / "app" / "static" / "style.css"
 
         self.assertIn(
-            "    .app-root--settings .app-main {\n"
-            "        padding-bottom: var(--space-6);\n"
-            "    }",
+            "    .app-root--settings .app-main {\n        padding-bottom: var(--space-6);\n    }",
             stylesheet.read_text(),
         )

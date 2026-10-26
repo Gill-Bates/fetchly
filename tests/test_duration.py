@@ -14,7 +14,7 @@ from unittest.mock import patch
 from app import db
 from app.routes.trim import _duration_validation_error
 from app.utils.duration import format_seconds, round_seconds
-from app.worker import _probe_media
+from app.workers.worker import _probe_media
 
 
 class DurationRoundingTests(unittest.TestCase):
@@ -35,11 +35,13 @@ class DurationRoundingTests(unittest.TestCase):
 
 class DurationPipelineTests(unittest.TestCase):
     def test_probe_preserves_one_decimal_duration(self) -> None:
-        payload = json.dumps({
-            "format": {"duration": "213.44", "bit_rate": "128000"},
-            "streams": [{"codec_type": "audio", "codec_name": "opus"}],
-        })
-        with patch("app.worker._run_cmd", return_value=payload):
+        payload = json.dumps(
+            {
+                "format": {"duration": "213.44", "bit_rate": "128000"},
+                "streams": [{"codec_type": "audio", "codec_name": "opus"}],
+            }
+        )
+        with patch("app.workers.worker._run_cmd", return_value=payload):
             codec, bitrate_kbps, duration_seconds = _probe_media(Path("track.opus"), "audio")
 
         self.assertEqual(codec, "opus")

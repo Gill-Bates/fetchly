@@ -45,9 +45,7 @@ class RenderChangelogTests(unittest.TestCase):
     def test_missing_file_returns_placeholder(self):
         with patch.object(changelog, "_CHANGELOG_PATH") as fake_path:
             fake_path.read_text.side_effect = FileNotFoundError
-            self.assertEqual(
-                changelog.render_changelog_html(), "<p>Changelog not found.</p>"
-            )
+            self.assertEqual(changelog.render_changelog_html(), "<p>Changelog not found.</p>")
 
     def test_render_failure_is_swallowed(self):
         with patch.object(changelog, "render_changelog_html", side_effect=RuntimeError("boom")):

@@ -23,7 +23,7 @@ class AuthFlowTests(WebAppTestCase):
         which would make this test sleep; the token minted here is the exact
         one the app would hand out after a successful sign-in.
         """
-        from app.session import SESSION_COOKIE, create_session
+        from app.auth.session import SESSION_COOKIE, create_session
 
         self.client.cookies.set(SESSION_COOKIE, create_session(username))
 
@@ -78,9 +78,7 @@ class AuthFlowTests(WebAppTestCase):
         # Enabling logged the caller out, so changing anything now needs a
         # session again.
         self._sign_in_as("alice")
-        self.assertEqual(
-            self._post_settings({"enable_authentication": False}).status_code, 200
-        )
+        self.assertEqual(self._post_settings({"enable_authentication": False}).status_code, 200)
 
         settings = db.get_settings(include_internal=True)
         self.assertFalse(settings["enable_authentication"])
@@ -93,15 +91,35 @@ class AuthFlowTests(WebAppTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(db.get_settings()["enable_authentication"])
 
+    def test_cookie_issued_before_auth_off_on_cycle_stays_invalid(self):
+        from app.auth.session import create_session, validate_session
+
+        self._post_settings(
+            {
+                "admin_username": "alice",
+                "admin_password": "correct-horse",
+                "enable_authentication": True,
+            }
+        )
+        old_token = create_session("alice")
+        self.assertEqual(validate_session(old_token), "alice")
+
+        self._sign_in_as("alice")
+        self.assertEqual(self._post_settings({"enable_authentication": False}).status_code, 200)
+        response = self._post_settings({"enable_authentication": True})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["redirect"], "/login")
+
+        self.assertIsNone(validate_session(old_token))
+        self.assertEqual(validate_session(create_session("alice")), "alice")
+
     def test_password_without_username_is_refused(self):
         response = self._post_settings({"admin_password": "correct-horse"})
         self.assertEqual(response.status_code, 400)
         self.assertIn("Username", response.json()["detail"])
 
     def test_weak_password_is_refused(self):
-        response = self._post_settings(
-            {"admin_username": "alice", "admin_password": "short"}
-        )
+        response = self._post_settings({"admin_username": "alice", "admin_password": "short"})
         self.assertEqual(response.status_code, 400)
         self.assertIn("at least 8", response.json()["detail"])
 
@@ -111,7 +129,7 @@ class AuthFlowTests(WebAppTestCase):
         POSTing /logout with a made-up fetchly_session value (CSRF protection
         does not stop this, since it only blocks other origins).
         """
-        from app.session import create_session, validate_session
+        from app.auth.session import create_session, validate_session
 
         self._post_settings(
             {
@@ -124,9 +142,7 @@ class AuthFlowTests(WebAppTestCase):
         self.assertEqual(validate_session(real_token), "alice")
 
         self.client.cookies.set("fetchly_session", "garbage-not-a-real-token")
-        response = self.client.post(
-            "/logout", headers={"X-CSRF-Token": self._csrf()}
-        )
+        response = self.client.post("/logout", headers={"X-CSRF-Token": self._csrf()})
         self.assertEqual(response.status_code, 303)
 
         # The real admin's independently-issued session must still validate:

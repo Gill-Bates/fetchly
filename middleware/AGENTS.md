@@ -84,7 +84,7 @@ app.add_middleware(
 
 ---
 
-**Last Updated:** 2026-09-21  
+**Last Updated:** 2026-10-26  
 **Standard:** Double-Submit Cookie Pattern  
 **Cookie:** `SameSite` set, `Secure` when behind HTTPS, `HttpOnly` deliberately off  
 **Scope:** `/login`, `/logout`, `/api` prefixes

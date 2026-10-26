@@ -32,7 +32,7 @@ from typing import Final
 
 from .fs import get_data_dir
 from .public_url import normalize_public_hostname
-from .watermark_logo import custom_logo_path, logo_status
+from .watermark_logo import inspect_custom_logo
 
 logger = logging.getLogger(__name__)
 
@@ -53,9 +53,9 @@ _LOGO_PNG: Final[Path] = Path(__file__).parent.parent / "static" / "img" / "fetc
 # rasterizes the default instance (wght 400, wdth 100, opsz 14).
 _FONT_TTF: Final[Path] = Path(__file__).parent.parent / "static" / "fonts" / "roboto-flex.ttf"
 
-# Cached badges live outside the per-job directories: housekeeping only sweeps
-# UUID-named folders (app/utils/housekeeping.py::cleanup_orphaned_directories),
-# so this one is left alone.
+# Cached badges live outside the per-job directories: the orphan sweep only
+# touches UUID-named folders, and housekeeping.cleanup_watermark_cache expires
+# old badges by age.
 _CACHE_DIRNAME: Final[str] = "watermark-cache"
 
 # Bumped whenever the badge layout changes, so upgraded installs re-render
@@ -137,7 +137,8 @@ def _font_file() -> str:
     if _FONT_TTF.is_file():
         return str(_FONT_TTF)
     logger.warning(
-        "Watermark font missing at %s; the instance hostname will be omitted.", _FONT_TTF
+        "Watermark font missing at %s; the instance hostname will be omitted.",
+        _FONT_TTF,
     )
     return ""
 
@@ -229,12 +230,13 @@ def _badge_filtergraph(geometry: _Geometry, text: str, font_file: str) -> str:
     """
     offset = geometry.shadow_offset
     chain = [
-        (f"[1:v]scale={geometry.logo_width}:{geometry.logo_height}:flags=lanczos,"
-        "format=rgba,split=2[lg][sh]"),
+        (f"[1:v]scale={geometry.logo_width}:{geometry.logo_height}:flags=lanczos,format=rgba,split=2[lg][sh]"),
         # Shadow = the logo alpha, blacked out and Gaussian-blurred so it reads
         # as soft, not as a second outline.
-        (f"[sh]colorchannelmixer=rr=0:gg=0:bb=0:aa={_SHADOW_ALPHA},"
-        f"gblur=sigma={geometry.shadow_blur:.2f}:steps=1[shadow]"),
+        (
+            f"[sh]colorchannelmixer=rr=0:gg=0:bb=0:aa={_SHADOW_ALPHA},"
+            f"gblur=sigma={geometry.shadow_blur:.2f}:steps=1[shadow]"
+        ),
         f"[lg]colorchannelmixer=aa={_LOGO_ALPHA}[logo]",
         f"[0:v][shadow]overlay={geometry.logo_x + offset}:{offset}[bg]",
         f"[bg][logo]overlay={geometry.logo_x}:0" + ("[out]" if text else ""),
@@ -292,14 +294,10 @@ def _resolve_logo() -> _Logo | None:
     artwork is always there. The same applies to a snapshot that cannot be
     written - see :class:`_Logo` for why the custom logo is copied at all.
     """
-    status = logo_status()
-    if status.custom and status.height > 0:
-        try:
-            logo_bytes = custom_logo_path().read_bytes()
-        except OSError as exc:
-            logger.warning("Could not read the custom logo for rendering: %s; falling back", exc)
-            return _bundled_logo()
-
+    inspected = inspect_custom_logo()
+    if inspected is not None and inspected[1].height > 0:
+        logo_bytes, status = inspected
+        # Everything below derives from these bytes; the live file is not read again.
         snapshot = get_data_dir() / _CACHE_DIRNAME / f"snapshot.{uuid.uuid4().hex[:8]}.png"
         try:
             snapshot.parent.mkdir(parents=True, exist_ok=True)
@@ -397,7 +395,11 @@ def build_watermark(
             try:
                 directory.mkdir(parents=True, exist_ok=True)
                 _render_badge(badge, geometry, text, font_file, logo.path)
-            except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as exc:
+            except (
+                subprocess.CalledProcessError,
+                subprocess.TimeoutExpired,
+                OSError,
+            ) as exc:
                 stderr = getattr(exc, "stderr", b"") or b""
                 logger.warning(
                     "Could not render the video watermark: %s %s",
@@ -434,10 +436,7 @@ def video_filter_args(watermark: VideoWatermark | None, *, scale: str = "") -> l
         main = "[0:v]"
     # format=yuv420p after the blend: the badge's RGBA alpha would otherwise
     # reach the encoder and produce a file some players reject.
-    stages.append(
-        f"{main}[1:v]overlay=W-w-{watermark.margin}:H-h-{watermark.margin}:format=auto,"
-        "format=yuv420p[v]"
-    )
+    stages.append(f"{main}[1:v]overlay=W-w-{watermark.margin}:H-h-{watermark.margin}:format=auto,format=yuv420p[v]")
     return [
         "-filter_complex",
         ";".join(stages),

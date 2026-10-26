@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 #
-# app/utils/cookie_import.py
+# app/utils/cookie_import.py  # noqa: ERA001
 # Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 #
 
@@ -61,21 +61,24 @@ _MAX_COOKIES: Final = 512
 
 # The request's own URL, as each "Copy as ..." flavour writes it.
 _REQUEST_URL_PATTERNS: Final = (
-    re.compile(r"""(?:--url|-Uri)\s+(['"])(?P<url>https?://[^'"\s]+)\1""", re.I),
-    re.compile(r"""fetch\(\s*(['"])(?P<url>https?://[^'"\s]+)\1""", re.I),
-    re.compile(r"""^\s*curl\s+(['"])(?P<url>https?://[^'"\s]+)\1""", re.I),
+    re.compile(r"""(?:--url|-Uri)\s+(['"])(?P<url>https?://[^'"\s]+)\1""", re.IGNORECASE),
+    re.compile(r"""fetch\(\s*(['"])(?P<url>https?://[^'"\s]+)\1""", re.IGNORECASE),
+    re.compile(r"""^\s*curl\s+(['"])(?P<url>https?://[^'"\s]+)\1""", re.IGNORECASE),
 )
 
 _CURL_COOKIE_PATTERNS: Final = (
-    re.compile(r"""(?:-H|--header)\s+(['"])\s*cookie\s*:\s*(?P<value>.*?)\1""", re.I | re.S),
-    re.compile(r"""(['"])cookie\1\s*[:=]\s*(['"])(?P<value>.*?)\2""", re.I | re.S),
-    re.compile(r"""(?:-b|--cookie)\s+(['"])(?P<value>.*?)\1""", re.S),
+    re.compile(
+        r"""(?:-H|--header)\s+(['"])\s*cookie\s*:\s*(?P<value>.*?)\1""",
+        re.IGNORECASE | re.DOTALL,
+    ),
+    re.compile(r"""(['"])cookie\1\s*[:=]\s*(['"])(?P<value>.*?)\2""", re.IGNORECASE | re.DOTALL),
+    re.compile(r"""(?:-b|--cookie)\s+(['"])(?P<value>.*?)\1""", re.DOTALL),
 )
 
 
 # A copied command from the Network tab. Detected so a cookie-less request
 # gets a different error from something that is not a request at all.
-_COPIED_COMMAND_RE: Final = re.compile(r"^\s*(?:curl\b|fetch\s*\(|Invoke-WebRequest\b|\$session\b)", re.I)
+_COPIED_COMMAND_RE: Final = re.compile(r"^\s*(?:curl\b|fetch\s*\(|Invoke-WebRequest\b|\$session\b)", re.IGNORECASE)
 
 
 def _unescape_copied_command(text: str) -> str:
@@ -85,13 +88,13 @@ def _unescape_copied_command(text: str) -> str:
     trailing caret; PowerShell uses backticks. Without undoing them the
     extractor finds no header and stores a mangled jar.
     """
-    if "^\"" in text:
+    if '^"' in text:
         # cmd.exe escapes with ^, so ^^ is a literal caret and a trailing ^
         # joins the next line.
         text = re.sub(r"\^\r?\n\s*", " ", text)
-        return re.sub(r"\^(.)", r"\1", text, flags=re.S)
+        return re.sub(r"\^(.)", r"\1", text, flags=re.DOTALL)
 
-    if "`\"" in text:
+    if '`"' in text:
         text = re.sub(r"`\r?\n\s*", " ", text)
         return text.replace('`"', '"').replace("``", "`")
 
@@ -102,7 +105,7 @@ def _unescape_copied_command(text: str) -> str:
 # (name, value, path, domain) order rather than building a header.
 _POWERSHELL_COOKIE_RE: Final = re.compile(
     r"""New-Object\s+System\.Net\.Cookie\(\s*"([^"]*)"\s*,\s*"([^"]*)"\s*,\s*"([^"]*)"\s*,\s*"([^"]*)"\s*\)""",
-    re.I,
+    re.IGNORECASE,
 )
 
 
@@ -141,9 +144,7 @@ def missing_session_cookie_hint(platform: str) -> str:
     )
 
 
-def _netscape_line(
-    *, domain: str, path: str, secure: bool, expires: int, name: str, value: str
-) -> str:
+def _netscape_line(*, domain: str, path: str, secure: bool, expires: int, name: str, value: str) -> str:
     include_subdomains = "TRUE" if domain.startswith(".") else "FALSE"
     return "\t".join(
         (
@@ -194,7 +195,7 @@ def _passthrough_netscape(text: str, platform: str) -> tuple[str, tuple[str, ...
     names: list[str] = []
     seen_entry = False
     for raw_line in text.splitlines():
-        line = raw_line[len(_HTTPONLY_PREFIX) :] if raw_line.startswith(_HTTPONLY_PREFIX) else raw_line
+        line = raw_line.removeprefix(_HTTPONLY_PREFIX)
         stripped = line.strip()
         if not stripped or stripped.startswith("#"):
             continue
@@ -258,7 +259,7 @@ def _cookie_header_from_curl(text: str) -> str | None:
 
 def _pairs_from_header(header: str) -> list[tuple[str, str]]:
     """Split a ``name=value; name2=value2`` header into its pairs."""
-    cleaned = re.sub(r"^\s*cookie\s*:\s*", "", header, flags=re.I)
+    cleaned = re.sub(r"^\s*cookie\s*:\s*", "", header, flags=re.IGNORECASE)
     pairs: list[tuple[str, str]] = []
     for chunk in cleaned.split(";"):
         item = chunk.strip()
@@ -275,10 +276,7 @@ def _pairs_from_header(header: str) -> list[tuple[str, str]]:
 def _from_header(header: str, platform: str, source_format: str) -> CookieImport:
     pairs = _pairs_from_header(header)
     if not pairs:
-        raise CookieImportError(
-            "No cookies found. Expected the cookie request header, e.g. "
-            "'SID=abc; HSID=def'."
-        )
+        raise CookieImportError("No cookies found. Expected the cookie request header, e.g. 'SID=abc; HSID=def'.")
     if len(pairs) > _MAX_COOKIES:
         raise CookieImportError("Too many cookies in one paste")
 
@@ -287,10 +285,7 @@ def _from_header(header: str, platform: str, source_format: str) -> CookieImport
         raise CookieImportError("Unknown platform")
 
     lines = [
-        _netscape_line(
-            domain=domain, path="/", secure=True, expires=0, name=name, value=value
-        )
-        for name, value in pairs
+        _netscape_line(domain=domain, path="/", secure=True, expires=0, name=name, value=value) for name, value in pairs
     ]
     return CookieImport(
         netscape=_NETSCAPE_HEADER + "\n".join(lines) + "\n",
@@ -304,8 +299,6 @@ def _from_powershell(text: str, platform: str) -> CookieImport | None:
     matches = _POWERSHELL_COOKIE_RE.findall(text)
     if not matches:
         return None
-    if len(matches) > _MAX_COOKIES:
-        raise CookieImportError("Too many cookies in one paste")
 
     fallback_domain = PLATFORM_PRIMARY_DOMAIN.get(platform, "")
     if not fallback_domain:
@@ -315,15 +308,23 @@ def _from_powershell(text: str, platform: str) -> CookieImport | None:
     names: list[str] = []
     seen_entry = False
     for name, value, path, domain in matches:
-        if not _is_writable(name, value):
+        # The regex lets quoted fields span lines, so path and domain need the
+        # same tab/newline check as name and value before reaching the jar.
+        normalized_path = path.strip() or "/"
+        normalized_domain = domain.strip() or fallback_domain
+        if not (
+            _is_writable(name, value)
+            and _is_writable("path", normalized_path)
+            and _is_writable("domain", normalized_domain)
+        ):
             continue
         seen_entry = True
-        if not _belongs_to(domain.strip() or fallback_domain, platform):
+        if not _belongs_to(normalized_domain, platform):
             continue
         lines.append(
             _netscape_line(
-                domain=domain.strip() or fallback_domain,
-                path=path.strip() or "/",
+                domain=normalized_domain,
+                path=normalized_path,
                 secure=True,
                 expires=0,
                 name=name,
@@ -336,6 +337,8 @@ def _from_powershell(text: str, platform: str) -> CookieImport | None:
         if seen_entry:
             raise _no_platform_cookies(platform)
         raise CookieImportError("The PowerShell command contains no usable cookies")
+    if len(lines) > _MAX_COOKIES:
+        raise CookieImportError("Too many cookies in one paste")
 
     return CookieImport(
         netscape=_NETSCAPE_HEADER + "\n".join(lines) + "\n",
@@ -361,7 +364,7 @@ def _expiry_from_json(entry: dict[str, Any]) -> int:
             expires = int(numeric)
         except (TypeError, ValueError, OverflowError):
             continue
-        return expires if expires > 0 else 0
+        return max(0, expires)
     return 0
 
 
@@ -383,7 +386,9 @@ def _from_json(text: str, platform: str) -> CookieImport:
     lines: list[str] = []
     names: list[str] = []
     seen_entry = False
-    for entry in payload[: _MAX_COOKIES + 1]:
+    # The route caps the payload size, so scanning every entry is bounded; the
+    # cookie limit applies to what survives the domain filter.
+    for entry in payload:
         if not isinstance(entry, dict):
             continue
         name = str(entry.get("name") or "").strip()
@@ -397,6 +402,8 @@ def _from_json(text: str, platform: str) -> CookieImport:
             continue
 
         domain = str(entry.get("domain") or fallback_domain).strip() or fallback_domain
+        if not _is_writable("domain", domain):
+            continue
         # Host-only cookie: no leading dot; domain cookie: leading dot.
         if entry.get("hostOnly") is True:
             domain = domain.lstrip(".")

@@ -12,18 +12,19 @@ Static files here are served by `VersionedStaticFiles` (`app/utils/assets.py`) w
 | --- | --- |
 | `js/main.js` | Dashboard entry point: page initialization, DOM setup, event listener registration |
 | `js/api.js` | API client: typed wrappers (`fetchJobs`, `fetchJob`, `submitJob`, `fetchStats`, `fetchVideoInfo`, …), CSRF header injection, error normalization via `toErrorMessage()` |
-| `js/config.js` | Frontend contract constants: `CONFIG`, `AUDIO_TYPE`, Lalal duration caps, and the status sets `DOWNLOADABLE_STATUSES`, `CANCELLABLE_STATUSES`, `RETRYABLE_STATUSES`, `TERMINAL_STATUSES` |
+| `js/config.js` | Frontend contract constants: `CONFIG`, `AUDIO_TYPE`, Lalal duration caps, and the status sets `DOWNLOADABLE_STATUSES`, `CANCELLABLE_STATUSES`, `RETRYABLE_STATUSES`, `TERMINAL_STATUSES`, `PROGRESS_STATUSES` |
 | `js/ui.js` | Shared UI vocabulary: `STATUS_META`, `ACTION_CATEGORY`, `normalizeStatus()`, `getStatusText()`, `getStatusPillClass()`, `toProgressPercent()` |
-| `js/utils.js` | Generic helpers: `clamp()`, `snapTime()`, `normalizeTimeRange()`, `buildTrimId()`, `createTimeoutSignal()`, `combineAbortSignals()`, `EMPTY_VALUE` |
+| `js/utils.js` | Generic helpers: `clamp()`, `snapTime()`, `normalizeTimeRange()`, `buildTrimId()`, `isSameTrimSelection()` (ties a pending Lalal result to its selection), `resetLalalLabel()`, `releaseLalalRun()`, `createTimeoutSignal()`, `combineAbortSignals()`, `EMPTY_VALUE` |
 | `js/jobs.js` | Job list UI: rendering, pagination, filtering, live status updates |
-| `js/job.js` | Job detail view: single job display, download controls, action buttons |
+| `js/job.js` | Job detail view: single job display, download controls, action buttons. Its open-time snapshot is dropped if a live update arrived meanwhile or a terminal state is already shown |
 | `js/trim.js` | Audio trimming editor: WaveSurfer.js waveform, region markers, in/out points |
+| `js/update-status.js` | Settings → System update badges: `UPDATE_STATE_VIEW` (icon + label per state, shared with the fetchly tile), `renderUpdateState()`, `applyUpdateBadge()`; all states share one pill geometry in `style.css` (`--update-badge-*` tokens) |
 | `js/settings.js` | Settings page: form handling, watermark upload, cookie management, system stats |
 | `js/login.js` | Login form handling and error display |
-| `js/events.js` | **SSE client**: opens `new EventSource("/events")`, routes messages, handles reconnect |
+| `js/events.js` | **SSE client**: opens `new EventSource("/events")`, routes messages, handles reconnect. Re-syncs with a `/api/jobs` snapshot on every open after a reconnect, hidden tab or pagehide; a snapshot entry is skipped when a live update for that job arrived after the request started (bounded re-run), and same-frame updates drop stale progress |
 | `js/toast.js` | Toast notifications: success/error/info, auto-dismiss, manual dismiss |
 | `js/confirm.js` | Confirmation modal (`confirmModal()`). Use this for destructive actions — never `window.confirm`/`alert`/`prompt`. |
-| `js/current-job.js` | Active job state: `setCurrentJob()`, `refreshCurrentJob()` |
+| `js/current-job.js` | Active job state: `setCurrentJob()`, `refreshCurrentJob()`, `restoreCurrentJob()` (rebuilds the card after a reload from the `activeJobsBootstrapData` script tag) |
 | `js/cookie-paste.js` | Cookie import UI: paste field, format validation, platform detection |
 | `js/watermark-logo.js` | Client-side logo validation: `prepareLogoUpload()`, `inspectSvg()`, `inspectPng()`, `rasterizeSvg()`, `MAX_LOGO_BYTES` (2 MiB) |
 | `js/errors.js` | `reportError()` / `reportWarning()` with context |
@@ -53,7 +54,7 @@ There is no `css/` subdirectory. Stylelint globs `app/static/**/*.css`, which pi
 - **Async:** use the `api.js` wrappers rather than raw `fetch()` — they attach the CSRF header and normalize errors
 - **Dialogs:** `confirmModal()` from `confirm.js`. Native browser dialogs are not used anywhere in this codebase.
 - **Error display:** surface user-facing failures through `toast.js`
-- **Live updates:** subscribe via `events.js` (SSE)
+- **Live updates:** subscribe via `events.js` (SSE). Ordering rule: a live update always wins over an HTTP snapshot requested before it; a returning tab reconciles once on the next stream open.
 - **Testing:** `tests/js/*.test.mjs`, run with `npm test`
 
 ### The status contract
@@ -114,7 +115,7 @@ Open DevTools: Console for errors, Network to confirm API calls and the `/events
 
 ---
 
-**Last Updated:** 2026-09-19  
+**Last Updated:** 2026-10-26  
 **JavaScript:** Native ES modules, no build step, no framework  
 **CSS:** Vanilla CSS plus vendored Bootstrap 5  
 **Audio Library:** WaveSurfer.js (vendored)  

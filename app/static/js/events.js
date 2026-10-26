@@ -3,7 +3,7 @@
 // Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 //
 
-import { CONFIG } from "./config.js";
+import { CONFIG, PROGRESS_STATUSES } from "./config.js";
 import { fetchJob, fetchJobs } from "./api.js";
 import { reportError, reportWarning } from "./errors.js";
 // Specifier must be byte-identical to main.js's: a different query string is a
@@ -51,6 +51,14 @@ let shouldReconnect = true;
 let streamEnabled = true;
 const recoveryRequestsInFlight = new Set();
 let reconciliationInFlight = false;
+let reconciliationPending = false;
+// Set when the stream was closed on purpose (hidden tab, pagehide) so the
+// next open re-syncs from a snapshot even though no error was involved.
+let needsReconciliation = false;
+// Live-update clock: a snapshot entry older than the job's last live update is stale.
+let jobUpdateEpoch = 0;
+const liveUpdateEpochs = new Map();
+const MAX_RECONCILE_PASSES = 3;
 
 export function dispatchAppEvent(name, detail) {
     document.dispatchEvent(new CustomEvent(name, { detail }));
@@ -89,10 +97,13 @@ function scheduleJobUpdate(payload) {
     }
 
     const jobId = String(payload.id);
-    queuedJobUpdates.set(jobId, {
-        ...(queuedJobUpdates.get(jobId) || {}),
-        ...payload,
-    });
+    jobUpdateEpoch += 1;
+    liveUpdateEpochs.set(jobId, jobUpdateEpoch);
+    if (liveUpdateEpochs.size > 1000) {
+        liveUpdateEpochs.clear();
+        liveUpdateEpochs.set(jobId, jobUpdateEpoch);
+    }
+    queuedJobUpdates.set(jobId, mergeQueuedUpdate(queuedJobUpdates.get(jobId), payload));
     if (queuedJobUpdateFrame !== null) {
         return;
     }
@@ -100,6 +111,22 @@ function scheduleJobUpdate(payload) {
     queuedJobUpdateFrame = window.requestAnimationFrame(() => {
         flushQueuedJobUpdates();
     });
+}
+
+/**
+ * Merge two updates of one job within a frame. A spread would keep an older
+ * progress when the newer status carries none, which the store treats as "absent".
+ */
+function mergeQueuedUpdate(previous, payload) {
+    const merged = { ...(previous || {}), ...payload };
+    if (
+        Object.hasOwn(payload, "status")
+        && !PROGRESS_STATUSES.has(payload.status)
+        && !Object.hasOwn(payload, "progress")
+    ) {
+        delete merged.progress;
+    }
+    return merged;
 }
 
 function isNewerUpdate(payload) {
@@ -231,31 +258,16 @@ async function recoverUnknownJobUpdate(payload) {
 
 async function reconcileVisibleJobs() {
     if (reconciliationInFlight) {
+        reconciliationPending = true;
         return;
     }
     reconciliationInFlight = true;
     try {
-        const jobs = await fetchJobs(0);
-        if (!Array.isArray(jobs)) {
-            return;
-        }
-
-        // Server page is newest-first. Known jobs are patched in place; unknown
-        // ones are prepended oldest-first so the newest still lands on top.
-        const unknownJobs = [];
-        for (const job of jobs) {
-            const updatedJob = applyJobUpdate(job);
-            if (updatedJob) {
-                dispatchJobUpdate(updatedJob);
-                continue;
-            }
-            unknownJobs.push(job);
-        }
-
-        for (let index = unknownJobs.length - 1; index >= 0; index -= 1) {
-            const insertedJob = upsertJobSnapshot(unknownJobs[index]);
-            if (insertedJob) {
-                dispatchJobUpdate(insertedJob);
+        for (let pass = 0; pass < MAX_RECONCILE_PASSES; pass += 1) {
+            reconciliationPending = false;
+            const skipped = await reconcileOnce();
+            if (!skipped && !reconciliationPending) {
+                break;
             }
         }
     } catch (error) {
@@ -266,7 +278,47 @@ async function reconcileVisibleJobs() {
         });
     } finally {
         reconciliationInFlight = false;
+        reconciliationPending = false;
     }
+}
+
+/**
+ * Apply one server snapshot, skipping jobs a live update touched since the
+ * request started (the snapshot is older for those).
+ * @returns {Promise<boolean>} true when at least one entry was skipped
+ */
+async function reconcileOnce() {
+    const startEpoch = jobUpdateEpoch;
+    // no-store: never reuse a response (or in-flight request) older than this call.
+    const jobs = await fetchJobs(0, { cache: "no-store" });
+    if (!Array.isArray(jobs)) {
+        return false;
+    }
+
+    let skipped = false;
+    // Server page is newest-first. Known jobs are patched in place; unknown
+    // ones are prepended oldest-first so the newest still lands on top.
+    const unknownJobs = [];
+    for (const job of jobs) {
+        if ((liveUpdateEpochs.get(String(job?.id)) ?? 0) > startEpoch) {
+            skipped = true;
+            continue;
+        }
+        const updatedJob = applyJobUpdate(job);
+        if (updatedJob) {
+            dispatchJobUpdate(updatedJob);
+            continue;
+        }
+        unknownJobs.push(job);
+    }
+
+    for (let index = unknownJobs.length - 1; index >= 0; index -= 1) {
+        const insertedJob = upsertJobSnapshot(unknownJobs[index]);
+        if (insertedJob) {
+            dispatchJobUpdate(insertedJob);
+        }
+    }
+    return skipped;
 }
 
 function resetEventSequenceState() {
@@ -369,9 +421,10 @@ export function connectEventStream() {
     activeStream = stream;
 
     stream.onopen = () => {
-        const wasReconnect = reconnectAttempt > 0;
+        const shouldReconcile = needsReconciliation || reconnectAttempt > 0;
+        needsReconciliation = false;
         reconnectAttempt = 0;
-        if (wasReconnect) {
+        if (shouldReconcile) {
             resetEventSequenceState();
             void reconcileVisibleJobs();
         }
@@ -410,6 +463,8 @@ export function setEventStreamEnabled(enabled) {
 
 function handlePageHide() {
     shouldReconnect = false;
+    needsReconciliation = true;
+    clearReconnectTimer();
     if (activeStream) {
         teardown(activeStream);
     }
@@ -426,6 +481,9 @@ function handlePageShow(event) {
 
 function handleVisibilityChange() {
     if (document.visibilityState !== "visible") {
+        // A pending reconnect timer would reopen the stream while hidden.
+        clearReconnectTimer();
+        needsReconciliation = true;
         if (activeStream) {
             teardown(activeStream);
         }

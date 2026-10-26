@@ -15,6 +15,10 @@ The City and ASN databases are downloaded on demand from the P3TERX
 GeoLite.mmdb mirror (no MaxMind license key required) and cached under
 ``DATA_DIR/geolite2``. Until a first successful download, lookup_ip()
 degrades to None - the caller renders the requester tile without geo data.
+
+Known limitation: the mirror publishes no checksum or signature, so a download
+is only checked by parsing it, not authenticated. That is acceptable because
+the result is display-only (the requester tile); no access decision uses it.
 """
 
 from __future__ import annotations
@@ -358,9 +362,10 @@ def _download_one(spec: _DBSpec) -> bool:
     try:
         os.fchmod(fd, 0o644)
         downloaded = 0
-        with httpx.Client(follow_redirects=False, timeout=_DOWNLOAD_TIMEOUT_SECONDS) as client, os.fdopen(
-            fd, "wb"
-        ) as handle:
+        with (
+            httpx.Client(follow_redirects=False, timeout=_DOWNLOAD_TIMEOUT_SECONDS) as client,
+            os.fdopen(fd, "wb") as handle,
+        ):
             fd = -1
             next_url = spec.url
             for _hop in range(5):

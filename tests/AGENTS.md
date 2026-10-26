@@ -10,18 +10,27 @@
 | --- | --- |
 | `conftest.py` | Imports `tests._support` for its side effect: `FETCHLY_SECRET_KEY` is set before pytest imports any test module. **Defines no fixtures.** |
 | `_support.py` | Shared setup: the secret-key bootstrap plus `IsolatedDbTestCase` and `WebAppTestCase` base classes |
-| `test_auth_credentials.py`, `test_auth_flow.py` | Admin credential handling, login/logout, session behavior |
+| `test_auth_credentials.py`, `test_auth_flow.py` | Admin credential handling, login/logout, session behavior, including that a cookie issued before an authentication off/on cycle stays invalid |
+| `test_csrf.py` | The double-submit CSRF token check and the additive Sec-Fetch-Site/Origin/Referer cross-site rejection |
 | `test_cookie_files.py`, `test_cookie_import.py`, `test_cookie_routes.py`, `test_cookie_status.py` | Netscape parsing, per-platform storage, routes, usability reporting |
 | `test_bpm_beat_this.py`, `test_bpm_naming.py`, `test_bpm_normalization.py` | Tempo detection, the `_94bpm` tag folded into download filenames, octave/half-time normalization |
+| `test_mp3_tags.py` | MP3 ID3 tags: cover (`attached_pic`, both edges ≤ 1280 px), Fetchly comment and `TBPM`; no thumbnail, no usable tempo, tagging failure never fails serving, filename and audio hash unchanged. Real-ffmpeg tests are `@pytest.mark.slow` |
 | `test_watermark.py`, `test_watermark_logo.py` | FFmpeg compositing and uploaded-logo validation |
 | `test_output_modes.py` | The three `download_output_mode` values: format selection, the post-download pass, and the watermark interaction |
 | `test_db_job_statuses.py` | Job status transitions and the valid status set |
-| `test_worker_hardening.py` | Worker resilience: failure handling, cancellation, recovery |
-| `test_runtime_settings.py`, `test_settings_migration.py` | Settings persistence and schema/setting migration |
+| `test_worker_hardening.py` | Worker resilience: failure handling, cancellation, recovery, and the actionable message for login-gated sources (`AuthRequiredError`) |
+| `test_active_jobs_reload.py` | A reloaded dashboard finds running jobs again (`list_active_jobs()`, including history-disabled jobs) with their last live progress |
+| `test_updates.py` | Update check: per-component status (current/available/unknown) and `reason`, ffmpeg build comparison within the installed series, large release payloads, request headers, calendar/`v` version parsing, per-component isolation and timeout, short negative cache with failed-only retry |
+| `test_runtime_settings.py` | Settings persistence |
+| `test_db_schema.py` | A fresh database has the complete schema; re-running `init_db()` changes nothing; no schema version is stamped; an existing database with missing columns raises `DatabaseSchemaError` without being modified, extra columns/tables are tolerated |
+| `test_job_paths.py` | The central per-job path helper: `jobs_dir()` is `DATA_DIR/jobs`, `job_dir()` resolves to `DATA_DIR/jobs/<uuid>` with the id UUID-validated and canonicalized, traversal and non-UUID names rejected, and both track the `DATA_DIR` env var |
 | `test_host_stats.py` | Host metrics parsing |
-| `test_changelog.py`, `test_version_source.py` | Changelog rendering; version source and the no-`==`-pins rule |
+| `test_changelog.py`, `test_version_source.py` | Changelog rendering; version source, the no-`==`-pins rule and the WaveSurfer version detection (env, then pin file) |
 | `test_duration.py`, `test_job_duration.py` | Duration parsing and job duration reporting |
-| `test_lalal_minutes.py`, `test_lalal_policy.py`, `test_lalal_route_safety.py` | Lalal.ai quota, policy guards, route safety |
+| `test_lalal_minutes.py`, `test_lalal_policy.py`, `test_lalal_route_safety.py` | Lalal.ai quota (a balance of 0 stays distinct from unknown), policy guards, route safety |
+| `test_lalal_client_io.py` | `LalalClient` transfers: stem download and upload errors surface as `LalalError`/`LalalUploadError` without leaking URLs, partial files are removed, settings read stays off the event loop |
+| `test_platform_urls.py` | Platform URL validation edge cases in `app/utils/platform.py`: Facebook Story links, YouTube Shorts |
+| `test_media_url_contract.py` | The authoritative media-URL accept/reject corpus: every supported grammar, each rejection with its message, and copy/paste normalization (surrounding whitespace, HTML-escaped `&`, zero-width characters) |
 | `test_public_url.py` | Share-link host normalization and base-URL construction |
 | `test_remove_all_jobs.py` | Bulk job deletion |
 | `test_housekeeping_retention.py` | The retention sweep: `purge_old_jobs` batching, and that an expired job loses its row, its directory and its share links together while `0` days sweeps nothing |
@@ -43,14 +52,18 @@
 | `test_client_ip_geoip.py` | Client-IP-to-GeoIP resolution backing the job detail "requester" tile |
 | `test_lalal_wait_for_completion.py` | Lalal.ai completion polling |
 | `test_memory_backpressure.py` | Governor memory-threshold backpressure |
+| `test_metadata_executor_isolation.py` | A metadata lookup that outlives its `asyncio.wait_for()` timeout keeps running on a dedicated executor instead of starving the shared default one |
+| `test_sse_events.py` | SSE subscriber lifecycle: registration must not outlive an abandoned stream, the connection cap is reserved atomically and its slot is released on every termination path, and abandoned per-job requests leave no dictionary entry |
+| `test_submit_duplicates.py` | `insert_job_unless_active_duplicate`: parallel identical inserts create one job, `confirm_duplicate` still allows a second, a queue-full rejection leaves no blocking row, headroom is checked before the metadata lookup |
+| `test_thumbnail_fallback_bound.py` | The yt-dlp thumbnail fallback never exceeds its concurrency budget, answers `503` when saturated, and keeps its slot until the subprocess ends |
 
-45 Python test files in total.
+57 Python test files in total.
 
 ## Subdirectories
 
 | Directory | Purpose |
 | --- | --- |
-| `js/` | 17 `node:test` suites (`*.test.mjs`): UI contracts, accessibility, layout stability, device profiles, console severity, network findings, audit result summaries, element-id contracts, toast/modal/CSRF/redirect safety |
+| `js/` | 22 `node:test` suites (`*.test.mjs`): UI contracts, accessibility, layout stability, device profiles, console severity, network findings, audit result summaries, element-id contracts, toast/modal/CSRF/redirect safety, media URL validation |
 | `js/helpers/` | `fake-dom.mjs` — the shared fake DOM |
 
 ## For AI Agents
@@ -62,7 +75,7 @@ These are **unittest-style classes executed by pytest**. There are no pytest fix
 - **Needs an isolated database:** subclass `IsolatedDbTestCase` from `tests/_support.py`
 - **Needs a FastAPI TestClient:** subclass `WebAppTestCase`
 - **Needs only the secret key:** nothing extra — `conftest.py` has already set it before your module is imported
-- **Import order matters:** `tests/_support.py` must be imported before any `app.*` import, because `app/session.py` and `app/main.py` require `FETCHLY_SECRET_KEY` at import time. Running under pytest this is automatic via `conftest.py`.
+- **Import order matters:** `tests/_support.py` must be imported before any `app.*` import, because `app/auth/session.py` and `app/main.py` require `FETCHLY_SECRET_KEY` at import time. Running under pytest this is automatic via `conftest.py`.
 - **Mocking external services:** `unittest.mock.patch` for yt-dlp, FFmpeg and Lalal.ai calls
 - **Run:** `pytest`, or `pytest tests/test_auth_flow.py -v`
 
@@ -155,11 +168,11 @@ pytest tests/test_worker_hardening.py --pdb
 ```
 
 ### CI Integration
-`.github/workflows/ci.yml` runs, as separate jobs: `ruff check --output-format=github .`, `pytest -q`, and `npm run lint:js` / `lint:css` / `lint:contracts` / `npm test`. `.github/workflows/ui-audit.yml` runs the Playwright audit. All must pass.
+`.github/workflows/ci.yml` runs, as separate jobs: `ruff check --output-format=github .`, `ruff format --check --diff .` and `pytest -q`; `npm run lint:js` / `lint:css` / `lint:contracts` / `npm test`; `bash -n docker/entrypoint.sh` and `docker build --check`; and the single-manifest check. `.github/workflows/ui-audit.yml` runs the Playwright audit. All must pass.
 
 ---
 
-**Last Updated:** 2026-09-21  
+**Last Updated:** 2026-10-26  
 **Python:** pytest runner, unittest-style classes, no fixtures  
 **JavaScript:** `node:test` + `node:assert/strict`  
-**Counts:** 45 Python files, 17 JavaScript files
+**Counts:** 57 Python files, 22 JavaScript files

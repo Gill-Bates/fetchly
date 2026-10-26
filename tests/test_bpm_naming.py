@@ -7,8 +7,8 @@
 import unittest
 from pathlib import Path
 
-from app.bpm_naming import apply_bpm_tag, tagged_download_name
-from app.lalal_policy import stem_download_name
+from app.audio.naming import apply_bpm_tag, tagged_download_name
+from app.integrations.lalal.policy import stem_download_name
 
 
 class ApplyBpmTagTests(unittest.TestCase):

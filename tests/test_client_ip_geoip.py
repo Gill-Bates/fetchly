@@ -6,13 +6,11 @@
 
 """The job detail page's "requester" tile: client_ip persistence, the
 geoip module's public/private guard, graceful degradation when no
-GeoLite2 database is present (the default in this test environment), the
-v2->v3 schema migration that added the column, and the download/staleness
-logic in isolation from the real network."""
+GeoLite2 database is present (the default in this test environment), and the
+download/staleness logic in isolation from the real network."""
 
 from __future__ import annotations
 
-import sqlite3
 import threading
 import time
 import uuid
@@ -30,7 +28,14 @@ from tests._support import IsolatedDbTestCase, WebAppTestCase
 class InsertJobClientIpTests(IsolatedDbTestCase):
     def test_insert_job_persists_ipv4_client_ip(self) -> None:
         job_id = str(uuid.uuid4())
-        db.insert_job(job_id, "https://example.com/video", "video", "max", "queued", client_ip="203.0.113.10")
+        db.insert_job(
+            job_id,
+            "https://example.com/video",
+            "video",
+            "max",
+            "queued",
+            client_ip="203.0.113.10",
+        )
 
         job = db.get_job(job_id)
 
@@ -39,7 +44,14 @@ class InsertJobClientIpTests(IsolatedDbTestCase):
 
     def test_insert_job_persists_ipv6_client_ip(self) -> None:
         job_id = str(uuid.uuid4())
-        db.insert_job(job_id, "https://example.com/video", "video", "max", "queued", client_ip="2001:db8::1")
+        db.insert_job(
+            job_id,
+            "https://example.com/video",
+            "video",
+            "max",
+            "queued",
+            client_ip="2001:db8::1",
+        )
 
         job = db.get_job(job_id)
 
@@ -56,64 +68,16 @@ class InsertJobClientIpTests(IsolatedDbTestCase):
         self.assertIsNone(job["client_ip"])
 
 
-class SchemaMigrationTests(IsolatedDbTestCase):
-    def test_a_v2_database_gains_the_client_ip_column_on_open(self) -> None:
-        # Recreates the exact v2 shape (no client_ip, user_version = 2) that
-        # a deployment upgrading from before this feature would have on
-        # disk, then confirms init_db() adds the column and bumps the stamp
-        # without losing the existing row.
-        # setUp() already ran init_db() at the current schema; drop that
-        # table and reset the stamp to recreate the exact v2 on-disk shape.
-        db.close_db()
-        con = sqlite3.connect(db.DB_PATH)
-        try:
-            con.execute("DROP TABLE IF EXISTS jobs")
-            con.execute("PRAGMA user_version = 2")
-            con.execute("""
-                CREATE TABLE jobs (
-                    id TEXT PRIMARY KEY,
-                    url TEXT NOT NULL,
-                    type TEXT,
-                    quality TEXT,
-                    status TEXT NOT NULL,
-                    filename TEXT,
-                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                    include_in_history INTEGER NOT NULL DEFAULT 1,
-                    finished_at TEXT,
-                    duration_seconds REAL,
-                    filesize_bytes INTEGER,
-                    message TEXT,
-                    codec TEXT,
-                    bitrate_kbps INTEGER,
-                    video_title TEXT,
-                    video_meta_hover TEXT,
-                    bpm INTEGER,
-                    bpm_confidence REAL,
-                    audio_hash TEXT,
-                    lalal_split_done INTEGER NOT NULL DEFAULT 0
-                )
-            """)
-            con.execute(
-                "INSERT INTO jobs (id, url, type, quality, status) VALUES (?, ?, ?, ?, ?)",
-                ("pre-existing", "https://example.com/video", "video", "max", "queued"),
-            )
-            con.commit()
-        finally:
-            con.close()
-
-        db._database_path_prepared = None
-        db.init_db()
-
-        job = db.get_job("pre-existing")
-        assert job is not None
-        self.assertIsNone(job["client_ip"])
-        with db.get_db() as con:
-            self.assertEqual(int(con.execute("PRAGMA user_version").fetchone()[0]), 3)
-
-
 class PublicIpGuardTests(IsolatedDbTestCase):
     def test_rejects_private_and_loopback_addresses(self) -> None:
-        for ip in ("127.0.0.1", "10.0.0.5", "192.168.1.1", "::1", "fc00::1", "not-an-ip"):
+        for ip in (
+            "127.0.0.1",
+            "10.0.0.5",
+            "192.168.1.1",
+            "::1",
+            "fc00::1",
+            "not-an-ip",
+        ):
             with self.subTest(ip=ip):
                 self.assertFalse(geoip._public_ip(ip))
 
@@ -130,13 +94,19 @@ class PublicIpGuardTests(IsolatedDbTestCase):
         # Explicitly simulate "no .mmdb files present" rather than relying on
         # the host's ambient DATA_DIR being empty - a real GeoLite2 download
         # on the machine running this suite must not make the test flaky.
-        with patch.object(geoip._city_reader, "get", return_value=None), patch.object(
-            geoip._asn_reader, "get", return_value=None
+        with (
+            patch.object(geoip._city_reader, "get", return_value=None),
+            patch.object(geoip._asn_reader, "get", return_value=None),
         ):
             self.assertIsNone(geoip.lookup_ip("8.8.8.8"))
 
-    def test_lookup_ip_returns_none_for_private_address_even_with_a_reader(self) -> None:
-        with patch.object(geoip, "_city_reader") as city_reader, patch.object(geoip, "_asn_reader") as asn_reader:
+    def test_lookup_ip_returns_none_for_private_address_even_with_a_reader(
+        self,
+    ) -> None:
+        with (
+            patch.object(geoip, "_city_reader") as city_reader,
+            patch.object(geoip, "_asn_reader") as asn_reader,
+        ):
             self.assertIsNone(geoip.lookup_ip("10.0.0.5"))
             city_reader.get.assert_not_called()
             asn_reader.get.assert_not_called()
@@ -191,7 +161,10 @@ class StalenessRefreshTests(IsolatedDbTestCase):
     def test_a_file_older_than_the_refresh_window_is_re_downloaded(self) -> None:
         with patch.object(geoip, "_verify_mmdb", return_value=True):
             self._write_fake_mmdb(geoip._CITY_SPEC, age_seconds=geoip._STALE_AFTER_SECONDS + 1)
-            with patch.object(geoip, "_validate_download_url"), patch("app.utils.geoip.httpx.Client") as client_cls:
+            with (
+                patch.object(geoip, "_validate_download_url"),
+                patch("app.utils.geoip.httpx.Client") as client_cls,
+            ):
                 client_cls.return_value.__enter__.return_value.stream.side_effect = RuntimeError("network disabled")
                 downloaded = geoip._download_one(geoip._CITY_SPEC)
             client_cls.assert_called_once()
@@ -221,11 +194,18 @@ class BuildRequesterInfoTests(IsolatedDbTestCase):
         assert info is not None
         self.assertEqual(info["ip"], "2001:db8::1")
 
-    def test_geo_fields_are_included_when_present_and_omitted_when_missing(self) -> None:
+    def test_geo_fields_are_included_when_present_and_omitted_when_missing(
+        self,
+    ) -> None:
         with patch.object(
             geoip,
             "lookup_ip",
-            return_value={"country": "DE", "city": "Berlin", "asn": 3320, "as_org": "Deutsche Telekom"},
+            return_value={
+                "country": "DE",
+                "city": "Berlin",
+                "asn": 3320,
+                "as_org": "Deutsche Telekom",
+            },
         ):
             info = build_requester_info("203.0.113.10")
 
@@ -254,10 +234,10 @@ class JobPageRequesterTileTests(WebAppTestCase):
     def setUp(self) -> None:
         super().setUp()
         # WebAppTestCase only runs init_api(); the job page also depends on
-        # media.py's own module-level context (data_dir/base_dir/templates).
-        from app.main import BASE_DIR, DATA_DIR, templates
+        # media.py's own module-level context (base_dir/templates).
+        from app.main import BASE_DIR, templates
 
-        media.init_media(DATA_DIR, BASE_DIR, templates)
+        media.init_media(BASE_DIR, templates)
 
     def _job(self, **kwargs: object) -> str:
         job_id = str(uuid.uuid4())
@@ -287,14 +267,22 @@ class JobPageRequesterTileTests(WebAppTestCase):
 
         with patch(
             "app.utils.geoip.lookup_ip",
-            return_value={"country": "DE", "city": "Berlin", "asn": 3320, "as_org": "Deutsche Telekom"},
+            return_value={
+                "country": "DE",
+                "city": "Berlin",
+                "asn": 3320,
+                "as_org": "Deutsche Telekom",
+            },
         ):
             response = self.client.get(f"/job/{job_id}")
 
         self.assertEqual(response.status_code, 200)
         self.assertIn("Requester", response.text)
         self.assertIn("2001:db8::1", response.text)
-        self.assertIn("https://cdn.jsdelivr.net/npm/flag-icons@7.3.2/flags/4x3/de.svg", response.text)
+        self.assertIn(
+            "https://cdn.jsdelivr.net/npm/flag-icons@7.3.2/flags/4x3/de.svg",
+            response.text,
+        )
         self.assertIn("Berlin", response.text)
         self.assertIn("AS3320", response.text)
 
@@ -312,9 +300,9 @@ class JobPageRequesterTileTests(WebAppTestCase):
         # The flag SVGs are loaded live from cdn.jsdelivr.net (never
         # vendored, see app/templates/job.html) - the CSP exception for that
         # must stay scoped to img-src and not leak into any other directive.
-        from app.main import SecurityHeadersMiddleware
+        from app.main import build_csp
 
-        directives = SecurityHeadersMiddleware._CSP.split("; ")
+        directives = build_csp("test-nonce").split("; ")
         img_src = next(part for part in directives if part.startswith("img-src"))
         self.assertIn("https://cdn.jsdelivr.net", img_src)
 
@@ -353,7 +341,8 @@ class MmdbVerificationTests(IsolatedDbTestCase):
     def test_a_smoke_test_miss_is_not_treated_as_corruption(self) -> None:
         path = self._write_min_size_file(geoip._CITY_SPEC)
         fake_reader = self._fake_reader(
-            database_type="GeoLite2-City", lookup_error=geoip.geoip2.errors.AddressNotFoundError("not found")
+            database_type="GeoLite2-City",
+            lookup_error=geoip.geoip2.errors.AddressNotFoundError("not found"),
         )
 
         with patch.object(geoip.geoip2.database, "Reader", return_value=fake_reader):
@@ -424,7 +413,10 @@ class ReaderCloseRaceTests(IsolatedDbTestCase):
             get_mock.assert_called_once()
 
     def test_a_lookup_after_a_completed_close_sees_none(self) -> None:
-        with patch.object(geoip, "_city_reader") as city_reader, patch.object(geoip, "_asn_reader") as asn_reader:
+        with (
+            patch.object(geoip, "_city_reader") as city_reader,
+            patch.object(geoip, "_asn_reader") as asn_reader,
+        ):
             city_reader.use.return_value.__enter__.return_value = None
             asn_reader.use.return_value.__enter__.return_value = None
             geoip._cached_lookup.cache_clear()

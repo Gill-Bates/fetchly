@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 #
 # tests/test_metadata_executor_isolation.py
-# Copyright (C) 2026 Gill-Bates
+# Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 #
 
 """N2 regression: a metadata lookup that outlives its asyncio.wait_for()

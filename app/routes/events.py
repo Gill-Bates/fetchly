@@ -15,11 +15,12 @@ from collections.abc import Callable
 from contextlib import suppress
 from itertools import count
 from typing import Any
+from weakref import finalize
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
-from ..common.rate_limit import limiter
+from ..auth.rate_limit import limiter
 from .auth import current_user, require_user
 
 logger = logging.getLogger(__name__)
@@ -35,10 +36,51 @@ _MAX_SSE_CONNECTIONS = 200
 _sse_connections: set[asyncio.Queue[dict[str, Any]]] = set()
 _job_sse_connections: defaultdict[str, set[asyncio.Queue[dict[str, Any]]]] = defaultdict(set)
 _sse_sequence = count(1)
+# Slots handed out to SSE responses that are built but not necessarily started
+# yet. Counted on the event-loop thread only, so check-and-increment is atomic.
+_reserved_connections = 0
+
+
+class _ConnectionSlot:
+    """One reserved SSE connection slot; ``release()`` is idempotent."""
+
+    __slots__ = ("_released",)
+
+    def __init__(self) -> None:
+        global _reserved_connections
+        _reserved_connections += 1
+        self._released = False
+
+    def release(self) -> None:
+        global _reserved_connections
+        if self._released:
+            return
+        self._released = True
+        _reserved_connections -= 1
+
+
+def _reserve_connection_slot() -> _ConnectionSlot:
+    """Reserve a slot synchronously or raise 503 when the cap is reached."""
+    if _reserved_connections >= _MAX_SSE_CONNECTIONS:
+        raise HTTPException(status_code=503, detail="Too many event streams")
+    return _ConnectionSlot()
 
 
 class SSEStreamingResponse(StreamingResponse):
-    """StreamingResponse variant that treats graceful-shutdown cancellation as normal."""
+    """StreamingResponse variant that treats graceful-shutdown cancellation as normal.
+
+    It also owns the reserved connection slot: the slot is freed when the ASGI
+    call ends, even if the body generator never started.
+    """
+
+    slot: _ConnectionSlot | None = None
+
+    async def __call__(self, scope, receive, send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            if self.slot is not None:
+                self.slot.release()
 
     async def listen_for_disconnect(self, receive):
         with suppress(asyncio.CancelledError):
@@ -198,69 +240,79 @@ def _build_sse_response(
     request: Request,
     subscribe: Callable[[], asyncio.Queue[dict[str, Any]]],
     cleanup: Callable[[asyncio.Queue[dict[str, Any]]], None],
+    slot: _ConnectionSlot | None = None,
 ) -> StreamingResponse:
     async def _stream_with_cleanup():
         # Subscribe inside the generator so registration and cleanup are
         # paired by construction: if Starlette never drives this generator
         # (e.g. the client disconnects before the first iteration), the
         # subscriber is never registered either, and nothing leaks.
-        subscriber = subscribe()
+        subscriber: asyncio.Queue[dict[str, Any]] | None = None
         try:
+            subscriber = subscribe()
             async for chunk in _sse_stream(request, subscriber):
                 yield chunk
         except asyncio.CancelledError:
             return
         finally:
-            cleanup(subscriber)
+            if subscriber is not None:
+                cleanup(subscriber)
+            if slot is not None:
+                slot.release()
 
     headers = {
         "Cache-Control": "no-cache",
         "Connection": "keep-alive",
         "X-Accel-Buffering": "no",
     }
-    return SSEStreamingResponse(_stream_with_cleanup(), media_type="text/event-stream", headers=headers)
+    response = SSEStreamingResponse(_stream_with_cleanup(), media_type="text/event-stream", headers=headers)
+    if slot is not None:
+        response.slot = slot
+        # Backstop for a response that is dropped without ever being called.
+        finalize(response, slot.release)
+    return response
 
 
 @router.get("/events")
 @limiter.limit("30/minute")
 async def sse_events(request: Request, _user: str = Depends(require_user)):
     """Server-sent event stream for dashboard job updates."""
-    if _active_connection_count() >= _MAX_SSE_CONNECTIONS:
-        raise HTTPException(status_code=503, detail="Too many event streams")
-
-    return _build_sse_response(
-        request,
-        lambda: _subscribe_sse(_sse_connections),
-        lambda subscriber: _unsubscribe_sse(_sse_connections, subscriber),
-    )
+    slot = _reserve_connection_slot()
+    try:
+        return _build_sse_response(
+            request,
+            lambda: _subscribe_sse(_sse_connections),
+            lambda subscriber: _unsubscribe_sse(_sse_connections, subscriber),
+            slot,
+        )
+    except BaseException:
+        slot.release()
+        raise
 
 
 @router.get("/api/jobs/{job_id}/events")
 @limiter.limit("30/minute")
 async def sse_job_events(job_id: uuid.UUID, request: Request, _user: str = Depends(require_user)):
     """Server-sent event stream for a single job detail page."""
-    if _active_connection_count() >= _MAX_SSE_CONNECTIONS:
-        raise HTTPException(status_code=503, detail="Too many event streams")
-
+    slot = _reserve_connection_slot()
     job_id_str = str(job_id)
-    subscribers = _job_sse_connections[job_id_str]
+
+    def _subscribe() -> asyncio.Queue[dict[str, Any]]:
+        # Touch the defaultdict only once the stream really starts, so an
+        # abandoned request never leaves an empty set behind.
+        return _subscribe_sse(_job_sse_connections[job_id_str])
 
     def _cleanup(subscriber: asyncio.Queue[dict[str, Any]]) -> None:
-        _unsubscribe_sse(subscribers, subscriber)
+        subscribers = _job_sse_connections.get(job_id_str)
+        if subscribers is not None:
+            _unsubscribe_sse(subscribers, subscriber)
         _prune_empty_job_subscribers(job_id_str)
 
-    return _build_sse_response(
-        request,
-        lambda: _subscribe_sse(subscribers),
-        _cleanup,
-    )
-
-
-def _active_connection_count() -> int:
-    """Return the number of currently subscribed SSE streams."""
-    return len(_sse_connections) + sum(
-        len(subscribers) for subscribers in _job_sse_connections.values()
-    )
+    try:
+        return _build_sse_response(request, _subscribe, _cleanup, slot)
+    except BaseException:
+        slot.release()
+        raise
 
 
 def init_sse_shutdown_event() -> None:

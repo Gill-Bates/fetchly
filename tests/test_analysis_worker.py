@@ -11,9 +11,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import PropertyMock, patch
 
-from app import analysis_worker
-from app.audio_analysis import AudioAnalysisResult
+from app.audio.analysis import AudioAnalysisResult
 from app.db import DOWNLOADABLE_STATUSES, get_audio_analysis_cache, get_job, insert_job
+from app.workers import analysis_worker
 from tests._support import IsolatedDbTestCase
 
 JOB = ("22222222-2222-2222-2222-222222222222", "https://example.com/a", "audio", "max")
@@ -22,25 +22,29 @@ JOB = ("22222222-2222-2222-2222-222222222222", "https://example.com/a", "audio",
 class _FakeProcess:
     """Minimal stand-in for a multiprocessing child (see _await_process)."""
 
-    def __init__(self, *, alive: bool = True) -> None:
+    def __init__(self, *, alive: bool = True, stubborn: bool = False) -> None:
         self._alive = alive
+        self._stubborn = stubborn
         self.pid = 4242
         self.terminated = False
         self.killed = False
+        self.join_timeouts: list[float | None] = []
 
     def is_alive(self) -> bool:
         return self._alive
 
     def join(self, timeout: float | None = None) -> None:
-        _ = timeout
+        self.join_timeouts.append(timeout)
 
     def terminate(self) -> None:
         self.terminated = True
-        self._alive = False
+        if not self._stubborn:
+            self._alive = False
 
     def kill(self) -> None:
         self.killed = True
-        self._alive = False
+        if not self._stubborn:
+            self._alive = False
 
 
 class AwaitProcessTests(unittest.TestCase):
@@ -75,6 +79,14 @@ class AwaitProcessTests(unittest.TestCase):
 
         self.assertFalse(process.terminated)
         self.assertFalse(process.killed)
+
+    def test_a_child_surviving_sigkill_never_gets_an_unbounded_join(self) -> None:
+        process = _FakeProcess(stubborn=True)
+
+        with patch.object(analysis_worker.logger, "error"):
+            analysis_worker._stop_process(process)  # type: ignore[arg-type]
+
+        self.assertEqual(process.join_timeouts, [5, 5])
 
 
 class StopAnalysisWorkersTests(unittest.TestCase):
@@ -184,7 +196,7 @@ class ApplyAnalysisTests(IsolatedDbTestCase):
         self.assertIsNone(row["bpm"])
 
     def test_the_stored_file_keeps_its_name(self) -> None:
-        # app/bpm_naming.py owns the BPM tag, and it only ever decorates the
+        # app/audio/naming.py owns the BPM tag, and it only ever decorates the
         # download name: the ".source" marker the media routes key off has to
         # stay at the end of the stem on disk.
         self._run(AudioAnalysisResult(bpm=94, confidence=0.8))

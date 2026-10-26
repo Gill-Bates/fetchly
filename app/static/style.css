@@ -1303,48 +1303,117 @@ html body .text-muted {
     color: var(--text);
 }
 
+/* Two fixed columns (status badge, version chip) so every row lines up and a
+   state change never shifts the layout. Only one badge/status is visible. */
 .settings-version-cell {
-    display: inline-flex;
+    --version-badge-col: 9.25rem;
+    --version-chip-col: 8.5rem;
+    display: grid;
+    grid-template-columns: var(--version-badge-col) var(--version-chip-col);
+    justify-content: end;
     align-items: center;
-    justify-content: flex-end;
-    flex-wrap: wrap;
     gap: var(--space-2);
 }
+.settings-version-cell > .settings-update-badge,
+.settings-version-cell > .settings-update-status {
+    min-width: 0;
+    width: 100%;
+}
+.settings-version-cell > .settings-version-badge {
+    box-sizing: border-box;
+    height: 1.5rem;
+    padding-block: 0;
+    justify-content: center;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    text-align: center;
+}
 
-/* Shown only when the update check found a newer upstream release. */
-.settings-update-badge {
+@media (max-width: 575.98px) {
+    .settings-info-row:has(.settings-version-cell) {
+        flex-wrap: wrap;
+        align-items: center;
+    }
+    .settings-version-cell {
+        flex: 1 1 100%;
+        justify-content: start;
+    }
+}
+
+/* One badge geometry for every update-check state. Only the three colour
+   tokens (--update-badge-color / -bg / -border) differ per state. The
+   "available" badge is the link; the others are a plain status label. */
+.settings-update-badge,
+.settings-update-status,
+.settings-app-update-badge {
+    --update-badge-color: var(--text-muted);
+    --update-badge-bg: color-mix(in srgb, var(--text-muted) 10%, var(--surface));
+    --update-badge-border: color-mix(in srgb, var(--text-muted) 35%, transparent);
     display: inline-flex;
     align-items: center;
+    justify-content: center;
     gap: 0.25rem;
-    padding: 0.25rem 0.55rem;
-    border: 1px solid color-mix(in srgb, var(--warning) 45%, transparent);
+    /* Fixed footprint: the badge keeps its size while the state changes. */
+    min-width: 9.25rem;
+    min-height: 1.5rem;
+    padding: 0.125rem 0.5rem;
+    border: 1px solid var(--update-badge-border);
     border-radius: var(--radius-sm);
-    background: color-mix(in srgb, var(--warning) 18%, var(--surface));
-    color: var(--warning);
+    background: var(--update-badge-bg);
+    color: var(--update-badge-color);
     font-size: 0.75rem;
     font-weight: 600;
     line-height: 1.2;
     white-space: nowrap;
     text-decoration: none;
 }
-
+.settings-update-badge,
+.settings-app-update-badge[data-state="available"] {
+    --update-badge-color: var(--warning);
+    --update-badge-bg: color-mix(in srgb, var(--warning) 18%, var(--surface));
+    --update-badge-border: color-mix(in srgb, var(--warning) 45%, transparent);
+}
+.settings-update-status[data-state="current"],
+.settings-app-update-badge[data-state="current"] {
+    --update-badge-color: var(--success);
+    --update-badge-bg: color-mix(in srgb, var(--success) 14%, var(--surface));
+    --update-badge-border: color-mix(in srgb, var(--success) 45%, transparent);
+}
+.settings-app-update-badge[data-state="prerelease"] {
+    --update-badge-color: var(--primary-text);
+    --update-badge-bg: color-mix(in srgb, var(--primary-text) 12%, var(--surface));
+    --update-badge-border: color-mix(in srgb, var(--primary-text) 40%, transparent);
+}
 .settings-update-badge:hover,
 .settings-update-badge:focus-visible {
     background: color-mix(in srgb, var(--warning) 28%, var(--surface));
     color: var(--warning);
 }
-
-.settings-update-badge .icon-inline {
-    font-size: 15px;
+.settings-update-badge .icon-inline,
+.settings-update-status .icon-inline,
+.settings-app-update-badge .icon-inline {
+    font-size: 14px;
     line-height: 1;
+    flex-shrink: 0;
+}
+.settings-update-status[data-state="checking"] .icon-inline,
+.settings-app-update-spin {
+    animation: settings-app-update-spin 0.9s linear infinite;
 }
 
-.settings-update-badge[hidden] {
+@media (prefers-reduced-motion: reduce) {
+    .settings-update-status[data-state="checking"] .icon-inline,
+    .settings-app-update-spin {
+        animation: none;
+    }
+}
+.settings-update-badge[hidden],
+.settings-update-status[hidden] {
     display: none;
 }
-
 .settings-version-badge {
     max-width: 100%;
+    overflow-wrap: anywhere;
 }
 
 /* Fetchly self-update card (Settings → System) */
@@ -1381,39 +1450,40 @@ html body .text-muted {
 
 .settings-app-update-status {
     display: flex;
-    align-items: center;
-    gap: 0.4rem;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: var(--space-2);
     margin: 0;
+}
+
+.settings-app-update-detail {
     font-size: 0.9rem;
     font-weight: 500;
     color: var(--text-muted);
+    overflow-wrap: anywhere;
 }
 
-.settings-app-update-status .icon-inline {
-    font-size: 18px;
-    line-height: 1;
-    flex-shrink: 0;
+/* Current row: the Pre-release marker sits inline to the left of the version
+   badge (badge left, value right), matching the component version table. */
+.settings-app-update-current-cell {
+    display: inline-flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: var(--space-2);
 }
 
-.settings-app-update[data-app-update-state="current"] .settings-app-update-status {
-    color: var(--success);
+.settings-app-update-prerelease {
+    min-width: 0;
 }
 
-.settings-app-update[data-app-update-state="available"] .settings-app-update-status {
-    color: var(--warning);
-}
-
-.settings-app-update[data-app-update-state="prerelease"] .settings-app-update-status {
-    color: var(--primary-text);
+.settings-app-update-prerelease[hidden] {
+    display: none;
 }
 
 .settings-app-update-link[hidden] {
     display: none;
 }
 
-.settings-app-update-spin {
-    animation: settings-app-update-spin 0.9s linear infinite;
-}
 
 @keyframes settings-app-update-spin {
     to {

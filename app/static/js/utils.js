@@ -13,9 +13,16 @@
  * - {@link getCsrfToken}, which reads the rendered document
  * - {@link isSafeRedirect}, which reads `window.location`
  * - {@link subscribeToLalalProgress}, which subscribes to DOM events
+ * - {@link localizeValues}, which rewrites server-rendered UTC times and numbers
  *
- * NOTE: Keep media URL validation aligned with app/utils/platform.py.
- * Prefer {@link isValidYouTubeUrl} and {@link extractYouTubeVideoId} for app logic.
+ * User-visible numbers and times go through {@link formatNumber} and
+ * {@link formatDateTime}: browser locale and time zone, UTC instants in.
+ *
+ * NOTE: Media URL validation is NOT mirrored here. validate_media_url() in
+ * app/utils/platform.py is the single authority; {@link isValidMediaUrl} is a
+ * cheap host/scheme preflight only. {@link detectPlatform} stays a UI helper
+ * (pills/icons) and {@link normalizeYouTubeUrl}/{@link extractYouTubeVideoId}
+ * are YouTube copy-paste/thumbnail conveniences.
  */
 
 export const EMPTY_VALUE = "–";  // U+2013 EN DASH, placeholder for missing values
@@ -135,6 +142,50 @@ export function normalizeTimeRange(start, end, duration) {
     return { start: s, end: e };
 }
 
+/**
+ * Whether a long-running request still belongs to the live trim selection.
+ * Compared field by field, so a changed selection (revision, trimId) or a
+ * closed/reopened modal (session) each invalidate a pending result.
+ * @param {{session: number, revision: number, trimId: string | null}} frozen
+ * @param {{session: number, revision: number, trimId: string | null}} live
+ * @returns {boolean}
+ */
+export function isSameTrimSelection(frozen, live) {
+    return frozen.session === live.session
+        && frozen.revision === live.revision
+        && frozen.trimId === live.trimId;
+}
+
+/**
+ * Restore a Lalal button's idle label. By default only a finished label
+ * ("Done"/"Cached") is reset, so a label showing a run's progress is kept;
+ * `force` also drops progress text (modal reopen).
+ * @param {{dataset: Record<string, string>, textContent: string}} btn
+ * @param {{force?: boolean}} [options]
+ * @returns {boolean} whether the label was restored
+ */
+export function resetLalalLabel(btn, { force = false } = {}) {
+    if (!btn) return false;
+    const finished = btn.dataset.lalalDone === "1";
+    delete btn.dataset.lalalDone;
+    if ((!finished && !force) || btn.dataset.lalalLabel === undefined) return false;
+    btn.textContent = btn.dataset.lalalLabel;
+    return true;
+}
+
+/**
+ * Drop a run's ownership of a stem, but only while it still holds it.
+ * @param {Map<string, number>} runs
+ * @param {string} stem
+ * @param {number} runId
+ * @returns {boolean}
+ */
+export function releaseLalalRun(runs, stem, runId) {
+    if (runs.get(stem) !== runId) return false;
+    runs.delete(stem);
+    return true;
+}
+
 export function buildTrimId(start, end) {
     const s = Math.round(start * 1000);
     const e = Math.round(end * 1000);
@@ -165,24 +216,127 @@ const LALAL_PROGRESS_EVENT_NAME = "fetchly:lalal-progress";
  * Uses binary prefixes (1024-based).
  * Invalid input returns EMPTY_VALUE (en-dash).
  * @param {number | string | null | undefined} bytes
+ * @param {string | string[] | undefined} [locale] defaults to the browser locale
  * @returns {string}
  */
-export function humanSize(bytes) {
+export function humanSize(bytes, locale = undefined) {
     const value = Number(bytes);
     if (!Number.isFinite(value) || value < 0) return EMPTY_VALUE;
-    if (value < 1) return "0 B";
+    if (value < 1) return `${formatNumber(0, { locale })} B`;
 
     for (const { unit, divisor, precision } of SIZE_UNITS) {
         if (value >= divisor) {
-            return precision === 0
-                ? `${Math.round(value / divisor)} ${unit}`
-                : `${(value / divisor).toFixed(precision)} ${unit}`;
+            const digits = { locale, minimumFractionDigits: precision, maximumFractionDigits: precision };
+            return `${formatNumber(value / divisor, digits)} ${unit}`;
         }
     }
 
     // Unreachable while SIZE_UNITS ends in a divisor of 1, but callers compare
     // against EMPTY_VALUE - never hand them undefined.
     return EMPTY_VALUE;
+}
+
+/**
+ * Split a humanSize() result into its number and unit for a stat tile.
+ * @param {number | string | null | undefined} bytes
+ * @returns {{ value: string, unit: string }}
+ */
+export function splitSize(bytes, locale = undefined) {
+    const rendered = humanSize(bytes, locale);
+    const match = /^(.+?)\s+(\S+)$/.exec(rendered);
+    return match ? { value: match[1], unit: match[2] } : { value: rendered, unit: "" };
+}
+
+/**
+ * Format one dashboard stat value for its tile.
+ * @param {string} statKey
+ * @param {unknown} value
+ * @param {string | string[] | undefined} [locale] defaults to the browser locale
+ * @returns {{ value: string, unit: string }}
+ */
+export function statParts(statKey, value, locale = undefined) {
+    switch (statKey) {
+        case "total_bytes":
+            return splitSize(value, locale);
+        case "total_jobs":
+            return { value: formatNumber(Math.max(0, Math.trunc(Number(value) || 0)), { locale }), unit: "" };
+        case "total_minutes":
+        case "total_lalal_minutes":
+            return {
+                value: formatNumber(Math.max(0, Number(value) || 0), { locale, maximumFractionDigits: 1 }),
+                unit: "",
+            };
+        default:
+            return { value: String(value ?? 0), unit: "" };
+    }
+}
+
+/**
+ * Format a number with the browser's locale (decimal and grouping separators).
+ * Non-finite input returns EMPTY_VALUE.
+ * @param {unknown} value
+ * @param {Intl.NumberFormatOptions & { locale?: string | string[] }} [options]
+ * @returns {string}
+ */
+export function formatNumber(value, { locale = undefined, ...options } = {}) {
+    if (value === null || value === undefined || value === "") return EMPTY_VALUE;
+    const number = Number(value);
+    if (!Number.isFinite(number)) return EMPTY_VALUE;
+    return new Intl.NumberFormat(locale, options).format(number);
+}
+
+/**
+ * Format a UTC timestamp in the browser's locale and time zone.
+ * Unparseable input returns EMPTY_VALUE.
+ * @param {unknown} value ISO 8601 or SQLite `YYYY-MM-DD HH:MM:SS` (UTC)
+ * @param {Intl.DateTimeFormatOptions & { locale?: string | string[] }} [options]
+ * @returns {string}
+ */
+export function formatDateTime(value, { locale = undefined, ...options } = {}) {
+    const date = parseUtcTimestamp(value);
+    if (Number.isNaN(date.getTime())) return EMPTY_VALUE;
+    const parts = Object.keys(options).some((key) => key !== "timeZone")
+        ? options
+        : { ...options, dateStyle: "medium", timeStyle: "short" };
+    return new Intl.DateTimeFormat(locale, parts).format(date);
+}
+
+/**
+ * Localize server-rendered values below *root*: `<time data-localize datetime>`
+ * (UTC instant) and `[data-localize-number]` (`data-fraction-digits` optional).
+ * The server's UTC/plain-number text stays as the no-JS fallback.
+ * @param {ParentNode} root
+ * @param {{ locale?: string | string[], timeZone?: string }} [options]
+ */
+export function localizeValues(root, { locale = undefined, timeZone = undefined } = {}) {
+    if (typeof root?.querySelectorAll !== "function") return;
+    for (const el of root.querySelectorAll("time[data-localize]")) {
+        const text = formatDateTime(el.getAttribute("datetime"), { locale, timeZone, dateStyle: "medium", timeStyle: "short" });
+        if (text !== EMPTY_VALUE) {
+            el.textContent = text;
+            el.title = el.getAttribute("datetime");
+        }
+    }
+    for (const el of root.querySelectorAll("[data-localize-number]")) {
+        const digits = Number(el.dataset.fractionDigits);
+        const fraction = Number.isInteger(digits) && digits >= 0
+            ? { minimumFractionDigits: digits, maximumFractionDigits: digits }
+            : {};
+        const text = formatNumber(el.dataset.localizeNumber, { locale, ...fraction });
+        if (text !== EMPTY_VALUE) el.textContent = text;
+    }
+}
+
+/**
+ * Parse a job timestamp. SQLite stores UTC as `YYYY-MM-DD HH:MM:SS` without a
+ * zone marker, which `new Date()` would read as local time.
+ * @param {unknown} value
+ * @returns {Date}
+ */
+export function parseUtcTimestamp(value) {
+    const text = value == null ? "" : String(value).trim();
+    const sqliteUtc = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
+    return new Date(sqliteUtc.test(text) ? `${text.replace(" ", "T")}Z` : text);
 }
 
 /**
@@ -414,78 +568,32 @@ export function platformPillLabel(platform) {
 }
 
 /**
- * Validate whether a URL targets a supported platform
- * (YouTube/TikTok/Instagram/Facebook).
- * YouTube keeps strict video-ID validation; the others require a host match
- * plus a non-trivial path (yt-dlp performs the final resolution).
- * Mirrors validate_media_url() in app/utils/platform.py.
+ * Cheap client-side preflight: is this plausibly a supported media URL?
+ *
+ * This is UX only. The authority for which URLs are accepted is
+ * validate_media_url() in app/utils/platform.py; the server runs the full
+ * per-platform grammar and returns the differentiated error. The frontend
+ * deliberately does NOT reproduce that grammar — it only weeds out obvious
+ * junk early (non-HTTPS, unknown host, embedded credentials, custom port) so
+ * the preview and submit do not fire a doomed request. A URL that clears this
+ * preflight may still be rejected by the server, and that server rejection is
+ * final.
  * @param {unknown} url
  * @returns {boolean}
  */
 export function isValidMediaUrl(url) {
-    const platform = detectPlatform(url);
-    if (platform === PLATFORM.YOUTUBE) {
-        return isValidYouTubeUrl(url);
+    // detectPlatform() already enforces HTTPS and the known-host allowlist.
+    if (detectPlatform(url) === null) return false;
+
+    let parsed;
+    try {
+        parsed = new URL(String(url).trim().replace(/&amp;/g, "&").replace(/[\u200B-\u200D\uFEFF]/g, ""));
+    } catch {
+        return false;
     }
-    if (platform === PLATFORM.TIKTOK || platform === PLATFORM.INSTAGRAM || platform === PLATFORM.FACEBOOK) {
-        let parsed;
-        try {
-            parsed = new URL(String(url).trim());
-        } catch {
-            return false;
-        }
-
-        if (parsed.protocol !== "https:" || parsed.username || parsed.password || (parsed.port && parsed.port !== "443")) {
-            return false;
-        }
-
-        const segments = parsed.pathname.split("/").filter(Boolean);
-        if (platform === PLATFORM.FACEBOOK) {
-            const fbHost = parsed.hostname.toLowerCase();
-            const fbCode = /^[A-Za-z0-9_-]+$/;
-            // Short share hosts: fb.watch/<code>, fb.gg/<code>
-            if (FACEBOOK_EXACT_HOSTS.includes(fbHost)) {
-                return segments.length >= 1 && fbCode.test(segments[0]);
-            }
-            if (segments.length === 0) return false;
-            // /watch/?v=<id>, /watch?v=<id>, /video.php?v=<id>
-            if (segments[0] === "watch" || segments[0] === "video.php") {
-                return /^[0-9]{6,}$/.test(parsed.searchParams.get("v") || "");
-            }
-            // /reel/<id>
-            if (segments[0] === "reel") {
-                return segments.length >= 2 && fbCode.test(segments[1]);
-            }
-            // /share/v/<code>, /share/r/<code>
-            if (segments[0] === "share") {
-                return segments.length >= 3 && ["v", "r"].includes(segments[1]) && fbCode.test(segments[2]);
-            }
-            // Page permalinks: /<page>/videos/<id> and /<page>/videos/<slug>/<id>
-            return segments.length >= 3
-                && segments[1] === "videos"
-                && /^[A-Za-z0-9._-]{1,64}$/.test(segments[0])
-                && fbCode.test(segments[segments.length - 1]);
-        }
-        if (platform === PLATFORM.INSTAGRAM) {
-            return segments.length === 2
-                && ["p", "reel", "tv"].includes(segments[0])
-                && /^[A-Za-z0-9_-]+$/.test(segments[1]);
-        }
-
-        const host = parsed.hostname.toLowerCase();
-        const isLongVideo = segments.length === 3
-            && /^@[A-Za-z0-9._]{1,24}$/.test(segments[0])
-            && ["video", "photo"].includes(segments[1])
-            && /^\d{8,}$/.test(segments[2]);
-        const isShareHost = ["vm.tiktok.com", "vt.tiktok.com"].includes(host)
-            && segments.length === 1
-            && /^[A-Za-z0-9_-]+$/.test(segments[0]);
-        const isSharePath = ["tiktok.com", "www.tiktok.com"].includes(host) && segments.length === 2
-            && segments[0] === "t"
-            && /^[A-Za-z0-9_-]+$/.test(segments[1]);
-        return isLongVideo || isShareHost || isSharePath;
-    }
-    return false;
+    // Submitting these would only earn a server rejection; refuse them here so
+    // the obviously-broken cases never leave the browser.
+    return !(parsed.username || parsed.password || (parsed.port && parsed.port !== "443"));
 }
 
 /**

@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 from app import db
 from app.routes import media
+from app.utils.fs import job_dir
 from tests._support import WebAppTestCase
 
 
@@ -22,20 +23,28 @@ class AudioSourceProvenanceHeaderTests(WebAppTestCase):
 
         from app.main import BASE_DIR, templates
 
+        # Point DATA_DIR at the per-test tempdir so get_data_dir(), job_dir()
+        # and resolve_job_path() (all global, env-based now) agree on one root.
         self.data_dir = Path(self._tmp.name)
+        env_patcher = patch.dict("os.environ", {"DATA_DIR": str(self.data_dir)})
+        env_patcher.start()
+        self.addCleanup(env_patcher.stop)
+
         context_patcher = patch.object(
             media,
             "_MEDIA_CONTEXT",
-            media.MediaContext(data_dir=self.data_dir, base_dir=BASE_DIR, templates=templates),
+            media.MediaContext(base_dir=BASE_DIR, templates=templates),
         )
         context_patcher.start()
         self.addCleanup(context_patcher.stop)
 
     def _audio_job(self, filename: str) -> str:
         job_id = str(uuid.uuid4())
-        job_dir = self.data_dir / job_id
-        job_dir.mkdir(parents=True, exist_ok=True)
-        file_path = job_dir / filename
+        # The route resolves the stored path against get_data_dir(); build the
+        # file under the same global per-job dir so the two match.
+        job_directory = job_dir(job_id)
+        job_directory.mkdir(parents=True, exist_ok=True)
+        file_path = job_directory / filename
         file_path.write_bytes(b"not really audio")
         db.insert_job(job_id, "https://example.com/track", "audio", "max", "queued")
         db.update_job(job_id, status="done", filename=str(file_path))

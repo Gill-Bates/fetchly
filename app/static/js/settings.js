@@ -7,7 +7,8 @@ import { showToast } from "./toast.js";
 import { confirmModal } from "./confirm.js";
 import { openCookiePasteDialog } from "./cookie-paste.js";
 import { fetchStats, toErrorMessage } from "./api.js";
-import { formatLalalMinutes, getCsrfToken, humanSize, isSafeSameOriginRedirect } from "./utils.js";
+import { EMPTY_VALUE, formatLalalMinutes, formatNumber, getCsrfToken, humanSize, isSafeSameOriginRedirect, localizeValues, splitSize, statParts } from "./utils.js";
+import { UPDATE_STATE_VIEW, applyUpdateBadge, renderUpdateState } from "./update-status.js";
 import { MAX_LOGO_BYTES, logoFileKind, prepareLogoUpload } from "./watermark-logo.js";
 
 const AUTO_SAVE_DELAY_MS = 800;
@@ -155,6 +156,18 @@ async function parseResponsePayload(res) {
     return res.json().catch(() => ({}));
 }
 
+/** Throw the server's error text (or `HTTP <status>`) for a failed settings request. */
+function assertResponseOk(res, payload) {
+    if (!res.ok) {
+        throw new Error(toErrorMessage(payload.detail) || `HTTP ${res.status}`);
+    }
+}
+
+/** User-facing text for a failed request; an abort means the request timed out. */
+function describeRequestError(err, fallback) {
+    return err?.name === "AbortError" ? "Request timed out" : (err?.message || fallback);
+}
+
 function createRequestController() {
     const controller = new AbortController();
     const timeoutId = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
@@ -227,7 +240,7 @@ const SESSION_MAX_DAY_OPTIONS = [1, 2, 3, 4, 5, 6, 7];
 // what the range input carries; the mode string is what gets saved.
 const OUTPUT_MODE_OPTIONS = ["source", "universal", "av1"];
 // Where the slider lands when the stored value is missing or unrecognized.
-// Mirrors _DEFAULT_OUTPUT_MODE in app/worker.py: never silently "source",
+// Mirrors _DEFAULT_OUTPUT_MODE in app/workers/worker.py: never silently "source",
 // which would quietly drop the compatibility promise.
 const OUTPUT_MODE_FALLBACK_INDEX = OUTPUT_MODE_OPTIONS.indexOf("universal");
 const OUTPUT_MODE_LABELS = {
@@ -608,7 +621,7 @@ function validateSettings() {
     };
 }
 
-/** Mirrors normalize_admin_username() in app/utils/credentials.py. */
+/** Mirrors normalize_admin_username() in app/auth/credentials.py. */
 const USERNAME_RE = /^[A-Za-z_-]+$/;
 
 function validateCredentials() {
@@ -764,9 +777,7 @@ async function performSettingsSave(data, successToast = null) {
         });
 
         const payload = await parseResponsePayload(res);
-        if (!res.ok) {
-            throw new Error(toErrorMessage(payload.detail) || `HTTP ${res.status}`);
-        }
+        assertResponseOk(res, payload);
 
         if (!pendingSave) {
             settingsDirty = false;
@@ -775,9 +786,7 @@ async function performSettingsSave(data, successToast = null) {
             showToast(payload.message || successToast, "success");
         }
     } catch (err) {
-        const message = err?.name === "AbortError"
-            ? "Request timed out"
-            : (err?.message || "Could not save");
+        const message = describeRequestError(err, "Could not save");
         showToast(`Error: ${message}`, "danger");
     } finally {
         isSaving = false;
@@ -863,9 +872,7 @@ async function saveAuthenticationFlag(enabled) {
         });
         responseReceived = true;
         const payload = await parseResponsePayload(res);
-        if (!res.ok) {
-            throw new Error(toErrorMessage(payload.detail) || `HTTP ${res.status}`);
-        }
+        assertResponseOk(res, payload);
 
         settingsDirty = false;
         if (payload.redirect && isSafeSameOriginRedirect(payload.redirect)) {
@@ -876,9 +883,7 @@ async function saveAuthenticationFlag(enabled) {
         setLogoutVisible(enabled);
         showToast(payload.message || "Authentication setting updated", "success");
     } catch (err) {
-        const message = err?.name === "AbortError"
-            ? "Request timed out"
-            : (err?.message || "Could not update authentication");
+        const message = describeRequestError(err, "Could not update authentication");
         if (!responseReceived) {
             showToast(`Authentication state is uncertain: ${message}. Reloading…`, "warning");
             window.location.reload();
@@ -947,9 +952,7 @@ async function saveCredentials() {
         });
         responseReceived = true;
         const payload = await parseResponsePayload(res);
-        if (!res.ok) {
-            throw new Error(toErrorMessage(payload.detail) || `HTTP ${res.status}`);
-        }
+        assertResponseOk(res, payload);
 
         settingsDirty = false;
         if (adminPasswordEl) adminPasswordEl.value = "";
@@ -966,7 +969,7 @@ async function saveCredentials() {
 
         showToast(payload.message || "Credentials updated", "success");
     } catch (err) {
-        const message = err?.name === "AbortError" ? "Request timed out" : (err?.message || "Request failed");
+        const message = describeRequestError(err, "Request failed");
         if (!responseReceived) {
             showToast(`Credential state is uncertain: ${message}. Reloading…`, "warning");
             window.location.reload();
@@ -1014,16 +1017,14 @@ async function resetStatistics() {
         });
 
         const payload = await parseResponsePayload(res);
-        if (!res.ok) {
-            throw new Error(toErrorMessage(payload.detail) || `HTTP ${res.status}`);
-        }
+        assertResponseOk(res, payload);
 
         showToast(payload.message || "Statistics reset", "success");
         // The tiles are server-rendered, so nothing else would correct them
         // until the System tab is opened again.
         await refreshJobStats();
     } catch (err) {
-        const message = err?.name === "AbortError" ? "Request timed out" : (err?.message || "Request failed");
+        const message = describeRequestError(err, "Request failed");
         showToast(`Error: ${message}`, "danger");
     } finally {
         isResettingStats = false;
@@ -1064,14 +1065,12 @@ async function removeAllJobs() {
         });
 
         const payload = await parseResponsePayload(res);
-        if (!res.ok) {
-            throw new Error(toErrorMessage(payload.detail) || `HTTP ${res.status}`);
-        }
+        assertResponseOk(res, payload);
 
         showToast(payload.message || "All jobs removed", "success");
         await refreshJobStats();
     } catch (err) {
-        const message = err?.name === "AbortError" ? "Request timed out" : (err?.message || "Request failed");
+        const message = describeRequestError(err, "Request failed");
         showToast(`Error: ${message}`, "danger");
     } finally {
         isRemovingAllJobs = false;
@@ -1292,15 +1291,13 @@ async function uploadLogo(file) {
             body,
         });
         const payload = await parseResponsePayload(res);
-        if (!res.ok) {
-            throw new Error(toErrorMessage(payload.detail) || `HTTP ${res.status}`);
-        }
+        assertResponseOk(res, payload);
 
         logoStatusGeneration += 1;
         renderLogoStatus(payload);
         showToast("Watermark logo updated", "success");
     } catch (err) {
-        const message = err?.name === "AbortError" ? "Request timed out" : (err?.message || "Upload failed");
+        const message = describeRequestError(err, "Upload failed");
         showToast(`Error: ${message}`, "danger");
     } finally {
         isLogoBusy = false;
@@ -1334,14 +1331,12 @@ async function removeLogo() {
             headers: { "X-CSRF-Token": requireCsrfToken() },
         });
         const payload = await parseResponsePayload(res);
-        if (!res.ok) {
-            throw new Error(toErrorMessage(payload.detail) || `HTTP ${res.status}`);
-        }
+        assertResponseOk(res, payload);
         logoStatusGeneration += 1;
         renderLogoStatus({ custom: false });
         showToast("Custom logo removed", "success");
     } catch (err) {
-        const message = err?.name === "AbortError" ? "Request timed out" : (err?.message || "Request failed");
+        const message = describeRequestError(err, "Request failed");
         showToast(`Error: ${message}`, "danger");
     } finally {
         isLogoBusy = false;
@@ -1826,9 +1821,7 @@ async function pasteCookies(platform) {
                 );
 
                 const payload = await parseResponsePayload(res);
-                if (!res.ok) {
-                    throw new Error(toErrorMessage(payload.detail) || `HTTP ${res.status}`);
-                }
+                assertResponseOk(res, payload);
 
                 cookieStatusGeneration += 1;
                 renderCookieStatus(platform, payload);
@@ -1836,7 +1829,7 @@ async function pasteCookies(platform) {
             },
         });
     } catch (err) {
-        const message = err?.name === "AbortError" ? "Request timed out" : err?.message;
+        const message = describeRequestError(err);
         showToast(`Error: ${message || "Could not store these cookies"}`, "danger");
     } finally {
         setCookieTileBusy(els, false);
@@ -1868,15 +1861,13 @@ async function removeCookieFile(platform) {
         });
 
         const payload = await parseResponsePayload(res);
-        if (!res.ok) {
-            throw new Error(toErrorMessage(payload.detail) || `HTTP ${res.status}`);
-        }
+        assertResponseOk(res, payload);
 
         cookieStatusGeneration += 1;
         renderCookieStatus(platform, { platform, status: "missing", present: false });
         showToast(`${label} cookies removed`, "success");
     } catch (err) {
-        const message = err?.name === "AbortError" ? "Request timed out" : (err?.message || "Request failed");
+        const message = describeRequestError(err, "Request failed");
         showToast(`Error: ${message}`, "danger");
     } finally {
         setCookieTileBusy(els, false);
@@ -1912,9 +1903,7 @@ function bindLalalEvents() {
             });
 
             const payload = await parseResponsePayload(res);
-            if (!res.ok) {
-                throw new Error(toErrorMessage(payload.detail) || `HTTP ${res.status}`);
-            }
+            assertResponseOk(res, payload);
 
             // Invalidate any status read still in flight: it predates the
             // disconnect and would report the account as connected again.
@@ -1980,9 +1969,7 @@ function bindLalalEvents() {
             });
 
             const payload = await parseResponsePayload(res);
-            if (!res.ok) {
-                throw new Error(toErrorMessage(payload.detail) || `HTTP ${res.status}`);
-            }
+            assertResponseOk(res, payload);
 
             if (lalalActivationKey) lalalActivationKey.value = "";
             showAuthPanel("success");
@@ -2032,11 +2019,12 @@ function bindLalalEvents() {
 }
 
 const APP_UPDATE_STATES = {
-    loading: { icon: "progress_activity", spin: true, text: "Checking for updates…" },
-    current: { icon: "check_circle", text: "You're running the latest version" },
-    available: { icon: "new_releases", text: "Update available" },
-    prerelease: { icon: "science", text: "You're on a pre-release build" },
-    unknown: { icon: "cloud_off", text: "Update check unavailable" },
+    loading: { ...UPDATE_STATE_VIEW.checking, spin: true, detail: "Checking for updates…" },
+    current: { ...UPDATE_STATE_VIEW.current, detail: "You're running the latest version" },
+    available: { ...UPDATE_STATE_VIEW.available, detail: "A newer version is available" },
+    // The badge says it all; no detail line for a pre-release build.
+    prerelease: { ...UPDATE_STATE_VIEW.prerelease, detail: "" },
+    unknown: { ...UPDATE_STATE_VIEW.unknown, detail: "Update check unavailable" },
 };
 
 function parseVersionParts(value) {
@@ -2066,6 +2054,10 @@ function setAppUpdateState(box, state, { text, url } = {}) {
     if (!box) return;
 
     const preset = APP_UPDATE_STATES[state] || APP_UPDATE_STATES.unknown;
+    const statusEl = box.querySelector("[data-app-update-status]");
+    const badgeEl = box.querySelector("[data-app-update-badge]");
+    const prereleaseEl = box.querySelector("[data-app-update-prerelease]");
+    const labelEl = box.querySelector("[data-app-update-label]");
     const iconEl = box.querySelector("[data-app-update-icon]");
     const textEl = box.querySelector("[data-app-update-text]");
     const linkEl = box.querySelector("[data-app-update-link]");
@@ -2074,12 +2066,22 @@ function setAppUpdateState(box, state, { text, url } = {}) {
     box.dataset.appUpdateState = state;
     box.setAttribute("aria-busy", String(state === "loading"));
 
+    // Pre-release is shown inline beside the version, not as the top status
+    // block, so the top status is suppressed only in that state.
+    const isPrerelease = state === "prerelease";
+    if (prereleaseEl) prereleaseEl.hidden = !isPrerelease;
+    if (statusEl) statusEl.hidden = isPrerelease;
+
+    if (badgeEl) badgeEl.dataset.state = state in APP_UPDATE_STATES ? state : "unknown";
+    if (labelEl) labelEl.textContent = preset.text;
     if (iconEl) {
         iconEl.textContent = preset.icon;
         iconEl.classList.toggle("settings-app-update-spin", Boolean(preset.spin));
     }
     if (textEl) {
-        textEl.textContent = text || preset.text;
+        const detail = text || preset.detail;
+        textEl.textContent = detail;
+        textEl.hidden = !detail;
     }
     if (refreshBtn) {
         refreshBtn.disabled = state === "loading";
@@ -2102,10 +2104,10 @@ function setAppUpdateVersions(box, current, latest) {
     const latestEl = box.querySelector("[data-app-update-latest]");
 
     if (currentEl) {
-        currentEl.textContent = formatVersion(current) || "–";
+        currentEl.textContent = formatVersion(current) || EMPTY_VALUE;
     }
     if (latestEl) {
-        latestEl.textContent = formatVersion(latest) || "–";
+        latestEl.textContent = formatVersion(latest) || EMPTY_VALUE;
     }
 }
 
@@ -2131,9 +2133,7 @@ function applyAppUpdate(box, info) {
     }
 
     if (current && compareVersions(current, latest) > 0) {
-        setAppUpdateState(box, "prerelease", {
-            text: `Ahead of the latest release (${latestLabel})`,
-        });
+        setAppUpdateState(box, "prerelease");
         return;
     }
 
@@ -2142,21 +2142,9 @@ function applyAppUpdate(box, info) {
     });
 }
 
-function applyUpdateBadge(cell, info) {
-    const badge = cell.querySelector("[data-update-badge]");
-    if (!badge) return;
-
-    if (!info?.update_available || !info.latest) {
-        badge.hidden = true;
-        return;
-    }
-
-    // Informational only — updating means rebuilding the container image.
-    const hint = `Version ${info.latest} is available — rebuild the image to update`;
-    badge.href = info.url || "#";
-    badge.title = hint;
-    badge.setAttribute("aria-label", `${info.label || "Component"}: ${hint}`);
-    badge.hidden = false;
+function markUpdateCheckUnavailable(cells, appBox) {
+    cells.forEach((cell) => renderUpdateState(cell, "unknown"));
+    setAppUpdateState(appBox, "unknown");
 }
 
 async function loadUpdateStatus() {
@@ -2170,22 +2158,21 @@ async function loadUpdateStatus() {
         setAppUpdateVersions(appBox, appBox.dataset.currentVersion, "");
         setAppUpdateState(appBox, "loading");
     }
-    // Clear the previous answer's badges up front. Every failure path below
-    // leaves the components untouched, so a stale "update available" would
-    // otherwise outlive the check that found it - including on a manual refresh.
-    cells.forEach((cell) => applyUpdateBadge(cell, null));
+    // Reset to "checking" up front so a stale answer cannot outlive the check
+    // that produced it - including on a manual refresh.
+    cells.forEach((cell) => renderUpdateState(cell, "checking"));
 
     try {
         const res = await fetchWithTimeout("/api/updates", { credentials: "same-origin" });
         if (!res.ok) {
-            setAppUpdateState(appBox, "unknown");
+            markUpdateCheckUnavailable(cells, appBox);
             return;
         }
 
         const payload = await parseResponsePayload(res);
         const components = payload?.components;
         if (!components || typeof components !== "object") {
-            setAppUpdateState(appBox, "unknown");
+            markUpdateCheckUnavailable(cells, appBox);
             return;
         }
 
@@ -2194,8 +2181,8 @@ async function loadUpdateStatus() {
         });
         applyAppUpdate(appBox, components.fetchly);
     } catch {
-        // Update checks are best-effort — a failed check simply shows no badge.
-        setAppUpdateState(appBox, "unknown");
+        // Update checks are best-effort — a failed check shows "Check unavailable".
+        markUpdateCheckUnavailable(cells, appBox);
     }
 }
 
@@ -2219,36 +2206,30 @@ function setHostMetric(metric, { value, unit = "", title = null }) {
     if (title) card.setAttribute("title", title);
 }
 
-function splitSize(bytes) {
-    const rendered = humanSize(bytes);
-    const match = /^(.+?)\s+(\S+)$/.exec(rendered);
-    return match ? { value: match[1], unit: match[2] } : { value: rendered, unit: "" };
-}
-
 function renderHostStats(payload) {
     const storage = payload?.storage;
     setHostMetric("storage", storage && Number.isFinite(Number(storage.free))
         ? {
             ...splitSize(storage.free),
-            title: `${humanSize(storage.free)} free of ${humanSize(storage.total)} · ${storage.percent}% used`,
+            title: `${humanSize(storage.free)} free of ${humanSize(storage.total)} · ${formatNumber(storage.percent, { maximumFractionDigits: 1 })}% used`,
         }
-        : { value: "–" });
+        : { value: EMPTY_VALUE });
 
     const cpu = payload?.cpu;
     setHostMetric("cpu", cpu && Number.isFinite(Number(cpu.percent))
-        ? { value: String(Math.round(cpu.percent)), unit: "%", title: cpu.cores ? `${cpu.cores} logical cores` : null }
-        : { value: "–" });
+        ? { value: formatNumber(Math.round(cpu.percent)), unit: "%", title: cpu.cores ? `${cpu.cores} logical cores` : null }
+        : { value: EMPTY_VALUE });
 
     const memory = payload?.memory;
     setHostMetric("memory", memory && Number.isFinite(Number(memory.percent))
         ? {
-            value: String(Math.round(memory.percent)),
+            value: formatNumber(Math.round(memory.percent)),
             unit: "%",
             title: `${humanSize(memory.used)} used of ${humanSize(memory.total)}`,
         }
-        : { value: "–" });
+        : { value: EMPTY_VALUE });
 
-    setHostMetric("uptime", { value: payload?.uptime?.text || "–" });
+    setHostMetric("uptime", { value: payload?.uptime?.text || EMPTY_VALUE });
 }
 
 async function loadHostStats() {
@@ -2265,26 +2246,6 @@ async function loadHostStats() {
 }
 
 const JOB_STATS_MOBILE_QUERY = "(max-width: 767.98px)";
-
-/**
- * Render one dashboard stat value into its tile. Mirrors renderStatParts() in
- * main.js -- the same four keys, formatted the same way.
- * @param {string} statKey
- * @param {unknown} value
- */
-function renderJobStatParts(statKey, value) {
-    switch (statKey) {
-        case "total_bytes":
-            return splitSize(value);
-        case "total_jobs":
-            return { value: String(Math.max(0, Math.trunc(Number(value) || 0))), unit: "" };
-        case "total_minutes":
-        case "total_lalal_minutes":
-            return { value: String(Math.round(Math.max(0, Number(value) || 0) * 10) / 10), unit: "" };
-        default:
-            return { value: String(value ?? 0), unit: "" };
-    }
-}
 
 /**
  * Refresh the dashboard stat tiles that mobile moves onto the System tab.
@@ -2304,7 +2265,7 @@ async function refreshJobStats() {
     }
 
     row.querySelectorAll(".stat-card[data-stat-key]").forEach((card) => {
-        const rendered = renderJobStatParts(card.dataset.statKey, stats?.[card.dataset.statKey]);
+        const rendered = statParts(card.dataset.statKey, stats?.[card.dataset.statKey]);
         const valueNode = card.querySelector("[data-stat-value]");
         const unitNode = card.querySelector("[data-stat-unit]");
         if (valueNode) valueNode.textContent = rendered.value;
@@ -2387,4 +2348,5 @@ function init() {
     });
 }
 
+localizeValues(document);
 init();

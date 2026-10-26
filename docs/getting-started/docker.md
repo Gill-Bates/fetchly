@@ -27,7 +27,7 @@ under it:
 ```text
 /app/data/
 ├── jobs.db               # SQLite database (WAL mode): jobs, settings, share links
-├── <job-uuid>/           # One directory per job: media, thumbnail, trims, stems
+├── jobs/<job-uuid>/      # One directory per job: media, thumbnail, trims, stems
 ├── cookies/              # Imported per-platform cookie jars
 ├── logo/                 # Uploaded watermark logo, if any
 ├── thumb-cache/          # Cached remote thumbnails
@@ -101,7 +101,7 @@ services:
       FETCHLY_SECRET_KEY: "${FETCHLY_SECRET_KEY:?required}"
       FETCHLY_BEHIND_HTTPS: "1"
       FORWARDED_ALLOW_IPS: "172.18.0.0/16"
-      TZ: "${TZ:-Etc/UTC}"
+      TZ: Etc/UTC
     logging:
       driver: json-file
       options:
@@ -130,13 +130,10 @@ useful as a first stop when something behaves unexpectedly.
 
 ## Timezone
 
-`TZ` controls the timestamps rendered in the UI and written to the logs. Job records
-themselves are stored in UTC.
-
-```yaml
-environment:
-  TZ: Europe/Berlin
-```
+fetchly works in UTC throughout: job records, API and event payloads, and log lines
+(`2026-10-26T12:34:56Z`). The web UI converts every date, time, and number to the
+browser's locale and time zone, so there is nothing to set on the server. Keep
+`TZ: Etc/UTC`; another value changes neither the UI nor the logs.
 
 ## Backups
 
@@ -149,5 +146,5 @@ tar czf fetchly-backup-$(date +%F).tar.gz data/
 docker compose start
 ```
 
-Restore by putting the directory back and starting the container; the schema migrates
-forward automatically.
+Restore by putting the directory back and starting the container. Databases are not migrated
+between releases: a `jobs.db` written by an older release is not upgraded, and the container stops at startup with an error that names the file. Remove `jobs.db` (with `-wal` and `-shm`) to start fresh; jobs and settings are lost.

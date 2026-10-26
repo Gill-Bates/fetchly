@@ -42,7 +42,7 @@ Document project conventions:
 - **Integration tests:** Feature workflows across modules
 - **UI tests:** DOM rendering, accessibility, responsive layout
 - **Coverage:** reported, not enforced. `[tool.coverage.run]` in `pyproject.toml` covers `app` and `middleware` with branch coverage, and `[tool.coverage.report]` sets `show_missing`. There is no `fail_under` and CI sets no threshold — do not invent one.
-- **CI gate:** `.github/workflows/ci.yml` runs `ruff check`, `pytest -q`, `npm run lint:js`, `npm run lint:css`, `npm run lint:contracts` and `npm test`. All must pass before merge.
+- **CI gate:** `.github/workflows/ci.yml` runs `ruff check`, `ruff format --check`, `pytest -q`, `npm run lint:js`, `npm run lint:css`, `npm run lint:contracts` and `npm test`, plus the entrypoint/Dockerfile checks and the single-manifest check. All must pass before merge.
 
 ### Common Development Workflows
 - **Adding feature:** Plan → Create branch → Code → Test → PR → Review → Merge
@@ -79,7 +79,7 @@ pip install -e .[dev]     # Installs with dev dependencies
 npm install               # Install JavaScript test dependencies
 
 # Initialize database
-python run.py             # Creates/migrates database on startup
+python run.py             # Creates the database on startup (no migrations)
 
 # Verify setup
 pytest tests/ -v          # Run Python tests
@@ -149,7 +149,7 @@ python -m cProfile -s cumulative run.py > profile.txt
 
 ---
 
-**Last Updated:** 2026-09-19  
+**Last Updated:** 2026-10-26  
 **Language:** Python 3.13+, JavaScript (ES6+)  
 **Test Framework:** pytest (Python), `node --test` with `node:assert/strict` (JavaScript)  
 **Version Control:** Git with GitHub  

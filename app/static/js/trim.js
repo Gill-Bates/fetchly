@@ -9,14 +9,19 @@
  * for the waveform and region selection.
  */
 
+import { toErrorMessage } from "./api.js";
 import { showToast } from "./toast.js";
 import { reportError } from "./errors.js";
 import { LALAL_MAX_DURATION_MINUTES, LALAL_MAX_DURATION_SECONDS } from "./config.js";
 import {
     buildTrimId,
     clamp,
+    formatNumber,
     getCsrfToken as readCsrfToken,
     isSafeRedirect,
+    isSameTrimSelection,
+    releaseLalalRun,
+    resetLalalLabel,
     normalizeTimeRange,
     subscribeToLalalProgress,
     triggerDownload,
@@ -27,6 +32,14 @@ import { isLalalEnabled, isLalalDurationGuardEnabled } from "./ui.js";
 // WaveSurfer imports (loaded dynamically)
 let WaveSurfer = null;
 let RegionsPlugin = null;
+
+// CSP nonce for WaveSurfer's shadow-root <style>. The server sets a fresh one
+// per response in base.html; style-src 'self' 'nonce-...' only admits the sheet
+// carrying it. Absent (e.g. a page without the dataset attribute), WaveSurfer
+// omits the nonce and the sheet is blocked - which is the safe failure.
+function waveSurferCspNonce() {
+    return document.documentElement?.dataset.wavesurferCspNonce || "";
+}
 
 let trimWs = null;
 let trimRegion = null;
@@ -42,6 +55,8 @@ let zoomLevel = 50;
 let isLooping = false;
 let isOpening = false;
 let trimSession = 0;
+let lalalRunCounter = 0;
+const activeLalalRuns = new Map();  // stem -> id of the run that owns its button
 let zoomRaf = 0;
 let pendingZoomClientX = null;
 let beatGridRaf = 0;
@@ -161,6 +176,9 @@ function resetButtons({ preservePlayback = false } = {}) {
     setPlaybackControlsEnabled(preservePlayback && trimReady);
     setButtonState(btnVocals, { disabled: true });
     setButtonState(btnInstr, { disabled: true });
+    // A reopened modal starts idle; selection clears keep a running label.
+    resetLalalLabel(btnVocals, { force: !preservePlayback });
+    resetLalalLabel(btnInstr, { force: !preservePlayback });
 
     isLooping = false;
     syncLoopButton();
@@ -190,6 +208,8 @@ function updateSelectionActions() {
 function markSelectionChanged() {
     selectionRevision += 1;
     trimId = null;
+    resetLalalLabel(btnVocals);
+    resetLalalLabel(btnInstr);
     updateSelectionActions();
 }
 
@@ -207,7 +227,7 @@ async function parseApiResponse(res, fallbackMessage) {
     }
 
     if (!res.ok || data.ok === false) {
-        throw new Error(data.error || data.detail || fallbackMessage);
+        throw new Error(toErrorMessage(data) || fallbackMessage);
     }
 
     return data;
@@ -1110,7 +1130,7 @@ function handleWaveClick(e, { fromTouchTap = false } = {}) {
         setSelectionVisualState(false);
         resetButtons({ preservePlayback: true });
         if (trimInfoEl) {
-            trimInfoEl.textContent = `Selection must be at least ${MIN_SELECTION_SECONDS.toFixed(1)}s. Click or tap to choose a new start.`;
+            trimInfoEl.textContent = `Selection must be at least ${formatSeconds(MIN_SELECTION_SECONDS)}s. Click or tap to choose a new start.`;
         }
         return;
     }
@@ -1184,14 +1204,19 @@ function setupEventListeners() {
  */
 function formatTime(seconds) {
     const mins = Math.floor(seconds / 60);
-    const secs = (seconds % 60).toFixed(2);
-    return `${mins}:${secs.padStart(5, "0")}`;
+    const secs = formatNumber(seconds % 60, { minimumIntegerDigits: 2, minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    return `${mins}:${secs}`;
+}
+
+/** Seconds with one decimal in the browser locale (`1.5` / `1,5`). */
+function formatSeconds(seconds) {
+    return formatNumber(seconds, { minimumFractionDigits: 1, maximumFractionDigits: 1 });
 }
 
 function updateInfo() {
     if (!trimRegion || !trimInfoEl) return;
     const duration = trimRegion.end - trimRegion.start;
-    trimInfoEl.textContent = `${formatTime(trimRegion.start)} – ${formatTime(trimRegion.end)} (${duration.toFixed(1)}s)`;
+    trimInfoEl.textContent = `${formatTime(trimRegion.start)} – ${formatTime(trimRegion.end)} (${formatSeconds(duration)}s)`;
 }
 
 /**
@@ -1309,6 +1334,7 @@ export async function openTrimModal(jobId, options = {}) {
 
         trimWs = WaveSurfer.create({
             container: trimWaveEl,
+            cspNonce: waveSurferCspNonce(),
             waveColor: "rgba(226, 232, 240, 0.45)",
             progressColor: "rgba(255, 255, 255, 0.7)",
             cursorColor: "#f59e0b",
@@ -1477,7 +1503,7 @@ async function ensureTrimSelection() {
     const duration = end - start;
 
     // Validate selection
-    if (duration < 1) {
+    if (duration < MIN_SELECTION_SECONDS) {
         showToast("Selection too short (minimum 1 second)", "warning");
         return false;
     }
@@ -1531,7 +1557,7 @@ async function ensureTrimSelection() {
         updateSelectionActions();
 
         const cachedNote = data.cached ? " (cached)" : "";
-        showToast(`Trimmed ${duration.toFixed(1)}s of audio${cachedNote}`, "success");
+        showToast(`Trimmed ${formatSeconds(duration)}s of audio${cachedNote}`, "success");
         return true;
 
     } catch (err) {
@@ -1588,14 +1614,22 @@ async function runLalal(stem) {
         return;
     }
 
+    // Freeze the selection this run was started for; a later selection
+    // change must not let its result land on a different selection.
     const session = trimSession;
+    const requestedTrimId = trimId;
+    const frozen = { session, revision: selectionRevision, trimId: requestedTrimId };
+    const isCurrent = () => isSameTrimSelection(
+        frozen,
+        { session: trimSession, revision: selectionRevision, trimId },
+    );
     const abortController = trimAbortController;
     const progressController = new AbortController();
     const requestController = new AbortController();
 
     const btn = stem === "vocals" ? btnVocals : btnInstr;
     if (!btn) return;
-
+    // Fetch the token before claiming the button, so a failure leaves no state.
     let csrfToken;
     try {
         csrfToken = requireCsrfToken();
@@ -1604,7 +1638,25 @@ async function runLalal(stem) {
         return;
     }
 
-    const originalText = btn.textContent;
+    const runId = ++lalalRunCounter;
+    activeLalalRuns.set(stem, runId);
+    // The first run captures the idle label; later runs may start while an
+    // older, now stale run still shows its progress text.
+    btn.dataset.lalalLabel ??= btn.textContent;
+    const originalText = btn.dataset.lalalLabel;
+    // True when the selection changed (or the modal closed) while this run was
+    // waiting. A same-session change resets this button's label unless a newer
+    // run already owns it; the enabled state is left to updateSelectionActions().
+    const abandonIfStale = () => {
+        if (isCurrent()) return false;
+        progressController.abort();
+        if (session === trimSession && releaseLalalRun(activeLalalRuns, stem, runId)) {
+            setButtonState(btn, { text: originalText });
+        }
+        return true;
+    };
+
+    delete btn.dataset.lalalDone;
     setButtonState(btn, { disabled: true, text: "Processing..." });
 
     let timedOut = false;
@@ -1617,7 +1669,7 @@ async function runLalal(stem) {
 
     // Listen for progress updates
     subscribeToLalalProgress(trimJobId, stem, (stage, progress) => {
-        if (session !== trimSession) return;
+        if (abandonIfStale()) return;
         btn.textContent = `${stage} ${progress}%`;
     }, progressController.signal);
 
@@ -1626,7 +1678,7 @@ async function runLalal(stem) {
         const url = new URL(`/api/lalal/${encodeURIComponent(trimJobId)}`, window.location.origin);
         url.searchParams.set("stem", stem);
         url.searchParams.set("trimmed", "true");
-        url.searchParams.set("trim_id", trimId);
+        url.searchParams.set("trim_id", requestedTrimId);
 
         const res = await fetch(
             url.toString(),
@@ -1640,7 +1692,7 @@ async function runLalal(stem) {
             }
         );
         const data = await parseApiResponse(res, "Lalal failed");
-        if (session !== trimSession) return;
+        if (abandonIfStale()) return;
 
         // Download the result
         if (!data.download_url) {
@@ -1659,16 +1711,17 @@ async function runLalal(stem) {
         // changing it (updateSelectionActions) re-arms the button.
         const statusText = data.cached ? "✓ Cached" : "✓ Done";
         setButtonState(btn, { text: statusText });
+        btn.dataset.lalalDone = "1";
 
     } catch (err) {
         if (err?.name === "AbortError" && timedOut) {
-            if (session !== trimSession) return;
+            if (abandonIfStale()) return;
             showToast("Lalal timed out. Please try again.", "warning");
             setButtonState(btn, { text: originalText, disabled: false });
             return;
         }
         if (err?.name === "AbortError") return;
-        if (session !== trimSession) return;
+        if (abandonIfStale()) return;
         reportError(err, {
             module: "trim",
             action: "runLalal",
@@ -1680,6 +1733,7 @@ async function runLalal(stem) {
         window.clearTimeout(timeoutId);
         abortController.signal.removeEventListener("abort", abortRequest);
         progressController.abort();
+        releaseLalalRun(activeLalalRuns, stem, runId);
     }
 }
 

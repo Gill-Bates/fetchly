@@ -10,7 +10,8 @@ The setting is the only session deadline: it is counted from login, is never
 extended (there is no renewal), and the cookie's Max-Age has to expire with it.
 """
 
-from app import db, session
+from app import db
+from app.auth import session
 from tests._support import IsolatedDbTestCase, WebAppTestCase
 
 
@@ -69,7 +70,7 @@ class SessionLifetimeRouteTests(WebAppTestCase):
     """Cover the actual server-side effect: a request with an expired
 
     session cookie is treated as unauthenticated end to end, through
-    require_user()/require_html_auth() - not just at the session.py unit
+    require_user()/require_html_auth() - not just at the auth/session.py unit
     level.
     """
 
@@ -140,7 +141,9 @@ class SessionLifetimeRouteTests(WebAppTestCase):
         copied_client_cookies.set(session.SESSION_COOKIE, token)
         self.assertEqual(self.client.get("/api/jobs").status_code, 401)
 
-    def test_logout_with_a_garbage_session_cookie_does_not_revoke_the_real_session(self):
+    def test_logout_with_a_garbage_session_cookie_does_not_revoke_the_real_session(
+        self,
+    ):
         """S1 regression: an anonymous visitor must not be able to force-logout
 
         the admin by POSTing /logout with a garbage fetchly_session cookie.

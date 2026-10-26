@@ -13,7 +13,7 @@ from unittest.mock import patch
 import httpx
 
 from app import db
-from app.lalal import LalalError, parse_minutes_left
+from app.integrations.lalal.client import LalalError, parse_minutes_left
 from tests._support import WebAppTestCase
 
 
@@ -67,7 +67,7 @@ class LalalStatusMinutesTests(WebAppTestCase):
         FakeLalalClient.calls = 0
         FakeLalalClient.quota = {"minutes_left": 261.5}
         FakeLalalClient.error = None
-        client_patcher = patch("app.lalal.LalalClient", FakeLalalClient)
+        client_patcher = patch("app.integrations.lalal.client.LalalClient", FakeLalalClient)
         client_patcher.start()
         self.addCleanup(client_patcher.stop)
 
@@ -97,7 +97,9 @@ class LalalStatusMinutesTests(WebAppTestCase):
         self.assertEqual(self._status(force_refresh=True)["remaining_minutes"], 12.25)
         self.assertEqual(FakeLalalClient.calls, 2)
 
-    def test_failed_validation_drops_the_balance_instead_of_keeping_a_stale_one(self) -> None:
+    def test_failed_validation_drops_the_balance_instead_of_keeping_a_stale_one(
+        self,
+    ) -> None:
         self._status()
         FakeLalalClient.error = RuntimeError("invalid key")
 
@@ -135,12 +137,20 @@ class LalalStatusMinutesTests(WebAppTestCase):
         self.assertTrue(payload["token_valid"])
         self.assertEqual(payload["remaining_minutes"], 261.5)
 
-
     def test_a_source_without_a_balance_reports_unknown(self) -> None:
         FakeLalalClient.quota = {"mode": "web_session"}
         payload = self._status()
         self.assertTrue(payload["token_valid"])
         self.assertIsNone(payload["remaining_minutes"])
+
+    def test_an_exhausted_balance_is_reported_as_zero_not_unknown(self) -> None:
+        FakeLalalClient.quota = {"minutes_left": 0}
+        self.assertEqual(self._status()["remaining_minutes"], 0.0)
+        self.assertEqual(db.get_settings()["lalalaai_minutes_left"], 0.0)
+        # Served from the cache on the second call, which is the path that lost the 0.
+        self.assertEqual(self._status()["remaining_minutes"], 0.0)
+        self.assertEqual(FakeLalalClient.calls, 1)
+        self.assertIn('"lalal_minutes_left": 0.0', self.client.get("/settings").text)
 
     def test_unconfigured_account_reports_no_balance(self) -> None:
         db.set_settings({"lalalaai_email": "", "lalalaai_auth_key": ""})
@@ -171,7 +181,7 @@ class LalalActivationKeyMinutesTests(WebAppTestCase):
         FakeLalalClient.calls = 0
         FakeLalalClient.quota = {"minutes_left": 42.0}
         FakeLalalClient.error = None
-        client_patcher = patch("app.lalal.LalalClient", FakeLalalClient)
+        client_patcher = patch("app.integrations.lalal.client.LalalClient", FakeLalalClient)
         client_patcher.start()
         self.addCleanup(client_patcher.stop)
 

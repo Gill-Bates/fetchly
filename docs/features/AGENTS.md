@@ -10,10 +10,10 @@ Pages here explain how to use each major feature, with screenshots, examples, an
 
 | File | Purpose |
 | --- | --- |
-| `downloads.md` | Media download feature: supported platforms (YouTube, TikTok, Instagram, Facebook), format selection, quality options, download progress, errors |
+| `downloads.md` | Media download feature: supported platforms (YouTube, TikTok, Instagram, Facebook), format selection, quality options, MP3 ID3 tags (cover, comment), download progress, errors |
 | `video-codecs.md` | Video output format trade-off: H.264 vs Source vs AV1 across resolution, file size, compatibility and CPU cost; when re-encoding happens |
 | `jobs.md` | Job management: submitting jobs, monitoring progress, canceling jobs, retrying failed jobs, viewing job history |
-| `bpm.md` | BPM detection: the two-detector cascade, preprocessing, octave normalization, the `_94bpm` tag on the download filename, cached results, performance impact |
+| `bpm.md` | BPM detection: the two-detector cascade, preprocessing, octave normalization, the `_94bpm` tag on the download filename, the `TBPM` ID3 tag, cached results, performance impact |
 | `trimming.md` | Audio trimming: waveform editor, setting trim points, listening to clips, saving trimmed audio |
 | `stems.md` | Stem separation: Lalal.ai integration, stem types (vocals, drums, bass, other), quality levels, pricing, results |
 | `cookies.md` | Cookie management: why cookies needed, importing from browser, platform-specific requirements, troubleshooting |
@@ -78,7 +78,7 @@ Pages here explain how to use each major feature, with screenshots, examples, an
 ```bash
 # Consistent setup
 # Use full HD browser window (1920x1080 or similar)
-# Use light theme for consistency
+# The app is dark-only; use its dark theme
 # Show relevant UI only (crop if needed)
 # Include cursor if pointing at something
 # Save as PNG in docs/assets/img/features/
@@ -125,7 +125,7 @@ The dashboard will show video title and available formats.
 
 ---
 
-**Last Updated:** 2026-09-19  
+**Last Updated:** 2026-10-26  
 **Audience:** End users (non-technical to intermediate)  
 **Scope:** Feature usage and troubleshooting  
 **Screenshots:** From actual fetchly instance  

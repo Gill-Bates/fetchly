@@ -4,7 +4,7 @@
 # Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 #
 
-"""One budget per workload: app/worker.py takes transcode slots from a thread,
+"""One budget per workload: app/workers/worker.py takes transcode slots from a thread,
 app/routes/{media,trim,lalal}.py take them from the event loop. Two separate
 semaphores would each hand out the full count."""
 
@@ -13,9 +13,9 @@ import threading
 import time
 import unittest
 
-# No tests._support import: app.governor needs no secret key, and conftest.py
+# No tests._support import: app.runtime.governor needs no secret key, and conftest.py
 # has already bootstrapped one before this module is imported.
-from app.governor import Governor, GovernorConfig, SharedSemaphore
+from app.runtime.governor import Governor, GovernorConfig, SharedSemaphore
 
 
 class SharedSemaphoreTests(unittest.TestCase):

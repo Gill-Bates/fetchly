@@ -13,6 +13,7 @@ what the client said about them. A user's own PNG is why the odd encodings
 below (palette, 16-bit) are covered: a canvas render only ever produced rgba.
 """
 
+import hashlib
 import re
 import shutil
 import subprocess
@@ -203,6 +204,30 @@ class LogoLifecycleTests(unittest.TestCase):
         watermark_logo.custom_logo_path().write_bytes(b"truncated")
         self.assertFalse(logo_status().custom)
 
+    def test_a_logo_swapped_during_inspection_is_not_mixed_in(self):
+        # Logo B lands on disk after the bytes of logo A were read: size and
+        # fingerprint of A must not be reported with B's dimensions.
+        store_custom_logo(self.logo)
+        other = _png(
+            "color=c=black@0.0:s=200x200,format=rgba",
+            self.dir / "other.png",
+            filters="drawbox=x=10:y=10:w=100:h=100:color=white@1.0:t=fill,format=rgba",
+        )
+        real_probe = watermark_logo._probe_png
+
+        def probe_after_swap(path):
+            watermark_logo.custom_logo_path().write_bytes(other)
+            return real_probe(path)
+
+        with patch.object(watermark_logo, "_probe_png", side_effect=probe_after_swap):
+            inspected = watermark_logo.inspect_custom_logo()
+
+        assert inspected is not None
+        raw, status = inspected
+        self.assertEqual(raw, self.logo)
+        self.assertEqual((status.width, status.height, status.bytes), (400, 120, len(self.logo)))
+        self.assertEqual(status.fingerprint, hashlib.sha256(self.logo).hexdigest()[:16])
+
 
 @unittest.skipUnless(_HAS_FFMPEG, "ffmpeg/ffprobe not available")
 class BadgeUsesTheCustomLogoTests(unittest.TestCase):
@@ -223,7 +248,10 @@ class BadgeUsesTheCustomLogoTests(unittest.TestCase):
 
     def _badge(self):
         return build_watermark(
-            video_width=1920, video_height=1080, hostname="example.com", cache_dir=self.cache
+            video_width=1920,
+            video_height=1080,
+            hostname="example.com",
+            cache_dir=self.cache,
         )
 
     def test_installing_a_logo_produces_a_different_badge(self):

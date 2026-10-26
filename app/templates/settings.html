@@ -911,6 +911,12 @@
                                                         aria-hidden="true">upgrade</span>
                                                     <span>Update available</span>
                                                 </a>
+                                                <span class="settings-update-status" data-update-status
+                                                    data-state="checking">
+                                                    <span class="material-symbols-outlined icon-inline"
+                                                        aria-hidden="true" data-update-status-icon>sync</span>
+                                                    <span data-update-status-text>Checking…</span>
+                                                </span>
                                                 <span class="ui-badge settings-version-badge font-monospace">{{
                                                     ytdlp_version |
                                                     default('unavailable') }}</span>
@@ -925,6 +931,12 @@
                                                         aria-hidden="true">upgrade</span>
                                                     <span>Update available</span>
                                                 </a>
+                                                <span class="settings-update-status" data-update-status
+                                                    data-state="checking">
+                                                    <span class="material-symbols-outlined icon-inline"
+                                                        aria-hidden="true" data-update-status-icon>sync</span>
+                                                    <span data-update-status-text>Checking…</span>
+                                                </span>
                                                 <span class="ui-badge settings-version-badge font-monospace">{{
                                                     ytdlp_ejs_version
                                                     | default('unavailable') }}</span>
@@ -939,6 +951,12 @@
                                                         aria-hidden="true">upgrade</span>
                                                     <span>Update available</span>
                                                 </a>
+                                                <span class="settings-update-status" data-update-status
+                                                    data-state="checking">
+                                                    <span class="material-symbols-outlined icon-inline"
+                                                        aria-hidden="true" data-update-status-icon>sync</span>
+                                                    <span data-update-status-text>Checking…</span>
+                                                </span>
                                                 <span class="ui-badge settings-version-badge font-monospace">{{
                                                     js_runtime_version | default('unavailable') }}</span>
                                             </dd>
@@ -952,6 +970,12 @@
                                                         aria-hidden="true">upgrade</span>
                                                     <span>Update available</span>
                                                 </a>
+                                                <span class="settings-update-status" data-update-status
+                                                    data-state="checking">
+                                                    <span class="material-symbols-outlined icon-inline"
+                                                        aria-hidden="true" data-update-status-icon>sync</span>
+                                                    <span data-update-status-text>Checking…</span>
+                                                </span>
                                                 <span class="ui-badge settings-version-badge font-monospace">{{
                                                     ffmpeg_version |
                                                     default('unavailable') }}</span>
@@ -966,6 +990,12 @@
                                                         aria-hidden="true">upgrade</span>
                                                     <span>Update available</span>
                                                 </a>
+                                                <span class="settings-update-status" data-update-status
+                                                    data-state="checking">
+                                                    <span class="material-symbols-outlined icon-inline"
+                                                        aria-hidden="true" data-update-status-icon>sync</span>
+                                                    <span data-update-status-text>Checking…</span>
+                                                </span>
                                                 <span class="ui-badge settings-version-badge font-monospace">{{
                                                     wavesurfer_version | default('unavailable') }}</span>
                                             </dd>
@@ -993,16 +1023,30 @@
                             <div class="ui-card-body">
                                 <div class="settings-app-update" data-app-update
                                     data-current-version="{{ VERSION | e }}" data-app-update-state="loading">
-                                    <p class="settings-app-update-status" role="status" aria-live="polite">
-                                        <span class="material-symbols-outlined icon-inline settings-app-update-spin"
-                                            aria-hidden="true" data-app-update-icon>progress_activity</span>
-                                        <span data-app-update-text>Checking for updates…</span>
-                                    </p>
+                                    <div class="settings-app-update-status" role="status" aria-live="polite"
+                                        data-app-update-status>
+                                        <span class="settings-app-update-badge" data-app-update-badge
+                                            data-state="loading">
+                                            <span class="material-symbols-outlined icon-inline settings-app-update-spin"
+                                                aria-hidden="true" data-app-update-icon>progress_activity</span>
+                                            <span data-app-update-label>Checking…</span>
+                                        </span>
+                                        <p class="settings-app-update-detail mb-0" data-app-update-text>Checking for
+                                            updates…</p>
+                                    </div>
                                     <dl class="settings-info-row-group">
                                         <div class="settings-info-row">
                                             <dt>Current</dt>
-                                            <dd><span class="ui-badge settings-version-badge font-monospace"
-                                                    data-app-update-current>v{{ VERSION | e }}</span></dd>
+                                            <dd class="settings-app-update-current-cell">
+                                                <span class="settings-app-update-badge settings-app-update-prerelease"
+                                                    data-app-update-prerelease data-state="prerelease" hidden>
+                                                    <span class="material-symbols-outlined icon-inline"
+                                                        aria-hidden="true">science</span>
+                                                    <span>Pre-release</span>
+                                                </span>
+                                                <span class="ui-badge settings-version-badge font-monospace"
+                                                    data-app-update-current>v{{ VERSION | e }}</span>
+                                            </dd>
                                         </div>
                                         <div class="settings-info-row">
                                             <dt>Latest</dt>

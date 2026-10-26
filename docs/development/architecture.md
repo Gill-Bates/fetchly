@@ -43,9 +43,9 @@ flowchart TB
 `WORKERS=1` is enforced by the entrypoint, not just defaulted. Two structures live only
 in this process's memory, with no cross-process coordination:
 
-| Structure | If duplicated across processes |
-|---|---|
-| Job queue (`app/worker.py`) | The same job runs twice |
+| Structure                                        | If duplicated across processes                            |
+| ------------------------------------------------ | --------------------------------------------------------- |
+| Job queue (`app/workers/worker.py`)              | The same job runs twice                                   |
 | SSE subscriber registry (`app/routes/events.py`) | A client's events go to a process that never sees its job |
 
 This is a correctness boundary, not a performance one. Concurrency comes from
@@ -56,13 +56,13 @@ governor — see [Resources & Workers](../configuration/resources.md).
 
 1. `POST /api/submit` validates the request, extracts a metadata preview (8 s budget),
    inserts a `queued` row (`app/db.py`), and pushes onto the in-memory queue
-2. A worker thread (`app/worker.py`) picks it up, moves it through `processing` →
+2. A worker thread (`app/workers/worker.py`) picks it up, moves it through `processing` →
    `downloading` → `transcoding`, running yt-dlp and ffmpeg as subprocesses bounded by
    the governor's semaphores
 3. Every status change is pushed onto an `asyncio.Queue` and fanned out to SSE
    subscribers by the event broadcaster background task
 4. An audio job that finished transcoding is handed to the **analysis worker pool**
-   (`app/analysis_worker.py`): a separate process, started with `multiprocessing`'s
+   (`app/workers/analysis_worker.py`): a separate process, started with `multiprocessing`'s
    `spawn` context, runs the [BPM cascade](../features/bpm.md) and reports back over a
    `multiprocessing.Connection`. The job is `analysis` (already downloadable) until this
    finishes, then `analysis_done`
@@ -86,7 +86,7 @@ the FastAPI process's memory and GIL. Running them in a `spawn`ed child:
 The FastAPI `lifespan` context does, in order:
 
 1. Check optional dependencies, create `DATA_DIR` and `DATA_DIR/cookies`
-2. Initialize the database (`init_db`) — schema creation and migration
+2. Initialize the database (`init_db`) — schema creation (no migrations)
 3. Cancel jobs left `processing`/`downloading`/`transcoding` from a previous run
    (the subprocess is gone; there is nothing to resume)
 4. Configure the resource governor (CPU/memory detection)
@@ -105,7 +105,7 @@ generous enough for this whole sequence.
 
 ## The resource governor
 
-`app/governor.py` detects the effective CPU allocation (cgroup-aware) and sizes worker
+`app/runtime/governor.py` detects the effective CPU allocation (cgroup-aware) and sizes worker
 threads and semaphores accordingly, with backpressure that rejects new submissions
 under memory pressure instead of accepting them into an unbounded backlog. Full detail
 in [Resources & Workers](../configuration/resources.md).
@@ -114,12 +114,12 @@ in [Resources & Workers](../configuration/resources.md).
 
 SQLite in WAL mode, four tables:
 
-| Table | Holds |
-|---|---|
-| `jobs` | One row per download: URL, type, quality, status, metadata, BPM |
+| Table                  | Holds                                                                                             |
+| ---------------------- | ------------------------------------------------------------------------------------------------- |
+| `jobs`                 | One row per download: URL, type, quality, status, metadata, BPM                                   |
 | `audio_analysis_cache` | BPM and confidence keyed by audio content hash, so a re-download of the same audio skips analysis |
-| `share_links` | Token, target job, use count, snapshotted max uses |
-| `settings` | Key/value runtime configuration (see `app/db.py::_SETTINGS_DEFAULTS`) |
+| `share_links`          | Token, target job, use count, snapshotted max uses                                                |
+| `settings`             | Key/value runtime configuration (see `app/db.py::_SETTINGS_DEFAULTS`)                             |
 
 There is deliberately no `owner` column: fetchly is single-identity, and adding
 multi-user support would start with this table. See
@@ -133,16 +133,16 @@ templates engine, an event-enqueue callback) receive it through an explicit `ini
 function called from `lifespan`, rather than importing a module-level global — this is
 what keeps `TestClient(app)` usable without a full app boot in most tests.
 
-| Module | Routes |
-|---|---|
-| `auth.py` | Login, logout |
-| `api.py` | Jobs, settings, stats, system, thumbnails |
-| `media.py` | Download, playback, job page |
-| `trim.py` | Audio trimming |
-| `lalal.py` | Lalal.ai auth and stem separation |
-| `cookies.py` | Platform cookie import |
-| `share.py` | Share link creation and redemption |
-| `events.py` | SSE streams |
+| Module       | Routes                                    |
+| ------------ | ----------------------------------------- |
+| `auth.py`    | Login, logout                             |
+| `api.py`     | Jobs, settings, stats, system, thumbnails |
+| `media.py`   | Download, playback, job page              |
+| `trim.py`    | Audio trimming                            |
+| `lalal.py`   | Lalal.ai auth and stem separation         |
+| `cookies.py` | Platform cookie import                    |
+| `share.py`   | Share link creation and redemption        |
+| `events.py`  | SSE streams                               |
 
 ## Middleware
 

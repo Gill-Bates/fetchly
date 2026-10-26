@@ -7,10 +7,14 @@
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from app import analysis_worker, db, lalal, worker
-from app.governor import _auto_concurrent_fragments, governor
+from app import db
+from app.auth import session
+from app.auth.rate_limit import limiter
+from app.integrations.lalal import client as lalal
 from app.main import _governor_config_from_settings
+from app.runtime.governor import _auto_concurrent_fragments, governor
 from app.utils.template_filters import public_settings
+from app.workers import analysis_worker, worker
 from tests._support import WebAppTestCase
 
 
@@ -25,6 +29,8 @@ class RuntimeSettingsTests(WebAppTestCase):
             "download_timeout_minutes": 60,
             "transcode_timeout_minutes": 120,
             "download_max_filesize_gib": 4,
+            # A freshly initialized database ships the watermark off.
+            "video_watermark": False,
             "audio_analysis_max_minutes": 15,
             "audio_analysis_timeout_minutes": 5,
             "lalal_max_download_gib": 4,
@@ -211,6 +217,78 @@ class RuntimeSettingsTests(WebAppTestCase):
                     # The watermark forces an encode but never rewrites the mode:
                     # in "source" that encode targets the downloaded codec.
                     self.assertEqual(worker._download_tuning()[1], mode)
+
+    def _post_settings_unthrottled(self, body: dict[str, object]):
+        # A sweep over every bound would otherwise trip the settings rate limit.
+        limiter.reset()
+        return self._post_settings(body)
+
+    def test_settings_api_enforces_the_declared_bounds_of_every_integer_setting(self) -> None:
+        for key, (minimum, maximum) in db.SETTING_INT_BOUNDS.items():
+            if key == "session_max_days":
+                continue  # needs a credential round-trip; covered by the session tests
+            for value in (minimum, maximum):
+                with self.subTest(key=key, value=value):
+                    self.assertEqual(self._post_settings_unthrottled({key: value}).status_code, 200)
+                    self.assertEqual(db.get_settings()[key], value)
+            for value in (minimum - 1, maximum + 1):
+                with self.subTest(key=key, rejected=value):
+                    response = self._post_settings_unthrottled({key: value})
+                    self.assertEqual(response.status_code, 400)
+                    self.assertEqual(response.json()["detail"], f"{key} must be between {minimum} and {maximum}")
+            with self.subTest(key=key, rejected="text"):
+                response = self._post_settings_unthrottled({key: "many"})
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(response.json()["detail"], f"{key} must be an integer")
+
+    def test_stored_values_outside_the_declared_bounds_fall_back_to_the_default(self) -> None:
+        for key, (minimum, maximum) in db.SETTING_INT_BOUNDS.items():
+            with self.subTest(key=key):
+                for bad in (minimum - 1, maximum + 1):
+                    with db.get_db() as con:
+                        con.execute("INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)", (key, str(bad)))
+                        con.commit()
+                    self.assertEqual(db.get_settings()[key], db.setting_default(key))
+
+    def test_every_integer_bound_contains_its_default(self) -> None:
+        for key, (minimum, maximum) in db.SETTING_INT_BOUNDS.items():
+            with self.subTest(key=key):
+                self.assertTrue(minimum <= db.setting_default(key) <= maximum)
+
+    def test_fallback_defaults_match_the_stored_defaults(self) -> None:
+        self.assertEqual(worker._DEFAULT_DOWNLOAD_TIMEOUT_MINUTES, db.setting_default("download_timeout_minutes"))
+        self.assertEqual(worker._DEFAULT_TRANSCODE_TIMEOUT_MINUTES, db.setting_default("transcode_timeout_minutes"))
+        self.assertEqual(worker._DEFAULT_DOWNLOAD_MAX_FILESIZE_GIB, db.setting_default("download_max_filesize_gib"))
+        self.assertEqual(worker._DEFAULT_OUTPUT_MODE, db.setting_default("download_output_mode"))
+        self.assertEqual(worker._DEFAULT_VIDEO_WATERMARK, db.setting_default("video_watermark"))
+        self.assertEqual(worker._MAX_CONCURRENT_FRAGMENTS, db.SETTING_INT_BOUNDS["download_concurrent_fragments"][1])
+        self.assertEqual(lalal._DEFAULT_LALAL_MAX_DOWNLOAD_GIB, db.setting_default("lalal_max_download_gib"))
+        self.assertEqual(
+            analysis_worker._DEFAULT_MAX_ANALYSIS_MINUTES, db.setting_default("audio_analysis_max_minutes")
+        )
+        self.assertEqual(
+            analysis_worker._DEFAULT_ANALYSIS_TIMEOUT_MINUTES, db.setting_default("audio_analysis_timeout_minutes")
+        )
+        self.assertEqual(session._DEFAULT_MAX_DAYS, db.setting_default("session_max_days"))
+
+    def test_unreadable_settings_make_the_workers_use_the_stored_defaults(self) -> None:
+        with patch.object(worker, "get_settings", side_effect=OSError("db gone")):
+            limits = worker._download_runtime_limits()
+        self.assertEqual(limits.download_timeout_seconds, db.setting_default("download_timeout_minutes") * 60)
+        self.assertEqual(limits.transcode_timeout_seconds, db.setting_default("transcode_timeout_minutes") * 60)
+        self.assertEqual(limits.max_filesize_arg, f"{db.setting_default('download_max_filesize_gib')}G")
+
+        with patch.object(analysis_worker, "get_settings", side_effect=OSError("db gone")):
+            max_duration_seconds, timeout_seconds = analysis_worker._analysis_runtime_limits()
+        self.assertEqual(max_duration_seconds, db.setting_default("audio_analysis_max_minutes") * 60)
+        self.assertEqual(timeout_seconds, db.setting_default("audio_analysis_timeout_minutes") * 60)
+
+        with patch.object(lalal, "get_settings", side_effect=OSError("db gone")):
+            max_bytes = lalal._max_result_download_bytes()
+        self.assertEqual(max_bytes, db.setting_default("lalal_max_download_gib") * 1024**3)
+
+    def test_the_slider_vocabulary_has_not_drifted(self) -> None:
+        self.assertEqual(db.DOWNLOAD_OUTPUT_MODES, ("source", "universal", "av1"))
 
     def test_manual_fragment_count_skips_host_probe(self) -> None:
         db.set_settings({"download_concurrent_fragments": 9})

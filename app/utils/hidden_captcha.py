@@ -15,6 +15,11 @@
    submit it must be present, correctly signed, not older than
    ``max_age_seconds``, and not *younger* than ``min_age_seconds`` (an
    implausibly fast submit is scripted). Tokens are not single-use.
+
+This is a bot signal, not a brute-force control: a token can be replayed within
+its lifetime, so the time-trap only screens the first attempt. The boundary
+against password guessing is the per-IP rate limit on ``POST /login``
+(app/routes/auth.py).
 """
 
 from __future__ import annotations
@@ -53,9 +58,7 @@ class CaptchaOutcome(StrEnum):
 
 
 def _sign(secret_key: str, payload: str) -> str:
-    return hmac.new(
-        f"{secret_key}:{_SALT}".encode(), payload.encode("utf-8"), sha256
-    ).hexdigest()
+    return hmac.new(f"{secret_key}:{_SALT}".encode(), payload.encode("utf-8"), sha256).hexdigest()
 
 
 def issue_captcha_token(secret_key: str) -> str:

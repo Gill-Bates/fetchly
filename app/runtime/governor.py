@@ -1,0 +1,628 @@
+#!/usr/bin/env python3
+#
+# app/runtime/governor.py
+# Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
+#
+
+# Centralized resource governor for CPU detection, semaphore management,
+# backpressure control, and worker scaling. Designed for a small VPS under load.
+
+import asyncio
+import contextlib
+import logging
+import math
+import os
+import threading
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from dataclasses import dataclass
+from pathlib import Path
+from time import monotonic
+from typing import Final, Self
+
+from fastapi import HTTPException
+
+from ..utils.boolean import parse_bool_text
+
+logger = logging.getLogger(__name__)
+
+
+_GOVERNOR_NOT_CONFIGURED_MSG: Final = "Governor not configured. Call governor.configure() at application startup."
+_MEMORY_CACHE_TTL_SECONDS: Final[float] = 5.0
+_CGROUP_V1_UNLIMITED_HEURISTIC: Final[int] = 2**60
+
+# Bounds for the "Automatic" --concurrent-fragments setting. The floor keeps a
+# 0.5-CPU container faster than a serial download; the ceiling stops a big host
+# from opening so many connections that the source starts throttling.
+_AUTO_FRAGMENTS_MIN: Final[int] = 2
+_AUTO_FRAGMENTS_MAX: Final[int] = 8
+# Fragment downloads are IO bound but each one still costs a TLS connection and
+# a decrypt/append cycle, so scale a little faster than the CPU quota.
+_AUTO_FRAGMENTS_PER_CPU: Final[float] = 1.5
+# Rough working set per in-flight fragment (buffers plus yt-dlp overhead). Used
+# to back off on a host that is already low on free memory.
+_AUTO_FRAGMENTS_MB_PER_FRAGMENT: Final[int] = 64
+
+# How often an awaiting coroutine retries a slot held by a worker thread. The
+# waits this guards are whole ffmpeg runs, so the poll costs nothing measurable
+# while keeping the event loop free (an executor thread blocked on acquire()
+# would compete with the to_thread() calls the rest of the app depends on).
+_SHARED_SEMAPHORE_POLL_SECONDS: Final[float] = 0.05
+
+type _MemoryCacheEntry = tuple[float, int]
+
+
+class SharedSemaphore:
+    """One counting semaphore for both worker threads and request handlers.
+
+    A limit like ``transcode_limit`` describes what the host can run at once, so
+    it has to be a single budget. Keeping a separate ``asyncio.Semaphore`` and
+    ``threading.Semaphore`` per workload would hand out the full count twice -
+    ``worker.py`` transcoding under the sync one while ``routes/media.py``,
+    ``routes/trim.py`` and ``routes/lalal.py`` transcode under the async one -
+    and allow up to double the configured parallelism on exactly the host that
+    can least afford it.
+
+    Use it as ``with governor.transcode_semaphore_sync:`` from a thread and
+    ``async with governor.transcode_semaphore:`` from a coroutine.
+    """
+
+    __slots__ = ("_poll_seconds", "_semaphore")
+
+    def __init__(self, value: int, *, poll_seconds: float = _SHARED_SEMAPHORE_POLL_SECONDS) -> None:
+        self._semaphore = threading.Semaphore(value)
+        self._poll_seconds = poll_seconds
+
+    def acquire(self) -> bool:
+        return self._semaphore.acquire()
+
+    def release(self) -> None:
+        self._semaphore.release()
+
+    def __enter__(self) -> Self:
+        self._semaphore.acquire()
+        return self
+
+    def __exit__(self, *_exc_info: object) -> None:
+        self._semaphore.release()
+
+    async def acquire_async(self) -> None:
+        """Take a slot without blocking the event loop.
+
+        Cancellation-safe: a cancelled wait happens between polls, so it can
+        never leave an unreleased slot behind.
+        """
+        while True:
+            if self._semaphore.acquire(blocking=False):
+                return
+            await asyncio.sleep(self._poll_seconds)
+
+    async def __aenter__(self) -> Self:
+        await self.acquire_async()
+        return self
+
+    async def __aexit__(self, *_exc_info: object) -> None:
+        self._semaphore.release()
+
+
+def _read_cgroup_file(path: str) -> str | None:
+    """Read a cgroup file, returning None if not accessible."""
+    try:
+        return Path(path).read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+
+
+def _env_int(
+    name: str,
+    default: int,
+    *,
+    min_value: int | None = None,
+    max_value: int | None = None,
+) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"Environment variable {name} must be an integer, got {raw!r}") from exc
+
+    if min_value is not None and value < min_value:
+        raise ValueError(f"Environment variable {name} must be >= {min_value}, got {value}")
+    if max_value is not None and value > max_value:
+        raise ValueError(f"Environment variable {name} must be <= {max_value}, got {value}")
+    return value
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+
+    parsed = parse_bool_text(raw)
+    if parsed is None:
+        raise ValueError(f"Environment variable {name} must be a boolean value, got {raw!r}")
+    return parsed
+
+
+def _parse_cpuset(spec: str | None) -> int | None:
+    """Parse a cpuset spec like '0-3,5,7' into CPU count."""
+    if not spec:
+        return None
+    total = 0
+    for raw_part in spec.split(","):
+        part = raw_part.strip()
+        if not part:
+            continue
+        try:
+            if "-" in part:
+                start, end = part.split("-", 1)
+                total += int(end) - int(start) + 1
+            else:
+                int(part)  # Validate that this fragment is a parseable single CPU index.
+                total += 1
+        except ValueError:
+            logger.warning("Ignoring invalid cpuset fragment: %r", part)
+    return total or None
+
+
+def _detect_effective_cpus() -> float:
+    """Effective CPU count respecting Docker/cgroup limits.
+
+    Returns the minimum of every applicable limit, checked in priority order:
+    sched_getaffinity, cgroup v2/v1 cpuset, cgroup v2/v1 cpu quota, then
+    os.cpu_count(). Never below 0.5.
+    """
+    limits: list[float] = []
+
+    # sched_getaffinity - CPU pinning via cpuset
+    with contextlib.suppress(AttributeError, OSError):
+        limits.append(float(len(os.sched_getaffinity(0))))
+
+    # cgroup v2 then v1 cpuset
+    cpuset = _parse_cpuset(_read_cgroup_file("/sys/fs/cgroup/cpuset.cpus.effective"))
+    if cpuset is None:
+        cpuset = _parse_cpuset(_read_cgroup_file("/sys/fs/cgroup/cpuset/cpuset.cpus"))
+    if cpuset is not None:
+        limits.append(float(cpuset))
+
+    # cgroup v2 cpu.max (format: "100000 100000" or "max 100000")
+    cpu_max = _read_cgroup_file("/sys/fs/cgroup/cpu.max")
+    if cpu_max:
+        parts = cpu_max.split()
+        if len(parts) >= 2 and parts[0] != "max":
+            with contextlib.suppress(ValueError, ZeroDivisionError):
+                limits.append(float(parts[0]) / float(parts[1]))
+    else:
+        # cgroup v1 quota/period
+        quota = _read_cgroup_file("/sys/fs/cgroup/cpu/cpu.cfs_quota_us")
+        period = _read_cgroup_file("/sys/fs/cgroup/cpu/cpu.cfs_period_us")
+        if quota and period:
+            try:
+                quota_val, period_val = int(quota), int(period)
+                if quota_val > 0 and period_val > 0:
+                    limits.append(quota_val / period_val)
+            except ValueError:
+                pass
+
+    if not limits:
+        fallback = os.cpu_count() or 1
+        limits.append(float(fallback))
+
+    effective = max(0.5, min(limits))
+    logger.debug("CPU detection: limits=%s, effective=%.2f", limits, effective)
+    return effective
+
+
+def _auto_concurrent_fragments(effective_cpus: float, memory_available_mb: int) -> int:
+    """Scale yt-dlp's ``--concurrent-fragments`` to the host's capacity.
+
+    ``memory_available_mb`` of -1 means unknown; only the CPU quota then
+    applies. Result is within ``_AUTO_FRAGMENTS_MIN.._AUTO_FRAGMENTS_MAX``.
+    """
+    fragments = math.ceil(effective_cpus * _AUTO_FRAGMENTS_PER_CPU)
+    fragments = max(_AUTO_FRAGMENTS_MIN, min(_AUTO_FRAGMENTS_MAX, fragments))
+    if memory_available_mb >= 0:
+        by_memory = memory_available_mb // _AUTO_FRAGMENTS_MB_PER_FRAGMENT
+        fragments = max(_AUTO_FRAGMENTS_MIN, min(fragments, by_memory))
+    return fragments
+
+
+@dataclass(slots=True)
+class GovernorConfig:
+    """Governor configuration; 0 means auto-detect for every count/limit."""
+
+    worker_count: int = 0
+    queue_maxsize: int = 0  # 0 = auto (2x workers)
+
+    cpu_semaphore_limit: int = 0
+    analysis_semaphore_limit: int = 0
+    io_semaphore_limit: int = 0
+    transcode_semaphore_limit: int = 0
+
+    # Stop accepting jobs when free memory drops below this (MB).
+    memory_threshold_mb: int = 256
+
+    enable_backpressure: bool = True
+
+    @classmethod
+    def from_env(cls) -> Self:
+        return cls(
+            # Worker count comes from the persisted settings store and is
+            # applied at startup from app/main.py.
+            worker_count=0,
+            queue_maxsize=_env_int("WORKER_QUEUE_MAXSIZE", 0, min_value=0),
+            cpu_semaphore_limit=_env_int("CPU_SEMAPHORE_LIMIT", 0, min_value=0),
+            analysis_semaphore_limit=_env_int("ANALYSIS_SEMAPHORE_LIMIT", 0, min_value=0),
+            io_semaphore_limit=_env_int("IO_SEMAPHORE_LIMIT", 0, min_value=0),
+            transcode_semaphore_limit=_env_int("TRANSCODE_SEMAPHORE_LIMIT", 0, min_value=0),
+            memory_threshold_mb=_env_int("MEMORY_THRESHOLD_MB", 256, min_value=0),
+            enable_backpressure=_env_bool("ENABLE_BACKPRESSURE", True),
+        )
+
+
+@dataclass(slots=True)
+class ResourceLimits:
+    """Resource limits calculated from system detection."""
+
+    effective_cpus: float
+    worker_count: int
+    queue_maxsize: int
+    cpu_limit: int
+    analysis_limit: int
+    io_limit: int
+    transcode_limit: int
+
+
+class Governor:
+    """Central resource governor: cgroup-aware CPU detection, worker/queue
+    sizing, memory backpressure, and one semaphore per workload, shared by
+    worker threads and request handlers alike.
+
+    Call ``configure()`` once at startup, then read the properties and use the
+    semaphores (``async with governor.transcode_semaphore`` /
+    ``with governor.cpu_semaphore_sync``).
+    """
+
+    def __init__(self) -> None:
+        self._config: GovernorConfig | None = None
+        self._limits: ResourceLimits | None = None
+        self._lock = threading.Lock()
+        self._memory_read_lock = threading.Lock()
+
+        # Semaphores are initialized eagerly in configure(). One object per
+        # workload, shared by the sync and async accessors - see SharedSemaphore.
+        self._cpu_sem: SharedSemaphore | None = None
+        self._analysis_sem: SharedSemaphore | None = None
+        self._io_sem: SharedSemaphore | None = None
+        self._transcode_sem: SharedSemaphore | None = None
+
+        # Short-lived memory cache to keep status checks cheap
+        self._memory_cache: _MemoryCacheEntry | None = None
+        self._memory_refreshing = False
+
+        self._configured = False
+
+    def configure(self, config: GovernorConfig | None = None) -> None:
+        """Configure resource limits (idempotent; later calls are ignored).
+
+        ``config`` of None auto-detects from the environment and system.
+        """
+        with self._lock:
+            if self._configured:
+                logger.debug("Governor already configured, skipping")
+                return
+
+            self._config = config or GovernorConfig.from_env()
+            effective_cpus = _detect_effective_cpus()
+
+            if self._config.worker_count > 0:
+                worker_count = self._config.worker_count
+            else:
+                # SQLite has a single writer; scaling worker threads adds
+                # subprocess (ffmpeg/yt-dlp) parallelism but not database
+                # throughput, so the ceiling stays lower than the CPU count
+                # would otherwise suggest.
+                worker_count = max(1, min(4, math.ceil(effective_cpus * 1.5)))
+
+            if self._config.queue_maxsize > 0:
+                queue_maxsize = self._config.queue_maxsize
+            elif self._config.enable_backpressure:
+                queue_maxsize = worker_count * 2
+            else:
+                queue_maxsize = 0  # unlimited
+
+            cpu_limit = self._config.cpu_semaphore_limit or max(1, math.ceil(effective_cpus))
+            analysis_limit = self._config.analysis_semaphore_limit or max(1, min(2, math.ceil(effective_cpus)))
+            io_limit = self._config.io_semaphore_limit or max(2, math.ceil(effective_cpus * 4))
+            transcode_limit = self._config.transcode_semaphore_limit or max(1, min(2, math.ceil(effective_cpus)))
+
+            self._limits = ResourceLimits(
+                effective_cpus=effective_cpus,
+                worker_count=worker_count,
+                queue_maxsize=queue_maxsize,
+                cpu_limit=cpu_limit,
+                analysis_limit=analysis_limit,
+                io_limit=io_limit,
+                transcode_limit=transcode_limit,
+            )
+
+            # Initialize semaphores eagerly to avoid race conditions.
+            self._cpu_sem = SharedSemaphore(cpu_limit)
+            self._analysis_sem = SharedSemaphore(analysis_limit)
+            self._io_sem = SharedSemaphore(io_limit)
+            self._transcode_sem = SharedSemaphore(transcode_limit)
+
+            self._configured = True
+
+            logger.info(
+                "Governor configured: cpus=%.2f, workers=%d, queue=%d, "
+                "cpu_sem=%d, analysis_sem=%d, io_sem=%d, transcode_sem=%d",
+                effective_cpus,
+                worker_count,
+                queue_maxsize,
+                cpu_limit,
+                analysis_limit,
+                io_limit,
+                transcode_limit,
+            )
+
+    def _require_value[T](self, value: T | None, _name: str) -> T:
+        if value is None:
+            raise RuntimeError(_GOVERNOR_NOT_CONFIGURED_MSG)
+        return value
+
+    def _require_configured(self) -> tuple[GovernorConfig, ResourceLimits]:
+        return (
+            self._require_value(self._config, "config"),
+            self._require_value(self._limits, "limits"),
+        )
+
+    @property
+    def effective_cpus(self) -> float:
+        """Effective CPU count (Docker cgroup-aware)."""
+        return self._require_configured()[1].effective_cpus
+
+    @property
+    def worker_count(self) -> int:
+        return self._require_configured()[1].worker_count
+
+    @property
+    def queue_maxsize(self) -> int:
+        return self._require_configured()[1].queue_maxsize
+
+    @property
+    def analysis_limit(self) -> int:
+        return self._require_configured()[1].analysis_limit
+
+    @property
+    def transcode_limit(self) -> int:
+        return self._require_configured()[1].transcode_limit
+
+    def recommended_concurrent_fragments(self) -> int:
+        """Fragment parallelism for downloads when the setting is "Automatic".
+
+        Derived from the CPU quota and free memory at call time. Unlike the
+        other limits this works before :meth:`configure`, so the settings page
+        can report the current value outside the worker runtime.
+        """
+        with self._lock:
+            limits = self._limits
+        effective_cpus = limits.effective_cpus if limits else _detect_effective_cpus()
+        return _auto_concurrent_fragments(effective_cpus, self.get_memory_available_mb())
+
+    # The ``*_sync`` aliases return the same object as their async counterparts.
+    # Both spellings are kept because the call site, not the semaphore, decides
+    # whether a slot is taken with ``with`` or ``async with``.
+    @property
+    def cpu_semaphore(self) -> SharedSemaphore:
+        return self._require_value(self._cpu_sem, "cpu_semaphore")
+
+    @property
+    def analysis_semaphore(self) -> SharedSemaphore:
+        return self._require_value(self._analysis_sem, "analysis_semaphore")
+
+    @property
+    def io_semaphore(self) -> SharedSemaphore:
+        return self._require_value(self._io_sem, "io_semaphore")
+
+    @property
+    def transcode_semaphore(self) -> SharedSemaphore:
+        return self._require_value(self._transcode_sem, "transcode_semaphore")
+
+    @property
+    def cpu_semaphore_sync(self) -> SharedSemaphore:
+        return self._require_value(self._cpu_sem, "cpu_semaphore_sync")
+
+    @property
+    def analysis_semaphore_sync(self) -> SharedSemaphore:
+        return self._require_value(self._analysis_sem, "analysis_semaphore_sync")
+
+    @property
+    def io_semaphore_sync(self) -> SharedSemaphore:
+        return self._require_value(self._io_sem, "io_semaphore_sync")
+
+    @property
+    def transcode_semaphore_sync(self) -> SharedSemaphore:
+        return self._require_value(self._transcode_sem, "transcode_semaphore_sync")
+
+    @asynccontextmanager
+    async def acquire_or_503(
+        self,
+        semaphore: asyncio.Semaphore,
+        *,
+        timeout_seconds: float,
+        detail: str,
+        retry_after_seconds: int = 5,
+    ) -> AsyncIterator[None]:
+        """Acquire *semaphore* within *timeout_seconds*, else raise a 503.
+
+        Shared "wait briefly for capacity, then reject" pattern for request
+        paths that need a bounded-concurrency gate distinct from the
+        governor's own semaphores (e.g. a per-endpoint capacity limit). Reuses
+        this instead of a hand-rolled asyncio.Semaphore + asyncio.timeout so
+        every such gate reports rejection the same way (503 + Retry-After).
+        """
+        try:
+            async with asyncio.timeout(timeout_seconds):
+                await semaphore.acquire()
+        except TimeoutError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=detail,
+                headers={"Retry-After": str(retry_after_seconds)},
+            ) from exc
+
+        try:
+            yield
+        finally:
+            semaphore.release()
+
+    def _read_memory_available_mb_uncached(self) -> int:
+        """Read available memory in MB from cgroup or /proc without caching."""
+        result = -1
+
+        try:
+            # cgroup v2
+            mem_current = _read_cgroup_file("/sys/fs/cgroup/memory.current")
+            mem_max = _read_cgroup_file("/sys/fs/cgroup/memory.max")
+            if mem_current and mem_max and mem_max != "max":
+                current = int(mem_current)
+                maximum = int(mem_max)
+                return max(0, (maximum - current) // (1024 * 1024))
+        except (ValueError, TypeError):
+            pass
+
+        try:
+            # cgroup v1
+            mem_usage = _read_cgroup_file("/sys/fs/cgroup/memory/memory.usage_in_bytes")
+            mem_limit = _read_cgroup_file("/sys/fs/cgroup/memory/memory.limit_in_bytes")
+            if mem_usage and mem_limit:
+                usage = int(mem_usage)
+                limit = int(mem_limit)
+                # Very high limit means no cgroup limit.
+                if limit < _CGROUP_V1_UNLIMITED_HEURISTIC:
+                    return max(0, (limit - usage) // (1024 * 1024))
+        except (ValueError, TypeError):
+            pass
+
+        try:
+            # Fallback: /proc/meminfo
+            meminfo = Path("/proc/meminfo").read_text(encoding="utf-8")
+            for line in meminfo.splitlines():
+                if line.startswith("MemAvailable:"):
+                    kb = int(line.split()[1])
+                    return kb // 1024
+        except (OSError, ValueError, IndexError):
+            pass
+
+        return result
+
+    def _store_memory_cache(self, value: int) -> None:
+        with self._lock:
+            self._memory_cache = (monotonic(), value)
+            self._memory_refreshing = False
+
+    def _refresh_memory_cache_background(self) -> None:
+        """Refresh the memory cache asynchronously after it expires."""
+        try:
+            value = self._read_memory_available_mb_uncached()
+        except Exception:
+            logger.exception("Failed to refresh memory cache")
+            # Reset refresh flag so the next caller can trigger a new attempt.
+            with self._lock:
+                self._memory_refreshing = False
+            return
+
+        self._store_memory_cache(value)
+
+    def _read_memory_available_mb_serialized(self) -> int:
+        """Read memory once across concurrent cold-cache callers."""
+        with self._memory_read_lock:
+            with self._lock:
+                cached = self._memory_cache
+                if cached is not None:
+                    cached_at, cached_value = cached
+                    if monotonic() - cached_at < _MEMORY_CACHE_TTL_SECONDS:
+                        return cached_value
+
+            result = self._read_memory_available_mb_uncached()
+            self._store_memory_cache(result)
+            return result
+
+    def _cached_memory_or_start_refresh(self) -> int | None:
+        """Return a usable cached memory value, refreshing it when it is stale.
+
+        Returns None only when there is no cached value at all, which is the
+        one case a caller has to cover with a synchronous read.
+        """
+        with self._lock:
+            cached = self._memory_cache
+            if cached is None:
+                return None
+
+            cached_at, cached_value = cached
+            if monotonic() - cached_at < _MEMORY_CACHE_TTL_SECONDS:
+                return cached_value
+
+            if not self._memory_refreshing:
+                self._memory_refreshing = True
+                threading.Thread(
+                    target=self._refresh_memory_cache_background,
+                    daemon=True,
+                ).start()
+
+            # Every caller gets the stale value while a refresh is in flight,
+            # not just the one that started it - otherwise the callers arriving
+            # during the refresh would each block on a synchronous file read.
+            return cached_value
+
+    def get_memory_available_mb(self) -> int:
+        """Available memory in MB (cgroup-aware), or -1 when undeterminable.
+
+        Cache hits return immediately. A cold cache does a synchronous read; an
+        expired cache returns the stale value and refreshes in the background.
+        -1 disables the memory backpressure check in can_accept_job_async().
+        """
+        cached_value = self._cached_memory_or_start_refresh()
+        if cached_value is not None:
+            return cached_value
+
+        return self._read_memory_available_mb_serialized()
+
+    async def get_memory_available_mb_async(self) -> int:
+        """Async variant of get_memory_available_mb() for request paths."""
+        cached_value = self._cached_memory_or_start_refresh()
+        if cached_value is not None:
+            return cached_value
+
+        return await asyncio.to_thread(self._read_memory_available_mb_serialized)
+
+    async def can_accept_job_async(self) -> bool:
+        """Whether memory headroom allows accepting another job.
+
+        Accepts before :meth:`configure` so a submission never fails on startup
+        ordering, and when the available memory is unknown (-1).
+        """
+        with self._lock:
+            config = self._config
+
+        if config is None or not config.enable_backpressure:
+            return True
+
+        mem_available = await self.get_memory_available_mb_async()
+        threshold = config.memory_threshold_mb
+        if 0 <= mem_available < threshold:
+            logger.warning(
+                "Memory below threshold: %dMB available, %dMB required",
+                mem_available,
+                threshold,
+            )
+            return False
+
+        return True
+
+
+governor = Governor()

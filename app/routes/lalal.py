@@ -26,11 +26,23 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, StringConstraints
 
-from ..common.rate_limit import limiter
+from ..auth.rate_limit import limiter
 from ..db import DOWNLOADABLE_STATUSES, get_job, get_settings, set_settings, update_job
-from ..governor import governor
-from ..lalal_policy import stem_download_name
-from ..utils.fs import TRIM_ID_RE, path_is_file
+from ..integrations.lalal.policy import (
+    LALAL_MINUTES_UNKNOWN,
+    minutes_from_setting,
+    minutes_to_setting,
+    stem_download_name,
+)
+from ..runtime.governor import governor
+from ..utils.fs import (
+    TRIM_ID_RE,
+    TRIM_WAV_GLOB,
+    job_dir,
+    path_is_file,
+    trim_base_name,
+    trim_wav_name,
+)
 from ..utils.template_filters import is_lalala_configured
 from .auth import require_user, require_user_json
 from .media import resolve_job_path, stop_ffmpeg_process, transcode_to_mp3
@@ -94,9 +106,7 @@ async def _run_ffmpeg(cmd: list[str], *, description: str) -> None:
         raise RuntimeError(f"{description} failed: {detail}")
 
 
-async def _decode_for_upload(
-    source_path: Path, output_dir: Path, base_name: str
-) -> tuple[Path, Path | None]:
+async def _decode_for_upload(source_path: Path, output_dir: Path, base_name: str) -> tuple[Path, Path | None]:
     """Return (file_to_upload, temp_file_to_clean_up_or_None)."""
     if source_path.suffix.lower() in _UPLOAD_READY_SUFFIXES:
         return source_path, None
@@ -108,11 +118,15 @@ async def _decode_for_upload(
         async with governor.transcode_semaphore:
             await _run_ffmpeg(
                 [
-                    "ffmpeg", "-y",
-                    "-i", str(source_path),
+                    "ffmpeg",
+                    "-y",
+                    "-i",
+                    str(source_path),
                     "-vn",
-                    "-codec:a", "pcm_s16le",
-                    "-f", "wav",
+                    "-codec:a",
+                    "pcm_s16le",
+                    "-f",
+                    "wav",
                     str(temp_path),
                 ],
                 description="Decoding source audio for Lalal.ai",
@@ -144,26 +158,23 @@ _STEM_INSTRUMENTAL = "instrumental"
 _VALID_STEMS = frozenset({_STEM_VOCALS, _STEM_INSTRUMENTAL})
 _LALAL_PROCESS_TIMEOUT_SECONDS = 600
 
-_DATA_DIR: Path | None = None
 _queue_event: Callable[[dict[str, Any]], None] | None = None
 _processing_capacity: asyncio.Semaphore | None = None
 
 
 def init_lalal(
-    data_dir: Path,
     queue_event_func: Callable[[dict[str, Any]], None],
 ) -> None:
-    global _DATA_DIR, _queue_event, _processing_capacity
-    _DATA_DIR = data_dir
+    global _queue_event, _processing_capacity
     _queue_event = queue_event_func
     _processing_capacity = asyncio.Semaphore(_LALAL_MAX_CONCURRENT_PROCESSES)
 
 
-
-def _require_initialized() -> Path:
-    if _DATA_DIR is None:
+def _require_initialized() -> None:
+    # Per-job paths come from the global job_dir(); only the enqueue callback
+    # and capacity semaphore need wiring, so the guard checks those.
+    if _queue_event is None or _processing_capacity is None:
         raise RuntimeError("Lalal routes are not initialized")
-    return _DATA_DIR.resolve()
 
 
 def _validate_email(email: str) -> None:
@@ -179,12 +190,14 @@ def _validate_stem(stem: str) -> None:
         )
 
 
+def _stem_path(output_dir: Path, base_name: str, stem: str) -> Path:
+    return output_dir / f"{base_name}_{stem}.mp3"
+
+
 def _validate_trim_id(trim_id: str) -> str:
     if not TRIM_ID_RE.fullmatch(trim_id):
         raise HTTPException(status_code=400, detail="Invalid trim_id format")
     return trim_id
-
-
 
 
 def _newest_first(output_dir: Path, pattern: str) -> list[Path]:
@@ -241,6 +254,7 @@ async def _acquire_processing_lock(lock_file: Path) -> AsyncIterator[None]:
 
 async def _remove_split_outputs(*paths: Path) -> None:
     """Remove any outputs left by a failed split attempt."""
+
     async def _remove(path: Path) -> None:
         try:
             await asyncio.to_thread(path.unlink, missing_ok=True)
@@ -303,7 +317,12 @@ async def _get_cached_split_response(
         return None
 
     if trimmed:
-        logger.debug("Returning cached Lalal result for %s (stem=%s, trim_id=%s)", job_id_str, stem, trim_id)
+        logger.debug(
+            "Returning cached Lalal result for %s (stem=%s, trim_id=%s)",
+            job_id_str,
+            stem,
+            trim_id,
+        )
     await _mark_lalal_split_done_if_ready(
         job_id_str,
         vocals_path,
@@ -323,14 +342,17 @@ async def _get_cached_split_response(
 async def _latest_trim_input(output_dir: Path, trim_id: str | None) -> tuple[Path, str]:
     if trim_id is not None:
         trim_id = _validate_trim_id(trim_id)
-        file_path = output_dir / f"trim_{trim_id}.wav"
+        file_path = output_dir / trim_wav_name(trim_id)
         if not await path_is_file(file_path):
-            raise HTTPException(status_code=404, detail=f"Trim file not found: trim_{trim_id}.wav")
+            raise HTTPException(status_code=404, detail=f"Trim file not found: {trim_wav_name(trim_id)}")
         return file_path, trim_id
 
-    trim_files = await asyncio.to_thread(_newest_first, output_dir, "trim_*.wav")
+    trim_files = await asyncio.to_thread(_newest_first, output_dir, TRIM_WAV_GLOB)
     if not trim_files:
-        raise HTTPException(status_code=400, detail="No trimmed file found. Please trim the audio first.")
+        raise HTTPException(
+            status_code=400,
+            detail="No trimmed file found. Please trim the audio first.",
+        )
     if len(trim_files) > 1:
         raise HTTPException(status_code=400, detail="trim_id required when multiple trims exist")
 
@@ -343,8 +365,8 @@ async def _latest_trim_input(output_dir: Path, trim_id: str | None) -> tuple[Pat
 async def _latest_trim_result(output_dir: Path, stem: str, trim_id: str | None) -> tuple[Path, str]:
     if trim_id is not None:
         trim_id = _validate_trim_id(trim_id)
-        base_name = f"trim_{trim_id}"
-        stem_path = output_dir / f"{base_name}_{stem}.mp3"
+        base_name = trim_base_name(trim_id)
+        stem_path = _stem_path(output_dir, base_name, stem)
         if not await path_is_file(stem_path):
             raise HTTPException(
                 status_code=404,
@@ -418,9 +440,7 @@ class ActivationKeyRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
     email: Annotated[str, StringConstraints(min_length=3, max_length=_MAX_EMAIL_LENGTH)]
-    activation_key: Annotated[
-        str, StringConstraints(min_length=1, max_length=_MAX_ACTIVATION_KEY_LENGTH)
-    ]
+    activation_key: Annotated[str, StringConstraints(min_length=1, max_length=_MAX_ACTIVATION_KEY_LENGTH)]
 
 
 class AuthStatusResponse(BaseModel):
@@ -450,9 +470,7 @@ _auth_state_lock = asyncio.Lock()
 _auth_generation = 0
 
 
-async def _commit_auth_settings(
-    values: dict[str, Any], *, expected_generation: int | None, bump: bool
-) -> bool:
+async def _commit_auth_settings(values: dict[str, Any], *, expected_generation: int | None, bump: bool) -> bool:
     """Persist auth settings unless the credentials changed meanwhile."""
     global _auth_generation
 
@@ -505,17 +523,16 @@ async def api_lalal_status(
     token_valid = bool(settings.get("lalalaai_auth_is_valid", False))
     validation_error = str(settings.get("lalalaai_auth_last_error", "") or "").strip()
     # -1 is the stored "not known yet"; the response carries None instead.
-    cached_minutes = float(settings.get("lalalaai_minutes_left", -1) or -1)
-    minutes_left: float | None = cached_minutes if cached_minutes >= 0 else None
+    minutes_left = minutes_from_setting(settings.get("lalalaai_minutes_left", LALAL_MINUTES_UNKNOWN))
 
-    should_validate = (
-        force_refresh
-        or checked_at <= 0
-        or (now_ts - checked_at) >= _LALAL_AUTH_VALIDATION_CACHE_SECONDS
-    )
+    should_validate = force_refresh or checked_at <= 0 or (now_ts - checked_at) >= _LALAL_AUTH_VALIDATION_CACHE_SECONDS
 
     if should_validate:
-        from ..lalal import LalalClient, LalalError, parse_minutes_left
+        from ..integrations.lalal.client import (
+            LalalClient,
+            LalalError,
+            parse_minutes_left,
+        )
 
         # Only Lalal.ai itself can declare a credential invalid. A timeout or a
         # transport error says nothing about the key, so those paths keep the
@@ -559,7 +576,7 @@ async def api_lalal_status(
                 "lalalaai_auth_checked_at": checked_at,
                 "lalalaai_auth_is_valid": token_valid,
                 "lalalaai_auth_last_error": validation_error,
-                "lalalaai_minutes_left": -1 if minutes_left is None else minutes_left,
+                "lalalaai_minutes_left": minutes_to_setting(minutes_left),
             },
             expected_generation=generation,
             bump=False,
@@ -591,7 +608,7 @@ async def api_lalal_auth_activation_key(
 
     _validate_email(email)
 
-    from ..lalal import LalalClient, LalalError, parse_minutes_left
+    from ..integrations.lalal.client import LalalClient, LalalError, parse_minutes_left
 
     client = LalalClient(activation_key)
     try:
@@ -622,7 +639,7 @@ async def api_lalal_auth_activation_key(
             "lalalaai_auth_checked_at": int(time()),
             "lalalaai_auth_is_valid": True,
             "lalalaai_auth_last_error": "",
-            "lalalaai_minutes_left": -1 if minutes_left is None else minutes_left,
+            "lalalaai_minutes_left": minutes_to_setting(minutes_left),
         },
         expected_generation=generation,
         bump=True,
@@ -638,9 +655,7 @@ async def api_lalal_auth_activation_key(
 
 @router.post("/auth/logout", response_model=OperationResponse)
 @limiter.limit("10/minute")
-async def api_lalal_auth_logout(
-    request: Request, _user: str = Depends(require_user)
-) -> OperationResponse:
+async def api_lalal_auth_logout(request: Request, _user: str = Depends(require_user)) -> OperationResponse:
     _ = request
     await _commit_auth_settings(
         {
@@ -651,7 +666,7 @@ async def api_lalal_auth_logout(
             "lalalaai_auth_last_error": "",
             # -1 is "not known yet": the next account must not inherit this
             # one's balance while its first validation is still pending.
-            "lalalaai_minutes_left": -1,
+            "lalalaai_minutes_left": LALAL_MINUTES_UNKNOWN,
         },
         expected_generation=None,
         bump=True,
@@ -675,7 +690,7 @@ async def lalal_split(
     Note: Lalal always processes a vocals/instrumental split; `stem`
     only selects which cached result is returned.
     """
-    data_dir = _require_initialized()
+    _require_initialized()
     if _queue_event is None:
         raise RuntimeError("Lalal routes are not initialized")
 
@@ -692,12 +707,12 @@ async def lalal_split(
     if job["type"] != "audio":
         raise HTTPException(status_code=400, detail="Lalal.ai only works with audio jobs")
 
-    output_dir = data_dir / job_id_str
+    output_dir = job_dir(job_id_str)
     await asyncio.to_thread(output_dir.mkdir, parents=True, exist_ok=True)
 
     if trimmed:
         file_path, trim_id = await _latest_trim_input(output_dir, trim_id)
-        base_name = f"trim_{trim_id}"
+        base_name = trim_base_name(trim_id)
     else:
         raw_filename = job["filename"]
         file_path = resolve_job_path(raw_filename)
@@ -705,8 +720,8 @@ async def lalal_split(
             raise HTTPException(status_code=404, detail="Source file not found")
         base_name = file_path.stem
 
-    vocals_path = output_dir / f"{base_name}_vocals.mp3"
-    instrumental_path = output_dir / f"{base_name}_instrumental.mp3"
+    vocals_path = _stem_path(output_dir, base_name, "vocals")
+    instrumental_path = _stem_path(output_dir, base_name, "instrumental")
 
     cached_response = await _get_cached_split_response(
         job_id_str,
@@ -721,11 +736,16 @@ async def lalal_split(
     if cached_response is not None:
         return cached_response
 
-    logger.info("Starting Lalal.ai processing for %s (stem=%s, trim_id=%s)", job_id, stem, trim_id)
+    logger.info(
+        "Starting Lalal.ai processing for %s (stem=%s, trim_id=%s)",
+        job_id,
+        stem,
+        trim_id,
+    )
     lock_file = output_dir / f".lalal_{base_name}.lock"
 
     try:
-        from ..lalal import LalalClient, LalalError, StemType
+        from ..integrations.lalal.client import LalalClient, LalalError, StemType
     except ImportError as exc:
         raise HTTPException(status_code=500, detail="Lalal.ai module not available") from exc
 
@@ -767,9 +787,7 @@ async def lalal_split(
 
             async with _processing_capacity_slot(), client:
                 async with asyncio.timeout(_LALAL_PROCESS_TIMEOUT_SECONDS):
-                    upload_path, temp_upload = await _decode_for_upload(
-                        file_path, output_dir, base_name
-                    )
+                    upload_path, temp_upload = await _decode_for_upload(file_path, output_dir, base_name)
                     try:
                         results = await client.process_file(
                             upload_path,
@@ -845,7 +863,7 @@ async def lalal_download(
 ):
     """Download a processed Lalal.ai stem ('vocals' or 'instrumental')."""
     _ = request
-    data_dir = _require_initialized()
+    _require_initialized()
 
     _validate_stem(stem)
 
@@ -854,7 +872,7 @@ async def lalal_download(
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    output_dir = data_dir / job_id_str
+    output_dir = job_dir(job_id_str)
 
     if trimmed:
         stem_path, base_name = await _latest_trim_result(output_dir, stem, trim_id)
@@ -864,7 +882,7 @@ async def lalal_download(
         if not await path_is_file(source_path):
             raise HTTPException(status_code=404, detail="Source file not found")
         base_name = source_path.stem
-        stem_path = output_dir / f"{base_name}_{stem}.mp3"
+        stem_path = _stem_path(output_dir, base_name, stem)
         if not await path_is_file(stem_path):
             raise HTTPException(
                 status_code=404,

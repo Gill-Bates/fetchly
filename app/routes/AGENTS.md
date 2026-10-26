@@ -10,7 +10,7 @@ Route handlers validate requests, call business logic (database access, worker s
 
 | File | Purpose |
 | --- | --- |
-| `api.py` | Core API: job submission and listing, job cancel/retry, bulk removal, settings read/write, stats, BPM clusters, watermark logo upload/serve/delete, thumbnails, version info and update check. There is no single-job delete route — `POST /api/jobs/remove-all` is the only removal endpoint. |
+| `api.py` | Core API: job submission and listing, job cancel/retry, bulk removal, settings read/write, stats, BPM clusters, watermark logo upload/serve/delete, thumbnails, version info and update check; the dashboard page (`GET /`) also supplies `active_jobs`, and `job_to_dict()` merges in live worker progress. `GET /api/info` answers a login-gated source with `reason: "login_required"` and a cookie-aware message. There is no single-job delete route — `POST /api/jobs/remove-all` is the only removal endpoint. |
 | `auth.py` | Login page and POST, logout. The Lalal.ai activation key lives in `lalal.py`, not here. |
 | `media.py` | Media delivery: job page, download, audio source, thumbnail, favicon. `build_job_file_response()` here is what `share.py` reuses for public share downloads. |
 | `trim.py` | Audio trimming: clip submission, trim deletion and trimmed-file download |
@@ -26,7 +26,7 @@ Route handlers validate requests, call business logic (database access, worker s
 - **Location:** add the handler to the matching module, or create a new one
 - **Registration:** export the router from `__init__.py`, then add `app.include_router(...)` in `app/main.py`
 - **Authentication:** JSON endpoints depend on `require_user`; HTML pages call `require_html_auth(request)` and return its redirect when set. There is no `@requires_auth` decorator.
-- **Rate limiting:** apply `@limiter.limit()` from `app/common/rate_limit.py` to sensitive endpoints
+- **Rate limiting:** apply `@limiter.limit()` from `app/auth/rate_limit.py` to sensitive endpoints
 - **CSRF:** anything under `/api`, `/login` or `/logout` is covered automatically by `CSRFMiddleware`
 - **Validation:** Pydantic models or explicit parsing; validate untrusted URLs before handing them to yt-dlp
 - **Errors:** raise `HTTPException(status_code, detail)`; the detail string reaches the UI
@@ -52,14 +52,14 @@ Note the app-level auth endpoints live at `/login` and `/logout`, not under `/ap
 The `/auth/...` paths belong to `lalal.py` and therefore carry its `/api/lalal` prefix.
 
 ### Working with the Job Lifecycle
-- **Submission:** insert the job, enqueue it; a full worker queue is rejected with `503`
+- **Submission:** check headroom (`503` before any metadata lookup, checked again before the insert), then `db.insert_job_unless_active_duplicate()` does the duplicate check and the insert in one `BEGIN IMMEDIATE` transaction (`409 duplicate_job` unless `confirm_duplicate`), then enqueue; a queue that rejects marks the row `error` and answers `503`
 - **Status:** the valid set is defined in `app/db.py` — `queued`, `downloading`, `processing`, `transcoding`, `analysis`, `done`, `analysis_done`, `error`, `cancelled`
 - **Cancellation:** `update_job_if_status()` guards the transition so a finished job is not re-cancelled
 - **Completion:** the worker writes the terminal status; handlers read it back
 
 ### Working with External Services
-- **yt-dlp:** invoked as a subprocess; never pass an unvalidated URL straight through
-- **Lalal.ai:** `app/lalal.py` with the guards in `app/lalal_policy.py`
+- **yt-dlp:** invoked as a subprocess; never pass an unvalidated URL straight through. The thumbnail fallback in `api.py` is bounded by a local two-slot semaphore (`503` + `Retry-After` when busy); the slot is held until the subprocess ends
+- **Lalal.ai:** `app/integrations/lalal/client.py` with the guards in `app/integrations/lalal/policy.py`
 - **Watermark:** `app/utils/watermark.py`; uploads validated by `app/utils/watermark_logo.py`
 
 ### Common Patterns
@@ -73,12 +73,12 @@ The `/auth/...` paths belong to `lalal.py` and therefore carry its `/api/lalal` 
 
 ### Internal
 - `../db.py` — job, settings and share-link queries
-- `../governor.py` — resource headroom checks
-- `../session.py` — session validation (`require_user`, `require_html_auth`)
-- `../worker.py`, `../analysis_worker.py` — job submission
-- `../lalal.py`, `../lalal_policy.py`, `../bpm*.py` — business logic
+- `../runtime/governor.py` — resource headroom checks
+- `../auth/session.py` — session validation (`require_user`, `require_html_auth`)
+- `../workers/worker.py`, `../workers/analysis_worker.py` — job submission
+- `../integrations/lalal/`, `../audio/` — business logic
 - `../utils/` — watermark, cookies, version, changelog, public URL, duration
-- `../common/rate_limit.py` — limiter and client-IP resolution
+- `../auth/rate_limit.py` — limiter and client-IP resolution
 
 ### External
 - **FastAPI / Starlette:** routing, dependencies, `StreamingResponse` for SSE
@@ -120,7 +120,7 @@ async def get_job_handler(job_id: str, _user: str = Depends(require_user)):
 ```
 
 `require_user` / `require_user_json` / `require_html_auth` are defined in
-`app/routes/auth.py`; `app/session.py` holds the lower-level token functions.
+`app/routes/auth.py`; `app/auth/session.py` holds the lower-level token functions.
 
 `get_job()` returns a `sqlite3.Row` or `None` — index it like a mapping, not like an ORM object.
 
@@ -135,11 +135,12 @@ async def get_job_handler(job_id: str, _user: str = Depends(require_user)):
 - **Connection:** the client opens `EventSource("/events")`; per-job streams use `/api/jobs/{job_id}/events`
 - **Transport:** `StreamingResponse` with `media_type="text/event-stream"`. `SSEStreamingResponse` treats graceful-shutdown cancellation as a normal disconnect.
 - **Publishing:** other modules call `publish_payload()`; `broadcast_shutdown()` notifies clients on shutdown
-- **Cleanup:** subscribers are unregistered on disconnect; empty per-job subscriber sets are pruned
+- **Cleanup:** subscribers are unregistered on disconnect; empty per-job subscriber sets are pruned, and the per-job set is only created once the stream actually starts
+- **Connection cap:** `_MAX_SSE_CONNECTIONS` is enforced by reserving a slot synchronously before the response is returned; the slot is released exactly once when the response ends, the body generator finishes, or an unused response is dropped
 
 ---
 
-**Last Updated:** 2026-09-19  
+**Last Updated:** 2026-10-26  
 **Framework:** FastAPI (Starlette)  
 **Live Updates:** Server-Sent Events, not WebSocket  
 **Auth Dependencies:** `require_user` (JSON), `require_html_auth` (pages)

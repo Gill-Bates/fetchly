@@ -6,6 +6,7 @@
 import { DOWNLOADABLE_STATUSES, TERMINAL_STATUSES } from "./config.js";
 import { getStatusPillClass, getStatusText, toProgressPercent } from "./ui.js";
 import { fetchJob } from "./api.js";
+import { formatNumber, localizeValues } from "./utils.js";
 
 const script = document.getElementById("jobStatusScript");
 const jobId = script?.dataset.jobId;
@@ -21,6 +22,8 @@ const bpmEl = document.getElementById("bpmValue");
 const bpmRowEl = document.getElementById("bpmRow");
 const confidenceEl = document.getElementById("bpmConfidence");
 const linkEl = document.getElementById("downloadLink");
+
+localizeValues(document);
 const progressBar = document.getElementById("progressBar");
 const progressRow = document.getElementById("progressRow");
 const progressLabel = document.getElementById("progressLabel");
@@ -29,6 +32,9 @@ const statusText = document.getElementById("statusText");
 
 let shouldReconnect = !TERMINAL_STATUSES.has(initialStatus);
 let stream = null;
+// Bumped for every live payload applied; a snapshot requested earlier is stale.
+let liveRevision = 0;
+let terminalShown = TERMINAL_STATUSES.has(initialStatus);
 
 function updateStatus(payload) {
     statusText.textContent = getStatusText(payload.status, payload.progress);
@@ -74,7 +80,7 @@ function applyPayload(payload) {
     }
 
     if (payload.bpm_confidence != null) {
-        confidenceEl.textContent = Number(payload.bpm_confidence).toFixed(2);
+        confidenceEl.textContent = formatNumber(payload.bpm_confidence, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     }
 
     updateProgress(payload);
@@ -86,13 +92,20 @@ function applyPayload(payload) {
     }
 
     if (payload.status && TERMINAL_STATUSES.has(payload.status)) {
+        terminalShown = true;
         shouldReconnect = false;
         stream?.close();
     }
 }
 
 async function reconcileJob() {
-    const payload = await fetchJob(jobId);
+    const revision = liveRevision;
+    // no-store: never reuse a response (or in-flight request) older than this call.
+    const payload = await fetchJob(jobId, { cache: "no-store" });
+    // A live update (or a terminal state shown from one) is newer than this snapshot.
+    if (revision !== liveRevision || terminalShown) {
+        return;
+    }
     applyPayload(payload);
 }
 
@@ -126,6 +139,7 @@ function handleMessage(event) {
         return;
     }
 
+    liveRevision += 1;
     applyPayload(payload);
 }
 

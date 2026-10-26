@@ -66,8 +66,9 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
+          persist-credentials: false
           fetch-depth: 0  # Full history for git-based plugins
           # On workflow_run, GITHUB_SHA is the default branch's head, not the
           # commit the release published - so the default checkout would
@@ -77,7 +78,7 @@ jobs:
           ref: ${{ github.event.workflow_run.head_sha }}
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           # Same interpreter as ci.yml, the release workflow and
           # ARG PYTHON_BASE=python:3.13-slim. The docs toolchain does not need
@@ -118,7 +119,7 @@ jobs:
       # having a bad minute says nothing about the documentation, and blocking
       # the Pages deploy on it only produces reruns.
       - name: Check links
-        uses: lycheeverse/lychee-action@v1
+        uses: lycheeverse/lychee-action@2b973e86fc7b1f6b36a93795fe2c9c6ae1118621 # v1.10.0
         with:
           args: >-
             --verbose
@@ -139,7 +140,7 @@ jobs:
             github.event_name == 'workflow_dispatch' ||
             github.event_name == 'workflow_run'
           )
-        uses: actions/upload-pages-artifact@v5
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:
           path: ./site
 
@@ -165,15 +166,16 @@ jobs:
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v5
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
 
   security-scan:
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
+          persist-credentials: false
           # The same commit the build job resolves, or the scan would report
           # against a different dependency set than the one being deployed.
           ref: ${{ github.event.workflow_run.head_sha }}
@@ -181,7 +183,7 @@ jobs:
       # Same interpreter the build job uses, so the resolution below is the one
       # that actually builds the docs.
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: '3.13'
 

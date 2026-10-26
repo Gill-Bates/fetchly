@@ -11,12 +11,11 @@ Templates here render the entire UI. There is no client-side framework and no co
 | File | Purpose |
 | --- | --- |
 | `base.html` | Base layout: document structure, navbar, stylesheet/script includes, CSRF token exposure, dark `color-scheme` meta |
-| `index.html` | Dashboard: job submission form, URL input, format selection, job list |
+| `index.html` | Dashboard: job submission form, URL input, format selection, job list; bootstrap data in `jobsBootstrapData` (history page) and `activeJobsBootstrapData` (running jobs, restored after a reload) |
 | `login.html` | Login page: credentials form, invisible honeypot anti-bot field, error messages |
 | `settings.html` | Settings: authentication, download tuning, watermark, cookies, Lalal.ai integration, System tiles (version/update, host resources) |
 | `job.html` | Job detail: metadata, download controls, trim editor, stem separation |
 | `share_error.html` | Shown when a share link is expired, invalid, or over its use limit |
-| `_action_btn.html` | Action button partial. Currently **not included** by any page — the dashboard renders job rows client-side from `jobsBootstrapData`; `tests/test_status_mapping_parity.py` keeps its status sets in sync with the backend. |
 | `macros/navbar.html` | Navigation bar macro |
 | `macros/stats.html` | Host/statistics display macro |
 
@@ -107,7 +106,7 @@ Check the specific handler in `app/routes/` for the exact context rather than as
 
 ---
 
-**Last Updated:** 2026-09-19  
+**Last Updated:** 2026-10-26  
 **Template Engine:** Jinja2  
 **CSS Framework:** Bootstrap 5 (vendored)  
 **Live Updates:** Server-Sent Events

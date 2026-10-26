@@ -18,7 +18,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Final
 from urllib.parse import parse_qs, urlparse
 
-from .youtube import strip_zwsp, validate_youtube_url
+from .youtube import clean_pasted_url, validate_youtube_url
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -39,12 +39,14 @@ _PLATFORM_LABELS = {
 # Netscape cookie file names, keyed by platform - the single source every layer
 # resolves cookie paths from. Read-only (MappingProxyType) so a stray write
 # cannot change which jar reaches yt-dlp.
-PLATFORM_COOKIE_FILENAMES: Final[Mapping[str, str]] = MappingProxyType({
-    PLATFORM_YOUTUBE: "youtube_cookies.txt",
-    PLATFORM_INSTAGRAM: "instagram_cookies.txt",
-    PLATFORM_TIKTOK: "tiktok_cookies.txt",
-    PLATFORM_FACEBOOK: "facebook_cookies.txt",
-})
+PLATFORM_COOKIE_FILENAMES: Final[Mapping[str, str]] = MappingProxyType(
+    {
+        PLATFORM_YOUTUBE: "youtube_cookies.txt",
+        PLATFORM_INSTAGRAM: "instagram_cookies.txt",
+        PLATFORM_TIKTOK: "tiktok_cookies.txt",
+        PLATFORM_FACEBOOK: "facebook_cookies.txt",
+    }
+)
 
 _INSTAGRAM_EXACT_HOSTS = frozenset({"instagr.am", "www.instagr.am"})
 _FACEBOOK_EXACT_HOSTS = frozenset({"fb.watch", "www.fb.watch", "fb.gg", "www.fb.gg"})
@@ -55,13 +57,16 @@ _TIKTOK_SHARE_CODE_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 # Facebook numeric object IDs; share/reel codes are alphanumeric instead.
 _FACEBOOK_ID_RE = re.compile(r"^[0-9]{6,}$")
 _FACEBOOK_CODE_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+# Story IDs are base64 of an internal token, so they may carry "=" padding -
+# literal in a pasted URL, percent-encoded when the browser copied it.
+_FACEBOOK_STORY_RE = re.compile(r"^[A-Za-z0-9_-]+(?:=|%3[Dd]){0,2}$")
 _FACEBOOK_PAGE_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
 
 def _clean_url(url: str | None) -> str:
     if not url or not isinstance(url, str):
         return ""
-    return strip_zwsp(url.strip().replace("&amp;", "&"))
+    return clean_pasted_url(url)
 
 
 def detect_platform(url: str | None) -> str | None:
@@ -106,7 +111,10 @@ def _validate_tiktok_url(url: str) -> tuple[bool, str]:
     segments = [seg for seg in (parsed.path or "").strip("/").split("/") if seg]
 
     if not segments:
-        return False, "Invalid TikTok URL. Expected a TikTok video, photo, or share link."
+        return (
+            False,
+            "Invalid TikTok URL. Expected a TikTok video, photo, or share link.",
+        )
 
     # Long form: /@user/video/<id> and /@user/photo/<id>
     if (
@@ -144,7 +152,10 @@ def _validate_instagram_url(url: str) -> tuple[bool, str]:
     # Accept /p/<code>, /reel/<code>, /tv/<code>.
     if len(segments) == 2 and segments[0] in {"p", "reel", "tv"} and re.fullmatch(r"[A-Za-z0-9_-]+", segments[1]):
         return True, ""
-    return False, "Invalid Instagram URL. Expected an instagram.com post, reel, or tv link."
+    return (
+        False,
+        "Invalid Instagram URL. Expected an instagram.com post, reel, or tv link.",
+    )
 
 
 def _validate_facebook_url(url: str) -> tuple[bool, str]:
@@ -157,7 +168,7 @@ def _validate_facebook_url(url: str) -> tuple[bool, str]:
     parsed = urlparse(url)
     host = (parsed.hostname or "").lower()
     segments = [seg for seg in (parsed.path or "").strip("/").split("/") if seg]
-    error = "Invalid Facebook URL. Expected a Facebook video, reel, or share link."
+    error = "Invalid Facebook URL. Expected a Facebook video, reel, story, or share link."
 
     # Short share hosts: fb.watch/<code>, fb.gg/<code>
     if host in _FACEBOOK_EXACT_HOSTS:
@@ -178,6 +189,16 @@ def _validate_facebook_url(url: str) -> tuple[bool, str]:
     # /reel/<id>
     if segments[0] == "reel" and len(segments) >= 2 and _FACEBOOK_CODE_RE.fullmatch(segments[1]):
         return True, ""
+
+    # /stories/<set id> and /stories/<set id>/<story id>
+    if segments[0] == "stories":
+        if (
+            len(segments) >= 2
+            and _FACEBOOK_ID_RE.fullmatch(segments[1])
+            and (len(segments) == 2 or _FACEBOOK_STORY_RE.fullmatch(segments[2]))
+        ):
+            return True, ""
+        return False, error
 
     # /share/v/<code>, /share/r/<code>
     if segments[0] == "share" and len(segments) >= 3 and segments[1] in {"v", "r"}:
@@ -236,4 +257,7 @@ def validate_media_url(url: str | None) -> tuple[bool, str]:
     if platform == PLATFORM_FACEBOOK:
         return _validate_facebook_url(value)
 
-    return False, "Unsupported URL. Supported platforms: YouTube, TikTok, Instagram, Facebook."
+    return (
+        False,
+        "Unsupported URL. Supported platforms: YouTube, TikTok, Instagram, Facebook.",
+    )

@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 
-from app.lalal import LalalClient, LalalError, LalalProcessingError
+from app.integrations.lalal.client import LalalClient, LalalError, LalalProcessingError
 
 
 class WaitForCompletionTests(unittest.TestCase):
@@ -48,9 +48,7 @@ class WaitForCompletionTests(unittest.TestCase):
             "check_progress",
             AsyncMock(return_value=self._success_payload()),
         ):
-            result = self._run(
-                self.client.wait_for_completion("task-1", poll_interval=0.01, timeout=5.0)
-            )
+            result = self._run(self.client.wait_for_completion("task-1", poll_interval=0.01, timeout=5.0))
         self.assertEqual(result["stem_track"], "https://example.test/stem.wav")
         self.assertEqual(result["back_track"], "https://example.test/back.wav")
 
@@ -68,9 +66,7 @@ class WaitForCompletionTests(unittest.TestCase):
             return outcome
 
         with patch.object(self.client, "check_progress", fake_check_progress):
-            result = self._run(
-                self.client.wait_for_completion("task-1", poll_interval=0.01, timeout=5.0)
-            )
+            result = self._run(self.client.wait_for_completion("task-1", poll_interval=0.01, timeout=5.0))
         self.assertEqual(result["stem_track"], "https://example.test/stem.wav")
         self.assertEqual(responses, [])
 
@@ -81,9 +77,7 @@ class WaitForCompletionTests(unittest.TestCase):
             AsyncMock(side_effect=httpx.ConnectError("unreachable")),
         ):
             with self.assertRaises(LalalProcessingError):
-                self._run(
-                    self.client.wait_for_completion("task-1", poll_interval=0.001, timeout=5.0)
-                )
+                self._run(self.client.wait_for_completion("task-1", poll_interval=0.001, timeout=5.0))
 
     def test_a_definitive_lalal_error_still_raises_immediately(self) -> None:
         calls = 0
@@ -95,9 +89,7 @@ class WaitForCompletionTests(unittest.TestCase):
 
         with patch.object(self.client, "check_progress", fake_check_progress):
             with self.assertRaises(LalalError):
-                self._run(
-                    self.client.wait_for_completion("task-1", poll_interval=0.01, timeout=5.0)
-                )
+                self._run(self.client.wait_for_completion("task-1", poll_interval=0.01, timeout=5.0))
         # No retry loop for a definitive rejection: exactly one attempt.
         self.assertEqual(calls, 1)
 
@@ -108,9 +100,7 @@ class WaitForCompletionTests(unittest.TestCase):
             AsyncMock(return_value={"status": "error", "error": "boom"}),
         ):
             with self.assertRaises(LalalProcessingError):
-                self._run(
-                    self.client.wait_for_completion("task-1", poll_interval=0.01, timeout=5.0)
-                )
+                self._run(self.client.wait_for_completion("task-1", poll_interval=0.01, timeout=5.0))
 
 
 if __name__ == "__main__":

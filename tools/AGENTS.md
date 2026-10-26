@@ -113,7 +113,7 @@ Use `playwrightDevice` for a named Playwright descriptor, or `viewport` for an e
 
 ---
 
-**Last Updated:** 2026-09-21  
+**Last Updated:** 2026-10-26  
 **Browser Automation:** Playwright (chromium, webkit, firefox)  
 **Accessibility:** axe-core via `@axe-core/playwright`  
 **Key Tools:** ESLint, Stylelint, ruff, Playwright

@@ -88,8 +88,10 @@ class GetHostStatsTests(unittest.TestCase):
         from time import monotonic
 
         # A sample ~5s old, then a reading 30 jiffies busier out of 100.
-        with patch.object(host_stats, "_last_cpu_sample", (monotonic() - 5.0, 1_000, 2_000)), \
-             patch.object(host_stats, "_read_cpu_jiffies", return_value=(1_070, 2_100)):
+        with (
+            patch.object(host_stats, "_last_cpu_sample", (monotonic() - 5.0, 1_000, 2_000)),
+            patch.object(host_stats, "_read_cpu_jiffies", return_value=(1_070, 2_100)),
+        ):
             percent = asyncio.run(host_stats._sample_cpu_percent())
         self.assertAlmostEqual(percent, 30.0, places=5)
 

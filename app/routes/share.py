@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 
-from ..common.rate_limit import limiter
+from ..auth.rate_limit import limiter
 from ..db import consume_share_link, create_share_link, get_settings, get_share_link
 from ..utils.public_url import build_public_base_url
 from .auth import require_user_json
@@ -57,6 +57,7 @@ def _unavailable(request: Request) -> Response:
         context={},
         status_code=404,
     )
+
 
 # New tokens are 22 URL-safe characters / 128 bits (see create_share_link).
 # The range stays wide so links issued by an earlier version keep working and

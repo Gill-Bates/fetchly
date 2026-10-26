@@ -3,7 +3,7 @@ name: Docker Multi-Arch Build
 on:
   push:
     tags:
-      - 'v*'
+      - "v*"
   workflow_dispatch:
 
 concurrency:
@@ -46,8 +46,9 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
+          persist-credentials: false
           # Full history, so the main-ancestry check below can actually walk
           # from the tagged commit back to main.
           fetch-depth: 0
@@ -137,10 +138,12 @@ jobs:
           # still restores those layers from cache.
           APT_CACHE_DATE="${BUILD_DATE%%T*}"
 
-          echo "apt_cache_date=${APT_CACHE_DATE}" >> "$GITHUB_OUTPUT"
-          echo "build_date=${BUILD_DATE}" >> "$GITHUB_OUTPUT"
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          {
+            echo "apt_cache_date=${APT_CACHE_DATE}"
+            echo "build_date=${BUILD_DATE}"
+            echo "tag=${TAG}"
+            echo "version=${VERSION}"
+          } >> "$GITHUB_OUTPUT"
 
       # Everything the Dockerfile deliberately leaves rolling is resolved here,
       # once, and handed to every architecture as a build arg.
@@ -277,11 +280,11 @@ jobs:
           echo "  deno        : ${deno_version}"
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           # The interpreter the resolution below targets, and the same one
           # ARG PYTHON_BASE=python:3.13-slim carries.
-          python-version: '3.13'
+          python-version: "3.13"
 
       # pyproject.toml pins none of the application's dependencies, so "newest"
       # has to be decided once per release rather than twice by two runners
@@ -381,7 +384,7 @@ jobs:
           cat constraints.txt
 
       - name: Upload resolved constraints
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: constraints
           path: constraints.txt
@@ -592,8 +595,9 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
+          persist-credentials: false
           fetch-depth: 1
 
       # torch alone is a multi-hundred-MB wheel and the finished image runs to
@@ -631,17 +635,17 @@ jobs:
       # this same file, which is what makes their venvs identical even though
       # pyproject.toml pins nothing.
       - name: Download resolved constraints
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           name: constraints
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
         with:
           cache-binary: false
 
       - name: Log in to Docker Hub
-        uses: docker/login-action@v4
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -863,7 +867,7 @@ jobs:
               handle.setframerate(SAMPLE_RATE)
               handle.writeframes((samples * 32767).astype("<i2").tobytes())
 
-          # Mirrors app/bpm.py: MonoLoader on defaults, then
+          # Mirrors app/audio/bpm.py: MonoLoader on defaults, then
           # RhythmExtractor2013(method="multifeature"). MonoLoader decodes
           # through the static ffmpeg essentia links against, so the compiled
           # audio I/O path is covered too, not just the rhythm algorithm.
@@ -961,7 +965,7 @@ jobs:
           cat "toolchain/${{ matrix.image_suffix }}.txt"
 
       - name: Upload toolchain versions (${{ matrix.arch }})
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: toolchain-${{ matrix.image_suffix }}
           path: toolchain/${{ matrix.image_suffix }}.txt
@@ -990,15 +994,15 @@ jobs:
           # rolling anyway - it is re-downloaded on every run - so pinning the
           # binary that reads it buys no reproducibility, only a scanner that
           # ages until someone bumps it by hand.
-          version: 'latest'
-          cache: 'false'
-          image-ref: '${{ matrix.test_image }}'
-          format: 'json'
-          output: 'trivy-${{ matrix.image_suffix }}.json'
-          exit-code: '1'
+          version: "latest"
+          cache: "false"
+          image-ref: "${{ matrix.test_image }}"
+          format: "json"
+          output: "trivy-${{ matrix.image_suffix }}.json"
+          exit-code: "1"
           ignore-unfixed: true
-          vuln-type: 'os,library'
-          severity: 'CRITICAL,HIGH'
+          vuln-type: "os,library"
+          severity: "CRITICAL,HIGH"
           # Vulnerabilities only. trivy-action also runs the secret scanner by
           # default, and pointing that at a venv full of third-party code is a
           # false-positive generator: yt-dlp hardcodes the public API
@@ -1009,11 +1013,11 @@ jobs:
           # all, and there is no useful gate to build on them here - this step
           # exists to fail the release on a fixable CVE. It is also what
           # Trivy's own log recommends for scan time.
-          scanners: 'vuln'
+          scanners: "vuln"
           # Longer than the 10m upstream default: the venv this image ships
           # (torch, essentia, beat-this and their transitive deps) is a
           # large library surface to walk.
-          timeout: '15m'
+          timeout: "15m"
           # pip ships a CycloneDX SBOM of its own vendored libraries
           # (pip/_vendor/bom.cdx.json, PEP 770). Trivy parses it as a
           # third-party SBOM - warning "Third-party SBOM may lead to
@@ -1033,10 +1037,10 @@ jobs:
           # venv's) and survives a Python minor bump: Trivy matches skip-files
           # against paths relative to the scanned artifact's root, where a
           # leading slash never matches.
-          skip-files: '**/pip/_vendor/bom.cdx.json'
+          skip-files: "**/pip/_vendor/bom.cdx.json"
           # Accepted findings live in .trivyignore at the repository root, one
           # CVE id per line with the reason in a comment above it.
-          trivyignores: '.trivyignore'
+          trivyignores: ".trivyignore"
 
       - name: Generate Trivy summary (${{ matrix.arch }})
         if: always()
@@ -1071,7 +1075,7 @@ jobs:
 
       - name: Upload Trivy findings (${{ matrix.arch }})
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: trivy-findings-${{ matrix.image_suffix }}
           path: trivy-${{ matrix.image_suffix }}.json
@@ -1114,7 +1118,7 @@ jobs:
           echo "${{ matrix.image_suffix }} -> ${digest}"
 
       - name: Upload image digest (${{ matrix.arch }})
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: image-digest-${{ matrix.image_suffix }}
           path: digests/${{ matrix.image_suffix }}
@@ -1136,21 +1140,21 @@ jobs:
 
     steps:
       - name: Log in to Docker Hub
-        uses: docker/login-action@v4
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Download image digests
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           pattern: image-digest-*
           path: digests/
           merge-multiple: true
 
       - name: Download toolchain versions
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           pattern: toolchain-*
           path: toolchain/
@@ -1345,7 +1349,7 @@ jobs:
       - name: Download image digests
         id: digests
         continue-on-error: true
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           pattern: image-digest-*
           path: digests/
@@ -1603,12 +1607,13 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
+          persist-credentials: false
           fetch-depth: 1
 
       - name: Download Trivy findings
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           pattern: trivy-findings-*
           path: trivy-reports/
@@ -1617,14 +1622,14 @@ jobs:
       # The architectures the release actually published, straight from the
       # manifest's own sources - not a list this file has to keep in step.
       - name: Download image digests
-        uses: actions/download-artifact@v7
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           pattern: image-digest-*
           path: digests/
           merge-multiple: true
 
       - name: Create or update GitHub Release
-        uses: actions/github-script@v9
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
             const fs = require('node:fs');

@@ -4,11 +4,20 @@
 # Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 #
 
-"""Guards the job-status knowledge that is independently mirrored across
-app/db.py, app/utils/template_filters.py, the Jinja templates, and several
-static/js files (see DRY audit finding 3). These sets/labels have no single
-generated source of truth, so this test is the safety net that catches drift
-between them until they are consolidated behind one server-exported payload.
+"""Guards the job-status contract (DRY audit finding 2).
+
+The authoritative groups live in app/db.py and the display metadata in
+app/utils/template_filters.py. status_contract() serializes both into the page
+bootstrap data, and the frontend (config.js) reads only that payload - the
+other JS modules no longer keep their own status tables. This test asserts
+three things:
+
+1. the serialized contract matches the authoritative db.py groups and the
+   status_label()/status_class() output for every known status;
+2. the worker's progress-bearing set (which cannot import a new db constant)
+   still agrees with db.PROGRESS_STATUSES;
+3. the JS modules consume the single source instead of re-declaring it, so the
+   consolidation cannot silently regress.
 """
 
 import re
@@ -23,150 +32,123 @@ _STATIC_JS = _REPO_ROOT / "app" / "static" / "js"
 _TEMPLATES = _REPO_ROOT / "app" / "templates"
 
 
-def _extract_js_string_set(source: str, const_name: str) -> set[str]:
-    """Extract string literals from a `new Set([...])` JS declaration."""
-    match = re.search(rf"{const_name}\s*=\s*new Set\(\[(.*?)\]\)", source, re.DOTALL)
-    assert match, f"Could not find JS Set declaration for {const_name}"
-    return set(re.findall(r'"([^"]+)"', match.group(1)))
+class StatusContractSerializationTests(unittest.TestCase):
+    """status_contract() mirrors the authoritative db.py groups and labels."""
+
+    def setUp(self) -> None:
+        self.contract = template_filters.status_contract()
+
+    def test_groups_match_backend_sets(self) -> None:
+        self.assertEqual(set(self.contract["downloadable"]), set(db.DOWNLOADABLE_STATUSES))
+        self.assertEqual(set(self.contract["cancellable"]), set(db.CANCELLABLE_JOB_STATUSES))
+        self.assertEqual(set(self.contract["retryable"]), set(db.RETRYABLE_JOB_STATUSES))
+        self.assertEqual(set(self.contract["terminal"]), set(db.TERMINAL_JOB_STATUSES))
+        self.assertEqual(set(self.contract["progress"]), set(db.PROGRESS_STATUSES))
+
+    def test_groups_are_sorted_lists(self) -> None:
+        for key in ("downloadable", "cancellable", "retryable", "terminal", "progress"):
+            values = self.contract[key]
+            self.assertIsInstance(values, list)
+            self.assertEqual(values, sorted(values), key)
+
+    def test_meta_covers_every_known_status_with_label_and_color(self) -> None:
+        self.assertEqual(set(self.contract["meta"]), set(db._JOB_STATUSES))
+        for status in db._JOB_STATUSES:
+            entry = self.contract["meta"][status]
+            self.assertEqual(entry["label"], template_filters.status_label(status), status)
+            self.assertEqual(entry["color"], template_filters.status_class(status), status)
+
+    def test_cancellable_and_terminal_partition_the_lifecycle(self) -> None:
+        self.assertFalse(set(self.contract["cancellable"]) & set(self.contract["terminal"]))
+
+    def test_retryable_is_never_cancellable(self) -> None:
+        self.assertFalse(set(self.contract["retryable"]) & set(self.contract["cancellable"]))
 
 
-def _extract_js_object_keys(source: str, const_name: str) -> set[str]:
-    """Extract top-level keys from an `export const NAME = Object.freeze({...})` block."""
-    match = re.search(rf"{const_name}\s*=\s*Object\.freeze\(\{{(.*?)\}}\)", source, re.DOTALL)
-    assert match, f"Could not find JS object declaration for {const_name}"
-    body = match.group(1)
-    return set(re.findall(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*:", body, re.MULTILINE))
+class WorkerProgressParityTests(unittest.TestCase):
+    """The worker owns the progress-bearing writeback and must agree with db.py."""
+
+    def test_worker_progress_set_matches_db(self) -> None:
+        from app.workers import worker
+
+        self.assertEqual(set(worker._PROGRESS_BEARING_STATUSES), set(db.PROGRESS_STATUSES))
 
 
-def _extract_js_label(source: str, const_name: str, key: str) -> str | None:
-    match = re.search(rf"{const_name}\s*=\s*Object\.freeze\(\{{(.*?)\}}\)", source, re.DOTALL)
-    assert match, f"Could not find JS object declaration for {const_name}"
-    body = match.group(1)
-    key_match = re.search(rf'\b{key}\s*:\s*\{{[^}}]*label:\s*"([^"]+)"', body)
-    if key_match:
-        return key_match.group(1)
-    key_match = re.search(rf'\b{key}\s*:\s*"([^"]+)"', body)
-    return key_match.group(1) if key_match else None
+class StatusSubsetTests(unittest.TestCase):
+    """The worker-owned / cancellable / retryable subsets keep their meaning."""
 
+    def test_subsets_are_known_statuses(self) -> None:
+        for subset in (
+            db.WORKER_OWNED_STATUSES,
+            db.CANCELLABLE_JOB_STATUSES,
+            db.RETRYABLE_JOB_STATUSES,
+            db.PROGRESS_STATUSES,
+        ):
+            self.assertLessEqual(set(subset), db._JOB_STATUSES)
 
-class StatusSetParityTests(unittest.TestCase):
-    """DOWNLOADABLE/CANCELLABLE/TERMINAL status sets: db.py vs. config.js vs. templates."""
-
-    def test_config_js_matches_backend_status_sets(self) -> None:
-        config_source = (_STATIC_JS / "config.js").read_text(encoding="utf-8")
-
+    def test_subset_membership(self) -> None:
+        self.assertEqual(set(db.WORKER_OWNED_STATUSES), {"processing", "downloading", "transcoding"})
         self.assertEqual(
-            _extract_js_string_set(config_source, "DOWNLOADABLE_STATUSES"),
-            set(db.DOWNLOADABLE_STATUSES),
-        )
-        self.assertEqual(
-            _extract_js_string_set(config_source, "TERMINAL_STATUSES"),
-            set(db.TERMINAL_JOB_STATUSES),
-        )
-        # CANCELLABLE_STATUSES (config.js) has no named backend constant; it
-        # must match the in-flight statuses guarded server-side in worker.py's
-        # transition helpers ("processing", "downloading", "transcoding") plus
-        # "queued" (cancellable before a worker ever picks it up).
-        self.assertEqual(
-            _extract_js_string_set(config_source, "CANCELLABLE_STATUSES"),
+            set(db.CANCELLABLE_JOB_STATUSES),
             {"queued", "processing", "downloading", "transcoding"},
         )
+        self.assertEqual(set(db.RETRYABLE_JOB_STATUSES), {"error", "cancelled"})
+        self.assertEqual(set(db.PROGRESS_STATUSES), {"downloading", "transcoding"})
 
-    def test_action_button_template_matches_backend_status_sets(self) -> None:
-        action_btn_source = (_TEMPLATES / "_action_btn.html").read_text(encoding="utf-8")
+    def test_cancellable_jobs_are_never_terminal(self) -> None:
+        self.assertFalse(set(db.CANCELLABLE_JOB_STATUSES) & db.TERMINAL_JOB_STATUSES)
 
-        downloadable_match = re.search(
-            r'\{% if job\["status"\] in \(([^)]+)\) %\}', action_btn_source
+
+class FrontendConsumesSingleSourceTests(unittest.TestCase):
+    """The JS modules read the contract instead of re-declaring their own copy."""
+
+    def test_config_js_reads_the_bootstrap_contract(self) -> None:
+        source = (_STATIC_JS / "config.js").read_text(encoding="utf-8")
+        self.assertIn("dataset.statusContract", source)
+        # No hardcoded status set literals remain in config.js.
+        self.assertNotRegex(source, r'new Set\(\[\s*"(done|queued|error|analysis)"')
+
+    def test_ui_js_imports_status_meta_instead_of_defining_it(self) -> None:
+        source = (_STATIC_JS / "ui.js").read_text(encoding="utf-8")
+        self.assertRegex(
+            source,
+            r"import\s*\{[^}]*\bSTATUS_META\b[^}]*\}\s*from\s*\"\./config\.js\"",
         )
-        assert downloadable_match
-        downloadable = set(re.findall(r'"([^"]+)"', downloadable_match.group(1)))
-        self.assertEqual(downloadable, set(db.DOWNLOADABLE_STATUSES))
+        self.assertNotRegex(source, r"\bSTATUS_META\s*=\s*Object\.freeze")
 
-        cancellable_match = re.search(
-            r'\{% elif job\["status"\] in \(([^)]+)\) %\}', action_btn_source
+    def test_jobs_js_has_no_private_status_table(self) -> None:
+        source = (_STATIC_JS / "jobs.js").read_text(encoding="utf-8")
+        self.assertNotRegex(source, r"\bconst\s+STATUS\s*=\s*Object\.freeze")
+        self.assertNotRegex(source, r"\bSTATUS\.[A-Z]")
+
+    def test_main_js_derives_detail_labels_from_shared_meta(self) -> None:
+        source = (_STATIC_JS / "main.js").read_text(encoding="utf-8")
+        self.assertRegex(
+            source,
+            r"import\s*\{[^}]*\bSTATUS_META\b[^}]*\}\s*from\s*\"\./config\.js\"",
         )
-        assert cancellable_match
-        cancellable = set(re.findall(r'"([^"]+)"', cancellable_match.group(1)))
-        self.assertEqual(cancellable, {"queued", "processing", "downloading", "transcoding"})
+        self.assertNotRegex(source, r"\bDETAIL_STATUS_LABELS\s*=\s*Object\.freeze")
+
+    def test_progress_set_has_one_js_definition(self) -> None:
+        for name in ("ui.js", "jobs.js", "events.js"):
+            with self.subTest(module=name):
+                source = (_STATIC_JS / name).read_text(encoding="utf-8")
+                self.assertRegex(
+                    source,
+                    r"import\s*\{[^}]*\bPROGRESS_STATUSES\b[^}]*\}\s*from\s*\"\./config\.js\"",
+                )
+                self.assertNotRegex(source, r"\bPROGRESS_STATUSES\s*=\s*new Set")
+
+
+class TemplateDownloadableStatusTests(unittest.TestCase):
+    """job.html still gates its download button on the downloadable set."""
 
     def test_job_detail_template_matches_backend_downloadable_statuses(self) -> None:
         job_html_source = (_TEMPLATES / "job.html").read_text(encoding="utf-8")
         match = re.search(r"\(\s*'done',\s*'analysis',\s*'analysis_done'\s*\)", job_html_source)
-        assert match, "Expected job.html to hardcode the downloadable status tuple"
+        assert match, "Expected job.html to gate the download button on the downloadable tuple"
         found = set(re.findall(r"'([^']+)'", match.group(0)))
         self.assertEqual(found, set(db.DOWNLOADABLE_STATUSES))
-
-
-class StatusLabelParityTests(unittest.TestCase):
-    """Status -> display label: template_filters.py vs. ui.js vs. main.js.
-
-    All known statuses must resolve to the *same* label everywhere a job's
-    status is shown to the user, closing the "Done" vs. "Completed" drift
-    found in the DRY audit.
-    """
-
-    def _all_known_statuses(self) -> set[str]:
-        return set(db._JOB_STATUSES)
-
-    def test_ui_js_status_labels_match_backend_labels(self) -> None:
-        ui_source = (_STATIC_JS / "ui.js").read_text(encoding="utf-8")
-        for status in self._all_known_statuses():
-            backend_label = template_filters.status_label(status)
-            js_label = _extract_js_label(ui_source, "STATUS_META", status)
-            self.assertEqual(
-                js_label,
-                backend_label,
-                f"ui.js STATUS_META[{status!r}].label ({js_label!r}) must match "
-                f"status_label({status!r}) ({backend_label!r})",
-            )
-
-    def test_main_js_detail_labels_match_backend_labels(self) -> None:
-        main_source = (_STATIC_JS / "main.js").read_text(encoding="utf-8")
-        for status in self._all_known_statuses():
-            backend_label = template_filters.status_label(status)
-            js_label = _extract_js_label(main_source, "DETAIL_STATUS_LABELS", status)
-            # main.js intentionally collapses in-flight statuses to one
-            # coarse "Processing" label instead of the finer-grained pill
-            # text; only terminal statuses must match exactly.
-            if status in db.TERMINAL_JOB_STATUSES:
-                self.assertEqual(
-                    js_label,
-                    backend_label,
-                    f"main.js DETAIL_STATUS_LABELS[{status!r}] ({js_label!r}) must match "
-                    f"status_label({status!r}) ({backend_label!r}) for a terminal status",
-                )
-
-
-class ProgressStatusParityTests(unittest.TestCase):
-    """Which statuses carry a live progress percentage: ui.js vs. jobs.js.
-
-    worker.py only ever emits progress=... for "downloading" and
-    "transcoding" (see _DownloadProgress.feed/finish and
-    _emit_ffmpeg_progress); both JS-side sets must agree with that and with
-    each other.
-    """
-
-    def test_ui_js_and_jobs_js_agree_on_progress_bearing_statuses(self) -> None:
-        ui_source = (_STATIC_JS / "ui.js").read_text(encoding="utf-8")
-        jobs_source = (_STATIC_JS / "jobs.js").read_text(encoding="utf-8")
-
-        ui_progress_match = re.search(r"PROGRESS_STATUSES\s*=\s*new Set\(\[(.*?)\]\)", ui_source)
-        assert ui_progress_match
-        ui_progress = set(re.findall(r'"([^"]+)"', ui_progress_match.group(1)))
-
-        jobs_progress_match = re.search(
-            r"PROGRESS_BEARING_STATUSES\s*=\s*new Set\(\[(.*?)\]\)", jobs_source
-        )
-        assert jobs_progress_match
-        jobs_progress_raw = jobs_progress_match.group(1)
-        jobs_progress = set(re.findall(r"STATUS\.([A-Z_]+)", jobs_progress_raw))
-        # jobs.js references STATUS.DOWNLOADING/STATUS.TRANSCODING; translate
-        # to the same lowercase status strings ui.js uses directly.
-        jobs_progress = {name.lower() for name in jobs_progress}
-
-        self.assertEqual(ui_progress, {"downloading", "transcoding"})
-        self.assertEqual(jobs_progress, {"downloading", "transcoding"})
-        self.assertEqual(ui_progress, jobs_progress)
 
 
 if __name__ == "__main__":

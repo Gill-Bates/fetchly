@@ -16,10 +16,11 @@ import os
 import unittest
 from unittest.mock import patch
 
-from app import db, session
+from app import db
+from app.auth import session
+from app.auth.credentials import normalize_admin_username, validate_admin_password
+from app.auth.session import refresh_session_settings_cache
 from app.routes import auth
-from app.session import refresh_session_settings_cache
-from app.utils.credentials import normalize_admin_username, validate_admin_password
 from tests._support import IsolatedDbTestCase
 
 
@@ -37,7 +38,7 @@ class _IsolatedSettingsDb(IsolatedDbTestCase):
         self.addCleanup(auth.init_auth, original_templates, original_secret_key)
         auth.init_auth(object(), "test-auth-credentials-secret")
         # auth.is_authentication_enabled() reads the session-settings cache
-        # rather than sqlite directly (see app/session.py); pick up this
+        # rather than sqlite directly (see app/auth/session.py); pick up this
         # test's fresh database instead of whatever a previous test left
         # cached.
         refresh_session_settings_cache()
@@ -153,7 +154,7 @@ class CredentialValidationTests(unittest.TestCase):
                 normalize_admin_username(bad)
 
     def test_username_never_contains_the_session_delimiter(self):
-        # app/session.py packs the username into a colon-delimited token.
+        # app/auth/session.py packs the username into a colon-delimited token.
         with self.assertRaises(ValueError):
             normalize_admin_username("user:name")
 

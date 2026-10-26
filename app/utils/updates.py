@@ -7,8 +7,8 @@
 """Upstream release checks for the tools shown on the settings page.
 
 Each component is compared against the source the image actually installs it
-from — GitHub releases for the packages, the rolling BtbN build release for
-ffmpeg. The answer is cached for 24 hours (in memory plus a small JSON file in
+from — GitHub releases for the packages, the newest BtbN autobuild of the installed
+stable series for ffmpeg. The answer is cached for 24 hours (in memory plus a small JSON file in
 the data directory) so a page reload never triggers another network round trip.
 """
 
@@ -36,13 +36,17 @@ logger = logging.getLogger(__name__)
 
 CACHE_FILENAME = "update_check.json"
 # Bumped on layout change; mismatched files are discarded, not migrated.
-CACHE_SCHEMA = 4
+CACHE_SCHEMA = 5
 CACHE_TTL_SECONDS = 24 * 60 * 60  # after a successful check
-RETRY_TTL_SECONDS = 60 * 60       # after a failed one
+# Negative cache: only the components that failed are asked again, so a short
+# TTL costs a handful of requests (GitHub allows 60/h per IP unauthenticated).
+RETRY_TTL_SECONDS = 15 * 60
 # Hard ceiling on the whole concurrent fetch-all round. httpx's per-phase
 # timeout does not bound a redirect chain, so this is the real deadline every
 # /api/updates request can wait on via _lock.
 _TOTAL_FETCH_TIMEOUT = 20.0
+# Per-component deadline, so one slow upstream cannot cancel the others' answers.
+_COMPONENT_TIMEOUT = 15.0
 
 _REQUEST_TIMEOUT = 6.0
 _HEADERS = {
@@ -51,14 +55,23 @@ _HEADERS = {
     "User-Agent": "fetchly-update-check",
 }
 
-# Rolling release the ffmpeg build stage pulls from (see docker/Dockerfile).
+# BtbN publishes a rolling "latest" release (assets named "...-n9.0-latest-...",
+# no build id) and immutable dated "autobuild-*" releases whose assets carry the
+# real build, e.g. "ffmpeg-n9.0.2-36-g6882969ce9-linux64-gpl-9.0.tar.xz". The
+# release workflow pins the newest autobuild, so that is what we compare against.
 FFMPEG_BUILDS_REPO = "BtbN/FFmpeg-Builds"
-FFMPEG_CHECKSUMS_URL = f"https://github.com/{FFMPEG_BUILDS_REPO}/releases/download/latest/checksums.sha256"
-# Stable BtbN asset, e.g. "ffmpeg-n9.0-latest-linux64-gpl-9.0.tar.xz". The
-# backreference keeps out the "master" nightlies of ffmpeg's dev branch.
+FFMPEG_TAGS_URL = f"https://api.github.com/repos/{FFMPEG_BUILDS_REPO}/tags?per_page=10"
+FFMPEG_DOWNLOAD_BASE = f"https://github.com/{FFMPEG_BUILDS_REPO}/releases/download"
+# Stable GPL asset: group 1 the build ("n9.0.2-36-g6882969ce9"), group 2 the
+# arch, group 3 the series. The trailing series keeps out the "N-<rev>" master
+# builds, which carry none.
 _FFMPEG_ASSET_RE = re.compile(
-    r"^ffmpeg-n(\d+(?:\.\d+)*)-latest-linux(?:64|arm64)-(?:gpl|lgpl)-\1\.tar\.xz$"
+    r"^ffmpeg-(n\d+(?:\.\d+)*(?:-\d+-g[0-9a-f]+)?)-(linux64|linuxarm64)-gpl-(\d+(?:\.\d+)*)\.tar\.xz$"
 )
+# Installed/upstream ffmpeg id: "n9.0.2-12-gc867e13549-20260927" -> release
+# "9.0.2", commits since the tag "12". The trailing date is ignored.
+_FFMPEG_BUILD_RE = re.compile(r"^[nN]?(\d+(?:\.\d+)*)(?:-(\d+)-g[0-9a-f]+)?")
+_MAX_FFMPEG_AUTOBUILDS = 3
 # Leading numeric run of a version string ("n9.0.1-4-gabc" -> "9.0.1").
 _VERSION_RE = re.compile(r"\d+(?:\.\d+)*")
 
@@ -127,16 +140,18 @@ def _is_newer(latest: str | None, current: str | None) -> bool:
 
 
 # Cap pages per component so a release-happy repo cannot blow the fetch
-# budget: 3 x 50 releases / 3 x 100 tags is more than any configured repo has.
-_MAX_RELEASE_PAGES = 3
-# Bound an upstream response's memory (lists are normally a few KiB).
-_MAX_API_RESPONSE_BYTES = 1024 * 1024
+# budget: 2 x 20 releases / 3 x 100 tags is more than any configured repo needs.
+_MAX_RELEASE_PAGES = 2
+_MAX_TAG_PAGES = 3
+# Releases carry their full changelog text: 20 of yt-dlp's are ~1 MB and 20 of
+# deno's ~1.6 MB, so 50 per page (as used before) exceeded the old 1 MiB cap and
+# made those two checks fail every time. Bound memory, but with headroom.
+_RELEASES_PER_PAGE = 20
+_MAX_API_RESPONSE_BYTES = 4 * 1024 * 1024
 _MAX_FFMPEG_CHECKSUM_BYTES = 1024 * 1024
 
 
-async def _read_response_bytes(
-    client: httpx.AsyncClient, url: str, *, max_bytes: int
-) -> tuple[httpx.Response, bytes]:
+async def _read_response_bytes(client: httpx.AsyncClient, url: str, *, max_bytes: int) -> tuple[httpx.Response, bytes]:
     """Stream one response, rejecting it before it can exceed *max_bytes*."""
     async with client.stream("GET", url) as response:
         response.raise_for_status()
@@ -166,14 +181,12 @@ async def _fetch_latest_release(client: httpx.AsyncClient, repo: str) -> str | N
     """
     best_tag: str | None = None
     best_parts: tuple[int, ...] = ()
-    url: str | None = f"https://api.github.com/repos/{repo}/releases?per_page=50"
+    url: str | None = f"https://api.github.com/repos/{repo}/releases?per_page={_RELEASES_PER_PAGE}"
 
     for _ in range(_MAX_RELEASE_PAGES):
         if url is None:
             break
-        response, body = await _read_response_bytes(
-            client, url, max_bytes=_MAX_API_RESPONSE_BYTES
-        )
+        response, body = await _read_response_bytes(client, url, max_bytes=_MAX_API_RESPONSE_BYTES)
         payload = json.loads(body)
         if not isinstance(payload, list):
             break
@@ -205,12 +218,10 @@ async def _fetch_latest_tag(client: httpx.AsyncClient, repo: str) -> str | None:
     best_parts: tuple[int, ...] = ()
     url: str | None = f"https://api.github.com/repos/{repo}/tags?per_page=100"
 
-    for _ in range(_MAX_RELEASE_PAGES):
+    for _ in range(_MAX_TAG_PAGES):
         if url is None:
             break
-        response, body = await _read_response_bytes(
-            client, url, max_bytes=_MAX_API_RESPONSE_BYTES
-        )
+        response, body = await _read_response_bytes(client, url, max_bytes=_MAX_API_RESPONSE_BYTES)
         payload = json.loads(body)
         if not isinstance(payload, list):
             break
@@ -230,50 +241,100 @@ async def _fetch_latest_tag(client: httpx.AsyncClient, repo: str) -> str | None:
     return best_tag
 
 
-async def _fetch_latest_ffmpeg_build(client: httpx.AsyncClient) -> str | None:
-    """Return the newest stable ffmpeg series offered by the BtbN builds.
+def _ffmpeg_build_key(value: str | None) -> tuple[tuple[int, ...], int] | None:
+    """Comparable ``(release numbers, commits since tag)`` of an ffmpeg build id."""
+    match = _FFMPEG_BUILD_RE.match((value or "").strip())
+    if not match:
+        return None
+    release = tuple(int(part) for part in match.group(1).split("."))
+    return release, int(match.group(2) or 0)
 
-    Matches what docker/Dockerfile installs when FFMPEG_SERIES is unset. If a
-    deployment pins an older series, this still reports the newest - there is
-    no build-time record of the pin to read.
-    """
-    _, body = await _read_response_bytes(
-        client, FFMPEG_CHECKSUMS_URL, max_bytes=_MAX_FFMPEG_CHECKSUM_BYTES
-    )
 
-    best_series: str | None = None
-    best_parts: tuple[int, ...] = ()
-    for line in body.decode("utf-8").splitlines():
+def _ffmpeg_series(value: str | None) -> str | None:
+    """Series ("9.0") of an ffmpeg build id such as "n9.0.2-12-gabc"."""
+    key = _ffmpeg_build_key(value)
+    if not key or len(key[0]) < 2:
+        return None
+    return ".".join(str(part) for part in key[0][:2])
+
+
+def _parse_ffmpeg_builds(checksums: str) -> dict[str, str]:
+    """Map series -> build id for series published for both architectures."""
+    found: dict[str, dict[str, str]] = {}
+    for line in checksums.splitlines():
         parts = line.split()
         if len(parts) != 2:
             continue
         match = _FFMPEG_ASSET_RE.match(parts[1])
-        if not match:
-            continue
-        series = match.group(1)
-        version_parts = _parse_version(series)
-        if version_parts and version_parts > best_parts:
-            best_series, best_parts = series, version_parts
+        if match:
+            found.setdefault(match.group(3), {})[match.group(2)] = match.group(1)
+    return {
+        series: archs["linux64"]
+        for series, archs in found.items()
+        if len(archs) == 2 and archs["linux64"] == archs["linuxarm64"]
+    }
 
-    return f"n{best_series}" if best_series else None
+
+async def _fetch_latest_ffmpeg_build(
+    client: httpx.AsyncClient,
+) -> tuple[str | None, dict[str, str]]:
+    """Return ``(newest build, {series: build})`` of the newest usable autobuild.
+
+    Mirrors the release workflow: newest dated autobuild whose checksums list a
+    stable series for both architectures. The Dockerfile's series is not
+    recorded in the image, so the caller matches the installed series.
+    """
+    _, body = await _read_response_bytes(client, FFMPEG_TAGS_URL, max_bytes=_MAX_API_RESPONSE_BYTES)
+    payload = json.loads(body)
+    if not isinstance(payload, list):
+        return None, {}
+    tags = sorted(
+        {
+            name
+            for entry in payload
+            if isinstance(entry, dict) and (name := str(entry.get("name") or "")).startswith("autobuild-")
+        },
+        reverse=True,
+    )
+
+    for tag in tags[:_MAX_FFMPEG_AUTOBUILDS]:
+        _, checksums = await _read_response_bytes(
+            client,
+            f"{FFMPEG_DOWNLOAD_BASE}/{quote(tag, safe='')}/checksums.sha256",
+            max_bytes=_MAX_FFMPEG_CHECKSUM_BYTES,
+        )
+        builds = _parse_ffmpeg_builds(checksums.decode("utf-8"))
+        if builds:
+            newest = max(builds, key=lambda series: _parse_version(series) or ())
+            return builds[newest], builds
+    return None, {}
 
 
 async def _fetch_component(
     client: httpx.AsyncClient, key: str, component: _Component
-) -> tuple[str, str | None, bool]:
+) -> tuple[str, str | None, bool, dict[str, str]]:
     """Fetch the newest upstream version of one component.
 
-    Returns ``(key, tag, retry)``. ``retry`` is True only for transient
+    Returns ``(key, tag, retry, series)`` (*series* only for ffmpeg). ``retry`` is True only for transient
     failures (blip, timeout, rate limit) - a 404 is False, so a still-private
     repo does not drag the whole batch onto the short RETRY_TTL cadence.
     """
+    series: dict[str, str] = {}
     try:
-        if component.source == "ffmpeg-builds":
-            tag = await _fetch_latest_ffmpeg_build(client)
-        elif component.source == "tags":
-            tag = await _fetch_latest_tag(client, component.repo)
-        else:
-            tag = await _fetch_latest_release(client, component.repo)
+        async with asyncio.timeout(_COMPONENT_TIMEOUT):
+            if component.source == "ffmpeg-builds":
+                tag, series = await _fetch_latest_ffmpeg_build(client)
+            elif component.source == "tags":
+                tag = await _fetch_latest_tag(client, component.repo)
+            else:
+                tag = await _fetch_latest_release(client, component.repo)
+    except TimeoutError:
+        logger.warning(
+            "Update check for %s exceeded its %.0fs deadline",
+            component.repo,
+            _COMPONENT_TIMEOUT,
+        )
+        return key, None, True, {}
     except httpx.HTTPStatusError as exc:
         # 404 = not reachable (private/renamed/removed); anything else (403, 5xx)
         # is transient and worth a sooner retry.
@@ -284,17 +345,22 @@ async def _fetch_component(
             component.repo,
             exc,
         )
-        return key, None, retry
+        return key, None, retry, {}
     except (httpx.HTTPError, ValueError) as exc:
         logger.warning("Update check for %s failed: %s", component.repo, exc)
-        return key, None, True
-    return key, tag, False
+        return key, None, True, {}
+    return key, tag, False, series
 
 
 async def _fetch_all(
-    previous: dict[str, dict[str, Any]], attempted_at: float
+    previous: dict[str, dict[str, Any]],
+    attempted_at: float,
+    keys: frozenset[str] | None = None,
 ) -> tuple[dict[str, dict[str, Any]], bool]:
-    """Query every upstream source once. Returns ``(versions, all_succeeded)``.
+    """Query the upstream sources of *keys* (default: all) once.
+
+    Returns ``(versions, all_succeeded)``. Components outside *keys* keep their
+    entry untouched and do not count towards ``all_succeeded``.
 
     A transient failure keeps the component's last known version (with its own
     older ``checked_at``) and marks the round incomplete. A 404 drops any
@@ -307,14 +373,27 @@ async def _fetch_all(
         headers=_HEADERS,
     ) as client:
         results = await asyncio.gather(
-            *(_fetch_component(client, key, component) for key, component in COMPONENTS.items())
+            *(
+                _fetch_component(client, key, component)
+                for key, component in COMPONENTS.items()
+                if keys is None or key in keys
+            ),
+            return_exceptions=True,
         )
 
     versions = {key: entry for key, entry in previous.items() if key in COMPONENTS}
     complete = True
-    for key, tag, retry in results:
+    for result in results:
+        if isinstance(result, BaseException):
+            # A bug in one lookup must not take the other answers with it.
+            logger.error("Update check crashed: %r", result, exc_info=result)
+            complete = False
+            continue
+        key, tag, retry, series = result
         if tag:
             versions[key] = {"version": tag, "checked_at": attempted_at}
+            if series:
+                versions[key]["series"] = series
         elif retry:
             complete = False
         else:
@@ -380,6 +459,9 @@ def _read_cache_file() -> dict[str, Any] | None:
                 "version": version,
                 "checked_at": _parse_timestamp(entry.get("checked_at")),
             }
+            raw_series = entry.get("series")
+            if isinstance(raw_series, dict):
+                versions[str(key)]["series"] = {str(k): str(v) for k, v in raw_series.items() if isinstance(v, str)}
 
     # Clamp a corrupted far-future expires_at to what a real write could produce,
     # or update checks would be disabled indefinitely.
@@ -418,6 +500,29 @@ def _write_cache_file(entry: dict[str, Any]) -> None:
         logger.debug("Unable to persist update cache to %s: %s", path, exc)
 
 
+def _keys_to_refresh(cache: dict[str, Any] | None, now: float) -> frozenset[str] | None:
+    """Components worth asking again; None means all of them.
+
+    After an incomplete round only the failed ones are retried (those without
+    an answer, or whose answer predates the failed attempt) - the successful
+    ones keep their 24h window instead of burning the unauthenticated GitHub
+    rate limit on every retry.
+    """
+    if not cache or cache.get("complete"):
+        return None
+    versions: dict[str, dict[str, Any]] = cache.get("versions", {})
+    last_attempt_at = float(cache.get("last_attempt_at", 0.0))
+    stale_before = now - CACHE_TTL_SECONDS
+    keys = frozenset(
+        key
+        for key in COMPONENTS
+        if key not in versions
+        or float(versions[key].get("checked_at", 0.0)) < last_attempt_at
+        or float(versions[key].get("checked_at", 0.0)) < stale_before
+    )
+    return keys or None
+
+
 async def _get_latest_versions(force: bool = False) -> dict[str, Any]:
     """Return cached upstream versions, refreshing them when the cache expired."""
     global _cache
@@ -438,13 +543,17 @@ async def _get_latest_versions(force: bool = False) -> dict[str, Any]:
 
         previous: dict[str, dict[str, Any]] = dict(_cache.get("versions", {})) if _cache else {}
         previous_checked_at = float(_cache.get("checked_at", 0.0)) if _cache else 0.0
+        keys = None if force else _keys_to_refresh(_cache, now)
 
         attempted_at = time.time()
         try:
             async with asyncio.timeout(_TOTAL_FETCH_TIMEOUT):
-                versions, complete = await _fetch_all(previous, attempted_at)
+                versions, complete = await _fetch_all(previous, attempted_at, keys)
         except TimeoutError:
-            logger.warning("Upstream update check exceeded its %.0fs deadline", _TOTAL_FETCH_TIMEOUT)
+            logger.warning(
+                "Upstream update check exceeded its %.0fs deadline",
+                _TOTAL_FETCH_TIMEOUT,
+            )
             versions, complete = previous, False
 
         entry = {
@@ -459,6 +568,23 @@ async def _get_latest_versions(force: bool = False) -> dict[str, Any]:
         _cache = entry
         await asyncio.to_thread(_write_cache_file, entry)
         return entry
+
+
+def _ffmpeg_is_newer(latest: str | None, current: str | None) -> bool:
+    """True when the *latest* ffmpeg build is strictly newer than *current*."""
+    latest_key = _ffmpeg_build_key(latest)
+    current_key = _ffmpeg_build_key(current)
+    if not latest_key or not current_key:
+        return False
+    length = max(len(latest_key[0]), len(current_key[0]))
+    pad = lambda numbers: numbers + (0,) * (length - len(numbers))  # noqa: E731
+    return (pad(latest_key[0]), latest_key[1]) > (pad(current_key[0]), current_key[1])
+
+
+def _status(update_available: bool, comparable: bool) -> Literal["available", "current", "unknown"]:
+    if update_available:
+        return "available"
+    return "current" if comparable else "unknown"
 
 
 def _release_url(component: _Component, tag: str | None) -> str:
@@ -494,14 +620,36 @@ async def get_update_status(current: dict[str, str]) -> dict[str, Any]:
         cached = latest_versions.get(key) or {}
         latest = str(cached.get("version") or "") or None
         checked_at = float(cached.get("checked_at", 0.0))
+        if component.source == "ffmpeg-builds":
+            # Compare within the installed series, so a pinned older series is
+            # not reported against the newest one.
+            series_builds = cached.get("series") or {}
+            latest = series_builds.get(_ffmpeg_series(installed) or "") or latest
+            update_available = _ffmpeg_is_newer(latest, installed)
+            installed_ok = _ffmpeg_build_key(installed) is not None
+            comparable = _ffmpeg_build_key(latest) is not None and installed_ok
+        else:
+            update_available = _is_newer(latest, installed)
+            installed_ok = _parse_version(installed) is not None
+            comparable = _parse_version(latest) is not None and installed_ok
+        if update_available or comparable:
+            reason = ""
+        elif not installed_ok:
+            reason = "installed_unknown"
+        else:
+            reason = "latest_unknown"
         components[key] = {
             "label": component.label,
             "current": installed,
             "latest": latest or "",
-            "update_available": _is_newer(latest, installed),
+            "update_available": update_available,
+            # "unknown" = no answer or nothing comparable; never a guess.
+            "status": _status(update_available, comparable),
             "url": _release_url(component, latest),
             "checked_at": checked_at,
             "stale": bool(latest) and checked_at < last_attempt_at,
+            # Why status is "unknown": "installed_unknown" or "latest_unknown".
+            "reason": reason,
         }
 
     return {

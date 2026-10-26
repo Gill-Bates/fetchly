@@ -25,13 +25,17 @@ class RemoveAllJobsTests(unittest.TestCase):
             db_path = data_dir / "jobs.db"
             job_ids = [str(uuid.uuid4()), str(uuid.uuid4())]
 
-            with patch.object(db, "DB_PATH", db_path), patch.object(api, "get_data_dir", return_value=data_dir):
+            jobs_root = data_dir / "jobs"
+            with (
+                patch.object(db, "DB_PATH", db_path),
+                patch.object(api, "jobs_dir", return_value=jobs_root),
+            ):
                 db.init_db()
                 for job_id in job_ids:
                     db.insert_job(job_id, "https://example.com/video", "video", "max", "queued")
-                    job_dir = data_dir / job_id
-                    job_dir.mkdir()
-                    (job_dir / "download.mp4").write_bytes(b"video")
+                    job_directory = jobs_root / job_id
+                    job_directory.mkdir(parents=True)
+                    (job_directory / "download.mp4").write_bytes(b"video")
 
                 with db.get_db() as connection:
                     connection.execute(
@@ -51,9 +55,12 @@ class RemoveAllJobsTests(unittest.TestCase):
                 self.assertEqual(result["files_deleted"], 2)
                 self.assertEqual(result["share_links_deleted"], 2)
                 self.assertEqual(db.list_job_ids(), [])
-                self.assertTrue(all(not (data_dir / job_id).exists() for job_id in job_ids))
+                self.assertTrue(all(not (jobs_root / job_id).exists() for job_id in job_ids))
                 with db.get_db() as connection:
-                    self.assertEqual(connection.execute("SELECT COUNT(*) FROM share_links").fetchone()[0], 0)
+                    self.assertEqual(
+                        connection.execute("SELECT COUNT(*) FROM share_links").fetchone()[0],
+                        0,
+                    )
 
     def test_cancellation_runs_off_the_event_loop(self) -> None:
         """worker.cancel_job() waits out a SIGTERM grace period per running job,
@@ -68,15 +75,16 @@ class RemoveAllJobsTests(unittest.TestCase):
             def record_cancel(job_id: str) -> None:
                 cancel_threads.append(threading.get_ident())
 
+            jobs_root = data_dir / "jobs"
             with (
                 patch.object(db, "DB_PATH", db_path),
-                patch.object(api, "get_data_dir", return_value=data_dir),
+                patch.object(api, "jobs_dir", return_value=jobs_root),
                 patch.object(api, "cancel_worker_job", record_cancel),
             ):
                 db.init_db()
                 for job_id in job_ids:
                     db.insert_job(job_id, "https://example.com/video", "video", "max", "queued")
-                    (data_dir / job_id).mkdir()
+                    (jobs_root / job_id).mkdir(parents=True)
 
                 request = Request({"type": "http", "method": "POST", "path": "/api/jobs/remove-all"})
 

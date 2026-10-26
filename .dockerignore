@@ -10,15 +10,10 @@ dist/
 
 # Caches
 .eslintcache
-.eslintcache/**
 .mypy_cache/
-.mypy_cache/**
 .pytest_cache/
-.pytest_cache/**
 .ruff_cache/
-.ruff_cache/**
 .stylelintcache
-.stylelintcache/**
 __pycache__/
 **/__pycache__/
 *.pyc
@@ -57,36 +52,25 @@ site/
 .claude/settings.local.json
 .codex
 .kiro/
-.kiro/**
 .omc/
-.omc/**
 .omx/
-.omx/**
+.agents/
+
 node_modules/
-node_modules/**
 package.json
 package-lock.json
 setup.conf
 tools/
-tools/ui-lint/node_modules/
-tools/ui-lint/node_modules/**
-tools/ui-lint/.cache/
-tools/ui-lint/.cache/**
-tools/ui-lint/output/
-tools/ui-lint/output/**
 
 # Tests: the image copies app/ and middleware/ only, so these are pure context.
 tests/
 
 # Python
-*.py[cod]
 **/*.py[cod]
 *.pyo
 *.pyd
 .venv/
-.venv/**
 venv/
-venv/**
 .eggs/
 
 # Runtime and development artifacts
@@ -98,4 +82,3 @@ venv/**
 cookies.txt
 coverage.xml
 htmlcov/
-htmlcov/**

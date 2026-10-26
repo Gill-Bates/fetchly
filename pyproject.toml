@@ -17,7 +17,7 @@ name = "fetchly"
 # at runtime, the release workflow validates the git tag against it, and
 # docker/Dockerfile copies this file into the image so the Settings page and
 # /api/updates report the same number the tag was cut from.
-version = "1.3.1"
+version = "1.3.2"
 description = "Self-hosted media downloader with BPM analysis and stem separation"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -66,6 +66,14 @@ classifiers = [
 # transitive one it would be resolved from PyPI, against the CUDA torch, while
 # the image installs the +cpu build. Naming it keeps the resolution and the
 # image on the same artifact.
+#
+# soundfile is beat-this's audio decoder, named here rather than left to chance.
+# Since TorchAudio 2.9 torchaudio.load() delegates decoding to TorchCodec, an
+# optional dependency a plain torchaudio install does not pull in; without it
+# beat-this's load_audio() falls through to soundfile. Our beat-this input is a
+# locally produced input.wav, so soundfile decodes it directly and avoids adding
+# TorchCodec and its torch/FFmpeg compatibility matrix. soundfile ships platform
+# wheels (Linux ARM64 included since 0.13.0) that can bundle libsndfile.
 dependencies = [
     "beat-this>=1.1.0",
     "essentia",  # pinned
@@ -81,6 +89,7 @@ dependencies = [
     "pydantic",
     "python-multipart",
     "slowapi",
+    "soundfile",
     "starlette",
     "torch",
     "torchaudio",
@@ -95,18 +104,18 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest==9.1.1",
-    "pytest-asyncio==1.4.0",
+    "pytest-asyncio==1.4.1",
     "pytest-cov==7.1.0",
-    "ruff==0.16.8",
+    "ruff==0.17.2",
 ]
 docs = [
-    "markdown==3.10.3",
+    "markdown==3.11.2",
     "mkdocs==1.6.1",
-    "mkdocs-git-revision-date-localized-plugin==1.6.0",
-    "mkdocs-material==9.7.7",
+    "mkdocs-git-revision-date-localized-plugin==1.6.2",
+    "mkdocs-material==9.8.0",
     "mkdocs-minify-plugin==0.8.0",
     "mkdocs-redirects==1.2.3",
-    "pymdown-extensions==12.0.1",
+    "pymdown-extensions==12.3",
 ]
 
 [project.urls]
@@ -170,11 +179,15 @@ select = [
     "ARG",   # unused arguments
     "ASYNC", # blocking calls inside async def - this app is ASGI end to end
     "B",     # bugbear
+    "BLE",   # blind except: broad catches must be deliberate and justified
     "C4",    # comprehensions
     "DTZ",   # naive datetimes; job timestamps are UTC-aware on purpose
     "E",     # pycodestyle errors
     "EM",    # exception messages assigned to a name first
+    "ERA",   # commented-out code rots; git keeps the history
     "F",     # pyflakes
+    "FLY",   # static str.join over an f-string
+    "FURB",  # refurb - modern stdlib idioms
     "G",     # logging-format: %s args, never f-strings (lazy formatting)
     "I",     # import sorting
     "ICN",   # import conventions
@@ -185,6 +198,7 @@ select = [
     "PIE",   # misc lints
     "PL",    # pylint subset
     "PTH",   # prefer pathlib
+    "Q",     # quote style, kept in step with the formatter
     "RET",   # return simplifications
     "RSE",   # raise cleanups
     "RUF",   # ruff-specific

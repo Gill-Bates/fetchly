@@ -24,12 +24,12 @@ or not yet downloadable never gets a link handed out for it.
 
 ## Token shape
 
-| Property | Value |
-|---|---|
-| Length | 22 URL-safe characters (128 bits of randomness) |
-| Scope | One job's output file |
-| Session required to redeem | No |
-| Rate limit | 20/minute on both create and redeem |
+| Property                   | Value                                           |
+| -------------------------- | ----------------------------------------------- |
+| Length                     | 22 URL-safe characters (128 bits of randomness) |
+| Scope                      | One job's output file                           |
+| Session required to redeem | No                                              |
+| Rate limit                 | 20/minute on both create and redeem             |
 
 Short enough to paste into a chat, long enough that guessing a token is infeasible.
 The rate limit on the redeem route is a second line of defence, not the primary one.

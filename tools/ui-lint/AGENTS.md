@@ -111,7 +111,7 @@ node --test tests/js/ui-lint-health.test.mjs
 
 ---
 
-**Last Updated:** 2026-09-21  
+**Last Updated:** 2026-10-26  
 **Browser Automation:** Playwright (chromium, webkit, firefox)  
 **Accessibility:** axe-core via `@axe-core/playwright`  
 **Screenshot Diffing:** pixelmatch + pngjs  

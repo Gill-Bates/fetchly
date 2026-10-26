@@ -27,7 +27,7 @@ from typing import Any, Final
 from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
 from pydantic import BaseModel, Field
 
-from ..common.rate_limit import limiter
+from ..auth.rate_limit import limiter
 from ..utils.cookie_import import (
     CookieImport,
     CookieImportError,
@@ -195,9 +195,7 @@ async def list_cookie_statuses() -> list[CookieStatus]:
 
 @router.get("", response_model=list[CookieStatus])
 @limiter.limit("30/minute")
-async def api_cookies_status(
-    request: Request, _user: str = Depends(require_user)
-) -> list[CookieStatus]:
+async def api_cookies_status(request: Request, _user: str = Depends(require_user)) -> list[CookieStatus]:
     _ = request
     return await list_cookie_statuses()
 
@@ -226,9 +224,7 @@ async def api_cookies_upload(
         raise HTTPException(status_code=400, detail="Cookie file must be UTF-8 text") from exc
 
     imported = await asyncio.to_thread(_convert, platform, text, require_login=False)
-    return await asyncio.to_thread(
-        _validate_and_store, platform, imported.netscape, require_login=False
-    )
+    return await asyncio.to_thread(_validate_and_store, platform, imported.netscape, require_login=False)
 
 
 @router.post("/{platform}/paste", response_model=CookieStatus)
@@ -247,9 +243,7 @@ async def api_cookies_paste(
         raise HTTPException(status_code=413, detail="Pasted cookies are too large")
 
     imported = await asyncio.to_thread(_convert, platform, payload.text, require_login=True)
-    status = await asyncio.to_thread(
-        _validate_and_store, platform, imported.netscape, require_login=True
-    )
+    status = await asyncio.to_thread(_validate_and_store, platform, imported.netscape, require_login=True)
     logger.info(
         "Imported %d cookies for %s from a pasted %s",
         imported.cookie_count,
@@ -261,9 +255,7 @@ async def api_cookies_paste(
 
 @router.delete("/{platform}")
 @limiter.limit("10/minute")
-async def api_cookies_delete(
-    request: Request, platform: str, _user: str = Depends(require_user)
-) -> dict[str, Any]:
+async def api_cookies_delete(request: Request, platform: str, _user: str = Depends(require_user)) -> dict[str, Any]:
     """Remove a platform's stored cookie file, if any."""
     _ = request
     _filename_for(platform)  # 404s early for an unknown platform

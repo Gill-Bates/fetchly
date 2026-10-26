@@ -4,7 +4,7 @@
 # Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 #
 
-"""Regression tests for the conditional job writebacks in app/worker.py.
+"""Regression tests for the conditional job writebacks in app/workers/worker.py.
 
 A cancel and a retry can both move a job row while a worker thread is still
 inside ``process_job()``. The worker's own terminal writes therefore have to be
@@ -12,12 +12,13 @@ conditional, or an observation made before the retry lands would overwrite the
 fresh attempt (ABA).
 """
 
+import queue
 import threading
 from unittest.mock import patch
 
-from app import worker
 from app.db import get_job, insert_job, update_job, utc_timestamp
-from app.governor import GovernorConfig
+from app.runtime.governor import GovernorConfig
+from app.workers import worker
 from tests._support import IsolatedDbTestCase, WebAppTestCase
 
 JOB = ("11111111-1111-1111-1111-111111111111", "https://example.com/v", "audio", "max")
@@ -60,6 +61,39 @@ class CancelledWritebackIsConditionalTests(IsolatedDbTestCase):
         assert job is not None
         self.assertEqual(job["status"], "queued")
         self.assertIsNone(job["finished_at"])
+
+
+class UnexpectedWorkerErrorTests(IsolatedDbTestCase):
+    def _run_crashing_attempt(self, replacement_status: str | None) -> str:
+        insert_job(*JOB, "queued")
+        jobs: queue.Queue[worker.Job] = queue.Queue()
+        jobs.put(JOB)
+
+        def crash(_job):
+            if replacement_status is not None:
+                update_job(JOB[0], status=replacement_status)
+            worker._shutdown_event.set()
+            raise RuntimeError("unexpected failure")
+
+        try:
+            with (
+                patch.object(worker, "get_job_queue", return_value=jobs),
+                patch.object(worker, "process_job", side_effect=crash),
+                patch.object(worker, "_status_callback", None),
+            ):
+                worker.worker()
+        finally:
+            worker._shutdown_event.clear()
+
+        job = get_job(JOB[0])
+        assert job is not None
+        return str(job["status"])
+
+    def test_fallback_marks_an_owned_job_as_error(self) -> None:
+        self.assertEqual(self._run_crashing_attempt(None), "error")
+
+    def test_fallback_does_not_overwrite_a_requeued_job(self) -> None:
+        self.assertEqual(self._run_crashing_attempt("queued"), "queued")
 
 
 class RetryRejectedWhileWorkerStillOwnsTheJobTests(IsolatedDbTestCase):
@@ -118,7 +152,10 @@ class RetryRejectedWhileWorkerStillOwnsTheJobTests(IsolatedDbTestCase):
             thread.start()
             try:
                 self.assertTrue(worker.submit_download(JOB))
-                self.assertTrue(download_started.wait(timeout=5), "worker never reached the blocking point")
+                self.assertTrue(
+                    download_started.wait(timeout=5),
+                    "worker never reached the blocking point",
+                )
 
                 # A cancel arriving now writes the row straight to "cancelled"
                 # and sets the marker, exactly like app/routes/api.py::cancel_job -

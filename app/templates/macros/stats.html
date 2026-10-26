@@ -18,10 +18,10 @@ label is set explicitly) - without it every tile would read its name twice. #}
             <span class="stat-short-label" aria-hidden="true">{{ short_label }}</span>
             <span class="stat-num-line">
                 {%- if value.value is defined and value.unit is defined -%}
-                <span data-stat-value>{{ value.value }}</span><span class="stat-unit" data-stat-unit>{{ value.unit
+                <span data-stat-value data-localize-number="{{ value.value }}" data-fraction-digits="{{ 0 if value.unit == 'B' else 1 }}">{{ value.value }}</span><span class="stat-unit" data-stat-unit>{{ value.unit
                     }}</span>
                 {%- else -%}
-                <span data-stat-value>{{ value }}</span><span class="stat-unit" data-stat-unit hidden></span>
+                <span data-stat-value data-localize-number="{{ value }}">{{ value }}</span><span class="stat-unit" data-stat-unit hidden></span>
                 {%- endif -%}
             </span>
         </div>

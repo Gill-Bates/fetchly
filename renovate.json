@@ -1,0 +1,160 @@
+{
+    "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+    "extends": [
+        "config:best-practices",
+        "helpers:pinGitHubActionDigestsToSemver"
+    ],
+    "timezone": "Europe/Berlin",
+    "schedule": [
+        "before 6am on Monday"
+    ],
+    "labels": [
+        "dependencies",
+        "renovate"
+    ],
+    "rebaseWhen": "behind-base-branch",
+    "commitMessagePrefix": "chore(deps):",
+    "prConcurrentLimit": 4,
+    "prHourlyLimit": 2,
+    "minimumReleaseAge": "3 days",
+    "enabledManagers": [
+        "github-actions",
+        "dockerfile",
+        "npm",
+        "pep621",
+        "custom.regex"
+    ],
+    "customManagers": [
+        {
+            "description": "actionlint-py pinned with pip in the CI workflow",
+            "customType": "regex",
+            "managerFilePatterns": [
+                "/^\\.github/workflows/ci\\.yml$/"
+            ],
+            "matchStrings": [
+                "pip install actionlint-py==(?<currentValue>\\S+)"
+            ],
+            "depNameTemplate": "actionlint-py",
+            "datasourceTemplate": "pypi"
+        }
+    ],
+    "packageRules": [
+        {
+            "description": "GitHub Actions: SHA pins with version comment, one reviewed PR, no automerge",
+            "matchManagers": [
+                "github-actions"
+            ],
+            "groupName": "github-actions",
+            "pinDigests": true,
+            "automerge": false,
+            "addLabels": [
+                "github-actions"
+            ]
+        },
+        {
+            "description": "actionlint-py: tooling only, grouped with the workflow actions",
+            "matchPackageNames": [
+                "actionlint-py"
+            ],
+            "groupName": "github-actions",
+            "automerge": false
+        },
+        {
+            "description": "Dockerfile base images: digest pins, reviewed, no automerge",
+            "matchManagers": [
+                "dockerfile"
+            ],
+            "groupName": "docker-base-images",
+            "pinDigests": true,
+            "automerge": false,
+            "addLabels": [
+                "docker"
+            ]
+        },
+        {
+            "description": "Python base image stays on the 3.13 line (requires-python, CI and Dockerfile move together by hand); digest and patch updates still flow",
+            "matchManagers": [
+                "dockerfile"
+            ],
+            "matchPackageNames": [
+                "python"
+            ],
+            "matchUpdateTypes": [
+                "major",
+                "minor"
+            ],
+            "enabled": false
+        },
+        {
+            "description": "npm dev tooling (root and tools/ui-lint): minor/patch grouped, no automerge",
+            "matchManagers": [
+                "npm"
+            ],
+            "matchUpdateTypes": [
+                "minor",
+                "patch"
+            ],
+            "groupName": "npm-dev-tooling",
+            "automerge": false,
+            "addLabels": [
+                "javascript"
+            ]
+        },
+        {
+            "description": "Python dev and docs tooling (pinned in pyproject.toml): minor/patch grouped, no automerge",
+            "matchManagers": [
+                "pep621"
+            ],
+            "matchDepTypes": [
+                "project.optional-dependencies"
+            ],
+            "matchUpdateTypes": [
+                "minor",
+                "patch"
+            ],
+            "groupName": "python-dev-tooling",
+            "automerge": false,
+            "addLabels": [
+                "python"
+            ]
+        },
+        {
+            "description": "Runtime dependencies are deliberately unpinned (resolved once per release); Renovate must not add or bump a version",
+            "matchManagers": [
+                "pep621"
+            ],
+            "matchDepTypes": [
+                "project.dependencies"
+            ],
+            "enabled": false
+        },
+        {
+            "description": "Never touched by generic rules: compiled or CPU-index builds (essentia, torch, torchaudio, beat-this) and yt-dlp, which updates on its own cadence",
+            "matchPackageNames": [
+                "essentia",
+                "torch",
+                "torchaudio",
+                "beat-this",
+                "yt-dlp",
+                "yt-dlp-ejs"
+            ],
+            "enabled": false
+        },
+        {
+            "description": "Major updates: separate PRs, explicit review",
+            "matchUpdateTypes": [
+                "major"
+            ],
+            "automerge": false,
+            "addLabels": [
+                "breaking-change"
+            ]
+        }
+    ],
+    "vulnerabilityAlerts": {
+        "enabled": true,
+        "labels": [
+            "security"
+        ]
+    }
+}

@@ -14,13 +14,11 @@ import re
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
-from pathlib import Path
 from time import monotonic
 from typing import Any, Final, TypedDict
 from urllib.parse import parse_qs, urlparse, urlsplit, urlunsplit
 
-from .cookie_status import cookie_file_is_usable
-from .cookies import find_cookie_file
+from .duration import format_clock
 
 logger = logging.getLogger(__name__)
 
@@ -62,9 +60,38 @@ _MAX_INFO_JSON_CHARS = 16 * 1024 * 1024
 # a queued 6th lookup simply waits for a free thread, unlike a semaphore whose
 # release is tied to the caller giving up rather than the thread finishing.
 _METADATA_MAX_WORKERS: Final = 4
-_METADATA_EXECUTOR: Final = ThreadPoolExecutor(
-    max_workers=_METADATA_MAX_WORKERS, thread_name_prefix="fetchly-ytmeta"
+_METADATA_EXECUTOR: Final = ThreadPoolExecutor(max_workers=_METADATA_MAX_WORKERS, thread_name_prefix="fetchly-ytmeta")
+
+
+# yt-dlp stderr fragments (lowercase) meaning the source wants a signed-in
+# session: private/login-gated content, or an anonymous request being blocked.
+_AUTH_REQUIRED_MARKERS: Final[tuple[str, ...]] = (
+    "login required",
+    "login_required",
+    "rate-limit reached",
+    "not available, rate-limit",
+    "cookies-from-browser or --cookies",
+    "private video",
+    "video is private",
+    "you must be logged in",
+    "log in to",
+    "sign in to",
+    "cannot parse data",
+    "content isn't available",
+    "content is not available",
+    "requires authentication",
+    "members-only",
 )
+
+
+def is_auth_required_error(text: str) -> bool:
+    """True when yt-dlp output says the media needs a login or cookies."""
+    lowered = text.lower()
+    return any(marker in lowered for marker in _AUTH_REQUIRED_MARKERS)
+
+
+class AuthRequiredError(RuntimeError):
+    """The source refused metadata because it is private or login-gated."""
 
 
 class InfoPayload(TypedDict):
@@ -82,6 +109,11 @@ def strip_zwsp(text: str) -> str:
     return _ZWSP_RE.sub("", text)
 
 
+def clean_pasted_url(url: str) -> str:
+    """Undo common copy/paste damage: outer whitespace, HTML-escaped ``&``, zero-width chars."""
+    return strip_zwsp(url.strip().replace("&amp;", "&"))
+
+
 def _is_video_id(value: str) -> bool:
     """Return True if *value* is exactly a YouTube video ID.
 
@@ -94,29 +126,6 @@ def _is_video_id(value: str) -> bool:
 
 def _is_youtube_host(host: str) -> bool:
     return host in _YOUTUBE_HOSTS
-
-
-def _resolve_cookie_path(url: str) -> Path | None:
-    """The platform's cookie file for a URL, if it exists and is usable.
-
-    An expired jar is skipped (yt-dlp would still send it, and a stale login is
-    answered worse than an anonymous probe) - same rule as app/worker.py.
-    """
-    # Lazy import: platform.py imports this module, so this would close the cycle.
-    from .platform import PLATFORM_COOKIE_FILENAMES, detect_platform
-
-    platform = detect_platform(url)
-    if not platform:
-        return None
-
-    filename = PLATFORM_COOKIE_FILENAMES.get(platform)
-    if not filename:
-        return None
-
-    cookie_path = find_cookie_file(filename)
-    if cookie_path is None or not cookie_file_is_usable(cookie_path, platform):
-        return None
-    return cookie_path
 
 
 def _url_for_log(url: str) -> str:
@@ -134,9 +143,10 @@ def _build_yt_dlp_cmd(url: str, *, player_client: str | None = None) -> list[str
     cmd = ["yt-dlp", "--no-playlist", "--skip-download", "--dump-single-json"]
     if player_client is not None:
         cmd.extend(["--extractor-args", f"youtube:player_client={player_client}"])
-    cookie_path = _resolve_cookie_path(url)
-    if cookie_path is not None:
-        cmd.extend(["--cookies", str(cookie_path)])
+    # Lazy import: cookie_args imports platform.py, which imports this module.
+    from .cookie_args import cookie_args_for_url
+
+    cmd.extend(cookie_args_for_url(url))
     cmd.append("--")
     cmd.append(url)
     return cmd
@@ -199,8 +209,7 @@ def validate_youtube_url(url: str) -> tuple[bool, str]:
     if not url or not isinstance(url, str):
         return False, "URL is required"
 
-    url = url.strip()
-    url = strip_zwsp(url.replace("&amp;", "&"))  # common copy/paste damage
+    url = clean_pasted_url(url)
 
     if not url:
         return False, "URL is required"
@@ -240,8 +249,7 @@ def validate_youtube_url(url: str) -> tuple[bool, str]:
                 return True, ""
 
     return False, (
-        "Invalid YouTube URL. Supported formats: "
-        "youtube.com/watch?v=..., youtu.be/..., youtube.com/shorts/..."
+        "Invalid YouTube URL. Supported formats: youtube.com/watch?v=..., youtu.be/..., youtube.com/shorts/..."
     )
 
 
@@ -249,7 +257,7 @@ def normalize_info_url(url: str) -> str:
     """Reduce a YouTube URL to ``watch?v=<id>``, dropping playlist context
     that makes yt-dlp slower and flakier. Validate the URL first.
     """
-    value = strip_zwsp(url.strip().replace("&amp;", "&"))
+    value = clean_pasted_url(url)
     try:
         parsed = urlparse(value)
     except ValueError:
@@ -295,6 +303,7 @@ def _load_video_info_uncached(url: str) -> InfoPayload | None:
     else:
         player_clients = (None,)
 
+    auth_error: str | None = None
     for player_client in player_clients:
         info: InfoPayload | None = None
 
@@ -330,9 +339,14 @@ def _load_video_info_uncached(url: str) -> InfoPayload | None:
                     proc.returncode,
                     stderr,
                 )
+                if stderr_data and is_auth_required_error(stderr_data):
+                    auth_error = stderr_data[:300]
                 continue
             if len(stdout_data) > _MAX_INFO_JSON_CHARS:
-                logger.warning("yt-dlp metadata for %s exceeds the parse cap; ignoring", _url_for_log(url))
+                logger.warning(
+                    "yt-dlp metadata for %s exceeds the parse cap; ignoring",
+                    _url_for_log(url),
+                )
                 continue
             if stdout_data:
                 parsed = json.loads(stdout_data)
@@ -343,7 +357,11 @@ def _load_video_info_uncached(url: str) -> InfoPayload | None:
             # to None rather than raise past a best-effort caller.
             logger.error("yt-dlp command not found in PATH")
         except json.JSONDecodeError as exc:
-            logger.debug("yt-dlp subprocess returned invalid JSON for %s: %s", _url_for_log(url), exc)
+            logger.debug(
+                "yt-dlp subprocess returned invalid JSON for %s: %s",
+                _url_for_log(url),
+                exc,
+            )
         except (OSError, UnicodeError) as exc:
             logger.warning("yt-dlp subprocess failed for %s: %s", _url_for_log(url), exc)
 
@@ -351,8 +369,14 @@ def _load_video_info_uncached(url: str) -> InfoPayload | None:
             return info
 
         if player_client is None and len(player_clients) > 1:
-            logger.debug("Retrying YouTube metadata extraction with %s client", _YOUTUBE_FALLBACK_PLAYER_CLIENT)
+            logger.debug(
+                "Retrying YouTube metadata extraction with %s client",
+                _YOUTUBE_FALLBACK_PLAYER_CLIENT,
+            )
 
+    if auth_error is not None:
+        # Raised only after every client failed; lru_cache does not store it.
+        raise AuthRequiredError(auth_error)
     return None
 
 
@@ -391,7 +415,10 @@ def extract_video_meta(url: str) -> dict[str, object]:
     Returns ``video_title``, ``video_meta_hover``, ``duration_seconds`` (the
     source's own runtime, shown until ffprobe measures the finished file).
     """
-    info = load_video_info(url)
+    try:
+        info = load_video_info(url)
+    except AuthRequiredError:
+        info = None  # best-effort caller; the worker reports the auth failure
     if info is None:
         return {"video_title": None, "video_meta_hover": None, "duration_seconds": None}
 
@@ -407,12 +434,7 @@ def extract_video_meta(url: str) -> dict[str, object]:
     if uploader:
         lines.append(f"Uploader: {uploader}")
     if isinstance(duration, int) and duration > 0:
-        hours, remainder = divmod(duration, 3600)
-        mins, secs = divmod(remainder, 60)
-        if hours:
-            lines.append(f"Duration: {hours}:{mins:02d}:{secs:02d}")
-        else:
-            lines.append(f"Duration: {mins}:{secs:02d}")
+        lines.append(f"Duration: {format_clock(duration)}")
     if isinstance(views, int) and views >= 0:
         lines.append(f"Views: {views:,}")
 
@@ -420,7 +442,7 @@ def extract_video_meta(url: str) -> dict[str, object]:
         "video_title": title or None,
         "video_meta_hover": " | ".join(lines) if lines else None,
         # load_video_info() normalizes this to a non-negative int or None.
-        "duration_seconds": duration if isinstance(duration, int) and duration > 0 else None,
+        "duration_seconds": (duration if isinstance(duration, int) and duration > 0 else None),
     }
 
 

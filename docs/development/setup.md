@@ -4,14 +4,14 @@ Setting up fetchly for local development, outside the container.
 
 ## Requirements
 
-| Requirement | Notes |
-|---|---|
-| Linux | Host-stats and process handling are Linux-first |
-| Python 3.13 | `python3.13-venv`, `python3.13-dev` |
-| `ffmpeg` | On `PATH` |
-| `git` | For version metadata |
+| Requirement             | Notes                                                          |
+| ----------------------- | -------------------------------------------------------------- |
+| Linux                   | Host-stats and process handling are Linux-first                |
+| Python 3.13             | `python3.13-venv`, `python3.13-dev`                            |
+| `ffmpeg`                | On `PATH`                                                      |
+| `git`                   | For version metadata                                           |
 | `yt-dlp` + `yt-dlp-ejs` | Installed via pip, deliberately not pinned in `pyproject.toml` |
-| `deno` | On `PATH` — solves YouTube JS challenges |
+| `deno`                  | On `PATH` — solves YouTube JS challenges                       |
 
 Essentia and `beat_this` (for [BPM analysis](../features/bpm.md)) are optional in a
 dev environment; the app runs without them and simply skips analysis.
@@ -113,15 +113,19 @@ Note the glob: `node --test tests/js/` (the directory form) needs Node 24, so th
 
 Three linters:
 
-| Target | Config | Run with |
-|---|---|---|
-| Python | `[tool.ruff]` in `pyproject.toml` | `ruff check .` |
-| Front-end JS | `tools/eslint.config.mjs` | `npm run lint:js` |
-| CSS | `tools/stylelint.config.mjs` | `npm run lint:css` |
+| Target       | Config                            | Run with           |
+| ------------ | --------------------------------- | ------------------ |
+| Python       | `[tool.ruff]` in `pyproject.toml` | `ruff check .` and `ruff format --check .` |
+| Front-end JS | `tools/eslint.config.mjs`         | `npm run lint:js`  |
+| CSS          | `tools/stylelint.config.mjs`      | `npm run lint:css` |
 
 `npm run lint` runs both front-end linters; `npm run lint:fix` applies what is safely
 fixable. All three run on every push and pull request via
 `.github/workflows/ci.yml`.
+
+Ruff's version is set in the `dev` extra in `pyproject.toml`. CI generates its
+requirements from that extra with `tools/pyproject-deps.py dev`, so the pipeline
+uses the same Ruff version without a separate version setting.
 
 A few rules encode project decisions rather than style:
 
@@ -152,14 +156,14 @@ It audits six device profiles, chosen around the breakpoint in
 `(max-width: 1366px) and (pointer: coarse)` so every touch iPad up to a 12.9" Pro
 in landscape gets the feed:
 
-| Profile | Device | Width | Engine | Layout |
-|---|---|---|---|---|
-| `desktop` | — | 1440px | Chromium | desktop table |
-| `mobile` | iPhone 13 | 390px | WebKit | feed |
-| `tablet` | iPad Mini | 768px | WebKit | feed |
-| `tablet-landscape` | iPad Mini landscape | 1024px | WebKit | feed (width breakpoint edge) |
-| `tablet-wide` | iPad Pro 11 landscape | 1194px | WebKit | feed via coarse-pointer rule |
-| `desktop-firefox` | — | 1440px | Firefox | desktop table |
+| Profile            | Device                | Width  | Engine   | Layout                       |
+| ------------------ | --------------------- | ------ | -------- | ---------------------------- |
+| `desktop`          | —                     | 1440px | Chromium | desktop table                |
+| `mobile`           | iPhone 13             | 390px  | WebKit   | feed                         |
+| `tablet`           | iPad Mini             | 768px  | WebKit   | feed                         |
+| `tablet-landscape` | iPad Mini landscape   | 1024px | WebKit   | feed (width breakpoint edge) |
+| `tablet-wide`      | iPad Pro 11 landscape | 1194px | WebKit   | feed via coarse-pointer rule |
+| `desktop-firefox`  | —                     | 1440px | Firefox  | desktop table                |
 
 Form factor and touch stay separate axes in the runner. `isMobile` (which DOM
 renders) keys off width *and* touch — a touch iPad past 1024px still gets the feed,
@@ -178,15 +182,15 @@ Beyond the layout checks, each view runs the axe-core WCAG 2.1 A/AA ruleset,
 records cumulative layout shift (Chromium only — WebKit and Firefox report
 `unsupported`, never a zero), and gets a weighted health score out of 100.
 
-| Variable | Default | Effect |
-|---|---|---|
-| `UI_LINT_BROWSERS` | all three | which engines run, comma-separated |
-| `UI_LINT_BROWSER_CONCURRENCY` | engine count | engines audited in parallel |
-| `UI_LINT_DEVICE_CONCURRENCY` | 2 | pages in flight per engine |
-| `UI_LINT_AXE` | 1 | set to 0 to skip the accessibility pass |
-| `UI_LINT_AXE_FAIL_ON` | `critical` | `serious` widens the gate, `none` makes axe report-only |
-| `UI_LINT_HEALTH_MIN` | 0 (off) | fail a view scoring below this |
-| `UI_LINT_HEALTH_GATE` | 0 (off) | fail on critical UX or blocking axe findings |
+| Variable                      | Default      | Effect                                                  |
+| ----------------------------- | ------------ | ------------------------------------------------------- |
+| `UI_LINT_BROWSERS`            | all three    | which engines run, comma-separated                      |
+| `UI_LINT_BROWSER_CONCURRENCY` | engine count | engines audited in parallel                             |
+| `UI_LINT_DEVICE_CONCURRENCY`  | 2            | pages in flight per engine                              |
+| `UI_LINT_AXE`                 | 1            | set to 0 to skip the accessibility pass                 |
+| `UI_LINT_AXE_FAIL_ON`         | `critical`   | `serious` widens the gate, `none` makes axe report-only |
+| `UI_LINT_HEALTH_MIN`          | 0 (off)      | fail a view scoring below this                          |
+| `UI_LINT_HEALTH_GATE`         | 0 (off)      | fail on critical UX or blocking axe findings            |
 
 Both health knobs are off by default: the score is new, and turning it into a
 gate before the baseline is agreed would only teach everyone to set it back to
@@ -237,13 +241,12 @@ images and refuses to push an index whose halves disagree.
 app/
 ├── main.py              # FastAPI app, lifespan, background tasks
 ├── routes/               # One module per route family
-├── worker.py             # Download/transcode worker threads
-├── analysis_worker.py    # BPM analysis process pool
-├── bpm*.py                # Tempo detection cascade
-├── governor.py           # Resource sizing and semaphores
+├── workers/              # Download/transcode worker, BPM analysis process pool
+├── audio/                # Tempo detection cascade, analysis cache, naming
+├── runtime/              # Resource sizing and semaphores, Gunicorn logger
+├── auth/                 # Sessions, admin credentials, rate limiting
+├── integrations/lalal/   # Lalal.ai client and product rules
 ├── db.py                 # SQLite schema, settings, queries
-├── session.py             # Session cookie signing and validation
-├── lalal*.py               # Lalal.ai client and product rules
 ├── utils/                # Focused single-purpose helpers
 ├── templates/             # Jinja2 templates
 └── static/                # CSS, JS, vendored assets

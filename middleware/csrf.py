@@ -19,7 +19,7 @@ from fastapi.responses import JSONResponse
 from starlette.datastructures import MutableHeaders
 from starlette.types import ASGIApp
 
-from app.session import resolve_cookie_secure
+from app.auth.session import resolve_cookie_secure
 
 SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
@@ -31,7 +31,7 @@ SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 _SAME_ORIGIN_FETCH_SITES = frozenset({"same-origin", "none"})
 
 # Characters that must not appear in a cookie name per RFC 6265.
-_BAD_COOKIE_NAME_CHARS = re.compile(r'[;=\s]')
+_BAD_COOKIE_NAME_CHARS = re.compile(r"[;=\s]")
 
 _DEFAULT_PORTS: Final[dict[str, int]] = {"http": 80, "https": 443}
 
@@ -272,10 +272,11 @@ class CSRFMiddleware:
             sent_token = request.headers.get("X-CSRF-Token")  # JS fetch path
             if not sent_token:  # traditional form submit
                 content_type = self._normalize_content_type(request.headers.get("content-type", ""))
-                if content_type in {"application/x-www-form-urlencoded", "multipart/form-data"}:
-                    sent_token, body_cache, disconnected = await self._extract_form_token(
-                        scope, receive, content_type
-                    )
+                if content_type in {
+                    "application/x-www-form-urlencoded",
+                    "multipart/form-data",
+                }:
+                    sent_token, body_cache, disconnected = await self._extract_form_token(scope, receive, content_type)
                     body_consumed = True
                     if disconnected:
                         # Body is truncated; neither validating the token nor

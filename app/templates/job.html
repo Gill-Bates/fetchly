@@ -82,8 +82,9 @@ sitting under a hidden one. Only the tag changes; .h2 keeps the type scale. #}
                         (job['bpm'] if job['bpm'] is not none else '–') | e }}</span></dd>
 
                 <dt>Confidence</dt>
-                <dd><span id="bpmConfidence">{% if job['bpm_confidence'] is not none %}{{
-                        '%.2f'|format(job['bpm_confidence']) }}{% else %}–{% endif %}</span></dd>
+                <dd>{% if job['bpm_confidence'] is not none %}<span id="bpmConfidence"
+                        data-localize-number="{{ job['bpm_confidence'] }}" data-fraction-digits="2">{{
+                        '%.2f'|format(job['bpm_confidence']) }}</span>{% else %}<span id="bpmConfidence">–</span>{% endif %}</dd>
 
                 <dt>Created</dt>
                 <dd>{{ job['created_at'] | localtime }}</dd>

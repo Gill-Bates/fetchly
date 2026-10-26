@@ -11,7 +11,7 @@ directory on your data volume.
 | YouTube | :material-check: | :material-check: | `youtube.com`, `youtu.be` |
 | TikTok | :material-check: | :material-check: | `tiktok.com` |
 | Instagram | :material-check: | :material-check: | `instagram.com` |
-| Facebook | :material-check: | :material-check: | `facebook.com`, `fb.watch` |
+| Facebook | :material-check: | :material-check: | `facebook.com`, `fb.watch` (videos, reels, stories, share links) |
 
 The platform is detected from the URL and decides which cookie jar (if any) is passed
 to yt-dlp. URLs that match no known platform are rejected at submit time.
@@ -24,6 +24,20 @@ to yt-dlp. URLs that match no known platform are rejected at submit time.
 | `video` | `medium` | Capped at 720p |
 | `video` | `small` | Capped at 480p |
 | `audio` | any | Audio extracted, encoded to MP3 |
+
+### MP3 tags
+
+The MP3 you download is encoded from the stored source and carries ID3v2.3 tags:
+
+| Tag | Content |
+|---|---|
+| Cover (`APIC`, front cover) | The source's thumbnail (YouTube, TikTok, Instagram, Facebook), as JPEG with the original aspect ratio, longest edge capped at 1280 px |
+| Comment (`COMM`) | `Downloaded with Fetchly - https://github.com/Gill-Bates/fetchly` |
+| BPM (`TBPM`) | The detected tempo, see [BPM Analysis](bpm.md#id3-tag-tbpm) |
+
+A source without a usable thumbnail still yields an MP3, just without a cover, and a
+failure while tagging is logged and never fails the download. Trim clips are WAV files
+and carry no tags; Lalal.ai stems are encoded without Fetchly tags.
 
 ### Video output format
 
@@ -123,7 +137,7 @@ host. The setting hint names the value it resolves to right now. See
 
 ### Video watermark
 
-**Settings → Processing → Watermark → Show Watermark** (on by default)
+**Settings → Processing → Watermark → Show Watermark** (off by default)
 
 Burns the fetchly logo into the bottom-right corner of every downloaded **video**, with
 the [public hostname](../configuration/settings.md#general) on a second line once one is
@@ -244,7 +258,7 @@ never blocked.
 Each job gets its own directory under the data volume:
 
 ```text
-/app/data/<job-uuid>/
+/app/data/jobs/<job-uuid>/
 ├── <title>.source.<ext>      # what yt-dlp produced
 ├── <title>.mp3               # transcoded audio, when applicable
 ├── thumbnail.jpg             # normalized thumbnail

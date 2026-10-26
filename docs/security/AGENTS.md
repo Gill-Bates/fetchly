@@ -8,13 +8,13 @@ Pages here guide administrators through securing fetchly deployments against com
 
 ## Key Files
 
-| File | Purpose |
-| --- | --- |
-| `overview.md` | Security overview: threat model, built-in protections, assumptions (single-user app by default), security by design |
-| `authentication.md` | Authentication security: password requirements, brute-force protection, session management, timeout settings, CAPTCHA configuration |
-| `best-practices.md` | Deployment best practices: HTTPS/TLS enforcement, firewall rules, network isolation, reverse proxy hardening, monitoring |
-| `rate-limiting.md` | Rate limiting: per-endpoint slowapi limits, trusted proxies via `FORWARDED_ALLOW_IPS`, client-IP resolution behind a reverse proxy, DDoS mitigation at the proxy layer. Counters are in-process memory only — there is no Redis or other shared backend. |
-| `anti-bot.md` | Anti-bot protection: CAPTCHA setup (honeypot + token), bot scoring, false-positive handling |
+| File                | Purpose                                                                                                                                                                                                                                                  |
+| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `overview.md`       | Security overview: threat model, built-in protections, assumptions (single-user app by default), security by design                                                                                                                                      |
+| `authentication.md` | Authentication security: password requirements, brute-force protection, session management, timeout settings, CAPTCHA configuration                                                                                                                      |
+| `best-practices.md` | Deployment best practices: HTTPS/TLS enforcement, firewall rules, network isolation, reverse proxy hardening, monitoring                                                                                                                                 |
+| `rate-limiting.md`  | Rate limiting: per-endpoint slowapi limits, trusted proxies via `FORWARDED_ALLOW_IPS`, client-IP resolution behind a reverse proxy, DDoS mitigation at the proxy layer. Counters are in-process memory only — there is no Redis or other shared backend. |
+| `anti-bot.md`       | Anti-bot protection: CAPTCHA setup (honeypot + token), bot scoring, false-positive handling                                                                                                                                                              |
 
 ## For AI Agents
 
@@ -137,7 +137,7 @@ steps that ask the user to "solve" anything.
 ## Password Requirements
 
 The enforced policy is length only, from `PASSWORD_MIN_LENGTH` and
-`PASSWORD_MAX_LENGTH` in `app/utils/credentials.py`:
+`PASSWORD_MAX_LENGTH` in `app/auth/credentials.py`:
 
 - Minimum 8 characters
 - Maximum 1024 characters
@@ -184,7 +184,7 @@ the pattern if it has been customized.
 
 ---
 
-**Last Updated:** 2026-09-19  
+**Last Updated:** 2026-10-26  
 **Audience:** System administrators, security engineers  
 **Scope:** Security configuration, threat model, best practices  
 **Threat Model:** Single-user app by default; assumes trusted network for bare-metal deployments  

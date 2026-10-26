@@ -10,9 +10,11 @@ A regression that reintroduced a second version file, or fell back to "dev",
 would ship mislabelled images.
 """
 
+import os
 import tomllib
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from app.utils import version as version_module
 
@@ -38,7 +40,12 @@ class VersionSourceTests(unittest.TestCase):
         # constraints.txt is generated per release by the Docker workflow and
         # handed to both architecture builds; a committed copy would pin the
         # images to a stale resolution.
-        for stale in ("VERSION", "requirements.txt", "docs/requirements-docs.txt", "constraints.txt"):
+        for stale in (
+            "VERSION",
+            "requirements.txt",
+            "docs/requirements-docs.txt",
+            "constraints.txt",
+        ):
             with self.subTest(stale=stale):
                 self.assertFalse(
                     (PROJECT_ROOT / stale).exists(),
@@ -80,11 +87,7 @@ class VersionSourceTests(unittest.TestCase):
             uv,
             "an extra index is searched for every package; declare an explicit index instead",
         )
-        cpu_indexes = [
-            index
-            for index in uv["index"]
-            if index["url"] == "https://download.pytorch.org/whl/cpu"
-        ]
+        cpu_indexes = [index for index in uv["index"] if index["url"] == "https://download.pytorch.org/whl/cpu"]
         self.assertEqual(len(cpu_indexes), 1)
         self.assertTrue(cpu_indexes[0]["explicit"])
         for package in ("torch", "torchaudio"):
@@ -100,16 +103,14 @@ class VersionSourceTests(unittest.TestCase):
         # would be resolved from PyPI - against the CUDA torch - while the image
         # installs the +cpu build from the CPU index.
         names = {
-            req.split("==")[0].split(">=")[0].split("[")[0].strip()
-            for req in _pyproject()["project"]["dependencies"]
+            req.split("==")[0].split(">=")[0].split("[")[0].strip() for req in _pyproject()["project"]["dependencies"]
         }
         self.assertIn("torch", names)
         self.assertIn("torchaudio", names)
 
     def test_runtime_dependencies_cover_the_web_stack(self) -> None:
         names = {
-            req.split("==")[0].split(">=")[0].split("[")[0].strip()
-            for req in _pyproject()["project"]["dependencies"]
+            req.split("==")[0].split(">=")[0].split("[")[0].strip() for req in _pyproject()["project"]["dependencies"]
         }
         for required in ("fastapi", "starlette", "uvicorn", "gunicorn", "jinja2"):
             with self.subTest(dependency=required):
@@ -118,3 +119,29 @@ class VersionSourceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WavesurferVersionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        version_module.get_wavesurfer_version.cache_clear()
+        self.addCleanup(version_module.get_wavesurfer_version.cache_clear)
+
+    def test_environment_wins(self) -> None:
+        with mock.patch.dict(os.environ, {"WAVESURFER_VERSION": "9.9.9"}):
+            self.assertEqual(version_module.get_wavesurfer_version(), "9.9.9")
+
+    def test_falls_back_to_the_committed_pin_when_the_entrypoint_was_bypassed(
+        self,
+    ) -> None:
+        pin = (PROJECT_ROOT / "docker" / "wavesurfer.version").read_text(encoding="utf-8").strip()
+        env = {k: v for k, v in os.environ.items() if k != "WAVESURFER_VERSION"}
+        with mock.patch.dict(os.environ, env, clear=True):
+            self.assertEqual(version_module.get_wavesurfer_version(), pin)
+
+    def test_garbage_in_the_pin_file_is_ignored(self) -> None:
+        env = {k: v for k, v in os.environ.items() if k != "WAVESURFER_VERSION"}
+        with (
+            mock.patch.dict(os.environ, env, clear=True),
+            mock.patch.object(version_module, "_read_file", return_value="<html>nope</html>"),
+        ):
+            self.assertEqual(version_module.get_wavesurfer_version(), "unavailable")

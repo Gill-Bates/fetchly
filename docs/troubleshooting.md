@@ -214,9 +214,10 @@ invalidates every outstanding session immediately.
 ### `403` on a POST from a script
 
 `/login`, `/logout`, and every state-changing route under `/api/*` are CSRF-protected.
-Fetch `/login` first to get the `fetchly_csrf` cookie, then echo it back via the
-`X-CSRF-Token` header or a `csrf_token` form field. See
-[API Authentication](api/authentication.md).
+Fetch `/login` first to get the CSRF cookie, then echo it back via the
+`X-CSRF-Token` header or a `csrf_token` form field. The cookie is named
+`__Host-fetchly_csrf` when `FETCHLY_BEHIND_HTTPS=1` and `fetchly_csrf` otherwise. See
+[API Authentication](api/authentication.md#csrf).
 
 ## Performance
 

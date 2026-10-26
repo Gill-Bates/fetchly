@@ -74,9 +74,15 @@ cookie — not just `/api/submit`. Every `POST`/`PUT`/`PATCH`/`DELETE` under `/a
 Lalal.ai actions, share link creation, and more) requires the token. Safe methods
 (`GET`, `HEAD`, `OPTIONS`) are never checked, protected or not.
 
-1. `GET /login` sets the `fetchly_csrf` cookie and embeds the same value in the page
+1. `GET /login` sets the CSRF cookie and embeds the same value in the page
 2. Send it back in the `X-CSRF-Token` header, or as a `csrf_token` form field
 3. A mismatch returns `403`
+
+**Cookie name.** With `FETCHLY_BEHIND_HTTPS=1` the cookie is named `__Host-fetchly_csrf`,
+otherwise `fetchly_csrf`. The name is fixed at startup from that variable alone; an HTTPS
+request scheme does not change it. A script that reads the cookie from a cookie jar must
+accept both names, as the example below does. The session cookie always keeps the name
+`fetchly_session`.
 
 ## Using the session
 
@@ -117,7 +123,8 @@ trap 'rm -f "$JAR" "$PAGE"' EXIT
 
 # Fetch the login page: CSRF cookie + anti-bot token
 curl -sc "$JAR" "$BASE/login" -o "$PAGE"
-CSRF="$(awk '$6=="fetchly_csrf"{print $7}' "$JAR")"
+# Column 6 is the cookie name, column 7 the value; accept the __Host- prefix too
+CSRF="$(awk '$6 ~ /^(__Host-)?fetchly_csrf$/ {print $7}' "$JAR")"
 CAPTCHA="$(grep -oP 'name="captcha_token"[^>]*value="\K[^"]+' "$PAGE")"
 
 # The time trap rejects anything faster than a second

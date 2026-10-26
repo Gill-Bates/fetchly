@@ -5,13 +5,14 @@
 #
 
 import logging
+import time
 import unittest
 from pathlib import Path
 
 from gunicorn.config import Config
 
-from app.gunicorn_logging import FetchlyGunicornLogger
-from run import _build_log_config
+from app.runtime.gunicorn_logging import FetchlyGunicornLogger
+from run import RedactingFormatter, _build_log_config
 
 
 class GunicornLoggingTests(unittest.TestCase):
@@ -32,10 +33,18 @@ class GunicornLoggingTests(unittest.TestCase):
             self.assertIsNotNone(formatter)
             self.assertEqual(formatter._style._fmt, run_formatter["format"])
             self.assertEqual(formatter.datefmt, run_formatter["datefmt"])
+            # Logs carry UTC, whatever TZ the host or container sets.
+            self.assertIs(formatter.converter, time.gmtime)
+
+    def test_uvicorn_formatter_writes_iso_utc_timestamps(self) -> None:
+        config = _build_log_config(log_level="INFO", use_colors=False)["formatters"]["redacted"]
+        formatter = RedactingFormatter(config["format"], config["datefmt"])
+        record = logging.makeLogRecord({"msg": "hello", "created": 0.0})
+        self.assertTrue(formatter.format(record).startswith("1970-01-01T00:00:00Z - "))
 
     def test_entrypoint_uses_the_custom_logger(self) -> None:
         entrypoint = Path(__file__).resolve().parents[1] / "docker" / "entrypoint.sh"
-        self.assertIn("--logger-class app.gunicorn_logging.FetchlyGunicornLogger", entrypoint.read_text())
+        self.assertIn("--logger-class app.runtime.gunicorn_logging.FetchlyGunicornLogger", entrypoint.read_text())
 
     @staticmethod
     def _restore_loggers(original_state: list[tuple[logging.Logger, list[logging.Handler], int, bool]]) -> None:

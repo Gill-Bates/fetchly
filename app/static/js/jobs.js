@@ -10,7 +10,7 @@
  * parallel from one in-memory job list.
  */
 
-import { CONFIG, TERMINAL_STATUSES } from "./config.js";
+import { CONFIG, PROGRESS_STATUSES, TERMINAL_STATUSES } from "./config.js";
 import { reportError } from "./errors.js";
 import {
     createStatusElement,
@@ -18,7 +18,7 @@ import {
     createPrimaryActionButton,
     resolveJobAction,
 } from "./ui.js";
-import { detectPlatform, formatDuration, humanSize, platformPillLabel } from "./utils.js";
+import { detectPlatform, EMPTY_VALUE, formatDuration, humanSize, parseUtcTimestamp, platformPillLabel } from "./utils.js";
 
 // Mirrors the compact jobs-surface media query in style.css: narrow viewports,
 // plus any touch tablet up to an iPad Pro 12.9" landscape (1366px). Keep the
@@ -31,25 +31,6 @@ const FALLBACK_JOBS_TABLE_COLUMN_COUNT = 5;
 // search/status filter placeholder main.js mounts.
 const EMPTY_STATE_SELECTOR = "#emptyRow, #jobsEmptyState, #jobsFilterEmptyRow, #jobsFilterEmptyState";
 const HARD_MAX_ROWS = CONFIG.MAX_ROWS * 2;
-const EMPTY_VALUE = "–";
-
-function parseUtcTimestamp(value) {
-    const text = value == null ? "" : String(value).trim();
-    const sqliteUtc = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
-    return new Date(sqliteUtc.test(text) ? `${text.replace(" ", "T")}Z` : text);
-}
-
-const STATUS = Object.freeze({
-    DOWNLOADING: "downloading",
-    DONE: "done",
-    ANALYSIS: "analysis",
-    ANALYSIS_DONE: "analysis_done",
-    CANCELLED: "cancelled",
-    ERROR: "error",
-    PROCESSING: "processing",
-    QUEUED: "queued",
-    TRANSCODING: "transcoding",
-});
 
 const JOB_TYPE = Object.freeze({
     AUDIO: "audio",
@@ -336,14 +317,11 @@ export function normalizeJobUpdate(payload) {
     return update;
 }
 
-// Statuses whose events carry a percentage; a change to any other status
-// drops the stale percentage.
-const PROGRESS_BEARING_STATUSES = new Set([STATUS.DOWNLOADING, STATUS.TRANSCODING]);
 
 function mergeStoredJob(existingJob, update) {
     const mergedJob = { ...existingJob, ...update };
 
-    if (hasOwnField(update, "status") && !PROGRESS_BEARING_STATUSES.has(update.status) && !hasOwnField(update, "progress")) {
+    if (hasOwnField(update, "status") && !PROGRESS_STATUSES.has(update.status) && !hasOwnField(update, "progress")) {
         mergedJob.progress = null;
     }
 
@@ -372,12 +350,12 @@ export function updateJobStore(update) {
 
 function applyJobDataset(element, job) {
     element.dataset.jobId = getJobId(job);
-    element.dataset.status = job?.status || STATUS.QUEUED;
+    element.dataset.status = job?.status || "queued";
     element.dataset.bpm = String(job?.bpm ?? "");
 }
 
 
-function createPlatformPill(job) {
+export function createPlatformPill(job) {
     const platform = job?.platform || detectPlatform(job?.url || "");
     const label = platformPillLabel(platform);
     if (!label) return null;
@@ -642,10 +620,10 @@ function renderJobActions(job, { mobile = false } = {}) {
 function applyRowStatusClasses(element, status) {
     element.classList.toggle(
         "row-done",
-        status === STATUS.DONE || status === STATUS.ANALYSIS_DONE,
+        status === "done" || status === "analysis_done",
     );
-    element.classList.toggle("row-error", status === STATUS.ERROR);
-    element.classList.toggle("row-cancelled", status === STATUS.CANCELLED);
+    element.classList.toggle("row-error", status === "error");
+    element.classList.toggle("row-cancelled", status === "cancelled");
     element.classList.toggle("row-pending", status !== "" && !TERMINAL_STATUSES.has(String(status || "")));
     element.dataset.status = status;
 }
@@ -730,7 +708,7 @@ export function buildMobileEmptyState(message, { id = "jobsEmptyState", icon = "
 function buildDesktopJob(job) {
     const tr = document.createElement("tr");
     applyJobDataset(tr, job);
-    applyRowStatusClasses(tr, job?.status || STATUS.QUEUED);
+    applyRowStatusClasses(tr, job?.status || "queued");
     tr.append(
         renderDesktopTitle(job),
         ...renderDesktopMeta(job),
@@ -745,7 +723,7 @@ function buildMobileJob(job) {
     const article = document.createElement("article");
     article.className = "job-item jobs-mobile-item jobs-mobile-feed-item";
     applyJobDataset(article, job);
-    applyRowStatusClasses(article, job?.status || STATUS.QUEUED);
+    applyRowStatusClasses(article, job?.status || "queued");
 
     const body = document.createElement("div");
     body.className = "job-item__body";
@@ -807,7 +785,7 @@ export function patchJobCard(node, job) {
 
 function patchDesktopJobNode(row, job) {
     applyJobDataset(row, job);
-    applyRowStatusClasses(row, job?.status || STATUS.QUEUED);
+    applyRowStatusClasses(row, job?.status || "queued");
 
     const titleCell = row.querySelector(".job-title-cell");
     if (titleCell instanceof HTMLElement) {
@@ -857,7 +835,7 @@ function patchDesktopJobNode(row, job) {
 
 function patchMobileJobNode(article, job) {
     applyJobDataset(article, job);
-    applyRowStatusClasses(article, job?.status || STATUS.QUEUED);
+    applyRowStatusClasses(article, job?.status || "queued");
 
     const titleWrap = article.querySelector('[data-role="job-title"]');
     if (titleWrap instanceof HTMLElement) {
@@ -1122,8 +1100,8 @@ export function applyStoredJobTitleFilter(query, statusFilter = "all") {
         const searchableText = [getTitleText(job), job?.url || ""].join(" ").toLowerCase();
         const status = String(job?.status || "").toLowerCase();
         const matchesStatus = normalizedStatusFilter === "all"
-            || (normalizedStatusFilter === "done" && (status === STATUS.DONE || status === STATUS.ANALYSIS_DONE))
-            || (normalizedStatusFilter === "error" && status === STATUS.ERROR);
+            || (normalizedStatusFilter === "done" && (status === "done" || status === "analysis_done"))
+            || (normalizedStatusFilter === "error" && status === "error");
         const matchesQuery = normalizedQuery === "" || searchableText.includes(normalizedQuery);
         const shouldHide = !(matchesStatus && matchesQuery);
         for (const nodes of [state.desktopNodes, state.mobileNodes]) {

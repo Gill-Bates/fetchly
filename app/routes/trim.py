@@ -21,22 +21,32 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..bpm_naming import apply_bpm_tag
-from ..common.rate_limit import limiter
+from ..audio.naming import apply_bpm_tag
+from ..auth.rate_limit import limiter
 from ..db import DOWNLOADABLE_STATUSES, get_job
-from ..governor import governor
-from ..lalal_policy import LALAL_MAX_DURATION_MINUTES, LALAL_MAX_DURATION_SECONDS
+from ..integrations.lalal.policy import (
+    LALAL_MAX_DURATION_MINUTES,
+    LALAL_MAX_DURATION_SECONDS,
+)
+from ..runtime.governor import governor
 from ..utils.duration import format_seconds, round_seconds
-from ..utils.fs import AUDIO_SOURCE_EXTENSIONS, TRIM_ID_RE, path_is_file
-from ..worker import sanitize_filename
+from ..utils.fs import (
+    AUDIO_SOURCE_EXTENSIONS,
+    TRIM_ID_RE,
+    TRIM_WAV_GLOB,
+    job_dir,
+    path_is_file,
+    trim_wav_name,
+)
+from ..workers.worker import sanitize_filename
 from .auth import require_user_json
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/trim", tags=["trim"])
 
-_DATA_DIR: Path | None = None
 _resolve_job_path: Callable[[str | None], Path] | None = None
+
 
 class TrimRequest(BaseModel):
     model_config = ConfigDict(allow_inf_nan=False, extra="forbid")
@@ -54,18 +64,16 @@ class TrimResponse(BaseModel):
 
 
 def init_trim(
-    data_dir: Path,
     resolve_job_path_func: Callable[[str | None], Path],
 ) -> None:
-    global _DATA_DIR, _resolve_job_path
-    _DATA_DIR = data_dir
+    global _resolve_job_path
     _resolve_job_path = resolve_job_path_func
 
 
-def _require_init() -> tuple[Path, Callable[[str | None], Path]]:
-    if _DATA_DIR is None or _resolve_job_path is None:
+def _require_init() -> Callable[[str | None], Path]:
+    if _resolve_job_path is None:
         raise RuntimeError("Trim module not initialized: call init_trim() first")
-    return _DATA_DIR, _resolve_job_path
+    return _resolve_job_path
 
 
 async def _ensure_directory(path: Path) -> None:
@@ -89,14 +97,14 @@ def _validate_trim_id(trim_id: str) -> str:
 async def _delete_trim_files(output_dir: Path, trim_id: str | None) -> int:
     def _delete() -> int:
         if trim_id is not None:
-            trim_path = output_dir / f"trim_{trim_id}.wav"
+            trim_path = output_dir / trim_wav_name(trim_id)
             if trim_path.is_file():
                 trim_path.unlink(missing_ok=True)
                 return 1
             return 0
 
         deleted = 0
-        for trim_path in output_dir.glob("trim_*.wav"):
+        for trim_path in output_dir.glob(TRIM_WAV_GLOB):
             trim_path.unlink(missing_ok=True)
             deleted += 1
         return deleted
@@ -112,12 +120,7 @@ def _duration_validation_error(end: float, raw_duration: object) -> JSONResponse
 
     return JSONResponse(
         status_code=400,
-        content={
-            "error": (
-                f"End time ({format_seconds(end)}s) exceeds track duration "
-                f"({format_seconds(duration)}s)"
-            )
-        },
+        content={"error": (f"End time ({format_seconds(end)}s) exceeds track duration ({format_seconds(duration)}s)")},
     )
 
 
@@ -157,7 +160,7 @@ async def trim_audio(
 ) -> TrimResponse | JSONResponse:
     """Trim an audio file to the requested start and end times."""
     _ = request
-    data_dir, resolve_job_path = _require_init()
+    resolve_job_path = _require_init()
 
     start = body.start
     end = body.end
@@ -209,26 +212,31 @@ async def trim_audio(
     if source_path.suffix.lower() not in (AUDIO_SOURCE_EXTENSIONS | {".mp3"}):
         return JSONResponse(status_code=400, content={"error": "Not an audio file"})
 
-    output_dir = data_dir / job_id_str
+    output_dir = job_dir(job_id_str)
     await _ensure_directory(output_dir)
 
     trim_id = f"{start_ms}_{end_ms}"
     lock_file = output_dir / f".trim_{trim_id}.lock"
 
     # WAV (PCM re-encode, not stream copy) for broad Lalal compatibility.
-    out_file = output_dir / f"trim_{trim_id}.wav"
+    out_file = output_dir / trim_wav_name(trim_id)
     temp_file = output_dir / f"trim_{uuid.uuid4().hex}.wav.tmp"
 
     # -ss after -i for accurate trims.
     cmd = [
         "ffmpeg",
         "-y",
-        "-i", str(source_path),
-        "-ss", str(start),
-        "-t", str(duration),
+        "-i",
+        str(source_path),
+        "-ss",
+        str(start),
+        "-t",
+        str(duration),
         "-vn",  # No video
-        "-acodec", "pcm_s16le",  # PCM 16-bit for WAV
-        "-f", "wav",  # Explicit format (required for .tmp extension)
+        "-acodec",
+        "pcm_s16le",  # PCM 16-bit for WAV
+        "-f",
+        "wav",  # Explicit format (required for .tmp extension)
         str(temp_file),
     ]
 
@@ -317,17 +325,17 @@ async def delete_trim(
 ):
     """Delete one trim file (``trim_id``) or all of a job's trim files."""
     _ = request
-    data_dir, _ = _require_init()
+    _require_init()
 
     job_id_str = str(job_id)
-    output_dir = data_dir / job_id_str
+    output_dir = job_dir(job_id_str)
 
     deleted_count = 0
 
     if trim_id:
         deleted_count = await _delete_trim_files(output_dir, _validate_trim_id(trim_id))
         if deleted_count:
-            logger.info("Deleted trim file: %s", output_dir / f"trim_{trim_id}.wav")
+            logger.info("Deleted trim file: %s", output_dir / trim_wav_name(trim_id))
     else:
         deleted_count = await _delete_trim_files(output_dir, None)
         if deleted_count:
@@ -338,18 +346,26 @@ async def delete_trim(
 
 @router.get("/{job_id}/{trim_id}/download", response_model=None)
 @limiter.limit("30/minute")
-async def download_trim(request: Request, job_id: uuid.UUID, trim_id: str, _user: str = Depends(require_user_json)):
+async def download_trim(
+    request: Request,
+    job_id: uuid.UUID,
+    trim_id: str,
+    _user: str = Depends(require_user_json),
+):
     """Download a trimmed WAV file (``trim_id`` format: startMs_endMs)."""
     _ = request
-    data_dir, _ = _require_init()
+    _require_init()
 
     trim_id = _validate_trim_id(trim_id)
 
     job_id_str = str(job_id)
-    trim_path = data_dir / job_id_str / f"trim_{trim_id}.wav"
+    trim_path = job_dir(job_id_str) / trim_wav_name(trim_id)
 
     if not await path_is_file(trim_path):
-        return JSONResponse(status_code=404, content={"error": "Trimmed file not found. Please trim again."})
+        return JSONResponse(
+            status_code=404,
+            content={"error": "Trimmed file not found. Please trim again."},
+        )
 
     # Read columns off the row directly: `"video_title" in job` tests a
     # sqlite3.Row's *values*, not its keys, so it is always False.

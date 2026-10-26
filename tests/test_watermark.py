@@ -18,7 +18,7 @@ from app.utils.watermark import (
     build_watermark,
     video_filter_args,
 )
-from app.worker import _scaled_size, _watermark_x264_settings
+from app.workers.worker import _scaled_size, _watermark_x264_settings
 
 _HAS_FFMPEG = shutil.which("ffmpeg") is not None
 
@@ -188,8 +188,16 @@ class BuildWatermarkTests(unittest.TestCase):
     def _probe(self, path: Path) -> tuple[int, int]:
         out = subprocess.run(
             [
-                "ffprobe", "-v", "error", "-select_streams", "v:0",
-                "-show_entries", "stream=width,height", "-of", "csv=p=0", str(path),
+                "ffprobe",
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=width,height",
+                "-of",
+                "csv=p=0",
+                str(path),
             ],
             capture_output=True,
             text=True,
@@ -203,8 +211,16 @@ class BuildWatermarkTests(unittest.TestCase):
         width, height = self._probe(path)
         out = subprocess.run(
             [
-                "ffmpeg", "-v", "error", "-i", str(path),
-                "-f", "rawvideo", "-pix_fmt", "rgba", "-",
+                "ffmpeg",
+                "-v",
+                "error",
+                "-i",
+                str(path),
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "rgba",
+                "-",
             ],
             capture_output=True,
             check=True,
@@ -262,24 +278,18 @@ class BuildWatermarkTests(unittest.TestCase):
         self.assertNotEqual(one.path, two.path)
 
     def test_an_ipv6_hostname_renders(self):
-        result = build_watermark(
-            video_width=1280, video_height=720, hostname="2001:db8::1", cache_dir=self.cache
-        )
+        result = build_watermark(video_width=1280, video_height=720, hostname="2001:db8::1", cache_dir=self.cache)
         self.assertIsNotNone(result)
         assert result is not None
         self.assertTrue(result.path.is_file())
 
     def test_a_zero_sized_video_yields_no_watermark(self):
-        self.assertIsNone(
-            build_watermark(video_width=0, video_height=0, hostname="", cache_dir=self.cache)
-        )
+        self.assertIsNone(build_watermark(video_width=0, video_height=0, hostname="", cache_dir=self.cache))
 
     def test_a_failed_render_is_not_fatal(self):
         with patch.object(watermark, "_render_badge", side_effect=OSError("boom")):
             self.assertIsNone(
-                build_watermark(
-                    video_width=1280, video_height=720, hostname="x.example.com", cache_dir=self.cache
-                )
+                build_watermark(video_width=1280, video_height=720, hostname="x.example.com", cache_dir=self.cache)
             )
 
     def test_uses_the_bundled_roboto_flex_font(self):
@@ -289,9 +299,7 @@ class BuildWatermarkTests(unittest.TestCase):
 
     def test_filtergraph_blurs_the_shadow_and_references_the_bundled_font(self):
         geometry = badge_geometry(1280, 720, "fetchly.example.com")
-        graph = watermark._badge_filtergraph(
-            geometry, "fetchly.example.com", watermark._font_file()
-        )
+        graph = watermark._badge_filtergraph(geometry, "fetchly.example.com", watermark._font_file())
         self.assertIn("gblur=sigma=", graph)
         self.assertIn(str(watermark._FONT_TTF), graph)
 
@@ -345,9 +353,7 @@ class BuildWatermarkTests(unittest.TestCase):
 
         # The hostname row must reach full opacity somewhere: it is
         # information, not a brand mark, and stays legible over any footage.
-        text_row = [
-            alpha_at(x, geometry.text_y + geometry.font_size // 2) for x in range(width)
-        ]
+        text_row = [alpha_at(x, geometry.text_y + geometry.font_size // 2) for x in range(width)]
         self.assertEqual(max(text_row), 255)
 
     def test_without_a_font_the_hostname_is_dropped(self):
@@ -361,10 +367,10 @@ class BuildWatermarkTests(unittest.TestCase):
 
 
 class WatermarkSettingTests(unittest.TestCase):
-    def test_default_is_on(self):
+    def test_default_is_off(self):
         from app.db import _SETTINGS_DEFAULTS, _SETTINGS_TYPES
 
-        self.assertEqual(_SETTINGS_DEFAULTS["video_watermark"], "true")
+        self.assertEqual(_SETTINGS_DEFAULTS["video_watermark"], "false")
         self.assertTrue(_SETTINGS_TYPES["video_watermark"]("true"))
         self.assertFalse(_SETTINGS_TYPES["video_watermark"]("false"))
 

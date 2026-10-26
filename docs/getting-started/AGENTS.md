@@ -104,7 +104,7 @@ docker-compose up
 
 ---
 
-**Last Updated:** 2026-09-19  
+**Last Updated:** 2026-10-26  
 **Audience:** New users (non-technical to intermediate)  
 **Scope:** Installation and basic setup only  
 **Testing:** All examples verified on actual systems  

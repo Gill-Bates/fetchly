@@ -13,7 +13,7 @@ import unittest
 import uuid
 from unittest.mock import MagicMock, patch
 
-from app.governor import Governor, GovernorConfig
+from app.runtime.governor import Governor, GovernorConfig
 from tests._support import WebAppTestCase
 
 

@@ -44,14 +44,15 @@ running the test suite.
 
 ## Tests
 
-| Kind | Location | Run with |
-|---|---|---|
-| Python | `tests/test_*.py` | `pytest` |
-| Front-end contracts | `tests/js/*.test.mjs` | `npm test` — Node, no browser<br>needs `npm ci --prefix tools/ui-lint` once |
-| Python lint | — | `ruff check .` |
-| JS lint | `app/static/js/`, `tests/js/`, `tools/` | `npm run lint:js` |
-| CSS lint | `app/static/*.css` | `npm run lint:css` |
-| Browser audit | `tools/ui-lint` | `npm run ui-lint` — needs a running app |
+| Kind                | Location                                | Run with                                                                    |
+| ------------------- | --------------------------------------- | --------------------------------------------------------------------------- |
+| Python              | `tests/test_*.py`                       | `pytest`                                                                    |
+| Front-end contracts | `tests/js/*.test.mjs`                   | `npm test` — Node, no browser<br>needs `npm ci --prefix tools/ui-lint` once |
+| Python lint         | —                                       | `ruff check .`                                                              |
+| Python format       | —                                       | `ruff format --check .` — `ruff format .` applies it                        |
+| JS lint             | `app/static/js/`, `tests/js/`, `tools/` | `npm run lint:js`                                                           |
+| CSS lint            | `app/static/*.css`                      | `npm run lint:css`                                                          |
+| Browser audit       | `tools/ui-lint`                         | `npm run ui-lint` — needs a running app                                     |
 
 The linters, `pytest`, and `npm test` all run on every pull request
 (`.github/workflows/ci.yml`). Only the browser audit stays a local command — it
@@ -59,8 +60,8 @@ needs a live server. Run it before opening a pull request. See
 [Development Setup](setup.md) for the device profiles it covers, iPhone and iPad
 included.
 
-A change to shared policy modules — `bpm_normalization.py`, `bpm_naming.py`,
-`lalal_policy.py`, `public_url.py`, the settings parsers in `db.py` — should come with
+A change to shared policy modules — `audio/normalization.py`, `audio/naming.py`,
+`integrations/lalal/policy.py`, `public_url.py`, the settings parsers in `db.py` — should come with
 a test, since these are exactly the modules other parts of the app depend on without
 re-checking their invariants.
 
@@ -70,10 +71,10 @@ Changes here get closer scrutiny, since a subtle regression is easy to miss in r
 and expensive once shipped:
 
 - `middleware/csrf.py`
-- `app/session.py`
+- `app/auth/session.py`
 - `app/routes/auth.py`
 - `app/utils/hidden_captcha.py`
-- `app/common/rate_limit.py`
+- `app/auth/rate_limit.py`
 - `app/utils/public_url.py` (host validation)
 
 If your change touches how a request is authenticated, how a cookie is issued, or how a

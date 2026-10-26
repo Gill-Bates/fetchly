@@ -41,7 +41,7 @@ reconnects and re-reads the current state from `GET /api/jobs`.
 | `analysis_done` | :material-check: | Finished, with analysis |
 | `done` | :material-check: | Finished, no analysis |
 | `error` | :material-check: | Failed — the message is shown and a retry is offered |
-| `cancelled` | :material-check: | Cancelled by the user |
+| `cancelled` | :material-check: | Cancelled by the user; it can be retried like a failed job |
 
 `done` and `analysis_done` both count as *completed*. `analysis` additionally counts as
 *downloadable*, so an audio file can be fetched while its tempo analysis is still
@@ -59,7 +59,7 @@ on Safari, iOS, or most TVs.
 | Download | Any downloadable status (automatic when **Start Download after Processing** is on) |
 | Open job page | Any job |
 | Cancel | While in flight |
-| Retry | After `error` |
+| Retry | After `error` or `cancelled` |
 | Trim | Audio jobs, downloadable — [Audio Trimming](trimming.md) |
 | Stems | Audio jobs, Lalal.ai connected — [Stem Separation](stems.md) |
 | Share | Completed jobs — [Share Links](sharing.md) |

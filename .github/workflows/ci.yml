@@ -5,7 +5,7 @@
 # The PR gate. docker-build.yml only runs on release tags, so this is the only
 # workflow standing between a broken commit and main. Gates on linting, the
 # source-level UI contracts, pytest, npm test, the container entrypoint and
-# Dockerfile, and the single-manifest invariant.
+# Dockerfile, the workflow files themselves, and the single-manifest invariant.
 #
 
 name: CI
@@ -44,10 +44,12 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           # Matches ARG PYTHON_BASE=python:3.13-slim in docker/Dockerfile and
           # requires-python in pyproject.toml.
@@ -75,10 +77,10 @@ jobs:
       - name: Ruff lint
         run: ruff check --output-format=github .
 
-      # `ruff format` is configured in pyproject.toml and available locally, but
-      # is deliberately not a gate: adopting it would reformat 43 existing files
-      # in one commit and bury the next real diff. Run it per file when touching
-      # one, and turn this into a check once the tree has caught up.
+      # Check only: --diff prints what `ruff format .` would change, nothing is
+      # rewritten in CI. Fix locally with `ruff format .`.
+      - name: Ruff format
+        run: ruff format --check --diff .
 
       # No FETCHLY_SECRET_KEY here on purpose: each test module sets its own
       # via os.environ.setdefault(), and an ambient value would silently win.
@@ -92,10 +94,12 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
 
       - name: Set up Node
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
         with:
           node-version: '22'
           cache: npm
@@ -159,7 +163,9 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
 
       # The image is only ever built from a release tag, so without these two
       # steps a broken entrypoint or Dockerfile stays invisible until the
@@ -178,6 +184,33 @@ jobs:
       - name: Dockerfile check
         run: docker build --check -f docker/Dockerfile .
 
+  actionlint:
+    name: Workflow lint
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.13'
+
+      # actionlint-py wraps the actionlint binary and picks up
+      # .github/actionlint.yaml (the ubuntu-26.04 labels) on its own. Renovate
+      # keeps the pin current; the wheel version is the actionlint release plus
+      # a packaging suffix.
+      - name: actionlint
+        run: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          pip install actionlint-py==1.7.12.25
+          actionlint
+
   manifest:
     name: pyproject.toml is the only manifest
     runs-on: ubuntu-26.04
@@ -185,7 +218,9 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v5
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
 
       # VERSION, requirements.txt and docs/requirements-docs.txt were folded
       # into pyproject.toml. Reintroducing any of them would give the release

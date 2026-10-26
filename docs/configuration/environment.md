@@ -45,14 +45,14 @@ for compatibility with images that set them.
 
 | Variable | Default | Description |
 |---|---|---|
-| `DATA_DIR` | `data/` locally, `/app/data` in Docker | Database, downloads, cookie jars, thumbnail cache, model cache. Use an absolute path in Docker. |
+| `DATA_DIR` | `data/` locally, `/app/data` in Docker | Database, per-job media directories, cookie jars, caches, model cache. See [Storage](storage.md#layout). Use an absolute path in Docker. |
 | `TORCH_HOME` | `${DATA_DIR}/.cache/torch` | Where the `beat_this` checkpoint is cached. Keep it on the volume so the ~81 MB download survives a container recreate. The entrypoint creates and chowns this directory as root, so — like `DATA_DIR` — it must be an absolute path and the container refuses to start if it resolves to a system directory (`/`, `/etc`, `/usr`, …). Its parent is left untouched. |
 
 ## Runtime
 
 | Variable | Default | Description |
 |---|---|---|
-| `TZ` | `Etc/UTC` | Timezone for UI timestamps and logs |
+| `TZ` | `Etc/UTC` | Keep at UTC. Logs are always UTC; the UI shows times in the browser's time zone |
 | `LOG_LEVEL` | `info` | `debug`, `info`, `warning`, or `error` |
 | `WORKERS` | `1` | Gunicorn processes — **must remain `1`** |
 | `TIMEOUT` | `60` | Gunicorn worker timeout (container) |
@@ -126,7 +126,7 @@ disables it.
 
 | Variable | Description |
 |---|---|
-| `WAVESURFER_VERSION` | Shown in **Settings → System**. The image build resolves whichever WaveSurfer release unpkg served and records it in `/app/.wavesurfer_version`; the entrypoint reads that file and exports this variable, unless it is already set. There is no build argument for it, and the vendored bundle carries no version marker of its own, so outside the image the value reads `unavailable`. |
+| `WAVESURFER_VERSION` | Shown in **Settings → System**. The image build resolves whichever WaveSurfer release unpkg served and records it in `/app/.wavesurfer_version`; the entrypoint reads that file and exports this variable, unless it is already set. There is no build argument for it, and the vendored bundle carries no version marker of its own, if the variable is unset, the app falls back to that file (or `docker/wavesurfer.version` in a checkout) and only reads `unavailable` when neither exists. |
 
 ## Compose-file variables
 
@@ -150,7 +150,6 @@ FETCHLY_BEHIND_HTTPS=1
 FORWARDED_ALLOW_IPS=172.18.0.0/16
 
 # Runtime
-TZ=Europe/Berlin
 LOG_LEVEL=info
 
 # Runtime download, BPM-analysis, and Lalal limits are configured in the UI.

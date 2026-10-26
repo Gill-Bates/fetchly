@@ -1,0 +1,715 @@
+#!/usr/bin/env python3
+#
+# app/integrations/lalal/client.py
+# Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
+#
+
+"""Lalal.ai API client for audio stem separation.
+
+OpenAPI spec: https://www.lalal.ai/api/v1/openapi.json
+"""
+
+import asyncio
+import logging
+import math
+import re
+import sqlite3
+import time
+from collections.abc import AsyncIterator, Callable
+from enum import StrEnum
+from numbers import Real
+from pathlib import Path
+from typing import Any, Self, TypedDict
+
+import httpx
+
+from ...db import get_settings, setting_default
+
+logger = logging.getLogger(__name__)
+
+LALAL_API_BASE = "https://www.lalal.ai"
+LALAL_API_PREFIX = "/api/v1"
+_TRANSFER_CHUNK_SIZE = 65536
+_DEFAULT_LALAL_MAX_DOWNLOAD_GIB: int = setting_default("lalal_max_download_gib")
+_BYTES_PER_GIB = 1024 * 1024 * 1024
+# Consecutive transient poll failures tolerated by wait_for_completion()
+# before it gives up. At the default 3s poll_interval this is ~45s of
+# sustained network trouble before a split is abandoned.
+_MAX_CONSECUTIVE_POLL_FAILURES: int = 15
+
+type ProgressCallback = Callable[[int], None]
+type StageProgressCallback = Callable[[str, int], None]
+type DownloadProgressCallback = Callable[[int, int], None]
+
+
+class StemType(StrEnum):
+    """Stem separation target types.
+
+    Note: ``INSTRUMENTAL`` maps to the API value ``"drum"``. Lalal.ai uses
+    that value for full instrumental extraction, while ``DRUMS``
+    (``"drums"``) targets percussion only.
+    """
+
+    VOCALS = "vocals"
+    INSTRUMENTAL = "drum"
+    DRUMS = "drums"
+    BASS = "bass"
+    PIANO = "piano"
+    ELECTRIC_GUITAR = "electric_guitar"
+    ACOUSTIC_GUITAR = "acoustic_guitar"
+    SYNTHESIZER = "synthesizer"
+    VOICE = "voice"
+    MUSIC = "music"
+    STRINGS = "strings"
+    WIND = "wind"
+
+
+class SplitType(StrEnum):
+    """Split configuration types."""
+
+    AUTO = "auto"
+    # Andromeda (v6) - current generation, the default used by the Lalal.ai web
+    # UI. This is what the app sends unless a caller overrides it; separation
+    # quality noticeably regresses on the older networks below.
+    ANDROMEDA = "andromeda"
+    # Previous generations, kept so existing callers/settings keep working.
+    PHOENIX = "phoenix"
+    ORION = "orion"
+    PERSEUS = "perseus"
+    CASSIOPEIA = "cassiopeia"
+    LYNX = "lynx"
+    LYRA = "lyra"
+
+
+class ExtractionLevel(StrEnum):
+    """Extraction intensity for compatible split modes."""
+
+    DEEP_EXTRACTION = "deep_extraction"
+    CLEAR_CUT = "clear_cut"
+
+
+class SplitMode(StrEnum):
+    """Processing mode/endpoint family in Lalal.ai v1 API."""
+
+    STEM_SEPARATOR = "stem_separator"
+    VOICE_CLEAN = "voice_clean"
+    DEMUSER = "demuser"
+
+
+class LalalError(Exception):
+    """Base exception for Lalal.ai API errors."""
+
+
+class LalalQuotaError(LalalError):
+    """Quota/credits exceeded."""
+
+
+class LalalUploadError(LalalError):
+    """File upload failed."""
+
+
+class LalalProcessingError(LalalError):
+    """Processing failed."""
+
+
+class UploadResult(TypedDict):
+    id: str
+    name: str
+    duration: float
+    size: int
+
+
+class SplitResult(TypedDict):
+    stem_track: str  # URL to download stem (e.g. vocals)
+    back_track: str  # URL to download backing track (e.g. instrumental)
+    stem_track_size: int
+    back_track_size: int
+    duration: float
+
+
+_ALLOWED_DOWNLOAD_SCHEMES: frozenset[str] = frozenset({"https"})
+_ALLOWED_DOWNLOAD_HOSTS: frozenset[str] = frozenset(
+    {
+        "cdn.lalal.ai",
+        "storage.lalal.ai",
+        "s3.amazonaws.com",
+    }
+)
+_ALLOWED_DOWNLOAD_HOST_SUFFIXES: tuple[str, ...] = (".lalal.ai", ".amazonaws.com")
+
+
+def _safe_header_filename(name: str) -> str:
+    """Sanitize a filename for use inside HTTP header values."""
+    cleaned = re.sub(r"[^A-Za-z0-9._-]", "_", name).strip("._")
+    return cleaned or "upload"
+
+
+def _stringify_error_value(value: Any) -> str | None:
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    if isinstance(value, dict):
+        nested = value.get("detail")
+        if isinstance(nested, str) and nested.strip():
+            return nested.strip()
+        nested_code = value.get("code")
+        if isinstance(nested_code, str) and nested_code.strip():
+            return nested_code.strip()
+        return str(value) if value else None
+    if isinstance(value, list) and value:
+        return "; ".join(str(item) for item in value)
+    return None
+
+
+def _json_object(response: httpx.Response) -> dict[str, Any]:
+    """Return the response body as a dict, or ``{}`` when it is not a JSON object.
+
+    Proxies and CDNs answer errors with HTML, so ``response.json()`` raises on
+    exactly the responses callers want to report on. Folding an unparseable
+    body into the "no payload" case lets the status check pick the LalalError.
+    """
+    try:
+        payload = response.json()
+    except ValueError:
+        logger.debug(
+            "Non-JSON response from %s (HTTP %s, content-type %s)",
+            response.url,
+            response.status_code,
+            response.headers.get("content-type", "unknown"),
+        )
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _extract_api_error(data: dict[str, Any]) -> str:
+    """Extract a human-readable error message from Lalal.ai API variants."""
+    for key in ("message", "detail", "error", "errors", "code"):
+        message = _stringify_error_value(data.get(key))
+        if message:
+            return message
+    return "Unknown error"
+
+
+def parse_minutes_left(quota: object) -> float | None:
+    """Read the remaining processing minutes from a check_quota() payload.
+
+    The API answers ``{"minutes_left": 261.5}``. A missing or unusable value is
+    "unknown" (None), not zero.
+    """
+    if not isinstance(quota, dict):
+        return None
+
+    value = quota.get("minutes_left")
+    if isinstance(value, bool) or not isinstance(value, Real):
+        return None
+
+    minutes = float(value)
+    if not math.isfinite(minutes) or minutes < 0:
+        return None
+    return minutes
+
+
+def _extract_processing_error(error: Any, default: str = "Processing failed") -> str:
+    """Normalize processing error payloads into a readable string."""
+    message = _stringify_error_value(error)
+    return message or default
+
+
+def _max_result_download_bytes() -> int:
+    """Return the persisted maximum Lalal result size in bytes."""
+    try:
+        settings = get_settings()
+    except (sqlite3.Error, OSError):
+        logger.warning(
+            "Could not read Lalal download limit; falling back to default",
+            exc_info=True,
+        )
+        return _DEFAULT_LALAL_MAX_DOWNLOAD_GIB * _BYTES_PER_GIB
+
+    max_download_gib = max(1, int(settings.get("lalal_max_download_gib", _DEFAULT_LALAL_MAX_DOWNLOAD_GIB)))
+    return max_download_gib * _BYTES_PER_GIB
+
+
+async def _iter_file_chunks(file_path: Path, chunk_size: int = _TRANSFER_CHUNK_SIZE) -> AsyncIterator[bytes]:
+    """Yield file contents in bounded chunks without loading the full file into memory."""
+    file_handle = await asyncio.to_thread(file_path.open, "rb")
+    try:
+        while True:
+            chunk = await asyncio.to_thread(file_handle.read, chunk_size)
+            if not chunk:
+                break
+            yield chunk
+    finally:
+        # Shielded so a cancelled upload still releases the descriptor.
+        await asyncio.shield(asyncio.to_thread(file_handle.close))
+
+
+def _content_length(response: httpx.Response) -> int | None:
+    """Return a validated response length, when the server provided one."""
+    raw_length = response.headers.get("content-length")
+    if raw_length is None:
+        return None
+    try:
+        length = int(raw_length)
+    except ValueError as exc:
+        raise LalalError("Invalid Content-Length returned by provider") from exc
+    if length < 0:
+        raise LalalError("Invalid Content-Length returned by provider")
+    return length
+
+
+def _is_safe_download_url(url: str) -> bool:
+    """Return True only for HTTPS URLs on known Lalal.ai / CDN hosts."""
+    try:
+        parsed = httpx.URL(url)
+    except Exception:  # noqa: BLE001 - any URL parse failure means unsafe, so reject
+        return False
+    if parsed.scheme not in _ALLOWED_DOWNLOAD_SCHEMES:
+        return False
+    host = parsed.host
+    return host in _ALLOWED_DOWNLOAD_HOSTS or any(host.endswith(suffix) for suffix in _ALLOWED_DOWNLOAD_HOST_SUFFIXES)
+
+
+class LalalClient:
+    """Async client for Lalal.ai API."""
+
+    def __init__(self, api_key: str, timeout: float = 300.0) -> None:
+        if not api_key:
+            raise ValueError("API key is required")
+
+        self._timeout = timeout
+        self._client: httpx.AsyncClient | None = None
+        self._client_lock = asyncio.Lock()
+        self._api_key = api_key
+        self._headers = {
+            "X-License-Key": api_key,
+            "Authorization": f"license {api_key}",
+        }
+
+    def _make_client(self) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            base_url=LALAL_API_BASE,
+            headers=self._headers,
+            timeout=self._timeout,
+        )
+
+    async def _get_client(self) -> httpx.AsyncClient:
+        """Return the shared AsyncClient, creating it on first use."""
+        async with self._client_lock:
+            if self._client is None:
+                self._client = self._make_client()
+            return self._client
+
+    async def close(self) -> None:
+        async with self._client_lock:
+            if self._client is not None:
+                await self._client.aclose()
+                self._client = None
+
+    async def __aenter__(self) -> Self:
+        await self._get_client()
+        return self
+
+    async def __aexit__(self, *args: object) -> None:
+        await self.close()
+
+    async def wait_for_completion(
+        self,
+        task_id: str,
+        *,
+        poll_interval: float = 3.0,
+        timeout: float = 600.0,
+        progress_callback: ProgressCallback | None = None,
+    ) -> SplitResult:
+        """Poll the Lalal.ai API until processing completes or times out.
+
+        A transport-level failure on a single poll (timeout or connection
+        error - the request never reached Lalal.ai, or its response never
+        came back) does not abort an otherwise-successful split: it is logged
+        and retried on the next interval, up to
+        ``_MAX_CONSECUTIVE_POLL_FAILURES`` in a row. Any ``LalalError`` -
+        including a 401, quota error, or a real processing error, all of
+        which ``check_progress()`` already raises as one flat exception type
+        regardless of HTTP status - still raises immediately, since it is not
+        safe to assume that class of failure is transient.
+        """
+        start_time = time.monotonic()
+        consecutive_failures = 0
+
+        while True:
+            if time.monotonic() - start_time > timeout:
+                raise LalalProcessingError(f"Processing timed out after {timeout}s")
+
+            try:
+                task_info = await self.check_progress(task_id)
+            except (TimeoutError, httpx.TimeoutException, httpx.TransportError) as exc:
+                consecutive_failures += 1
+                if consecutive_failures > _MAX_CONSECUTIVE_POLL_FAILURES:
+                    raise LalalProcessingError(
+                        f"Processing status check failed {consecutive_failures} times in a row: {exc}"
+                    ) from exc
+                logger.warning(
+                    "Transient error polling Lalal.ai progress for %s (attempt %d/%d): %s",
+                    task_id,
+                    consecutive_failures,
+                    _MAX_CONSECUTIVE_POLL_FAILURES,
+                    exc,
+                )
+                await asyncio.sleep(poll_interval)
+                continue
+            else:
+                consecutive_failures = 0
+
+            state = self._task_state(task_info)
+
+            if state in {"error", "server_error", "cancelled"}:
+                raise LalalProcessingError(self._task_error(task_info))
+
+            if state == "success":
+                return self._build_split_result(task_info)
+
+            progress_pct = self._task_progress(task_info)
+            if progress_callback:
+                try:
+                    progress_callback(progress_pct)
+                except Exception:
+                    logger.debug("Progress callback failed", exc_info=True)
+
+            logger.debug("Lalal.ai processing: %d%% (state=%s)", progress_pct, state)
+            await asyncio.sleep(poll_interval)
+
+    async def download_result(
+        self,
+        url: str,
+        output_path: Path | str,
+        *,
+        progress_callback: DownloadProgressCallback | None = None,
+    ) -> Path:
+        """Download a processed audio file from a validated Lalal.ai URL."""
+        output_path = Path(output_path)
+        await asyncio.to_thread(output_path.parent.mkdir, parents=True, exist_ok=True)
+
+        logger.info("Downloading result to %s", output_path)
+
+        if not _is_safe_download_url(url):
+            raise LalalError("Unsafe download URL returned by API")
+
+        part_path = output_path.with_suffix(f"{output_path.suffix}.part")
+        downloaded = 0
+        # Settings live in SQLite (synchronous), so keep the read off the event loop.
+        max_download_bytes = await asyncio.to_thread(_max_result_download_bytes)
+        try:
+            try:
+                async with (
+                    httpx.AsyncClient(timeout=120.0, follow_redirects=False) as transfer_client,
+                    transfer_client.stream("GET", url) as response,
+                ):
+                    response.raise_for_status()
+                    total = _content_length(response)
+                    if total is not None and total > max_download_bytes:
+                        raise LalalError("Download exceeds configured size limit")
+
+                    output_file = await asyncio.to_thread(part_path.open, "wb")
+                    try:
+                        async for chunk in response.aiter_bytes(chunk_size=_TRANSFER_CHUNK_SIZE):
+                            downloaded += len(chunk)
+                            if downloaded > max_download_bytes:
+                                raise LalalError("Download exceeds configured size limit")
+                            await asyncio.to_thread(output_file.write, chunk)
+
+                            if progress_callback and total is not None:
+                                try:
+                                    progress_callback(downloaded, total)
+                                except Exception:
+                                    logger.debug(
+                                        "Download progress callback failed",
+                                        exc_info=True,
+                                    )
+                    finally:
+                        await asyncio.shield(asyncio.to_thread(output_file.close))
+            except httpx.HTTPStatusError as exc:
+                # The httpx message embeds the full (possibly signed) URL; keep it out of the error.
+                raise LalalError(f"Result download failed with HTTP {exc.response.status_code}") from None
+            except httpx.HTTPError as exc:
+                logger.warning("Result download failed: %s", type(exc).__name__)
+                raise LalalError("Result download failed") from None
+
+            await asyncio.to_thread(part_path.replace, output_path)
+            return output_path
+        finally:
+            await asyncio.shield(asyncio.to_thread(part_path.unlink, True))
+
+    def _task_state(self, task_info: dict[str, Any]) -> str:
+        return str(task_info.get("status", "unknown"))
+
+    def _task_progress(self, task_info: dict[str, Any]) -> int:
+        return int(task_info.get("progress") or 0)
+
+    def _task_error(self, task_info: dict[str, Any]) -> str:
+        return _extract_processing_error(task_info.get("error"), "Processing failed")
+
+    def _build_split_result(self, task_info: dict[str, Any]) -> SplitResult:
+        result_info = task_info.get("result", {})
+        tracks = result_info.get("tracks", []) if isinstance(result_info, dict) else []
+
+        stem_info: dict[str, Any] = {}
+        back_info: dict[str, Any] = {}
+        if isinstance(tracks, list):
+            for track in tracks:
+                if not isinstance(track, dict):
+                    continue
+                track_type = track.get("type")
+                if track_type == "stem" and not stem_info:
+                    stem_info = track
+                elif track_type == "back" and not back_info:
+                    back_info = track
+
+        return SplitResult(
+            stem_track=stem_info.get("url", ""),
+            back_track=back_info.get("url", ""),
+            stem_track_size=int(stem_info.get("size") or 0),
+            back_track_size=int(back_info.get("size") or 0),
+            duration=float((result_info.get("duration") if isinstance(result_info, dict) else None) or 0),
+        )
+
+    async def check_quota(self) -> dict[str, Any]:
+        """Check remaining API quota; ``minutes_left`` holds spendable minutes
+        (see :func:`parse_minutes_left`).
+        """
+        client = await self._get_client()
+        response = await client.post(f"{LALAL_API_PREFIX}/limits/minutes_left/", timeout=30.0)
+
+        if response.status_code == 401:
+            raise LalalError("Invalid API key")
+
+        data = _json_object(response)
+        if response.status_code >= 400:
+            raise LalalError(_extract_api_error(data))
+        return data
+
+    async def upload_file(self, file_path: Path | str) -> UploadResult:
+        """Upload an audio file for processing; returns its file ID and metadata."""
+        file_path = Path(file_path)
+
+        try:
+            file_size = (await asyncio.to_thread(file_path.stat)).st_size
+        except FileNotFoundError:
+            raise FileNotFoundError(f"File not found: {file_path}") from None
+        logger.info("Uploading %s (%d bytes) to Lalal.ai", file_path.name, file_size)
+
+        client = await self._get_client()
+        response = await client.post(
+            f"{LALAL_API_PREFIX}/upload/",
+            content=_iter_file_chunks(file_path),
+            headers={
+                "Content-Disposition": f'attachment; filename="{_safe_header_filename(file_path.name)}"',
+                "Content-Type": "application/octet-stream",
+                "Content-Length": str(file_size),
+            },
+        )
+
+        if response.status_code == 401:
+            raise LalalError("Invalid API key")
+
+        if response.status_code == 402:
+            raise LalalQuotaError("Insufficient credits/quota")
+
+        file_info = _json_object(response)
+
+        if response.status_code >= 400:
+            raise LalalUploadError(_extract_api_error(file_info))
+
+        # Fail here rather than in split() with an unrelated-looking error.
+        file_id = file_info.get("id")
+        if not isinstance(file_id, str) or not file_id.strip():
+            raise LalalUploadError("Upload response did not include a file id")
+
+        return UploadResult(
+            id=file_id,
+            name=file_info.get("name", file_path.name),
+            duration=float(file_info.get("duration", 0)),
+            size=int(file_info.get("size", file_size)),
+        )
+
+    async def split(
+        self,
+        file_id: str,
+        *,
+        stem: StemType = StemType.VOCALS,
+        split_type: SplitType = SplitType.ANDROMEDA,
+        enhanced_processing: bool = True,
+        split_mode: SplitMode = SplitMode.STEM_SEPARATOR,
+        noise_cancelling_level: int | None = None,
+        dereverb_enabled: bool | None = None,
+        extraction_level: ExtractionLevel | str | None = None,
+        multivocal: str | None = None,
+    ) -> str:
+        """Start stem separation for an uploaded ``file_id``; returns a task ID.
+
+        ``noise_cancelling_level`` is 0-2, ``multivocal`` is ``"lead_back"`` or
+        None. ``split_mode`` selects the endpoint family.
+        """
+        client = await self._get_client()
+        if noise_cancelling_level is not None and not (0 <= noise_cancelling_level <= 2):
+            raise ValueError("noise_cancelling_level must be between 0 and 2")
+
+        extraction_value: str | None
+        if extraction_level is None:
+            extraction_value = None
+        elif isinstance(extraction_level, ExtractionLevel):
+            extraction_value = extraction_level.value
+        else:
+            extraction_value = str(extraction_level).strip().lower()
+            if extraction_value not in {"deep_extraction", "clear_cut"}:
+                raise ValueError("extraction_level must be one of: deep_extraction, clear_cut")
+
+        presets: dict[str, Any] = {
+            "splitter": split_type.value,
+            "enhanced_processing_enabled": bool(enhanced_processing),
+        }
+        if dereverb_enabled is not None:
+            presets["dereverb_enabled"] = dereverb_enabled
+
+        if split_mode == SplitMode.STEM_SEPARATOR:
+            presets["stem"] = stem.value
+            if extraction_value is not None:
+                presets["extraction_level"] = extraction_value
+            if multivocal is not None:
+                if multivocal != "lead_back":
+                    raise ValueError('multivocal must be "lead_back" when provided')
+                presets["multivocal"] = multivocal
+        elif split_mode == SplitMode.VOICE_CLEAN:
+            presets["stem"] = StemType.VOICE.value
+            if noise_cancelling_level is not None:
+                presets["noise_cancelling_level"] = noise_cancelling_level
+        elif split_mode == SplitMode.DEMUSER:
+            presets["stem"] = StemType.MUSIC.value
+
+        payload = {
+            "source_id": file_id,
+            "presets": presets,
+        }
+
+        endpoint = {
+            SplitMode.STEM_SEPARATOR: f"{LALAL_API_PREFIX}/split/stem_separator/",
+            SplitMode.VOICE_CLEAN: f"{LALAL_API_PREFIX}/split/voice_clean/",
+            SplitMode.DEMUSER: f"{LALAL_API_PREFIX}/split/demuser/",
+        }[split_mode]
+
+        response = await client.post(endpoint, json=payload, timeout=60.0)
+
+        if response.status_code == 401:
+            raise LalalError("Invalid API key")
+
+        if response.status_code == 402:
+            raise LalalQuotaError("Insufficient credits for processing")
+
+        result = _json_object(response)
+        if response.status_code >= 400:
+            raise LalalProcessingError(_extract_api_error(result))
+
+        task_id = str(result.get("task_id", "")).strip()
+        if not task_id:
+            raise LalalProcessingError("Split request failed: missing task_id")
+        return task_id
+
+    async def check_progress(self, task_id: str) -> dict[str, Any]:
+        """Return the progress payload (state + percentage) for a split() task."""
+        client = await self._get_client()
+        response = await client.post(
+            f"{LALAL_API_PREFIX}/check/",
+            json={"task_ids": [task_id]},
+            timeout=30.0,
+        )
+
+        if response.status_code == 401:
+            raise LalalError("Invalid API key")
+
+        result = _json_object(response)
+        if response.status_code >= 400:
+            raise LalalError(_extract_api_error(result))
+
+        result_map = result.get("result", {})
+        if not isinstance(result_map, dict):
+            return {}
+        task_info = result_map.get(task_id, {})
+        return task_info if isinstance(task_info, dict) else {}
+
+    async def process_file(
+        self,
+        input_path: Path | str,
+        output_dir: Path | str,
+        *,
+        stem: StemType = StemType.VOCALS,
+        split_type: SplitType = SplitType.ANDROMEDA,
+        split_mode: SplitMode = SplitMode.STEM_SEPARATOR,
+        noise_cancelling_level: int | None = None,
+        dereverb_enabled: bool | None = None,
+        extraction_level: ExtractionLevel | str | None = None,
+        multivocal: str | None = None,
+        download_stem: bool = True,
+        download_backing: bool = True,
+        progress_callback: StageProgressCallback | None = None,
+    ) -> dict[str, Path]:
+        """Full workflow (upload, process, download); returns ``{name: path}``.
+
+        ``progress_callback`` is ``(stage: str, progress: int)``.
+        """
+        input_path = Path(input_path)
+        output_dir = Path(output_dir)
+        await asyncio.to_thread(output_dir.mkdir, parents=True, exist_ok=True)
+
+        def emit_progress(stage: str, pct: int) -> None:
+            if progress_callback:
+                try:
+                    progress_callback(stage, pct)
+                except Exception:
+                    logger.debug("Progress callback failed", exc_info=True)
+
+        emit_progress("upload", 0)
+        upload_result = await self.upload_file(input_path)
+        file_id = upload_result["id"]
+        emit_progress("upload", 100)
+
+        emit_progress("processing", 0)
+        task_id = await self.split(
+            file_id,
+            stem=stem,
+            split_type=split_type,
+            split_mode=split_mode,
+            noise_cancelling_level=noise_cancelling_level,
+            dereverb_enabled=dereverb_enabled,
+            extraction_level=extraction_level,
+            multivocal=multivocal,
+        )
+
+        def on_processing_progress(pct: int) -> None:
+            emit_progress("processing", pct)
+
+        split_result = await self.wait_for_completion(
+            task_id,
+            progress_callback=on_processing_progress,
+        )
+        emit_progress("processing", 100)
+
+        results: dict[str, Path] = {}
+        base_name = input_path.stem
+        # Lalal.ai returns each stem in the uploaded format; a hardcoded ".mp3"
+        # would mislabel Opus payloads.
+        result_suffix = input_path.suffix.lower() or ".mp3"
+
+        if download_stem and split_result["stem_track"]:
+            emit_progress("download_stem", 0)
+            stem_path = output_dir / f"{base_name}_{stem.value}{result_suffix}"
+            await self.download_result(split_result["stem_track"], stem_path)
+            results["stem"] = stem_path
+            emit_progress("download_stem", 100)
+
+        if download_backing and split_result["back_track"]:
+            emit_progress("download_backing", 0)
+            backing_name = "instrumental" if stem == StemType.VOCALS else "backing"
+            backing_path = output_dir / f"{base_name}_{backing_name}{result_suffix}"
+            await self.download_result(split_result["back_track"], backing_path)
+            results["backing"] = backing_path
+            emit_progress("download_backing", 100)
+
+        return results

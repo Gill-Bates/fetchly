@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 #
-# tests/test_cookie_import.py
+# tests/test_cookie_import.py  # noqa: ERA001
 # Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 #
 
@@ -28,11 +28,7 @@ YOUTUBE_HEADER = (
 
 def entries(netscape: str) -> list[list[str]]:
     """The tab-separated cookie rows of a Netscape file, comments dropped."""
-    return [
-        line.split("\t")
-        for line in netscape.splitlines()
-        if line.strip() and not line.startswith("#")
-    ]
+    return [line.split("\t") for line in netscape.splitlines() if line.strip() and not line.startswith("#")]
 
 
 def load_into_jar(netscape: str, platform: str):
@@ -49,11 +45,15 @@ class HeaderPasteTests(unittest.TestCase):
         self.assertEqual(result.source_format, "header")
         self.assertEqual(
             result.names,
-            ("VISITOR_INFO1_LIVE", "__Secure-3PSID", "__Secure-3PAPISID", "LOGIN_INFO", "PREF"),
+            (
+                "VISITOR_INFO1_LIVE",
+                "__Secure-3PSID",
+                "__Secure-3PAPISID",
+                "LOGIN_INFO",
+                "PREF",
+            ),
         )
-        for domain, include_subdomains, path, secure, expires, _name, _value in entries(
-            result.netscape
-        ):
+        for domain, include_subdomains, path, secure, expires, _name, _value in entries(result.netscape):
             self.assertEqual(domain, ".youtube.com")
             self.assertEqual(include_subdomains, "TRUE")
             self.assertEqual(path, "/")
@@ -228,8 +228,18 @@ class ForeignDomainTests(unittest.TestCase):
     def test_a_json_export_is_filtered_to_the_platform(self) -> None:
         payload = json.dumps(
             [
-                {"domain": ".example.com", "name": "sessionid", "value": "foreign", "path": "/"},
-                {"domain": ".instagram.com", "name": "csrftoken", "value": "own", "path": "/"},
+                {
+                    "domain": ".example.com",
+                    "name": "sessionid",
+                    "value": "foreign",
+                    "path": "/",
+                },
+                {
+                    "domain": ".instagram.com",
+                    "name": "csrftoken",
+                    "value": "own",
+                    "path": "/",
+                },
             ]
         )
         result = convert_to_netscape(payload, "instagram")
@@ -256,6 +266,50 @@ class ForeignDomainTests(unittest.TestCase):
         with self.assertRaises(CookieImportError) as caught:
             convert_to_netscape(payload, "instagram")
         self.assertIn("instagram.com", str(caught.exception))
+
+
+class LimitAndInjectionTests(unittest.TestCase):
+    """The cookie limit counts stored cookies, and no field may add a row."""
+
+    def test_foreign_entries_do_not_eat_the_cookie_limit(self) -> None:
+        foreign = [{"domain": ".example.com", "name": f"f{i}", "value": "x"} for i in range(600)]
+        own = [{"domain": ".instagram.com", "name": "sessionid", "value": "own"}]
+        result = convert_to_netscape(json.dumps(foreign + own), "instagram")
+        self.assertEqual(result.names, ("sessionid",))
+
+    def test_too_many_platform_cookies_are_refused(self) -> None:
+        own = [{"domain": ".instagram.com", "name": f"c{i}", "value": "x"} for i in range(513)]
+        with self.assertRaises(CookieImportError) as caught:
+            convert_to_netscape(json.dumps(own), "instagram")
+        self.assertIn("Too many cookies", str(caught.exception))
+
+    def test_powershell_path_or_domain_with_control_characters_is_skipped(self) -> None:
+        def cookie(name: str, path: str, domain: str) -> str:
+            return f'$session.Cookies.Add((New-Object System.Net.Cookie("{name}", "v", "{path}", "{domain}")))\n'
+
+        powershell = (
+            "$session = New-Object Microsoft.PowerShell.Commands.WebRequestSession\n"
+            + cookie("tabpath", "/\tTRUE", ".youtube.com")
+            + cookie("nlpath", "/\nx", ".youtube.com")
+            + cookie("nldomain", "/", ".youtube.com\nevil\t")
+            + cookie("good", "/", ".youtube.com")
+            + 'Invoke-WebRequest -Uri "https://www.youtube.com/" -WebSession $session'
+        )
+        result = convert_to_netscape(powershell, "youtube")
+
+        self.assertEqual(result.names, ("good",))
+        self.assertEqual([len(row) for row in entries(result.netscape)], [7])
+
+    def test_json_domain_with_control_characters_is_skipped(self) -> None:
+        payload = json.dumps(
+            [
+                {"domain": "evil\tTRUE\n.instagram.com", "name": "bad", "value": "x"},
+                {"domain": ".instagram.com", "name": "good", "value": "x"},
+            ]
+        )
+        result = convert_to_netscape(payload, "instagram")
+        self.assertEqual(result.names, ("good",))
+        self.assertEqual([len(row) for row in entries(result.netscape)], [7])
 
 
 class NetscapePassthroughTests(unittest.TestCase):
@@ -310,9 +364,7 @@ class SessionCookieDetectionTests(unittest.TestCase):
         # LOGIN_INFO *and* one of the SAPISID family. A jar with only the SID
         # cookies passes a naive check and then downloads signed out - which
         # is precisely what a request copied from google.com produces.
-        without_login_info = convert_to_netscape(
-            "__Secure-3PSID=g.a000; __Secure-3PAPISID=aG5YCo; NID=534", "youtube"
-        )
+        without_login_info = convert_to_netscape("__Secure-3PSID=g.a000; __Secure-3PAPISID=aG5YCo; NID=534", "youtube")
         self.assertFalse(has_session_cookie(without_login_info.names, "youtube"))
 
         without_sapisid = convert_to_netscape("LOGIN_INFO=AFm; __Secure-3PSID=g.a0", "youtube")

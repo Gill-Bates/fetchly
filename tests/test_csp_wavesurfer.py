@@ -4,62 +4,84 @@
 # Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 #
 
-"""Guards the CSP hash that lets WaveSurfer's shadow-DOM stylesheet load.
+"""Guards the CSP mechanism that lets WaveSurfer's shadow-DOM stylesheet load.
 
-Under `style-src 'self'` the browser blocks WaveSurfer's shadow-root <style>,
-and the progress canvas renders as a second waveform. The hash covers that
-stylesheet's text, which interpolates the configured waveform height, so both
-the vendored bundle and that height are pinned here to fail loudly on change.
+Under a bare `style-src 'self'` the browser blocks WaveSurfer's shadow-root
+<style>, and the progress canvas renders as a second waveform. WaveSurfer is
+now fetched unpinned at build time, so its stylesheet text (which interpolates
+the waveform height) is not fixed and a hard-coded style hash would drift.
+Instead the app emits a per-request nonce in `style-src` and trim.js stamps the
+same nonce onto WaveSurfer's injected <style> via `WaveSurfer.create({ cspNonce })`.
+
+These tests pin that contract: the policy carries a scoped nonce rather than
+'unsafe-inline', the nonce is fresh per response, the rendered page exposes the
+same nonce the header carries, and trim.js actually feeds it to WaveSurfer.
 """
 
-import hashlib
 import re
 import unittest
 from pathlib import Path
 
-from app.main import _WAVESURFER_STYLE_HASH, SecurityHeadersMiddleware
+from app.main import build_csp
+from tests._support import WebAppTestCase
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-_BUNDLE = _REPO_ROOT / "app/static/vendor/wavesurfer/dist/wavesurfer.esm.js"
 _TRIM_JS = _REPO_ROOT / "app/static/js/trim.js"
 
-# sha256 of the vendored bundle the hash above was taken from.
-_PINNED_BUNDLE_SHA256 = "2621439837525ed48935ed9939b082133aa8d84574d261104029680dcfb34d1d"
-# The height WaveSurfer.create() is called with; it is interpolated into the
-# stylesheet, so the hash is only valid for this value.
-_PINNED_WAVE_HEIGHT = 100
-
-_REFRESH_HINT = (
-    "Open the trim view in a browser: the CSP error names the new hash. "
-    "Put it in app/main.py::_WAVESURFER_STYLE_HASH and update the pin here."
-)
+_STYLE_SRC_RE = re.compile(r"style-src ([^;]*)")
+_HEADER_NONCE_RE = re.compile(r"style-src [^;]*'nonce-([^']+)'")
+_DATASET_NONCE_RE = re.compile(r'data-wavesurfer-csp-nonce="([^"]*)"')
 
 
-class WaveSurferCspHashTests(unittest.TestCase):
-    def test_policy_allows_the_shadow_stylesheet_without_unsafe_inline(self) -> None:
-        directive = next(
-            part for part in SecurityHeadersMiddleware._CSP.split("; ")
-            if part.startswith("style-src")
-        )
-        self.assertIn(_WAVESURFER_STYLE_HASH, directive)
-        # The hash exists precisely so the blanket keyword is not needed.
+class WaveSurferCspNonceTests(unittest.TestCase):
+    def test_policy_uses_a_scoped_nonce_without_unsafe_inline(self) -> None:
+        csp = build_csp("test-nonce-value")
+        directive = next(part for part in csp.split("; ") if part.startswith("style-src"))
+        self.assertIn("'self'", directive)
+        self.assertIn("'nonce-test-nonce-value'", directive)
+        # The nonce exists precisely so the blanket keyword is not needed.
         self.assertNotIn("unsafe-inline", directive)
 
-    def test_vendored_bundle_still_matches_the_hashed_stylesheet(self) -> None:
-        digest = hashlib.sha256(_BUNDLE.read_bytes()).hexdigest()
-        self.assertEqual(
-            digest,
-            _PINNED_BUNDLE_SHA256,
-            f"WaveSurfer was updated, so its stylesheet - and the CSP hash - may have changed. {_REFRESH_HINT}",
+    def test_trim_js_passes_the_nonce_to_wavesurfer(self) -> None:
+        source = _TRIM_JS.read_text(encoding="utf-8")
+        self.assertIn("cspNonce", source, "trim.js no longer forwards the CSP nonce to WaveSurfer")
+        self.assertIn(
+            "wavesurferCspNonce",
+            source,
+            "trim.js no longer reads the nonce from the page dataset",
         )
 
-    def test_wave_height_still_matches_the_hashed_stylesheet(self) -> None:
-        match = re.search(r"^\s*height:\s*(\d+),\s*$", _TRIM_JS.read_text(encoding="utf-8"), re.MULTILINE)
-        assert match is not None, "No height option found in the WaveSurfer.create() call"
+
+class WaveSurferCspNonceRenderTests(WebAppTestCase):
+    def test_rendered_page_nonce_matches_the_response_header(self) -> None:
+        response = self.client.get("/")
+        self.assertEqual(response.status_code, 200)
+
+        csp = response.headers.get("Content-Security-Policy", "")
+        header_match = _HEADER_NONCE_RE.search(csp)
+        self.assertIsNotNone(header_match, f"no style-src nonce in CSP header: {csp!r}")
+        header_nonce = header_match.group(1)
+        self.assertNotIn("unsafe-inline", _STYLE_SRC_RE.search(csp).group(1))
+
+        dataset_match = _DATASET_NONCE_RE.search(response.text)
+        self.assertIsNotNone(dataset_match, "dashboard did not expose data-wavesurfer-csp-nonce")
         self.assertEqual(
-            int(match.group(1)),
-            _PINNED_WAVE_HEIGHT,
-            f"The waveform height is interpolated into the hashed stylesheet. {_REFRESH_HINT}",
+            dataset_match.group(1),
+            header_nonce,
+            "the page's WaveSurfer nonce must equal the one in the CSP header",
+        )
+
+    def test_nonce_is_fresh_per_response(self) -> None:
+        first = self.client.get("/").headers.get("Content-Security-Policy", "")
+        second = self.client.get("/").headers.get("Content-Security-Policy", "")
+        first_nonce = _HEADER_NONCE_RE.search(first)
+        second_nonce = _HEADER_NONCE_RE.search(second)
+        self.assertIsNotNone(first_nonce)
+        self.assertIsNotNone(second_nonce)
+        self.assertNotEqual(
+            first_nonce.group(1),
+            second_nonce.group(1),
+            "a per-request nonce must not repeat across responses",
         )
 
 

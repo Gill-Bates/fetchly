@@ -88,7 +88,7 @@ Material's variable names are documented upstream and visible in DevTools on any
 
 ---
 
-**Last Updated:** 2026-09-19  
+**Last Updated:** 2026-10-26  
 **Theme:** Material for MkDocs  
 **Dark Mode:** `[data-md-color-scheme="slate"]`; palettes in `docs/mkdocs.yml` follow the OS via `prefers-color-scheme` and the toggle overrides it  
 **Brand Tokens:** `--fy-primary`, `--fy-accent`

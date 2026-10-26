@@ -9,6 +9,7 @@
 import asyncio
 import logging
 import os
+import secrets
 import shutil
 import signal
 from collections.abc import Callable
@@ -30,29 +31,28 @@ from uvicorn.middleware.proxy_headers import ProxyHeadersMiddleware
 
 from middleware.csrf import CSRFMiddleware
 
-from .analysis_worker import (
-    SubmitResult,
-    start_analysis_workers,
-    stop_analysis_workers,
-    submit_analysis,
+from .auth.rate_limit import (
+    get_trusted_proxy_hosts,
+    limiter,
+    validate_trusted_proxy_hosts,
 )
-from .analysis_worker import (
-    set_status_callback as set_analysis_status_callback,
-)
-from .common.rate_limit import get_trusted_proxy_hosts, limiter, validate_trusted_proxy_hosts
+from .auth.session import refresh_session_settings_cache, resolve_cookie_secure
 from .db import (
+    DatabaseSchemaError,
     cancel_interrupted_jobs,
     close_db,
-    delete_share_links_for_jobs,
+    delete_jobs_and_share_links,
     get_settings,
     init_db,
     job_exists,
+    list_expired_job_ids,
     list_jobs_requiring_audio_analysis,
     list_queued_jobs,
-    purge_old_jobs,
 )
-from .governor import GovernorConfig, governor
-from .lalal_policy import LALAL_MAX_DURATION_MINUTES, LALAL_MAX_DURATION_SECONDS
+from .integrations.lalal.policy import (
+    LALAL_MAX_DURATION_MINUTES,
+    LALAL_MAX_DURATION_SECONDS,
+)
 from .routes import (
     api_router,
     auth_router,
@@ -74,16 +74,36 @@ from .routes.lalal import init_lalal
 from .routes.media import init_media, resolve_job_path
 from .routes.share import init_share
 from .routes.trim import init_trim
-from .session import refresh_session_settings_cache, resolve_cookie_secure
+from .runtime.governor import GovernorConfig, governor
 from .utils.assets import VersionedStaticFiles, asset_url
 from .utils.cookies import ensure_data_cookies_dir
 from .utils.duration import round_seconds
-from .utils.fs import get_data_dir
+from .utils.fs import get_data_dir, jobs_dir, thumb_cache_dir
 from .utils.geoip import ensure_geoip_databases_async
-from .utils.housekeeping import cleanup_expired_jobs, cleanup_orphaned_directories, cleanup_thumbnail_cache
+from .utils.housekeeping import (
+    cleanup_expired_jobs,
+    cleanup_orphaned_directories,
+    cleanup_thumbnail_cache,
+    cleanup_watermark_cache,
+)
 from .utils.template_filters import register_filters
 from .utils.version import BUILD_INFO, VERSION
-from .worker import set_status_callback, signal_shutdown, start_workers, stop_workers, submit_download
+from .workers.analysis_worker import (
+    SubmitResult,
+    start_analysis_workers,
+    stop_analysis_workers,
+    submit_analysis,
+)
+from .workers.analysis_worker import (
+    set_status_callback as set_analysis_status_callback,
+)
+from .workers.worker import (
+    set_status_callback,
+    signal_shutdown,
+    start_workers,
+    stop_workers,
+    submit_download,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +116,7 @@ DATA_DIR = get_data_dir()
 _SECRET_KEY = os.environ.get("FETCHLY_SECRET_KEY")
 if not _SECRET_KEY:
     raise RuntimeError("FETCHLY_SECRET_KEY environment variable is required")
+
 
 # No admin credentials come from the environment. fetchly starts with
 # authentication switched off and an empty account; the admin username and
@@ -197,32 +218,33 @@ async def _event_broadcaster(queue: EventQueue) -> None:
 
 
 def _run_housekeeping_once() -> None:
-    """One retention sweep: purge expired jobs from the DB, then their files.
-
-    Retention deletes the job row first (purge_old_jobs), then reuses the same
-    ID list to remove filesystem artifacts and share links. 0 means unlimited
-    retention, so the sweep is skipped entirely in that case.
-    """
+    """One retention sweep: remove expired jobs' files, then their rows."""
     settings = get_settings()
     keep_days = settings.get("retention_days", 0)
-    if keep_days == 0:
-        cleanup_thumbnail_cache(DATA_DIR / "thumb-cache")
-        cleanup_orphaned_directories(DATA_DIR, job_exists)
-        return
-
-    expired_ids = purge_old_jobs(keep_days)
-    cleanup_expired_jobs(keep_days, DATA_DIR, lambda _days: expired_ids)
-    # The DB rows are already gone, so these share links can only 404 from
-    # here on. Dropping them keeps the table from growing without bound.
-    removed_links = delete_share_links_for_jobs(expired_ids)
-    if removed_links:
-        logger.info("Housekeeping: removed %d share link(s) for expired jobs", removed_links)
-    if expired_ids:
-        logger.info("Housekeeping: purged %d expired job(s) from the database", len(expired_ids))
-    cleanup_thumbnail_cache(DATA_DIR / "thumb-cache")
+    # Per-job directories live under DATA_DIR/jobs/<uuid>; both sweeps scan that
+    # subfolder, never the DATA_DIR top level where the sibling caches sit.
+    # jobs_dir() reads the global get_data_dir(), so a test redirects the whole
+    # sweep through the DATA_DIR env var, the same path model production uses.
+    per_job_root = jobs_dir()
+    # Files first: only jobs whose directory is gone lose their row and links,
+    # so a failed deletion is retried on the next sweep instead of orphaned.
+    cleaned_ids = cleanup_expired_jobs(keep_days, per_job_root, list_expired_job_ids)
+    deleted_ids, links_deleted = delete_jobs_and_share_links(cleaned_ids)
+    jobs_deleted = len(deleted_ids)
+    if jobs_deleted < len(cleaned_ids):
+        logger.info(
+            "Housekeeping: kept %d job(s) that became active again after their files were removed",
+            len(cleaned_ids) - jobs_deleted,
+        )
+    if links_deleted:
+        logger.info("Housekeeping: removed %d share link(s) for expired jobs", links_deleted)
+    if jobs_deleted:
+        logger.info("Housekeeping: purged %d expired job(s) from the database", jobs_deleted)
+    cleanup_thumbnail_cache(thumb_cache_dir())
+    cleanup_watermark_cache(DATA_DIR / "watermark-cache")
     # Retained DB rows protect their directories from this orphan sweep. Only
     # directories with no corresponding job record are removed here.
-    cleanup_orphaned_directories(DATA_DIR, job_exists)
+    cleanup_orphaned_directories(per_job_root, job_exists)
 
 
 async def _housekeeping_daemon() -> None:
@@ -258,7 +280,8 @@ async def _geoip_database_daemon() -> None:
                 await ensure_geoip_databases_async()
             except asyncio.CancelledError:
                 raise
-            except Exception as exc:
+            # A GeoIP refresh failure must not stop the daemon.
+            except Exception as exc:  # noqa: BLE001
                 log.warning("GeoIP database check failed: %s", exc)
             await asyncio.sleep(_GEOIP_REFRESH_INTERVAL)
     except asyncio.CancelledError:
@@ -398,7 +421,11 @@ async def _cancel_background_tasks(tasks: list[asyncio.Task[None]], *, timeout: 
     except TimeoutError:
         for task in tasks:
             if not task.done():
-                logger.warning("Background task %s did not stop within %.1fs", task.get_name(), timeout)
+                logger.warning(
+                    "Background task %s did not stop within %.1fs",
+                    task.get_name(),
+                    timeout,
+                )
 
 
 type _SignalHandler = Callable[[int, FrameType | None], Any] | int | None
@@ -459,14 +486,25 @@ async def lifespan(app: FastAPI):
     _ = app
     _check_dependencies()
     await asyncio.to_thread(DATA_DIR.mkdir, parents=True, exist_ok=True)
+    # Parent of every per-job DATA_DIR/jobs/<uuid> directory, created at startup
+    # like cookies/ so the first job write has its parent.
+    await asyncio.to_thread(jobs_dir().mkdir, parents=True, exist_ok=True)
     await asyncio.to_thread(ensure_data_cookies_dir)
-    await asyncio.to_thread(init_db)
+    try:
+        await asyncio.to_thread(init_db)
+    except DatabaseSchemaError as exc:
+        # Same pattern as _check_dependencies(): one readable line, then abort startup.
+        logger.critical("FATAL: %s", exc)
+        raise
     init_sse_shutdown_event()
     restore_shutdown_signals = _install_shutdown_signal_hook()
     await asyncio.to_thread(refresh_session_settings_cache)
     recovered_jobs = await asyncio.to_thread(cancel_interrupted_jobs)
     if recovered_jobs:
-        logger.warning("Marked %d interrupted in-flight jobs as cancelled during startup", recovered_jobs)
+        logger.warning(
+            "Marked %d interrupted in-flight jobs as cancelled during startup",
+            recovered_jobs,
+        )
     event_queue: EventQueue = asyncio.Queue(maxsize=_EVENT_QUEUE_MAXSIZE)
     loop = asyncio.get_running_loop()
     enqueue_event, thread_status_callback, disable_event_dispatch = _make_event_callbacks(loop, event_queue)
@@ -477,10 +515,10 @@ async def lifespan(app: FastAPI):
     await asyncio.to_thread(governor.configure, _governor_config_from_settings(startup_settings))
 
     init_api(templates)
-    init_media(DATA_DIR, BASE_DIR, templates)
+    init_media(BASE_DIR, templates)
     init_share(templates)
-    init_lalal(DATA_DIR, enqueue_event)
-    init_trim(DATA_DIR, resolve_job_path)
+    init_lalal(enqueue_event)
+    init_trim(resolve_job_path)
 
     set_status_callback(thread_status_callback)
     set_analysis_status_callback(thread_status_callback)
@@ -558,38 +596,47 @@ async def _redoc_ui(request: Request) -> Response:
     return get_redoc_html(openapi_url="/openapi.json", title=f"{app.title} - ReDoc")
 
 
-# SHA-256 of the stylesheet WaveSurfer injects into its shadow root, so
-# style-src can allow that one sheet without opening up 'unsafe-inline'.
-# Refresh it (from the browser console's CSP error) whenever the vendored
-# bundle or the trim view's height option changes.
-_WAVESURFER_STYLE_HASH: Final = "sha256-7XP2opZSAzH42qQ4QpsmFbwnOyeFkvJlqZeHR2BRgEA="
+# ASGI scope key under which the per-request WaveSurfer style nonce is shared
+# with the templates (reachable as request.state.wavesurfer_csp_nonce).
+_WAVESURFER_NONCE_STATE_KEY: Final = "wavesurfer_csp_nonce"
+
+
+def build_csp(style_nonce: str) -> str:
+    """Content-Security-Policy with a per-request nonce for WaveSurfer's sheet.
+
+    WaveSurfer renders its own ``<style>`` into a shadow root (trim.js); its
+    text interpolates the configured waveform height and changes between
+    releases, so a fixed hash would drift the moment the bundle is refreshed.
+    A nonce authorizes exactly that one injected sheet - trim.js passes it to
+    ``WaveSurfer.create({ cspNonce })`` - without opening 'unsafe-inline' to
+    any other inline style.
+    """
+    return "; ".join(
+        [
+            "default-src 'self'",
+            "script-src 'self'",
+            # No 'unsafe-inline': the app authors no <style>/style= and progress
+            # updates use element.style.* (CSSOM, not subject to style-src). The
+            # nonce covers the one <style> the app does not author - WaveSurfer's
+            # shadow-root sheet, stamped with the same nonce in trim.js.
+            f"style-src 'self' 'nonce-{style_nonce}'",
+            # cdn.jsdelivr.net serves the flag-icons SVGs for the job page's
+            # requester country tile (app/templates/job.html); loaded live, not
+            # vendored, matching wirebuddy's approach for the same feature.
+            "img-src 'self' data: https://img.youtube.com https://i.ytimg.com https://cdn.jsdelivr.net",
+            "font-src 'self'",
+            "connect-src 'self'",
+            "media-src 'self' blob:",
+            "worker-src blob:",
+            "frame-ancestors 'none'",
+            "base-uri 'self'",
+            "form-action 'self'",
+        ]
+    )
 
 
 class SecurityHeadersMiddleware:
     """Attach baseline security headers to all HTTP responses."""
-
-    _CSP = "; ".join([
-        "default-src 'self'",
-        "script-src 'self'",
-        # No 'unsafe-inline': templates have no <style>/style= and progress
-        # updates use element.style.* (CSSOM, not subject to style-src). The
-        # hash covers the one <style> the app does not author - WaveSurfer's
-        # shadow-root sheet, which positions the progress canvas over the
-        # waveform and interpolates the configured height (trim.js). Drift in
-        # either fails tests/test_csp_wavesurfer.py.
-        f"style-src 'self' '{_WAVESURFER_STYLE_HASH}'",
-        # cdn.jsdelivr.net serves the flag-icons SVGs for the job page's
-        # requester country tile (app/templates/job.html); loaded live, not
-        # vendored, matching wirebuddy's approach for the same feature.
-        "img-src 'self' data: https://img.youtube.com https://i.ytimg.com https://cdn.jsdelivr.net",
-        "font-src 'self'",
-        "connect-src 'self'",
-        "media-src 'self' blob:",
-        "worker-src blob:",
-        "frame-ancestors 'none'",
-        "base-uri 'self'",
-        "form-action 'self'",
-    ])
 
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
@@ -599,17 +646,27 @@ class SecurityHeadersMiddleware:
             await self.app(scope, receive, send)
             return
 
+        # One fresh nonce per request, shared with the templates through the
+        # ASGI scope state so the CSP header and WaveSurfer's <style nonce>
+        # carry the same value.
+        style_nonce = secrets.token_urlsafe(16)
+        scope.setdefault("state", {})[_WAVESURFER_NONCE_STATE_KEY] = style_nonce
+        csp = build_csp(style_nonce)
+
         async def send_wrapper(message: Message) -> None:
             if message.get("type") == "http.response.start":
                 headers = MutableHeaders(scope=message)
-                headers.setdefault("Content-Security-Policy", self._CSP)
+                headers.setdefault("Content-Security-Policy", csp)
                 headers.setdefault("X-Frame-Options", "DENY")
                 headers.setdefault("X-Content-Type-Options", "nosniff")
                 headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
                 headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
                 headers.setdefault("Cross-Origin-Resource-Policy", "same-origin")
                 if scope.get("scheme") == "https":
-                    headers.setdefault("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+                    headers.setdefault(
+                        "Strict-Transport-Security",
+                        "max-age=31536000; includeSubDomains",
+                    )
             await send(message)
 
         await self.app(scope, receive, send_wrapper)
