@@ -23,7 +23,7 @@
   ```
 - **Stages:**
   - `ffmpeg` — fetches a static FFmpeg/FFprobe build from the BtbN FFmpeg-Builds release named by `FFMPEG_RELEASE_URL`. FFmpeg does **not** come from `apt-get`.
-  - `essentia` — compiles essentia from source (`ESSENTIA_REPO`, `ESSENTIA_REF`) because upstream publishes no `linux/aarch64` wheel at all
+  - `essentia` — builds a CPU-only essentia wheel with `build-essentia.sh` from upstream master; CI resolves it once per release and passes `ESSENTIA_REF` so both architectures match because upstream publishes no `linux/aarch64` wheel. `essentia_check.py` is the functional check run in this stage, in `runtime` and in CI. See `docs/development/essentia.md`
   - `builder` — builds the virtualenv, installs yt-dlp / yt-dlp-ejs / Deno at the versions passed in, and fetches WaveSurfer (unpinned `@latest`) — see "Fetching WaveSurfer" below.
   - `runtime` — installs the few runtime apt packages, copies `ffmpeg`/`ffprobe`, the `/venv`, `deno` and the application source
 - **Adding a Python dependency:** add it to `pyproject.toml`. The builder reads `[project].dependencies` out of it with `tomllib` and installs that set without installing the project, so the layer stays cached across source-only changes. (`tools/pyproject-deps.py` is the release workflow's copy of the same step, not the builder's.)
@@ -62,7 +62,7 @@ the build actually fetched.
   full XSS in the admin context. This was deliberately re-enabled over the
   previous git-vendored, pinned design: the project wants upstream fixes to
   reach a plain rebuild without a manual bump, and accepts the reintroduced
-  trust surface. essentia stays pinned (`ESSENTIA_REF`); WaveSurfer does not.
+  trust surface. essentia follows upstream master too (one `ESSENTIA_REF` per release).
 - **CSP uses a per-request nonce, not a fixed hash.** Because the fetched
   version — and the shadow-DOM stylesheet it injects, which interpolates the
   waveform height — changes over time, a hard-coded `style-src` hash would

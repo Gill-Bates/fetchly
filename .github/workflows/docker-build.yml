@@ -129,13 +129,12 @@ jobs:
           BUILD_DATE="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
           TAG="v${VERSION}"
 
-          # Cache buster for the Dockerfile's apt layers. Resolved here, once,
-          # for the same reason every other rolling input is: the two
-          # architecture jobs must key their apt layers on one value, or a
-          # release that straddles midnight UTC upgrades one image against a
-          # different package snapshot than the other. A date rather than
-          # BUILD_DATE's timestamp, so re-running the same release within a day
-          # still restores those layers from cache.
+          # Cache buster for the Dockerfile's apt layers, not an apt snapshot:
+          # both architectures invalidate those layers on the same date, but
+          # each still resolves packages against the repository as it is when
+          # its runner reaches the layer. A date rather than BUILD_DATE's
+          # timestamp, so re-running the same release within a day still
+          # restores those layers from cache.
           APT_CACHE_DATE="${BUILD_DATE%%T*}"
 
           {
@@ -150,12 +149,11 @@ jobs:
       #
       # The Dockerfile's defaults each mean "whatever is newest at the moment
       # this layer runs": the python base tag, BtbN's 'latest' ffmpeg release,
-      # yt-dlp and yt-dlp-ejs unpinned, and deno's release-latest.txt. essentia
-      # is the exception - it is pinned in the Dockerfile and only read here, not
-      # re-resolved. That is the intent for a release - but the amd64
+      # yt-dlp and yt-dlp-ejs unpinned, deno's release-latest.txt, and
+      # essentia's upstream master. The amd64
       # and arm64 jobs are separate runners that reach those layers minutes
-      # apart, so each would resolve "newest" on its own. A yt-dlp release, an
-      # essentia commit or a nightly ffmpeg rebuild landing in that window
+      # apart, so each would resolve "newest" on its own. A yt-dlp release or a
+      # nightly ffmpeg rebuild landing in that window
       # would put different toolchains in the two halves of one manifest.
       #
       # Resolving once and pinning only for the duration of the build keeps
@@ -182,21 +180,15 @@ jobs:
           esac
           python_base="python:3.13-slim@${digest}"
 
-          # essentia is pinned, not rolling: docker/Dockerfile declares
-          # ARG ESSENTIA_REF=<commit> at a ref chosen to precede the upstream
-          # master merge that added onnxruntime to essentia's static 3rd-party
-          # chain and builds it with --use_cuda, which aborts on every CUDA-less
-          # build host here. Resolving refs/heads/master instead would drag that
-          # breaking commit back in and fail the build. Read the pin straight
-          # out of the Dockerfile so it stays the single source of truth; this
-          # value is still passed to both architectures so they ship one
-          # identically-built essentia. Bump the Dockerfile pin to move it.
-          essentia_ref="$(sed -n 's/^ARG ESSENTIA_REF=//p' docker/Dockerfile | head -n1)"
+          # essentia follows upstream master, snapshotted here so both
+          # architectures build one revision. ESSENTIA_REF reaches the build
+          # as a build arg, which also invalidates the essentia stage cache.
+          essentia_ref="$(git ls-remote https://github.com/MTG/essentia.git \
+            refs/heads/master | cut -f1)"
           if [[ ! "$essentia_ref" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "ERROR: could not read a pinned ESSENTIA_REF from docker/Dockerfile (got '${essentia_ref}')"
+            echo "ERROR: could not resolve essentia master (got '${essentia_ref}')"
             exit 1
           fi
-
           # ffmpeg comes from BtbN's builds, and the release the Dockerfile
           # defaults to - the one tagged 'latest' - is a rolling tag: every
           # nightly rebuild replaces its assets under unchanged file names.
@@ -565,9 +557,9 @@ jobs:
         # one published image analyses audio differently from the other.
         #
         # Hence the identical timeouts. Each job builds essentia's static
-        # 3rd-party chain (ffmpeg, fftw3, taglib, chromaprint, ...) and then
-        # the library itself, which only a cold build cache pays for - a
-        # release that does not move ESSENTIA_REF restores the stage instead.
+        # audio dependencies (ffmpeg, fftw3, libsamplerate) and then the
+        # library itself, which only a cold build cache pays for - a release
+        # whose essentia master SHA is unchanged restores the stage instead.
         #
         # Both runners name an image rather than following a moving label, and
         # both name the same generation. The host contributes nothing to what
@@ -663,16 +655,15 @@ jobs:
       # (the app reads pyproject.toml and BUILD_INFO from disk), and passing undeclared
       # build args would only produce warnings.
       #
-      # The toolchain the Dockerfile keeps rolling - the python base, essentia,
+      # The toolchain the Dockerfile keeps rolling - the python base,
       # the ffmpeg release, yt-dlp, yt-dlp-ejs, deno - comes in as build args
       # resolved once by the meta job, and the Python dependencies as the
       # constraints.txt downloaded into the context above. APT_CACHE_DATE joins
-      # them: without it the runtime stage's `apt-get upgrade` is a cache hit
-      # against whatever snapshot the last release happened to see. Those are still
-      # "whatever is newest", just newest as of one moment rather than as of
-      # whenever each runner happened to reach the layer, which is what keeps
-      # the amd64 and arm64 images carrying identical versions. The verify step
-      # below proves it.
+      # them only as a cache buster: without it the runtime stage's
+      # `apt-get upgrade` is a cache hit against whatever the last release saw.
+      # Apt packages still resolve independently per runner. Everything else is
+      # "whatever is newest", as of one moment, which keeps the amd64 and arm64
+      # images on identical versions; the verify steps below prove it.
       - name: Build image for smoke tests
         run: |
           set -euo pipefail
@@ -833,85 +824,22 @@ jobs:
           PY
 
       # The only step that proves essentia computes rather than merely imports.
-      # Both architectures compile essentia from the same pinned commit, so the
-      # library is the same everywhere except for FFTW's SIMD backend - sse2 on
-      # amd64, NEON on arm64 - and that backend is precisely the part no
-      # version pin can assert. The runtime stage's `import essentia.standard`
-      # only shows that _essentia.so loads and resolves its symbols; an image
-      # whose RhythmExtractor2013 returned nonsense would pass every other
-      # check here and surface on a user's first analysis job instead. Running
-      # it on both arches is what makes the two builds comparable.
+      # docker/essentia_check.py (also run during the image build) analyses a
+      # synthetic click track via MonoLoader and RhythmExtractor2013 and fails
+      # if _essentia.so links CUDA, ONNX or TensorFlow. Running it on both
+      # arches is what makes the two builds comparable, notably FFTW's SIMD
+      # backend (sse2 on amd64, NEON on arm64).
       - name: Verify BPM analysis (${{ matrix.arch }})
         run: |
           set -euo pipefail
-          docker exec -i "${{ matrix.container_name }}" python - <<'PY'
-          import math
-          import sys
-          import wave
-
-          import numpy as np
-
-          SAMPLE_RATE = 44100
-          EXPECTED_BPM = 120.0
-          TOLERANCE_BPM = 2.0
-          DURATION_S = 20.0
-          CLICK_PATH = "/tmp/bpm-smoke.wav"
-
-          # A click track is deliberately the simplest signal
-          # RhythmExtractor2013 can be asked about: one 1 kHz burst per beat,
-          # decaying over ~25 ms, at exactly EXPECTED_BPM. Anything reading
-          # that as a different tempo is broken, not merely imprecise. Built
-          # with numpy + wave rather than an ffmpeg filter so the fixture
-          # cannot itself become the flaky part.
-          period = 60.0 / EXPECTED_BPM
-          t = np.arange(int(SAMPLE_RATE * DURATION_S)) / SAMPLE_RATE
-          envelope = np.exp(-40.0 * np.mod(t, period))
-          samples = np.sin(2.0 * math.pi * 1000.0 * t) * envelope * 0.8
-
-          with wave.open(CLICK_PATH, "wb") as handle:
-              handle.setnchannels(1)
-              handle.setsampwidth(2)
-              handle.setframerate(SAMPLE_RATE)
-              handle.writeframes((samples * 32767).astype("<i2").tobytes())
-
-          # Mirrors app/audio/bpm.py: MonoLoader on defaults, then
-          # RhythmExtractor2013(method="multifeature"). MonoLoader decodes
-          # through the static ffmpeg essentia links against, so the compiled
-          # audio I/O path is covered too, not just the rhythm algorithm.
-          from essentia.standard import MonoLoader, RhythmExtractor2013
-
-          audio = MonoLoader(filename=CLICK_PATH)()
-          bpm, beats, confidence, _, _ = RhythmExtractor2013(method="multifeature")(audio)
-
-          bpm = float(bpm)
-          confidence = float(confidence)
-          print(f"samples loaded : {len(audio)}")
-          print(f"detected BPM   : {bpm:.3f}  (expected {EXPECTED_BPM} +/- {TOLERANCE_BPM})")
-          print(f"beats detected : {len(beats)}")
-          print(f"confidence     : {confidence:.3f}")
-
-          failures = []
-          if len(audio) == 0:
-              failures.append("MonoLoader returned no samples")
-          if not math.isfinite(bpm):
-              failures.append(f"BPM is not a finite number: {bpm!r}")
-          elif abs(bpm - EXPECTED_BPM) > TOLERANCE_BPM:
-              failures.append(
-                  f"BPM {bpm:.3f} is off by more than {TOLERANCE_BPM} from {EXPECTED_BPM}"
-              )
-          if len(beats) < int(DURATION_S / period) - 4:
-              failures.append(
-                  f"only {len(beats)} beats found in {DURATION_S:.0f}s at {EXPECTED_BPM} BPM"
-              )
-
-          if failures:
-              for failure in failures:
-                  print(f"✗ {failure}", file=sys.stderr)
-              sys.exit(1)
-
-          print("✓ essentia BPM analysis OK")
-          PY
-
+          expected="${{ needs.meta.outputs.essentia_ref }}"
+          actual="$(docker exec "${{ matrix.container_name }}" cat /venv/.essentia-commit)"
+          echo "essentia commit: expected ${expected}, image carries ${actual}"
+          if [[ "$actual" != "$expected" ]]; then
+            echo "ERROR: the image was not built from the resolved essentia commit"
+            exit 1
+          fi
+          docker exec -i "${{ matrix.container_name }}" python - < docker/essentia_check.py
       # What actually proves the two images agree. Each architecture writes the
       # resolved version of everything that rolls into an artifact; the
       # manifest job compares those files and refuses to publish an index whose
@@ -929,7 +857,9 @@ jobs:
           docker exec -i "${{ matrix.container_name }}" /entrypoint.sh python - \
             > "toolchain/${{ matrix.image_suffix }}.txt" <<'PY'
           import platform
+          import sys
           from importlib import metadata
+          from pathlib import Path
 
           from app.utils.version import (
               get_ffmpeg_version,
@@ -958,6 +888,7 @@ jobs:
               "yt-dlp-ejs": get_ytdlp_ejs_version(),
               "deno": get_js_runtime_version(),
               "wavesurfer": get_wavesurfer_version(),
+              "essentia-commit": (Path(sys.prefix) / ".essentia-commit").read_text().strip(),
           }
           for dist in metadata.distributions():
               name = dist.metadata["Name"]
@@ -1089,6 +1020,21 @@ jobs:
           retention-days: 14
           if-no-files-found: warn
 
+      # Declared before the push so the fragment cleanup knows about this tag even
+      # when the push succeeds and a later step (digest, upload) fails.
+      - name: Declare fragment tag (${{ matrix.arch }})
+        run: |
+          mkdir -p intents
+          printf '%s' "${{ matrix.image_suffix }}" > "intents/${{ matrix.image_suffix }}"
+
+      - name: Upload fragment tag intent (${{ matrix.arch }})
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fragment-intent-${{ matrix.image_suffix }}
+          path: intents/${{ matrix.image_suffix }}
+          retention-days: 1
+          if-no-files-found: error
+
       - name: Push arch-specific image
         run: |
           set -euo pipefail
@@ -1101,9 +1047,9 @@ jobs:
       # built now contributes no digest, instead of contributing a tag
       # reference that does not resolve.
       #
-      # This runs immediately after the push, so a digest artifact exists for
-      # exactly those architectures whose tag reached Docker Hub. The fragment
-      # cleanup job relies on that correspondence.
+      # The digest artifact feeds the manifest only. The fragment cleanup keys on
+      # the intent marker uploaded before the push, because a push can succeed
+      # and this step still fail.
       - name: Record image digest
         run: |
           set -euo pipefail
@@ -1197,9 +1143,12 @@ jobs:
               for name, value in sorted(versions.items()):
                   print(f"  {name}={value}")
 
-          if len(recorded) == 1:
-              print("\nOnly one architecture was built; nothing to compare.")
-              sys.exit(0)
+          digests = {path.name for path in pathlib.Path("digests").iterdir()}
+          if set(recorded) != digests or len(recorded) < 2:
+              sys.exit(
+                  f"FAIL: toolchain manifests {sorted(recorded)} and image digests "
+                  f"{sorted(digests)} must cover the same, at least two, architectures"
+              )
 
           names = sorted({name for versions in recorded.values() for name in versions})
           mismatches = []
@@ -1340,9 +1289,9 @@ jobs:
   # a half-published release until the next successful run happens to prune it.
   # This job removes them on every outcome, cancellation included.
   #
-  # It deletes exactly the tags the build jobs reported pushing - one digest
-  # artifact per pushed tag - so it never has to guess at architecture names,
-  # and a build that failed before its push leaves nothing to clean up.
+  # It deletes exactly the tags the build jobs declared before pushing - one
+  # intent artifact per tag - so it never has to guess at architecture names.
+  # A tag that was declared but never pushed answers 404, which is fine.
   cleanup-arch-tags:
     name: Remove architecture fragment tags
     needs: [meta, build, create-manifest]
@@ -1353,13 +1302,13 @@ jobs:
       contents: read
 
     steps:
-      - name: Download image digests
-        id: digests
+      - name: Download fragment tag intents
+        id: intents
         continue-on-error: true
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
-          pattern: image-digest-*
-          path: digests/
+          pattern: fragment-intent-*
+          path: intents/
           merge-multiple: true
 
       - name: Delete architecture tags
@@ -1379,9 +1328,9 @@ jobs:
           fi
 
           shopt -s nullglob
-          digest_files=(digests/*)
-          if (( ${#digest_files[@]} == 0 )); then
-            echo "No image digests were published - no architecture tags exist."
+          intent_files=(intents/*)
+          if (( ${#intent_files[@]} == 0 )); then
+            echo "No fragment tag was declared - nothing was pushed."
             exit 0
           fi
 
@@ -1404,7 +1353,7 @@ jobs:
 
           api_base="https://hub.docker.com/v2/namespaces/${DOCKERHUB_USERNAME}/repositories/${REPOSITORY}/tags"
 
-          for file in "${digest_files[@]}"; do
+          for file in "${intent_files[@]}"; do
             tag="${VERSION}-$(basename "$file")"
             status_code="$(curl -sS -o /dev/null -w '%{http_code}' \
               -X DELETE \

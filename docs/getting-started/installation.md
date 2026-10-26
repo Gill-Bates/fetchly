@@ -78,8 +78,9 @@ DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile -t fetchly .
 ```
 
 !!! warning "arm64 builds are slow"
-    On arm64 there is no prebuilt Essentia wheel, so the image compiles it from
-    source. Expect a long build; use the published image where you can.
+    The image compiles Essentia from source on every architecture (see
+    [Essentia Build](../development/essentia.md)). Expect a long first build; use
+    the published image where you can.
 
 ## Standalone (without Docker)
 

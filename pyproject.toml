@@ -293,6 +293,8 @@ ignore = [
 "app/utils/banner.py" = ["T20", "W291"]
 # Repo tooling: writing to stdout is the whole point of these scripts.
 "tools/*.py" = ["T20"]
+# Container-side check script: stdout is its report.
+"docker/*.py" = ["T20"]
 
 [tool.ruff.format]
 quote-style = "double"

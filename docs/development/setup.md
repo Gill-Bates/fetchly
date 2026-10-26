@@ -222,14 +222,14 @@ arm64: essentia is built from source on both, so that a multi-arch release
 ships the same version of it everywhere rather than a PyPI wheel on one
 architecture and a source build on the other. Upstream publishes no
 linux/aarch64 wheel at all, which is why there is no version to take instead.
-A plain `docker build` compiles `master`; `ESSENTIA_REF` selects any commit.
+Essentia follows upstream master (see [Essentia Build](essentia.md)).
 
-Nothing else is pinned either — not the base image, not ffmpeg, not deno,
+Nothing is pinned — not the base image, not ffmpeg, not deno,
 not yt-dlp, and not the Python dependencies. A local build therefore takes
 whatever is newest at the moment each layer runs. A release must not, because
 its two architecture jobs run on separate runners and would each resolve
 "newest" for themselves, so `.github/workflows/docker-build.yml` resolves every
-one of those once — the base image by digest, essentia to a commit, ffmpeg to an
+one of those once — the base image by digest, ffmpeg to an
 immutable dated BtbN release, the dependency set to a resolved
 `constraints.txt` — and passes the same values to both builds. Before the
 manifest is published it compares every version present in the two finished

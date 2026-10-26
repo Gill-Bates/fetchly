@@ -60,7 +60,7 @@ jobs:
       # The tests import the app, so the web stack has to be present - but
       # torch, beat-this and essentia are gigabytes of audio toolchain the
       # suite never touches. Both lists come out of pyproject.toml so the
-      # pins stay in one place.
+      # dependency policy stays in one place.
       - name: Install dependencies
         run: |
           set -euo pipefail
@@ -167,8 +167,8 @@ jobs:
         with:
           persist-credentials: false
 
-      # The image is only ever built from a release tag, so without these two
-      # steps a broken entrypoint or Dockerfile stays invisible until the
+      # The image is only ever built from a release tag, so without these cheap
+      # checks a broken entrypoint, Essentia script or Dockerfile stays invisible until the
       # release itself - the one run where a failure is most expensive. The
       # full multi-GB build is far too slow for a PR; these are the cheap half
       # that still catches a typo.
@@ -177,6 +177,18 @@ jobs:
       # it is parsed as bash rather than sh. -n parses without executing.
       - name: Entrypoint shell syntax
         run: bash -n docker/entrypoint.sh
+      - name: Essentia build script syntax
+        run: bash -n docker/build-essentia.sh
+      # Parse only: the check imports essentia, which this job does not install.
+      # ast.parse writes no .pyc into the checkout.
+      - name: Essentia verifier syntax
+        run: python3 -c 'import ast, sys; ast.parse(open(sys.argv[1]).read())' docker/essentia_check.py
+      # Essentia follows upstream master. CI resolves one SHA per release and
+      # passes it as a build arg; a committed pin would silently override that.
+      - name: Essentia is not pinned in the repository
+        run: |
+          test ! -e docker/essentia.ref
+          ! grep -nE 'ESSENTIA_REF=("?)[0-9a-f]{40}' docker/build-essentia.sh docker/Dockerfile
 
       # BuildKit's own linter: resolves the stages, ARG/ENV references and
       # COPY --from targets and reports on them without running a single
