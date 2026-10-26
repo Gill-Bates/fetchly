@@ -15,12 +15,12 @@ from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..audio.naming import apply_bpm_tag
-from ..auth.rate_limit import limiter
+from ..auth.rate_limit import rate_limit
 from ..db import DOWNLOADABLE_STATUSES, get_job
 from ..integrations.lalal.policy import (
     LALAL_MAX_DURATION_MINUTES,
@@ -123,16 +123,13 @@ def _duration_validation_error(end: float, raw_duration: object) -> JSONResponse
     )
 
 
-@router.post("/{job_id}", response_model=None)
-@limiter.limit("10/minute")
+@router.post("/{job_id}", response_model=None, dependencies=[Depends(rate_limit("10/minute"))])
 async def trim_audio(
-    request: Request,
     job_id: uuid.UUID,
     body: TrimRequest,
     _user: str = Depends(require_user_json),
 ) -> TrimResponse | JSONResponse:
     """Trim an audio file to the requested start and end times."""
-    _ = request
     resolve_job_path = _require_init()
 
     start = body.start
@@ -284,16 +281,13 @@ async def trim_audio(
         await _unlink_file(temp_file)
 
 
-@router.delete("/{job_id}", response_model=None)
-@limiter.limit("30/minute")
+@router.delete("/{job_id}", response_model=None, dependencies=[Depends(rate_limit("30/minute"))])
 async def delete_trim(
-    request: Request,
     job_id: uuid.UUID,
     trim_id: str | None = None,
     _user: str = Depends(require_user_json),
 ):
     """Delete one trim file (``trim_id``) or all of a job's trim files."""
-    _ = request
     _require_init()
 
     job_id_str = str(job_id)
@@ -311,16 +305,13 @@ async def delete_trim(
     return {"ok": True, "deleted": deleted_count}
 
 
-@router.get("/{job_id}/{trim_id}/download", response_model=None)
-@limiter.limit("30/minute")
+@router.get("/{job_id}/{trim_id}/download", response_model=None, dependencies=[Depends(rate_limit("30/minute"))])
 async def download_trim(
-    request: Request,
     job_id: uuid.UUID,
     trim_id: str,
     _user: str = Depends(require_user_json),
 ):
     """Download a trimmed WAV file (``trim_id`` format: startMs_endMs)."""
-    _ = request
     _require_init()
 
     trim_id = _validate_trim_id(trim_id)

@@ -150,7 +150,7 @@ what keeps `TestClient(app)` usable without a full app boot in most tests.
   `/logout`, and every state-changing route under the `/api` prefix
 - `ProxyHeadersMiddleware` (Uvicorn) — trusts `X-Forwarded-*` only from
   `FORWARDED_ALLOW_IPS`
-- SlowAPI's limiter — per-route rate limits keyed on client IP
+- The in-house sliding-window limiter (`auth/rate_limit.py`) — per-route rate limits keyed on client IP
 
 ## Frontend
 

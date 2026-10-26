@@ -20,12 +20,12 @@ from time import time
 from typing import Annotated, Any, Literal
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, StringConstraints
 
 from ..audio.tags import stop_ffmpeg_process
-from ..auth.rate_limit import limiter
+from ..auth.rate_limit import rate_limit
 from ..db import DOWNLOADABLE_STATUSES, get_job, get_settings, set_settings, update_job
 from ..integrations.lalal.policy import (
     LALAL_MINUTES_UNKNOWN,
@@ -485,13 +485,9 @@ async def _invalidate_auth_validation_cache() -> None:
         logger.warning("Could not expire the Lalal.ai validation cache", exc_info=True)
 
 
-@router.get("/status", response_model=AuthStatusResponse)
-@limiter.limit("30/minute")
-async def api_lalal_status(
-    request: Request, force_refresh: bool = False, _user: str = Depends(require_user)
-) -> AuthStatusResponse:
+@router.get("/status", response_model=AuthStatusResponse, dependencies=[Depends(rate_limit("30/minute"))])
+async def api_lalal_status(force_refresh: bool = False, _user: str = Depends(require_user)) -> AuthStatusResponse:
     """Return saved Lalal.ai auth status and validation state."""
-    _ = request
     generation = _auth_generation
     settings = await asyncio.to_thread(get_settings, include_secrets=True)
     email = str(settings.get("lalalaai_email", "")).strip()
@@ -581,16 +577,12 @@ async def api_lalal_status(
     )
 
 
-@router.post("/auth/activation-key", response_model=OperationResponse)
-@limiter.limit("5/minute")
+@router.post("/auth/activation-key", response_model=OperationResponse, dependencies=[Depends(rate_limit("5/minute"))])
 async def api_lalal_auth_activation_key(
-    request: Request,
     body: ActivationKeyRequest,
     _user: str = Depends(require_user),
 ) -> OperationResponse:
     """Validate and store a manually provided Lalal activation key."""
-    _ = request
-
     generation = _auth_generation
     email = body.email.lower()
     activation_key = body.activation_key
@@ -640,10 +632,8 @@ async def api_lalal_auth_activation_key(
     return OperationResponse(message="Activation key saved")
 
 
-@router.post("/auth/logout", response_model=OperationResponse)
-@limiter.limit("10/minute")
-async def api_lalal_auth_logout(request: Request, _user: str = Depends(require_user)) -> OperationResponse:
-    _ = request
+@router.post("/auth/logout", response_model=OperationResponse, dependencies=[Depends(rate_limit("10/minute"))])
+async def api_lalal_auth_logout(_user: str = Depends(require_user)) -> OperationResponse:
     await _commit_auth_settings(
         {
             "lalalaai_email": "",
@@ -662,10 +652,8 @@ async def api_lalal_auth_logout(request: Request, _user: str = Depends(require_u
     return OperationResponse(message="Logged out")
 
 
-@router.post("/{job_id}")
-@limiter.limit("5/minute")
+@router.post("/{job_id}", dependencies=[Depends(rate_limit("5/minute"))])
 async def lalal_split(
-    request: Request,  # noqa: ARG001  # @limiter.limit reads it by name
     job_id: uuid.UUID,
     stem: str = _STEM_VOCALS,
     trimmed: bool = False,
@@ -836,10 +824,8 @@ async def lalal_split(
         raise HTTPException(status_code=500, detail="Processing failed") from exc
 
 
-@router.get("/download/{job_id}")
-@limiter.limit("10/minute")
+@router.get("/download/{job_id}", dependencies=[Depends(rate_limit("10/minute"))])
 async def lalal_download(
-    request: Request,
     job_id: uuid.UUID,
     stem: str = _STEM_VOCALS,
     trimmed: bool = False,
@@ -847,7 +833,6 @@ async def lalal_download(
     _user: str = Depends(require_user_json),
 ):
     """Download a processed Lalal.ai stem ('vocals' or 'instrumental')."""
-    _ = request
     _require_initialized()
 
     _validate_stem(stem)

@@ -1037,7 +1037,7 @@ def create_share_link(job_id: str, max_uses: int) -> str:
 
         # 16 random bytes render as 22 URL-safe characters (128 bits). The token
         # is the only authorization a public share download has, so its length -
-        # not the SlowAPI rate limit on the redeem route - has to make guessing
+        # not the rate limit on the redeem route - has to make guessing
         # infeasible. Still short enough to paste into a chat.
         # Retry on the (vanishingly rare) primary-key collision instead of
         # letting the insert raise.

@@ -23,7 +23,6 @@ from fastapi import FastAPI, Request
 from fastapi.openapi.docs import get_redoc_html, get_swagger_ui_html
 from fastapi.responses import JSONResponse
 from fastapi.templating import Jinja2Templates
-from slowapi.errors import RateLimitExceeded
 from starlette.datastructures import MutableHeaders
 from starlette.responses import Response
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
@@ -33,7 +32,6 @@ from middleware.csrf import CSRFMiddleware
 
 from .auth.rate_limit import (
     get_trusted_proxy_hosts,
-    limiter,
     validate_trusted_proxy_hosts,
 )
 from .auth.session import refresh_session_settings_cache, resolve_cookie_secure
@@ -742,21 +740,15 @@ app.add_middleware(
     protected_paths=("/login", "/logout", "/api"),
 )
 app.add_middleware(SecurityHeadersMiddleware)
-app.state.limiter = limiter
 trusted_proxy_hosts = get_trusted_proxy_hosts()
 trusted_proxy_hosts = validate_trusted_proxy_hosts(trusted_proxy_hosts)
-# Decorator-based SlowAPI checks use request.client.host, so proxy headers must
+# Rate limits read request.client.host, so proxy headers must
 # wrap the app before route handlers run when requests come through Caddy.
 app.add_middleware(ProxyHeadersMiddleware, trusted_hosts=trusted_proxy_hosts)
 # This must be added after ProxyHeadersMiddleware: Starlette wraps the most
 # recently added middleware outside the earlier ones, preserving the raw peer
 # before ProxyHeadersMiddleware applies the validated X-Forwarded-* headers.
 app.add_middleware(OriginalClientMiddleware)
-
-
-@app.exception_handler(RateLimitExceeded)
-async def handle_rate_limit_exceeded(_request: Request, _exc: RateLimitExceeded) -> JSONResponse:
-    return JSONResponse(status_code=429, content={"detail": "Rate limit exceeded"})
 
 
 app.include_router(auth_router)

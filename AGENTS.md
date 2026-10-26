@@ -27,7 +27,7 @@ fetchly is a full-stack application that enables users to download, analyze, tri
 - **Database:** `/app/db.py` — raw `sqlite3` (stdlib, synchronous), hand-written SQL, `sqlite3.Row` results. No ORM, no SQLAlchemy, no Pydantic persistence models.
 - **Business logic:** `/app/audio/` (BPM and audio analysis), `/app/integrations/lalal/` (Lalal.ai client and policy), `/app/runtime/governor.py` (resource limits), `/app/auth/session.py` (HMAC-signed session tokens)
 - **Utilities:** `/app/utils/` (version detection, changelog rendering, host stats, watermark rendering, cookie import/validation, template filters, housekeeping)
-- **Dependencies:** FastAPI, Starlette, Uvicorn, Gunicorn, yt-dlp (installed unpinned, outside `pyproject.toml`), yt-dlp-ejs, essentia (audio features), beat-this (BPM, pulls torch), soundfile (beat-this's audio decoder), slowapi (rate limiting), pydantic (request validation)
+- **Dependencies:** FastAPI, Starlette, Uvicorn, Gunicorn, yt-dlp (installed unpinned, outside `pyproject.toml`), yt-dlp-ejs, essentia (audio features), beat-this (BPM, pulls torch), soundfile (beat-this's audio decoder), pydantic (request validation)
 
 ### Working on Frontend Features
 - **Static assets:** `/app/static/` — `js/` (ES modules, served as-is), `style.css` and `login.css` at the directory root, `img/`, `fonts/` (self-hosted), `vendor/` (Bootstrap 5 bundle, WaveSurfer.js)
@@ -57,7 +57,7 @@ fetchly is a full-stack application that enables users to download, analyze, tri
 - `app/routes/*` import `app/db.py`; `app/workers/worker.py` imports `db`, `runtime.governor` and `workers.analysis_worker` but **not** `app/routes/`
 
 ### External
-- **Runtime:** FastAPI, Uvicorn, uvicorn-worker, Gunicorn, Jinja2, Pydantic, Slowapi, Starlette, yt-dlp, yt-dlp-ejs, essentia, beat-this, torch and torchaudio (CPU wheels), httpx, markdown, markupsafe, nh3, numpy, python-multipart
+- **Runtime:** FastAPI, Uvicorn, uvicorn-worker, Gunicorn, Jinja2, Pydantic, Starlette, yt-dlp, yt-dlp-ejs, essentia, beat-this, torch and torchaudio (CPU wheels), httpx, markdown, markupsafe, nh3, numpy, python-multipart
 - **Development:** pytest, pytest-asyncio, pytest-cov, ruff (all pinned; runtime deps deliberately are not)
 - **Documentation:** MkDocs, mkdocs-material, pymdown-extensions and the plugins listed under `[project.optional-dependencies] docs`
 - **Frontend tooling:** ESLint, Stylelint, Playwright, @axe-core/playwright, pixelmatch, pngjs

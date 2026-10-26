@@ -34,7 +34,7 @@ from ..audio.tags import (
     mp3_path_for_source,
     stop_ffmpeg_process,
 )
-from ..auth.rate_limit import limiter
+from ..auth.rate_limit import rate_limit
 from ..db import DOWNLOADABLE_STATUSES, get_job, get_settings
 from ..runtime.governor import governor
 from ..utils.fs import (
@@ -357,8 +357,7 @@ async def _ensure_mp3(file_path: Path, bpm: object = None) -> Path:
     return mp3_path
 
 
-@router.get("/job/{job_id}", response_class=HTMLResponse)
-@limiter.limit("120/minute")
+@router.get("/job/{job_id}", response_class=HTMLResponse, dependencies=[Depends(rate_limit("120/minute"))])
 async def job_page(request: Request, job_id: uuid.UUID):
     redirect = require_html_auth(request)
     if redirect:
@@ -431,8 +430,7 @@ async def build_job_file_response(job_id: uuid.UUID) -> Response:
     )
 
 
-@router.get("/download/{job_id}")
-@limiter.limit("30/minute")
+@router.get("/download/{job_id}", dependencies=[Depends(rate_limit("30/minute"))])
 async def download(request: Request, job_id: uuid.UUID):
     redirect = require_html_auth(request)
     if redirect:
@@ -441,9 +439,8 @@ async def download(request: Request, job_id: uuid.UUID):
     return await build_job_file_response(job_id)
 
 
-@router.get("/audio-source/{job_id}")
-@limiter.limit("60/minute")
-async def audio_source(request: Request, job_id: uuid.UUID, _user: str = Depends(require_user_json)):
+@router.get("/audio-source/{job_id}", dependencies=[Depends(rate_limit("60/minute"))])
+async def audio_source(job_id: uuid.UUID, _user: str = Depends(require_user_json)):
     """Serve a job's stored audio inline for the waveform/trim UI.
 
     ``X-Audio-Quality`` reports provenance - the stored source or a converted
@@ -451,7 +448,6 @@ async def audio_source(request: Request, job_id: uuid.UUID, _user: str = Depends
     a codec-quality claim: a kept-as-is source can itself be lossy.
     Inline, unlike the /download attachment.
     """
-    _ = request  # required by @limiter.limit, unused now that auth is a Depends()
     try:
         job, file_path = await _get_ready_job_file(job_id)
     except HTTPException as exc:
@@ -503,10 +499,8 @@ async def favicon():
     return Response(status_code=204)
 
 
-@router.get("/thumbnail/{job_id}")
-@limiter.limit("120/minute")
-async def thumbnail(request: Request, job_id: uuid.UUID, _user: str = Depends(require_user_json)):
-    _ = request  # required by @limiter.limit, unused now that auth is a Depends()
+@router.get("/thumbnail/{job_id}", dependencies=[Depends(rate_limit("120/minute"))])
+async def thumbnail(job_id: uuid.UUID, _user: str = Depends(require_user_json)):
     try:
         thumb_path = await _get_thumbnail_path(job_id)
     except HTTPException as exc:

@@ -88,7 +88,6 @@ dependencies = [
     "numpy",
     "pydantic",
     "python-multipart",
-    "slowapi",
     "soundfile",
     "starlette",
     "torch",

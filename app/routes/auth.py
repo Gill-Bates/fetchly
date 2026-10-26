@@ -14,11 +14,11 @@ import logging
 from hashlib import pbkdf2_hmac, sha256
 from typing import TYPE_CHECKING, Final
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..auth.rate_limit import limiter
+from ..auth.rate_limit import rate_limit
 from ..auth.session import (
     SESSION_COOKIE,
     create_session,
@@ -214,8 +214,7 @@ async def _do_logout(request: Request) -> RedirectResponse:
     return response
 
 
-@router.get("/login", response_class=HTMLResponse)
-@limiter.limit("20/minute")
+@router.get("/login", response_class=HTMLResponse, dependencies=[Depends(rate_limit("20/minute"))])
 async def login_page(request: Request):
     if current_user(request):
         return RedirectResponse(url="/", status_code=303)
@@ -241,8 +240,7 @@ class LoginRequest(BaseModel):
     captcha_token: str = Field(default="", max_length=1024)
 
 
-@router.post("/login")
-@limiter.limit("5/minute")
+@router.post("/login", dependencies=[Depends(rate_limit("5/minute"))])
 async def login(request: Request, body: LoginRequest):
     if not is_authentication_enabled():
         # No login gate: skip CAPTCHA/credential checks; current_user() grants
@@ -272,7 +270,6 @@ async def login(request: Request, body: LoginRequest):
     return response
 
 
-@router.post("/logout")
-@limiter.limit("20/minute")
+@router.post("/logout", dependencies=[Depends(rate_limit("20/minute"))])
 async def logout_post(request: Request):
     return await _do_logout(request)

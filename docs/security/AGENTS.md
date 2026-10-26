@@ -13,7 +13,7 @@ Pages here guide administrators through securing fetchly deployments against com
 | `overview.md`       | Security overview: threat model, built-in protections, assumptions (single-user app by default), security by design                                                                                                                                      |
 | `authentication.md` | Authentication security: password requirements, brute-force protection, session management, timeout settings, CAPTCHA configuration                                                                                                                      |
 | `best-practices.md` | Deployment best practices: HTTPS/TLS enforcement, firewall rules, network isolation, reverse proxy hardening, monitoring                                                                                                                                 |
-| `rate-limiting.md`  | Rate limiting: per-endpoint slowapi limits, trusted proxies via `FORWARDED_ALLOW_IPS`, client-IP resolution behind a reverse proxy, DDoS mitigation at the proxy layer. Counters are in-process memory only — there is no Redis or other shared backend. |
+| `rate-limiting.md`  | Rate limiting: per-endpoint sliding-window limits, trusted proxies via `FORWARDED_ALLOW_IPS`, client-IP resolution behind a reverse proxy, DDoS mitigation at the proxy layer. Counters are in-process memory only — there is no Redis or other shared backend. |
 | `anti-bot.md`       | Anti-bot protection: CAPTCHA setup (honeypot + token), bot scoring, false-positive handling                                                                                                                                                              |
 
 ## For AI Agents
@@ -82,7 +82,7 @@ from `SameSite` plus the origin check, not from hiding the cookie.
 - **SQL Injection:** `app/db.py` writes raw SQL by hand, always parameterized. Status values are additionally validated against a fixed set before they reach a query.
 - **XSS:** HTML sanitization via nh3 (changelog rendering); Jinja2 auto-escaping
 - **CSRF:** double-submit tokens on the `/login`, `/logout` and `/api` prefixes
-- **Brute force:** slowapi rate limiting (`5/minute` on the login POST, `20/minute` on the surrounding auth routes) plus the invisible anti-bot check
+- **Brute force:** sliding-window rate limiting (`5/minute` on the login POST, `20/minute` on the surrounding auth routes) plus the invisible anti-bot check
 - **Untrusted input:** submitted URLs reach yt-dlp as subprocess arguments — validation before that boundary is the relevant control
 - **Session handling:** stateless HMAC-SHA256 tokens with an absolute lifetime (`session_max_days`, 1–7 days); `Secure` when `FETCHLY_BEHIND_HTTPS=1`
 

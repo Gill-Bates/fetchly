@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from app import db
 from app.auth import session
-from app.auth.rate_limit import limiter
+from app.auth.rate_limit import reset_rate_limits
 from app.integrations.lalal import client as lalal
 from app.main import _governor_config_from_settings
 from app.runtime.governor import _auto_concurrent_fragments, governor
@@ -220,7 +220,7 @@ class RuntimeSettingsTests(WebAppTestCase):
 
     def _post_settings_unthrottled(self, body: dict[str, object]):
         # A sweep over every bound would otherwise trip the settings rate limit.
-        limiter.reset()
+        reset_rate_limits()
         return self._post_settings(body)
 
     def test_settings_api_enforces_the_declared_bounds_of_every_integer_setting(self) -> None:

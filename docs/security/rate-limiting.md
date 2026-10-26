@@ -1,7 +1,7 @@
 # Rate Limiting
 
-Every route that costs work carries a per-client limit, enforced by
-[SlowAPI](https://github.com/laurentS/slowapi) and keyed on the client IP (IPv6: the /64). The
+Every route that costs work carries a per-client limit, enforced by an
+in-house sliding-window limiter and keyed on the client IP (IPv6: the /64). The
 dashboard (`GET /`), the settings page (`GET /settings`), `GET /favicon.ico` and the
 `GET /health` probe carry no limit — they render a template or return a constant, and
 the data behind them is fetched by the `/api/*` routes below, which are limited.
@@ -25,6 +25,26 @@ aggregated; a job's stored requester IP stays the full address.
 Configuring it wrongly is not a silent problem either: every request then appears to
 come from the proxy, so all clients share one bucket and the first busy user locks out
 everyone else. See [Reverse Proxy](../configuration/reverse-proxy.md).
+
+## Design guarantees
+
+- **Per client, never per account.** A limit is keyed on the client IP (IPv6: the /64)
+  plus the route, and on nothing a client can choose: no username, session or
+  header/body value. fetchly has no account lockout by design — with a single admin
+  credential, a per-account counter would let anyone lock the administrator out.
+- **One client cannot throttle another.** Flooding from one address only exhausts that
+  address's own budget on that route. Only requests that are admitted are recorded, so
+  hammering never extends a block beyond the window.
+- **Bounded memory without lockout.** Each route tracks at most 10,000 clients. When the
+  table is full, expired entries are dropped first, then the least recently used one; a
+  flood of fresh addresses can at worst reset other callers' counters, never reject them.
+- **Untrusted forwarded headers are ignored.** `X-Forwarded-For` only counts when the
+  socket peer is in `FORWARDED_ALLOW_IPS`, so a client cannot pick someone else's bucket.
+
+!!! warning "Shared addresses share a bucket"
+    Clients behind the same NAT or proxy appear as one address and share one budget. Behind
+    a reverse proxy, `FORWARDED_ALLOW_IPS` must contain the proxy; otherwise every user
+    shares the proxy's bucket and a single abusive client throttles everybody.
 
 ## Limits by route
 
@@ -133,12 +153,18 @@ disconnected rather than allowed to grow its queue without bound.
 
 ## Exceeding a limit
 
-The response is `429 Too Many Requests`. The UI surfaces it as a toast; API clients
-should back off and retry.
+The response is `429 Too Many Requests` with the body `{"detail": "Rate limit exceeded"}`
+and a `Retry-After` header giving the seconds (at least 1) until a request is admitted
+again. The UI surfaces it as a toast; API clients should wait that long before retrying.
+
+The window slides: only requests admitted within the last minute count, so there is no
+fixed-boundary burst of twice the limit. Rejected requests are not counted, so backing
+off is enough to recover. Each route has its own budget per client. If the limiter itself
+fails, the request is rejected rather than admitted.
 
 ## Tuning
 
-The limits are compiled into the route decorators and are not configurable at runtime —
+The limits are compiled into the route declarations and are not configurable at runtime —
 they encode a security posture rather than a capacity setting. If a limit genuinely
 blocks a legitimate workflow, open an issue rather than working around it with a proxy
 rule; the numbers reflect what each route costs and what abuse of it would achieve.

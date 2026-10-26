@@ -21,7 +21,7 @@ The app module is the heart of fetchly: it handles HTTP requests, runs an in-pro
 | `workers/`            | `worker.py` (download/transcode job processor) and `analysis_worker.py` (audio analysis submission)                                                 |
 | `audio/`              | BPM and audio analysis: `analysis.py`, `cache.py`, `hashing.py`, `bpm.py`, `beat_this.py`, `cluster.py`, `naming.py`, `normalization.py`, `tags.py` |
 | `integrations/lalal/` | Lalal.ai: `client.py` (API client) and `policy.py` (duration, quota and size guards)                                                                |
-| `auth/`               | `session.py` (HMAC session tokens), `credentials.py` (admin account), `rate_limit.py` (trusted proxies, client IP, slowapi limiter)                 |
+| `auth/`               | `session.py` (HMAC session tokens), `credentials.py` (admin account), `rate_limit.py` (trusted proxies, client IP, sliding-window limiter)               |
 | `runtime/`            | `governor.py` (resource governor) and `gunicorn_logging.py` (`FetchlyGunicornLogger`)                                                               |
 | `utils/`              | Utilities: version, changelog, host stats, watermark, cookies, platform quirks, template filters, housekeeping, public URL                          |
 | `static/`             | Web assets: ES modules, CSS, images, self-hosted fonts, vendored Bootstrap 5 and WaveSurfer.js                                                      |
@@ -57,7 +57,7 @@ The app module is the heart of fetchly: it handles HTTP requests, runs an in-pro
 - **Worker pick-up:** `workers/worker.py` consumes an in-process `queue.Queue` sized by `WORKER_QUEUE_MAXSIZE`; a full queue rejects submissions with `503`. It does not poll the database on a timer.
 - **Analysis flow:** after download the job moves to `analysis`, the analysis worker runs, results are written, and the status becomes `analysis_done`
 - **Error handling:** worker exceptions are caught and logged, and the job is set to `error` with a message; the user can retry
-- **Rate limiting:** slowapi `@limiter.limit()` on sensitive routes; client IP resolved through the trusted-proxy logic in `auth/rate_limit.py`
+- **Rate limiting:** in-house sliding-window limiter, `dependencies=[Depends(rate_limit("N/minute"))]` on sensitive routes; client IP resolved through the trusted-proxy logic in `auth/rate_limit.py`
 - **CSRF:** `CSRFMiddleware` from `/middleware`, applied to the `/login`, `/logout` and `/api` prefixes
 
 ## Dependencies
@@ -72,7 +72,7 @@ The app module is the heart of fetchly: it handles HTTP requests, runs an in-pro
 - **Media:** yt-dlp (installed unpinned, outside `pyproject.toml`), yt-dlp-ejs, FFmpeg (subprocess)
 - **Audio:** essentia (features; compiled from source in the image), beat-this (BPM, pulls torch), soundfile (beat-this's audio decoder since TorchAudio 2.9 moved decoding to the optional TorchCodec backend), numpy
 - **Database:** SQLite via the stdlib `sqlite3` module
-- **Security:** slowapi (rate limiting), nh3 (HTML sanitizing), stdlib `hmac`/`secrets` for tokens
+- **Security:** nh3 (HTML sanitizing), stdlib `hmac`/`secrets` for tokens
 - **HTTP:** httpx (outbound calls to Lalal.ai and GitHub)
 - **Templating:** Jinja2, markupsafe, markdown
 
