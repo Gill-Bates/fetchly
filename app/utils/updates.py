@@ -23,6 +23,7 @@ import os
 import re
 import tempfile
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -172,6 +173,56 @@ async def _read_response_bytes(client: httpx.AsyncClient, url: str, *, max_bytes
         return response, bytes(body)
 
 
+async def _highest_stable_tag(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    max_pages: int,
+    tag_of: Callable[[dict[str, Any]], str | None],
+) -> str | None:
+    """Return the highest non-prerelease tag across up to *max_pages* list pages.
+
+    *tag_of* extracts an entry's tag, or returns None to skip the entry.
+    """
+    best_tag: str | None = None
+    best_parts: tuple[int, ...] = ()
+    next_url: str | None = url
+
+    for _ in range(max_pages):
+        if next_url is None:
+            break
+        response, body = await _read_response_bytes(client, next_url, max_bytes=_MAX_API_RESPONSE_BYTES)
+        payload = json.loads(body)
+        if not isinstance(payload, list):
+            break
+
+        for entry in payload:
+            if not isinstance(entry, dict):
+                continue
+            tag = tag_of(entry)
+            if not tag or _is_prerelease_tag(tag):
+                continue
+            parts = _parse_version(tag)
+            if parts and parts > best_parts:
+                best_tag, best_parts = tag, parts
+
+        next_url = response.links.get("next", {}).get("url")
+
+    return best_tag
+
+
+def _release_tag(release: dict[str, Any]) -> str | None:
+    """Tag of a published release; None for drafts and flagged prereleases."""
+    if release.get("draft") or release.get("prerelease"):
+        return None
+    return str(release.get("tag_name") or "").strip()
+
+
+def _git_tag(entry: dict[str, Any]) -> str | None:
+    """Name of a Git tag entry."""
+    return str(entry.get("name") or "").strip()
+
+
 async def _fetch_latest_release(client: httpx.AsyncClient, repo: str) -> str | None:
     """Return the highest published, non-prerelease release tag of *repo*.
 
@@ -179,33 +230,12 @@ async def _fetch_latest_release(client: httpx.AsyncClient, repo: str) -> str | N
     some repos leave unset on betas. Filters on flag *and* tag name, takes the
     highest version (not the most recent), bounded to _MAX_RELEASE_PAGES.
     """
-    best_tag: str | None = None
-    best_parts: tuple[int, ...] = ()
-    url: str | None = f"https://api.github.com/repos/{repo}/releases?per_page={_RELEASES_PER_PAGE}"
-
-    for _ in range(_MAX_RELEASE_PAGES):
-        if url is None:
-            break
-        response, body = await _read_response_bytes(client, url, max_bytes=_MAX_API_RESPONSE_BYTES)
-        payload = json.loads(body)
-        if not isinstance(payload, list):
-            break
-
-        for release in payload:
-            if not isinstance(release, dict):
-                continue
-            if release.get("draft") or release.get("prerelease"):
-                continue
-            tag = str(release.get("tag_name") or "").strip()
-            if not tag or _is_prerelease_tag(tag):
-                continue
-            parts = _parse_version(tag)
-            if parts and parts > best_parts:
-                best_tag, best_parts = tag, parts
-
-        url = response.links.get("next", {}).get("url")
-
-    return best_tag
+    return await _highest_stable_tag(
+        client,
+        f"https://api.github.com/repos/{repo}/releases?per_page={_RELEASES_PER_PAGE}",
+        max_pages=_MAX_RELEASE_PAGES,
+        tag_of=_release_tag,
+    )
 
 
 async def _fetch_latest_tag(client: httpx.AsyncClient, repo: str) -> str | None:
@@ -214,31 +244,12 @@ async def _fetch_latest_tag(client: httpx.AsyncClient, repo: str) -> str | None:
     fetchly ships from Git tags (a GitHub Release may lag or never appear), so
     the tag list is the authoritative self-update source.
     """
-    best_tag: str | None = None
-    best_parts: tuple[int, ...] = ()
-    url: str | None = f"https://api.github.com/repos/{repo}/tags?per_page=100"
-
-    for _ in range(_MAX_TAG_PAGES):
-        if url is None:
-            break
-        response, body = await _read_response_bytes(client, url, max_bytes=_MAX_API_RESPONSE_BYTES)
-        payload = json.loads(body)
-        if not isinstance(payload, list):
-            break
-
-        for entry in payload:
-            if not isinstance(entry, dict):
-                continue
-            tag = str(entry.get("name") or "").strip()
-            if not tag or _is_prerelease_tag(tag):
-                continue
-            parts = _parse_version(tag)
-            if parts and parts > best_parts:
-                best_tag, best_parts = tag, parts
-
-        url = response.links.get("next", {}).get("url")
-
-    return best_tag
+    return await _highest_stable_tag(
+        client,
+        f"https://api.github.com/repos/{repo}/tags?per_page=100",
+        max_pages=_MAX_TAG_PAGES,
+        tag_of=_git_tag,
+    )
 
 
 def _ffmpeg_build_key(value: str | None) -> tuple[tuple[int, ...], int] | None:

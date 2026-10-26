@@ -88,12 +88,20 @@ def _is_session_expired(session: SessionData, now: int) -> bool:
     return now >= session.issued_at + _get_max_lifetime_seconds()
 
 
-def refresh_session_settings_cache() -> None:
+def refresh_session_settings_cache(*, session_version_floor: int | None = None) -> None:
     """Refresh the small session-related settings snapshot from the database."""
     try:
         settings = get_settings(include_internal=True)
     except (sqlite3.Error, OSError) as exc:
         logger.warning("Failed to refresh session settings cache: %s", exc)
+        if session_version_floor is not None:
+            with _SESSION_SETTINGS_LOCK:
+                cached_version = _SESSION_SETTINGS_CACHE.get("session_version", 0)
+                try:
+                    cached_version = max(0, int(cached_version or 0))
+                except (TypeError, ValueError):
+                    cached_version = 0
+                _SESSION_SETTINGS_CACHE["session_version"] = max(cached_version, session_version_floor)
         return
 
     refreshed = {
@@ -101,6 +109,11 @@ def refresh_session_settings_cache() -> None:
         "session_max_days": settings.get("session_max_days", _DEFAULT_MAX_DAYS),
         "enable_authentication": bool(settings.get("enable_authentication", True)),
     }
+    if session_version_floor is not None:
+        try:
+            refreshed["session_version"] = max(int(refreshed["session_version"] or 0), session_version_floor)
+        except (TypeError, ValueError):
+            refreshed["session_version"] = session_version_floor
     with _SESSION_SETTINGS_LOCK:
         _SESSION_SETTINGS_CACHE.clear()
         _SESSION_SETTINGS_CACHE.update(refreshed)
@@ -140,11 +153,11 @@ def invalidate_current_session(username: str) -> None:
     every user at once (fetchly is single-admin, so that is the only user).
     """
     try:
-        set_settings_and_bump_session_version({})
+        next_version = set_settings_and_bump_session_version({})
     except (sqlite3.Error, OSError, ValueError) as exc:
         logger.warning("Failed to bump session_version on logout for %s: %s", username, exc)
         raise
-    refresh_session_settings_cache()
+    refresh_session_settings_cache(session_version_floor=next_version)
 
 
 def get_cached_authentication_enabled() -> bool:

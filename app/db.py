@@ -1474,9 +1474,7 @@ def _serialize_settings(data: dict[str, Any]) -> dict[str, str]:
     for key, raw_value in data.items():
         parser = _SETTINGS_TYPES.get(key, str)
         parsed_value = parser(raw_value)
-        values[key] = (
-            "true" if parsed_value else "false"
-        ) if isinstance(parsed_value, bool) else str(parsed_value)
+        values[key] = ("true" if parsed_value else "false") if isinstance(parsed_value, bool) else str(parsed_value)
     return values
 
 

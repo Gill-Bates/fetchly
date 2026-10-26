@@ -19,7 +19,6 @@ import logging
 import mimetypes
 import threading
 import uuid
-from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -33,6 +32,7 @@ from ..audio.tags import (
     ensure_bpm_tag_async,
     find_cover,
     mp3_path_for_source,
+    stop_ffmpeg_process,
 )
 from ..auth.rate_limit import limiter
 from ..db import DOWNLOADABLE_STATUSES, get_job, get_settings
@@ -219,15 +219,6 @@ def needs_browser_audio_fallback(file_path: Path) -> bool:
     check if audio ever enters from an uncontrolled source.
     """
     return file_path.suffix.lower() not in _BROWSER_SAFE_AUDIO_EXTENSIONS
-
-
-async def stop_ffmpeg_process(proc: asyncio.subprocess.Process) -> None:
-    """Stop and reap a still-running ffmpeg process."""
-    if proc.returncode is None:
-        with suppress(ProcessLookupError):
-            proc.kill()
-    with suppress(ProcessLookupError):
-        await asyncio.shield(proc.wait())
 
 
 async def _run_mp3_ffmpeg(cmd: list[str]) -> tuple[int, bytes]:

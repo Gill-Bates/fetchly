@@ -9,14 +9,12 @@
 from __future__ import annotations
 
 import asyncio
-import fcntl
 import logging
-import os
 import re
 import stat as stat_module
 import uuid
 from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager, suppress
+from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from pathlib import Path
 from time import time
 from typing import Annotated, Any, Literal
@@ -26,6 +24,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, StringConstraints
 
+from ..audio.tags import stop_ffmpeg_process
 from ..auth.rate_limit import limiter
 from ..db import DOWNLOADABLE_STATUSES, get_job, get_settings, set_settings, update_job
 from ..integrations.lalal.policy import (
@@ -38,6 +37,7 @@ from ..runtime.governor import governor
 from ..utils.fs import (
     TRIM_ID_RE,
     TRIM_WAV_GLOB,
+    exclusive_file_lock,
     job_dir,
     path_is_file,
     trim_base_name,
@@ -45,7 +45,7 @@ from ..utils.fs import (
 )
 from ..utils.template_filters import is_lalala_configured
 from .auth import require_user, require_user_json
-from .media import resolve_job_path, stop_ffmpeg_process, transcode_to_mp3
+from .media import resolve_job_path, transcode_to_mp3
 
 logger = logging.getLogger(__name__)
 
@@ -230,26 +230,15 @@ async def _path_is_ready_file(path: Path) -> bool:
 
 @asynccontextmanager
 async def _acquire_processing_lock(lock_file: Path) -> AsyncIterator[None]:
-    def _lock() -> int:
-        lock_fd = os.open(lock_file, os.O_CREAT | os.O_RDWR)
+    """Hold the Lalal processing lock; a contended lock becomes HTTP 409."""
+    async with AsyncExitStack() as stack:
+        # Only acquisition maps to 409: a BlockingIOError from the protected
+        # work must propagate unchanged.
         try:
-            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            await stack.enter_async_context(exclusive_file_lock(lock_file))
         except BlockingIOError as exc:
-            os.close(lock_fd)
             raise HTTPException(status_code=409, detail="Lalal processing already in progress") from exc
-        return lock_fd
-
-    def _unlock(lock_fd: int) -> None:
-        try:
-            fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        finally:
-            os.close(lock_fd)
-
-    lock_fd = await asyncio.to_thread(_lock)
-    try:
         yield
-    finally:
-        await asyncio.to_thread(_unlock, lock_fd)
 
 
 async def _remove_split_outputs(*paths: Path) -> None:

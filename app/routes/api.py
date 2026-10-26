@@ -1169,6 +1169,7 @@ async def api_set_settings(
         current_settings = await asyncio.to_thread(get_settings, include_internal=True)
         auth_was_enabled = bool(current_settings.get("enable_authentication", False))
         invalidate_sessions = False
+        session_version_floor: int | None = None
 
         # Credentials are always set as a pair: the PBKDF2 salt is derived from
         # the username, so a rename has to re-hash, which needs the plaintext.
@@ -1208,13 +1209,16 @@ async def api_set_settings(
 
         if settings_to_update:
             if invalidate_sessions:
-                await asyncio.to_thread(
+                session_version_floor = await asyncio.to_thread(
                     set_settings_and_bump_session_version,
                     settings_to_update,
                 )
             else:
                 await asyncio.to_thread(set_settings, settings_to_update, allow_internal=True)
-            await asyncio.to_thread(refresh_session_settings_cache)
+            await asyncio.to_thread(
+                refresh_session_settings_cache,
+                session_version_floor=session_version_floor,
+            )
 
         auth_is_enabled = want_authentication if want_authentication is not None else auth_was_enabled
         # Only bounce to the login page when there is actually a login to

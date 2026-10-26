@@ -510,16 +510,12 @@ async def lifespan(app: FastAPI):
             )
         event_queue: EventQueue = asyncio.Queue(maxsize=_EVENT_QUEUE_MAXSIZE)
         loop = asyncio.get_running_loop()
-        enqueue_event, thread_status_callback, disable_event_dispatch = _make_event_callbacks(
-            loop, event_queue
-        )
+        enqueue_event, thread_status_callback, disable_event_dispatch = _make_event_callbacks(loop, event_queue)
 
         # Download-worker changes apply after restart because the worker pool
         # and queue are both startup-only process-local structures.
         startup_settings = await asyncio.to_thread(get_settings)
-        await asyncio.to_thread(
-            governor.configure, _governor_config_from_settings(startup_settings)
-        )
+        await asyncio.to_thread(governor.configure, _governor_config_from_settings(startup_settings))
 
         init_api(templates)
         init_media(BASE_DIR, templates)

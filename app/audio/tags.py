@@ -227,7 +227,7 @@ def ensure_bpm_tag(mp3_path: Path, bpm: Any) -> bool:
     return True
 
 
-async def _stop_ffmpeg_process(proc: asyncio.subprocess.Process) -> None:
+async def stop_ffmpeg_process(proc: asyncio.subprocess.Process) -> None:
     """Kill and reap a still-running ffmpeg process so cancellation orphans none."""
     if proc.returncode is None:
         with suppress(ProcessLookupError):
@@ -266,12 +266,12 @@ async def ensure_bpm_tag_async(mp3_path: Path, bpm: Any) -> bool:
         except TimeoutError as exc:
             # A stuck ffmpeg is a tagging failure, not a cancellation: translate
             # it to RuntimeError so _ensure_mp3 serves the untagged MP3.
-            await _stop_ffmpeg_process(proc)
+            await stop_ffmpeg_process(proc)
             raise RuntimeError("BPM tagging timed out") from exc
         except BaseException:
             # Cancellation (client disconnect, shutdown) or any other failure:
             # reap ffmpeg, then propagate so the request is not silently completed.
-            await _stop_ffmpeg_process(proc)
+            await stop_ffmpeg_process(proc)
             raise
         _finalize_bpm_rewrite(mp3_path, temp_path, tempo, proc.returncode or 0, stderr or b"")
     finally:

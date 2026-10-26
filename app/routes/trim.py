@@ -9,12 +9,10 @@
 from __future__ import annotations
 
 import asyncio
-import fcntl
 import logging
-import os
 import uuid
-from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager, suppress
+from collections.abc import Callable
+from contextlib import suppress
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -34,6 +32,7 @@ from ..utils.fs import (
     AUDIO_SOURCE_EXTENSIONS,
     TRIM_ID_RE,
     TRIM_WAV_GLOB,
+    exclusive_file_lock,
     job_dir,
     path_is_file,
     trim_wav_name,
@@ -122,32 +121,6 @@ def _duration_validation_error(end: float, raw_duration: object) -> JSONResponse
         status_code=400,
         content={"error": (f"End time ({format_seconds(end)}s) exceeds track duration ({format_seconds(duration)}s)")},
     )
-
-
-@asynccontextmanager
-async def _acquire_trim_lock(lock_file: Path) -> AsyncIterator[None]:
-    """Acquire an advisory trim lock without blocking the event loop."""
-
-    def _lock() -> int:
-        lock_fd = os.open(lock_file, os.O_CREAT | os.O_RDWR)
-        try:
-            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except Exception:
-            os.close(lock_fd)
-            raise
-        return lock_fd
-
-    def _unlock(lock_fd: int) -> None:
-        try:
-            fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        finally:
-            os.close(lock_fd)
-
-    lock_fd = await asyncio.to_thread(_lock)
-    try:
-        yield
-    finally:
-        await asyncio.to_thread(_unlock, lock_fd)
 
 
 @router.post("/{job_id}", response_model=None)
@@ -243,7 +216,7 @@ async def trim_audio(
     timeout = min(300, max(30, int(duration * 2)))
 
     try:
-        async with _acquire_trim_lock(lock_file):
+        async with exclusive_file_lock(lock_file):
             if await path_is_file(out_file):
                 logger.info("Trim cache hit: %s", out_file.name)
                 return TrimResponse(

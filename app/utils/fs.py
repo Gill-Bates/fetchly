@@ -9,10 +9,13 @@
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import json
 import os
 import re
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Final
 
@@ -22,6 +25,7 @@ __all__ = [
     "AUDIO_SOURCE_EXTENSIONS",
     "TRIM_ID_RE",
     "TRIM_WAV_GLOB",
+    "exclusive_file_lock",
     "get_data_dir",
     "get_json_body",
     "job_dir",
@@ -109,6 +113,36 @@ def thumb_cache_dir() -> Path:
 async def path_is_file(path: Path) -> bool:
     """Async wrapper around Path.is_file() for use in async route handlers."""
     return await asyncio.to_thread(path.is_file)
+
+
+@asynccontextmanager
+async def exclusive_file_lock(lock_file: Path) -> AsyncIterator[None]:
+    """Hold a non-blocking exclusive ``flock`` on *lock_file* without blocking the loop.
+
+    Raises ``BlockingIOError`` when another holder has the lock. The descriptor
+    is closed on every acquisition failure and after release.
+    """
+
+    def _lock() -> int:
+        lock_fd = os.open(lock_file, os.O_CREAT | os.O_RDWR)
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BaseException:
+            os.close(lock_fd)
+            raise
+        return lock_fd
+
+    def _unlock(lock_fd: int) -> None:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        finally:
+            os.close(lock_fd)
+
+    lock_fd = await asyncio.to_thread(_lock)
+    try:
+        yield
+    finally:
+        await asyncio.to_thread(_unlock, lock_fd)
 
 
 def resolve_within_root(candidate: Path, root: Path, *, allow_symlink: bool = True) -> Path:
