@@ -751,6 +751,37 @@ jobs:
           fi
           echo "✓ Gunicorn runs as appuser (uid 1000)"
 
+      # Build tooling and essentia's build leftovers belong to the essentia and
+      # builder stages only. A stray COPY --from or apt package would otherwise
+      # ship them without any other check noticing.
+      - name: Verify no build artefacts in the image
+        run: |
+          set -euo pipefail
+          docker exec -i "${{ matrix.container_name }}" bash -s <<'SH'
+          set -u
+          bad=0
+          for tool in gcc cc g++ c++ make cmake git nasm pkg-config; do
+            if command -v "$tool" >/dev/null 2>&1; then
+              echo "✗ build tool in image: $(command -v "$tool")"
+              bad=1
+            fi
+          done
+          for path in /src /wheels /opt/essentia-build /tmp/essentia-wheels /venv/lib/python3.13/site-packages/essentia/include; do
+            if [[ -e "$path" ]]; then
+              echo "✗ build leftover in image: ${path}"
+              bad=1
+            fi
+          done
+          leftovers="$(find /venv /app /tmp -xdev \( -name '*.whl' -o -name 'CMakeCache.txt' \) 2>/dev/null | head -20)"
+          if [[ -n "$leftovers" ]]; then
+            echo "✗ build leftovers in image:"
+            echo "$leftovers"
+            bad=1
+          fi
+          exit "$bad"
+          SH
+          echo "✓ no compiler, build tree or wheel leftovers"
+
       - name: Verify toolchain and build metadata
         run: |
           set -euo pipefail

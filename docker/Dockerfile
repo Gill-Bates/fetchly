@@ -273,7 +273,7 @@ RUN set -euo pipefail; \
 # greatest"): the newest release reaches every build with no manual bump. It is
 # same-origin JavaScript served under script-src 'self', fetched over TLS from
 # unpkg with no checksum - an accepted trade for staying current (see
-# "Vendoring WaveSurfer" in docker/AGENTS.md). essentia, by contrast, is pinned.
+# "Vendoring WaveSurfer" in docker/AGENTS.md).
 # unpkg's @latest alias redirects package.json to the resolved version;
 # that version is captured into /wavesurfer/version so app/utils/version.py can
 # report it without a rebuild changing what "current" means. The runtime stage

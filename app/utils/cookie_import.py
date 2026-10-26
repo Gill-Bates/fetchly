@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
 #
+# app/utils/cookie_import.py
+# Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
+#
+
 # app/utils/cookie_import.py  # noqa: ERA001
 # Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 #

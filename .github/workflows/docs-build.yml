@@ -25,12 +25,10 @@ on:
       - 'tools/pyproject-deps.py'
       - '.github/workflows/docs-build.yml'
   workflow_dispatch:
-  # A release (docker-build.yml) can ship a version/changelog bump that never
-  # touches docs/** on its own - VERSION and the tag do, CHANGELOG.md's push
-  # trigger above already covers a plain commit, but a re-run of that workflow
-  # from an existing tag would not re-fire this one otherwise. Rebuilding docs
-  # after every successful release keeps the deployed site in step with what
-  # was actually published, independent of which paths changed.
+  # Docs follow main, not the release that triggered this run. A release
+  # (docker-build.yml) only adds a rebuild trigger; the checkout below is always
+  # the current main, so re-running an old tag or publishing a prerelease can
+  # never roll the public site back to that commit's documentation.
   workflow_run:
     workflows:
       - 'Docker Multi-Arch Build'
@@ -50,14 +48,61 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build:
+  # Resolves the docs environment exactly once. The frozen result is what both
+  # the build and the CVE scan install or read, so the scanner always sees the
+  # environment the site was built in, transitive dependencies included.
+  resolve:
     # workflow_run fires on every conclusion of "Docker Multi-Arch Build"
     # (success, failure, cancelled...). Only a successful release should
-    # trigger a docs rebuild; every other trigger (push, pull_request,
-    # workflow_dispatch, schedule) has no such conclusion to check.
+    # trigger a docs rebuild; every other trigger has no such conclusion.
     if: >-
       github.event_name != 'workflow_run' ||
       github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.13'
+
+      # pyproject.toml is the single dependency manifest; the docs toolchain
+      # lives in its [project.optional-dependencies] docs extra. Installing
+      # `.[docs]` would drag in the runtime dependencies (torch included), so
+      # only the extra is materialised. The direct dependencies are pinned there
+      # on purpose (see the comment above that table); transitive ones resolve
+      # to their newest release here, once.
+      #
+      # The frozen file name has to contain "requirement" or Trivy's pip
+      # analyzer does not pick it up.
+      - name: Resolve and freeze the docs environment
+        run: |
+          set -euo pipefail
+          python3 tools/pyproject-deps.py docs > requirements-docs.txt
+          python3 -m venv .docs-env
+          .docs-env/bin/python -m pip install --quiet --upgrade pip
+          .docs-env/bin/python -m pip install --quiet -r requirements-docs.txt
+          .docs-env/bin/python -m pip freeze --all > docs-requirements-frozen.txt
+          cat docs-requirements-frozen.txt
+
+      - name: Upload frozen docs environment
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: docs-requirements
+          path: docs-requirements-frozen.txt
+          retention-days: 1
+          if-no-files-found: error
+
+  build:
+    # The weekly schedule exists for the CVE scan only; building the site and
+    # checking links would add nothing and let a flaky link block that scan.
+    needs: resolve
+    if: github.event_name != 'schedule'
     # Named, as in ci.yml and docker-build.yml, and on 26.04 ahead of the
     # ubuntu-latest migration (actions/runner-images#14748). The docs toolchain
     # is installed from pyproject.toml onto a setup-python interpreter, so the
@@ -70,12 +115,6 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0  # Full history for git-based plugins
-          # On workflow_run, GITHUB_SHA is the default branch's head, not the
-          # commit the release published - so the default checkout would
-          # deploy documentation for changes that are not in the release
-          # whenever main moved on in the meantime. Empty for every other
-          # trigger, which leaves checkout's own default in place.
-          ref: ${{ github.event.workflow_run.head_sha }}
 
       - name: Set up Python
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
@@ -88,17 +127,16 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
 
-      # pyproject.toml is the single dependency manifest; the docs toolchain
-      # lives in its [project.optional-dependencies] docs extra. Installing
-      # `.[docs]` would drag in the runtime dependencies (torch included), so
-      # only the extra is materialised here.
+      - name: Download frozen docs environment
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: docs-requirements
+
       - name: Install dependencies
         run: |
           set -euo pipefail
-          python3 tools/pyproject-deps.py docs > requirements-docs.txt
-          cat requirements-docs.txt
           pip install --upgrade pip
-          pip install -r requirements-docs.txt
+          pip install -r docs-requirements-frozen.txt
 
       - name: Copy root files to docs
         run: |
@@ -109,7 +147,7 @@ jobs:
         run: |
           mkdocs build -f docs/mkdocs.yml --strict
 
-      # Runs against the same build that gets deployed. It used to live in a
+      # Runs against the build that gets deployed. It used to live in a
       # separate job that rebuilt the docs from a shallow checkout, so the
       # git-revision-date plugin saw different history than the real build.
       # img.shields.io is excluded because the badges are generated on demand
@@ -169,47 +207,19 @@ jobs:
         uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
 
   security-scan:
+    needs: resolve
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-        with:
-          persist-credentials: false
-          # The same commit the build job resolves, or the scan would report
-          # against a different dependency set than the one being deployed.
-          ref: ${{ github.event.workflow_run.head_sha }}
-
-      # Same interpreter the build job uses, so the resolution below is the one
-      # that actually builds the docs.
-      - name: Set up Python
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
-        with:
-          python-version: '3.13'
-
       # Trivy reports on what a manifest names, and the docs extra names its
-      # seven direct dependencies only: mkdocs-material alone pulls in jinja2,
-      # markupsafe, babel, requests, urllib3 and pygments, none of which appear
-      # in pyproject.toml. Scanning the extra by itself therefore left the
-      # majority of the installed code unscanned. Installing it and freezing the
-      # result gives the scanner the environment mkdocs is built in, transitive
-      # set included.
-      #
-      # The frozen file is a scan inventory, not an installation pin: the build
-      # job resolves the extra itself, and the direct dependencies are pinned in
-      # pyproject.toml, so the two environments agree on everything a pinned
-      # dependency determines.
-      - name: Materialise the docs environment for scanning
-        run: |
-          set -euo pipefail
-          python3 tools/pyproject-deps.py docs > requirements-docs.txt
-          python3 -m venv .docs-scan
-          .docs-scan/bin/python -m pip install --quiet --upgrade pip
-          .docs-scan/bin/python -m pip install --quiet -r requirements-docs.txt
-          # The name has to contain "requirement" or Trivy's pip analyzer does
-          # not pick the file up at all.
-          .docs-scan/bin/python -m pip freeze --all > docs-requirements-frozen.txt
-          cat docs-requirements-frozen.txt
+      # direct dependencies only: mkdocs-material alone pulls in jinja2,
+      # markupsafe, babel, requests, urllib3 and pygments. The frozen file from
+      # the resolve job is the transitive set the build installs, so the scan
+      # covers exactly that environment.
+      - name: Download frozen docs environment
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: docs-requirements
 
       - name: Trivy scan docs dependencies
         # Pinned to an immutable commit SHA — see GHSA-69fq-xp46-6x23.
@@ -221,7 +231,6 @@ jobs:
           version: 'latest'
           cache: 'false'
           scan-type: 'fs'
-          # The frozen environment, not the manifest: see the step above.
           scan-ref: 'docs-requirements-frozen.txt'
           format: 'table'
           exit-code: '1'
