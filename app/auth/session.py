@@ -24,7 +24,7 @@ from ..db import (
     SESSION_MAX_DAYS_MAX,
     SESSION_MAX_DAYS_MIN,
     get_settings,
-    set_settings,
+    set_settings_and_bump_session_version,
     setting_default,
 )
 from ..utils.boolean import parse_bool_text
@@ -140,12 +140,10 @@ def invalidate_current_session(username: str) -> None:
     every user at once (fetchly is single-admin, so that is the only user).
     """
     try:
-        settings = get_settings(include_internal=True)
-        next_version = int(settings.get("session_version", 0) or 0) + 1
-        set_settings({"session_version": next_version}, allow_internal=True)
+        set_settings_and_bump_session_version({})
     except (sqlite3.Error, OSError, ValueError) as exc:
         logger.warning("Failed to bump session_version on logout for %s: %s", username, exc)
-        return
+        raise
     refresh_session_settings_cache()
 
 

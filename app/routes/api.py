@@ -44,6 +44,7 @@ from ..db import (
     list_job_ids,
     paginate_jobs,
     set_settings,
+    set_settings_and_bump_session_version,
     to_iso_utc,
     update_job,
     update_job_if_status,
@@ -1167,6 +1168,7 @@ async def api_set_settings(
     try:
         current_settings = await asyncio.to_thread(get_settings, include_internal=True)
         auth_was_enabled = bool(current_settings.get("enable_authentication", False))
+        invalidate_sessions = False
 
         # Credentials are always set as a pair: the PBKDF2 salt is derived from
         # the username, so a rename has to re-hash, which needs the plaintext.
@@ -1187,7 +1189,7 @@ async def api_set_settings(
             )
             # Invalidate every existing session: the credential they were
             # issued against no longer exists.
-            settings_to_update["session_version"] = int(current_settings.get("session_version", 0) or 0) + 1
+            invalidate_sessions = True
             credentials_changed = True
 
         if want_authentication is not None:
@@ -1201,14 +1203,17 @@ async def api_set_settings(
                 )
             if want_authentication != auth_was_enabled:
                 # A cookie that survives an off/on cycle must not become valid again.
-                settings_to_update.setdefault(
-                    "session_version",
-                    int(current_settings.get("session_version", 0) or 0) + 1,
-                )
+                invalidate_sessions = True
             settings_to_update["enable_authentication"] = "true" if want_authentication else "false"
 
         if settings_to_update:
-            await asyncio.to_thread(set_settings, settings_to_update, allow_internal=True)
+            if invalidate_sessions:
+                await asyncio.to_thread(
+                    set_settings_and_bump_session_version,
+                    settings_to_update,
+                )
+            else:
+                await asyncio.to_thread(set_settings, settings_to_update, allow_internal=True)
             await asyncio.to_thread(refresh_session_settings_cache)
 
         auth_is_enabled = want_authentication if want_authentication is not None else auth_was_enabled

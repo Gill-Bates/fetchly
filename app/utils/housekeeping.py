@@ -13,6 +13,7 @@ from collections.abc import Callable
 from pathlib import Path
 from time import time
 
+from ..db import delete_expired_job_if_eligible
 from .fs import resolve_within_root
 
 logger = logging.getLogger(__name__)
@@ -117,12 +118,15 @@ def cleanup_expired_jobs(
     jobs_root: Path,
     expired_job_ids_func: ExpiredJobIdsFunc,
 ) -> list[str]:
-    """Delete the directories of expired jobs; return the IDs cleaned.
+    """Delete files and database rows for expired jobs; return deleted IDs.
 
-    The caller selects the expired IDs first and removes only the returned
-    ones from the database, so a job whose files could not be deleted keeps
-    its row and is retried on the next sweep. A directory that is already
-    absent counts as cleaned. Raises TypeError/ValueError for invalid days.
+    The selector supplies candidates only. Each candidate is rechecked in an
+    immediate SQLite transaction, which remains open through the directory
+    deletion and matching row/link deletion. A retry that committed first is
+    therefore skipped; a retry that arrives later cannot succeed after
+    retention has claimed that job. A directory that is already absent counts
+    as cleaned. Failed directory deletion leaves the row and links for a later
+    sweep. Raises TypeError/ValueError for invalid days.
     """
     if isinstance(keep_days, bool) or not isinstance(keep_days, int):
         raise TypeError("keep_days must be a non-negative integer")
@@ -148,10 +152,20 @@ def cleanup_expired_jobs(
         logger.warning("Failed to resolve jobs directory %s: %s", jobs_root, exc)
         return []
 
-    cleaned = [job_id for job_id in valid_ids if cleanup_job_directory(job_id, jobs_root_resolved)]
+    cleaned: list[str] = []
+    for job_id in valid_ids:
+        deleted, links = delete_expired_job_if_eligible(
+            job_id,
+            keep_days,
+            lambda job_id=job_id: cleanup_job_directory(job_id, jobs_root_resolved),
+        )
+        if deleted:
+            cleaned.append(job_id)
+            if links:
+                logger.info("Housekeeping: removed %d share link(s) for expired job %s", links, job_id)
 
     logger.info(
-        "Housekeeping: %d expired job(s) found older than %d days; filesystem cleanup succeeded for %d",
+        "Housekeeping: %d expired job(s) found older than %d days; cleanup succeeded for %d",
         len(expired_ids),
         keep_days,
         len(cleaned),

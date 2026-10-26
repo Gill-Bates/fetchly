@@ -41,7 +41,6 @@ from .db import (
     DatabaseSchemaError,
     cancel_interrupted_jobs,
     close_db,
-    delete_jobs_and_share_links,
     get_settings,
     init_db,
     job_exists,
@@ -226,18 +225,10 @@ def _run_housekeeping_once() -> None:
     # jobs_dir() reads the global get_data_dir(), so a test redirects the whole
     # sweep through the DATA_DIR env var, the same path model production uses.
     per_job_root = jobs_dir()
-    # Files first: only jobs whose directory is gone lose their row and links,
-    # so a failed deletion is retried on the next sweep instead of orphaned.
-    cleaned_ids = cleanup_expired_jobs(keep_days, per_job_root, list_expired_job_ids)
-    deleted_ids, links_deleted = delete_jobs_and_share_links(cleaned_ids)
+    # Candidate IDs are rechecked while holding SQLite's writer transaction
+    # through directory deletion and matching row/link removal.
+    deleted_ids = cleanup_expired_jobs(keep_days, per_job_root, list_expired_job_ids)
     jobs_deleted = len(deleted_ids)
-    if jobs_deleted < len(cleaned_ids):
-        logger.info(
-            "Housekeeping: kept %d job(s) that became active again after their files were removed",
-            len(cleaned_ids) - jobs_deleted,
-        )
-    if links_deleted:
-        logger.info("Housekeeping: removed %d share link(s) for expired jobs", links_deleted)
     if jobs_deleted:
         logger.info("Housekeeping: purged %d expired job(s) from the database", jobs_deleted)
     cleanup_thumbnail_cache(thumb_cache_dir())
@@ -484,79 +475,144 @@ def _log_background_task_completion(task: asyncio.Task[None]) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _ = app
-    _check_dependencies()
-    await asyncio.to_thread(DATA_DIR.mkdir, parents=True, exist_ok=True)
-    # Parent of every per-job DATA_DIR/jobs/<uuid> directory, created at startup
-    # like cookies/ so the first job write has its parent.
-    await asyncio.to_thread(jobs_dir().mkdir, parents=True, exist_ok=True)
-    await asyncio.to_thread(ensure_data_cookies_dir)
+    background_tasks: list[asyncio.Task[None]] = []
+    restore_shutdown_signals: Callable[[], None] | None = None
+    disable_event_dispatch: Callable[[], None] | None = None
+    database_ready = False
+    sse_initialized = False
+    callbacks_registered = False
+    download_workers_started = False
+    analysis_workers_started = False
+    startup_error: BaseException | None = None
     try:
-        await asyncio.to_thread(init_db)
-    except DatabaseSchemaError as exc:
-        # Same pattern as _check_dependencies(): one readable line, then abort startup.
-        logger.critical("FATAL: %s", exc)
-        raise
-    init_sse_shutdown_event()
-    restore_shutdown_signals = _install_shutdown_signal_hook()
-    await asyncio.to_thread(refresh_session_settings_cache)
-    recovered_jobs = await asyncio.to_thread(cancel_interrupted_jobs)
-    if recovered_jobs:
-        logger.warning(
-            "Marked %d interrupted in-flight jobs as cancelled during startup",
-            recovered_jobs,
+        _check_dependencies()
+        await asyncio.to_thread(DATA_DIR.mkdir, parents=True, exist_ok=True)
+        # Parent of every per-job DATA_DIR/jobs/<uuid> directory, created at
+        # startup like cookies/ so the first job write has its parent.
+        await asyncio.to_thread(jobs_dir().mkdir, parents=True, exist_ok=True)
+        await asyncio.to_thread(ensure_data_cookies_dir)
+        try:
+            await asyncio.to_thread(init_db)
+        except DatabaseSchemaError as exc:
+            logger.critical("FATAL: %s", exc)
+            raise
+        database_ready = True
+
+        init_sse_shutdown_event()
+        sse_initialized = True
+        restore_shutdown_signals = _install_shutdown_signal_hook()
+        await asyncio.to_thread(refresh_session_settings_cache)
+        recovered_jobs = await asyncio.to_thread(cancel_interrupted_jobs)
+        if recovered_jobs:
+            logger.warning(
+                "Marked %d interrupted in-flight jobs as cancelled during startup",
+                recovered_jobs,
+            )
+        event_queue: EventQueue = asyncio.Queue(maxsize=_EVENT_QUEUE_MAXSIZE)
+        loop = asyncio.get_running_loop()
+        enqueue_event, thread_status_callback, disable_event_dispatch = _make_event_callbacks(
+            loop, event_queue
         )
-    event_queue: EventQueue = asyncio.Queue(maxsize=_EVENT_QUEUE_MAXSIZE)
-    loop = asyncio.get_running_loop()
-    enqueue_event, thread_status_callback, disable_event_dispatch = _make_event_callbacks(loop, event_queue)
 
-    # Download-worker changes apply after restart because the worker pool and
-    # queue are both startup-only process-local structures.
-    startup_settings = await asyncio.to_thread(get_settings)
-    await asyncio.to_thread(governor.configure, _governor_config_from_settings(startup_settings))
+        # Download-worker changes apply after restart because the worker pool
+        # and queue are both startup-only process-local structures.
+        startup_settings = await asyncio.to_thread(get_settings)
+        await asyncio.to_thread(
+            governor.configure, _governor_config_from_settings(startup_settings)
+        )
 
-    init_api(templates)
-    init_media(BASE_DIR, templates)
-    init_share(templates)
-    init_lalal(enqueue_event)
-    init_trim(resolve_job_path)
+        init_api(templates)
+        init_media(BASE_DIR, templates)
+        init_share(templates)
+        init_lalal(enqueue_event)
+        init_trim(resolve_job_path)
 
-    set_status_callback(thread_status_callback)
-    set_analysis_status_callback(thread_status_callback)
-    start_workers()
-    start_analysis_workers()
-    await _fill_download_queue()
+        callbacks_registered = True
+        set_status_callback(thread_status_callback)
+        set_analysis_status_callback(thread_status_callback)
 
-    await _fill_analysis_queue()
+        # Mark each pool as attempted before calling it: a partial start that
+        # raises still needs its stop routine during startup rollback.
+        download_workers_started = True
+        start_workers()
+        analysis_workers_started = True
+        start_analysis_workers()
+        await _fill_download_queue()
+        await _fill_analysis_queue()
 
-    background_tasks: list[asyncio.Task[None]] = [
-        asyncio.create_task(_event_broadcaster(event_queue), name="event_broadcaster"),
-        asyncio.create_task(_housekeeping_daemon(), name="housekeeping_daemon"),
-        asyncio.create_task(_geoip_database_daemon(), name="geoip_database_daemon"),
-        asyncio.create_task(_analysis_backlog_daemon(), name="analysis_backlog_daemon"),
-        asyncio.create_task(_download_backlog_daemon(), name="download_backlog_daemon"),
-        asyncio.create_task(_session_settings_refresh_daemon(), name="session_settings_refresh_daemon"),
-    ]
-    for task in background_tasks:
-        task.add_done_callback(_log_background_task_completion)
+        background_factories: tuple[tuple[str, Callable[[], Any]], ...] = (
+            ("event_broadcaster", lambda: _event_broadcaster(event_queue)),
+            ("housekeeping_daemon", _housekeeping_daemon),
+            ("geoip_database_daemon", _geoip_database_daemon),
+            ("analysis_backlog_daemon", _analysis_backlog_daemon),
+            ("download_backlog_daemon", _download_backlog_daemon),
+            ("session_settings_refresh_daemon", _session_settings_refresh_daemon),
+        )
+        for name, factory in background_factories:
+            task = asyncio.create_task(factory(), name=name)
+            background_tasks.append(task)
+            task.add_done_callback(_log_background_task_completion)
 
-    try:
         yield
+    except BaseException as exc:
+        startup_error = exc
+        raise
     finally:
-        restore_shutdown_signals()
-        logger.info("Shutting down...")
-        signal_sse_shutdown()
-        disable_event_dispatch()
-        set_status_callback(None)
-        set_analysis_status_callback(None)
-        signal_shutdown()
+        logger.info("Shutting down lifespan resources...")
+        cleanup_error: BaseException | None = None
 
-        await _cancel_background_tasks(background_tasks, timeout=2.0)
+        def cleanup_sync(label: str, action: Callable[[], Any]) -> None:
+            nonlocal cleanup_error
+            try:
+                action()
+            except BaseException as exc:
+                cleanup_error = cleanup_error or exc
+                logger.exception("Lifespan cleanup failed: %s", label)
 
-        # Blocking stops run in threads so the event loop stays responsive.
-        await asyncio.to_thread(stop_analysis_workers, 5.0)
-        await asyncio.to_thread(stop_workers, 2.0)
-        await asyncio.to_thread(close_db)
-        logger.info("Shutdown complete")
+        if restore_shutdown_signals is not None:
+            cleanup_sync("restore shutdown signal handlers", restore_shutdown_signals)
+        if sse_initialized:
+            cleanup_sync("signal SSE shutdown", signal_sse_shutdown)
+        if disable_event_dispatch is not None:
+            cleanup_sync("disable event dispatch", disable_event_dispatch)
+        if callbacks_registered:
+            cleanup_sync("clear download status callback", lambda: set_status_callback(None))
+            cleanup_sync(
+                "clear analysis status callback",
+                lambda: set_analysis_status_callback(None),
+            )
+        if download_workers_started:
+            cleanup_sync("signal worker shutdown", signal_shutdown)
+
+        async def cleanup_async(label: str, action: Callable[[], Any]) -> None:
+            nonlocal cleanup_error
+            try:
+                await action()
+            except BaseException as exc:
+                cleanup_error = cleanup_error or exc
+                logger.exception("Lifespan cleanup failed: %s", label)
+
+        if database_ready:
+            if background_tasks:
+                await cleanup_async(
+                    "cancel background tasks",
+                    lambda: _cancel_background_tasks(background_tasks, timeout=2.0),
+                )
+            if analysis_workers_started:
+                await cleanup_async(
+                    "stop analysis workers",
+                    lambda: asyncio.to_thread(stop_analysis_workers, 5.0),
+                )
+            if download_workers_started:
+                await cleanup_async(
+                    "stop download workers",
+                    lambda: asyncio.to_thread(stop_workers, 2.0),
+                )
+            await cleanup_async("close database", lambda: asyncio.to_thread(close_db))
+
+        if cleanup_error is not None and startup_error is None:
+            raise cleanup_error
+        logger.info("Lifespan cleanup complete")
 
 
 # Swagger UI, ReDoc, and the raw schema are disabled at their default paths and

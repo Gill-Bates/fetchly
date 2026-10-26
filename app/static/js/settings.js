@@ -520,7 +520,7 @@ async function loadLalalStatus({ forceRefresh = false } = {}) {
     const generation = ++lalalStatusGeneration;
     try {
         const { res, payload } = await fetchWithTimeout(url, { credentials: "same-origin" });
-        
+
 
         // A newer read or a disconnect has happened meanwhile: that state wins.
         if (generation !== lalalStatusGeneration) return;
@@ -792,7 +792,7 @@ async function performSettingsSave(data, successToast = null) {
             body: JSON.stringify(data),
         });
 
-        
+
         assertResponseOk(res, payload);
 
         if (!pendingSave) {
@@ -887,7 +887,7 @@ async function saveAuthenticationFlag(enabled) {
             }),
         });
         responseReceived = true;
-        
+
         assertResponseOk(res, payload);
 
         settingsDirty = false;
@@ -967,7 +967,7 @@ async function saveCredentials() {
             }),
         });
         responseReceived = true;
-        
+
         assertResponseOk(res, payload);
 
         settingsDirty = false;
@@ -1032,7 +1032,7 @@ async function resetStatistics() {
             },
         });
 
-        
+
         assertResponseOk(res, payload);
 
         showToast(payload.message || "Statistics reset", "success");
@@ -1080,7 +1080,7 @@ async function removeAllJobs() {
             },
         });
 
-        
+
         assertResponseOk(res, payload);
 
         showToast(payload.message || "All jobs removed", "success");
@@ -1254,7 +1254,7 @@ async function loadLogoStatus() {
     const generation = ++logoStatusGeneration;
     try {
         const { res, payload } = await fetchWithTimeout("/api/settings/watermark-logo", { credentials: "same-origin" });
-        
+
         // An upload or a removal has landed meanwhile: it knows better.
         if (generation !== logoStatusGeneration) return;
         if (res.ok) {
@@ -1306,7 +1306,7 @@ async function uploadLogo(file) {
             headers: { "X-CSRF-Token": requireCsrfToken() },
             body,
         });
-        
+
         assertResponseOk(res, payload);
 
         logoStatusGeneration += 1;
@@ -1346,7 +1346,7 @@ async function removeLogo() {
             credentials: "same-origin",
             headers: { "X-CSRF-Token": requireCsrfToken() },
         });
-        
+
         assertResponseOk(res, payload);
         logoStatusGeneration += 1;
         renderLogoStatus({ custom: false });
@@ -1790,7 +1790,7 @@ async function loadCookieStatuses() {
     try {
         const { res, payload } = await fetchWithTimeout("/api/cookies", { credentials: "same-origin" });
         if (!res.ok) return;
-        
+
         if (!Array.isArray(payload)) return;
         // An import or a removal has landed meanwhile. This answer covers every
         // platform, so applying it would undo that tile's fresh state.
@@ -1836,7 +1836,7 @@ async function pasteCookies(platform) {
                     },
                 );
 
-                
+
                 assertResponseOk(res, payload);
 
                 cookieStatusGeneration += 1;
@@ -1876,7 +1876,7 @@ async function removeCookieFile(platform) {
             },
         });
 
-        
+
         assertResponseOk(res, payload);
 
         cookieStatusGeneration += 1;
@@ -1918,7 +1918,7 @@ function bindLalalEvents() {
                 },
             });
 
-            
+
             assertResponseOk(res, payload);
 
             // Invalidate any status read still in flight: it predates the
@@ -1984,7 +1984,7 @@ function bindLalalEvents() {
                 }),
             });
 
-            
+
             assertResponseOk(res, payload);
 
             if (lalalActivationKey) lalalActivationKey.value = "";
@@ -2185,7 +2185,7 @@ async function loadUpdateStatus() {
             return;
         }
 
-        
+
         const components = payload?.components;
         if (!components || typeof components !== "object") {
             markUpdateCheckUnavailable(cells, appBox);

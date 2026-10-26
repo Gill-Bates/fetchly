@@ -68,6 +68,7 @@ __all__ = [
     "now_iso",
     "paginate_jobs",
     "set_settings",
+    "set_settings_and_bump_session_version",
     "setting_default",
     "update_job",
     "update_job_if_status",
@@ -1287,6 +1288,80 @@ def list_expired_job_ids(keep_days: int) -> list[str]:
     return [row["id"] for row in rows]
 
 
+def delete_expired_job_if_eligible(
+    job_id: str,
+    keep_days: int,
+    delete_directory: Callable[[], bool],
+) -> tuple[bool, int]:
+    """Delete one expired job's files, row, and links as one serialized decision.
+
+    The initial retention scan is only a candidate snapshot. ``BEGIN IMMEDIATE``
+    rechecks eligibility and holds SQLite's single-writer lock until the
+    directory callback and row/link deletion finish. A retry that commits first
+    changes the status and this function skips the directory; if retention
+    claims the writer slot first, the retry cannot report success before the
+    job is removed. A failed filesystem deletion leaves the database untouched
+    so a later sweep can retry it.
+
+    ``delete_directory`` must only touch this job's filesystem artifacts and
+    must not perform database writes.
+    """
+    _validate_keep_days(keep_days)
+    if keep_days == 0:
+        return False, 0
+
+    statuses = tuple(sorted(TERMINAL_JOB_STATUSES))
+    placeholders = _in_placeholders(statuses)
+    eligible_sql = f"""
+        SELECT 1
+        FROM jobs
+        WHERE id = ?
+          AND status IN ({placeholders})
+          AND finished_at IS NOT NULL
+          AND finished_at < datetime('now', '-' || ? || ' days')
+    """  # noqa: S608  # generated placeholders only; all values remain bound
+
+    with get_db() as con:
+        con.execute("BEGIN IMMEDIATE")
+        eligible = con.execute(eligible_sql, (job_id, *statuses, keep_days)).fetchone()
+        if eligible is None:
+            exists = con.execute("SELECT 1 FROM jobs WHERE id = ?", (job_id,)).fetchone()
+            if exists is None:
+                # The row may have been removed after the initial candidate
+                # snapshot. With no row to retry, its UUID directory is now an
+                # orphan; keep the writer lock through its cleanup as well.
+                if delete_directory():
+                    con.rollback()
+                    return True, 0
+            con.rollback()
+            return False, 0
+
+        if not delete_directory():
+            con.rollback()
+            return False, 0
+
+        links_cursor = con.execute("DELETE FROM share_links WHERE job_id = ?", (job_id,))
+        deleted = con.execute(
+            f"""
+            DELETE FROM jobs
+            WHERE id = ?
+              AND status IN ({placeholders})
+              AND finished_at IS NOT NULL
+              AND finished_at < datetime('now', '-' || ? || ' days')
+            RETURNING id
+            """,  # noqa: S608  # status values are bound; only generated placeholders enter SQL
+            (job_id, *statuses, keep_days),
+        ).fetchone()
+        if deleted is None:
+            # BEGIN IMMEDIATE prevents another connection from changing this
+            # row after the eligibility check; fail loudly if that invariant
+            # is ever broken rather than silently leaving files without a row.
+            raise RuntimeError(f"Expired job {job_id} changed during its cleanup transaction")
+
+        con.commit()
+        return True, max(links_cursor.rowcount, 0)
+
+
 def purge_old_jobs(keep_days: int, *, batch_size: int = _MAX_QUERY_LIMIT) -> list[str]:
     """Delete terminal jobs older than *keep_days*, in bounded batches.
 
@@ -1384,14 +1459,58 @@ def set_settings(data: dict[str, Any], *, allow_internal: bool = False) -> None:
     allowed = _ALLOWED_SETTINGS_KEYS | _INTERNAL_SETTINGS_KEYS if allow_internal else _ALLOWED_SETTINGS_KEYS
     filtered = {k: v for k, v in data.items() if k in allowed}
 
+    values = _serialize_settings(filtered)
     with get_db() as con:
-        for key, raw_value in filtered.items():
-            parser = _SETTINGS_TYPES.get(key, str)
-            parsed_value = parser(raw_value)
-            value = ("true" if parsed_value else "false") if isinstance(parsed_value, bool) else str(parsed_value)
-
+        for key, value in values.items():
             con.execute(
                 "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
                 (key, value),
             )
         con.commit()
+
+
+def _serialize_settings(data: dict[str, Any]) -> dict[str, str]:
+    """Parse and encode setting values before opening a write transaction."""
+    values: dict[str, str] = {}
+    for key, raw_value in data.items():
+        parser = _SETTINGS_TYPES.get(key, str)
+        parsed_value = parser(raw_value)
+        values[key] = (
+            "true" if parsed_value else "false"
+        ) if isinstance(parsed_value, bool) else str(parsed_value)
+    return values
+
+
+def set_settings_and_bump_session_version(data: dict[str, Any]) -> int:
+    """Atomically persist *data* and increment the global session version.
+
+    Credential changes and authentication-mode transitions invalidate every
+    stateless session. The version is read and incremented inside the same
+    ``BEGIN IMMEDIATE`` transaction as the settings write, so concurrent
+    requests cannot both publish the same next version.
+    """
+    allowed = _ALLOWED_SETTINGS_KEYS | _INTERNAL_SETTINGS_KEYS
+    filtered = {key: value for key, value in data.items() if key in allowed and key != "session_version"}
+    values = _serialize_settings(filtered)
+
+    with get_db() as con:
+        con.execute("BEGIN IMMEDIATE")
+        row = con.execute("SELECT value FROM settings WHERE key='session_version'").fetchone()
+        try:
+            current_version = _parse_nonnegative_int(row["value"]) if row else 0
+        except (TypeError, ValueError) as exc:
+            logger.warning("Invalid stored session_version=%r; using default: %s", row["value"], exc)
+            current_version = 0
+        next_version = current_version + 1
+
+        for key, value in values.items():
+            con.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)",
+                (key, value),
+            )
+        con.execute(
+            "INSERT OR REPLACE INTO settings (key, value) VALUES ('session_version', ?)",
+            (str(next_version),),
+        )
+        con.commit()
+    return next_version

@@ -189,7 +189,7 @@ def _require_templates() -> Jinja2Templates:
     return _templates
 
 
-def _do_logout(request: Request) -> RedirectResponse:
+async def _do_logout(request: Request) -> RedirectResponse:
     """Clear the cookie and revoke every outstanding session.
 
     Tokens are stateless HMAC signatures, so there is no per-token row to
@@ -205,8 +205,10 @@ def _do_logout(request: Request) -> RedirectResponse:
     # protection alone does not stop this - it only blocks other origins,
     # not a visitor calling the endpoint directly with their own valid
     # CSRF pair.
-    if is_authentication_enabled() and validate_session(request.cookies.get(SESSION_COOKIE)):
-        invalidate_current_session(current_user(request) or "")
+    if is_authentication_enabled():
+        username = validate_session(request.cookies.get(SESSION_COOKIE))
+        if username:
+            await asyncio.to_thread(invalidate_current_session, username)
     response = RedirectResponse(url="/login", status_code=303)
     delete_session_cookie(response, request)
     return response
@@ -273,4 +275,4 @@ async def login(request: Request, body: LoginRequest):
 @router.post("/logout")
 @limiter.limit("20/minute")
 async def logout_post(request: Request):
-    return _do_logout(request)
+    return await _do_logout(request)
