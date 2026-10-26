@@ -1903,10 +1903,8 @@ def _get_filesize(path: Path) -> int | None:
 
 
 def _title_from_output_name(path: Path) -> str | None:
-    stem = path.stem
-    stem = stem.removesuffix(SOURCE_MARKER)
-    title = re.sub(r"\s\((?:max|medium|small|best|default|\w+)Quality\)$", "", stem)
-    title = title.strip()
+    stem = path.stem.removesuffix(SOURCE_MARKER)
+    title = re.sub(r"\s\(\w+Quality\)$", "", stem).strip()
     return title or None
 
 

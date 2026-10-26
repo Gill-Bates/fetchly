@@ -614,9 +614,7 @@ async def api_lalal_auth_activation_key(
     try:
         async with client:
             quota = await asyncio.wait_for(client.check_quota(), timeout=20.0)
-    except TimeoutError as exc:
-        raise HTTPException(status_code=504, detail="Lalal.ai validation timed out") from exc
-    except httpx.TimeoutException as exc:
+    except (TimeoutError, httpx.TimeoutException) as exc:
         raise HTTPException(status_code=504, detail="Lalal.ai validation timed out") from exc
     except LalalError as exc:
         raise HTTPException(status_code=400, detail="Invalid activation key") from exc
@@ -691,8 +689,6 @@ async def lalal_split(
     only selects which cached result is returned.
     """
     _require_initialized()
-    if _queue_event is None:
-        raise RuntimeError("Lalal routes are not initialized")
 
     _validate_stem(stem)
 

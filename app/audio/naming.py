@@ -20,6 +20,14 @@ from typing import Any, Final
 SOURCE_MARKER: Final[str] = ".source"
 
 
+def bpm_to_int(bpm: Any) -> int | None:
+    """Round a detected tempo; ``None`` for "no usable tempo"."""
+    if isinstance(bpm, bool) or not isinstance(bpm, (int, float)):
+        return None
+    rounded = round(bpm)
+    return rounded if rounded > 0 else None
+
+
 def apply_bpm_tag(base_name: str, bpm: Any) -> str:
     """Return *base_name* with a ``_<bpm>bpm`` tag after its title part.
 
@@ -28,13 +36,11 @@ def apply_bpm_tag(base_name: str, bpm: Any) -> str:
     usable tempo - and every video job, which is never analysed - keeps its
     name unchanged.
     """
-    if isinstance(bpm, bool) or not isinstance(bpm, (int, float)):
-        return base_name
-    rounded = round(bpm)
-    if rounded <= 0:
+    tempo = bpm_to_int(bpm)
+    if tempo is None:
         return base_name
 
-    tag = f"_{rounded}bpm"
+    tag = f"_{tempo}bpm"
     if base_name.endswith(SOURCE_MARKER):
         return f"{base_name[: -len(SOURCE_MARKER)]}{tag}{SOURCE_MARKER}"
     return f"{base_name}{tag}"

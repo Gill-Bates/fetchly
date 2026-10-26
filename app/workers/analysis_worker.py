@@ -459,8 +459,8 @@ def start_analysis_workers(n: int | None = None) -> None:
             return
         _shutdown_event.clear()
         get_analysis_queue()
-        for _ in range(n):
-            thread = threading.Thread(target=_worker_loop, daemon=False, name=f"analysis-worker-{_}")
+        for index in range(n):
+            thread = threading.Thread(target=_worker_loop, daemon=False, name=f"analysis-worker-{index}")
             thread.start()
             _worker_threads.append(thread)
         _workers_started = True

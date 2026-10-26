@@ -482,8 +482,6 @@ class Governor:
 
     def _read_memory_available_mb_uncached(self) -> int:
         """Read available memory in MB from cgroup or /proc without caching."""
-        result = -1
-
         try:
             # cgroup v2
             mem_current = _read_cgroup_file("/sys/fs/cgroup/memory.current")
@@ -518,7 +516,7 @@ class Governor:
         except (OSError, ValueError, IndexError):
             pass
 
-        return result
+        return -1
 
     def _store_memory_cache(self, value: int) -> None:
         with self._lock:

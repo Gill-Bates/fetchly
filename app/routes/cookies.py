@@ -136,8 +136,7 @@ def _validate_and_store(platform: str, text: str, *, require_login: bool) -> Coo
     A fresh file also repairs permissions: O_CREAT's mode does not apply when
     overwriting, so a world-readable jar would stay world-readable.
     """
-    filename = _filename_for(platform)
-    target = default_cookie_file(filename)
+    target = _resolve_cookie_path(platform)
     target.parent.mkdir(parents=True, exist_ok=True)
 
     # Same directory as the target: os.replace() is atomic only within one
@@ -171,8 +170,7 @@ def _validate_and_store(platform: str, text: str, *, require_login: bool) -> Coo
 
 
 def _delete_cookie_files(platform: str) -> bool:
-    filename = _filename_for(platform)
-    target = default_cookie_file(filename)
+    target = _resolve_cookie_path(platform)
     if not target.is_file():
         return False
     target.unlink(missing_ok=True)

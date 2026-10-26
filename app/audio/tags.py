@@ -23,7 +23,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any, Final
 
-from .naming import SOURCE_MARKER
+from .naming import SOURCE_MARKER, bpm_to_int
 
 logger = logging.getLogger(__name__)
 
@@ -51,14 +51,6 @@ def sanitize_tag_value(value: object, *, max_length: int = _MAX_TAG_LENGTH) -> s
     """Return *value* as a single-line, length-limited tag text."""
     text = _CONTROL_CHARS.sub(" ", str(value))
     return " ".join(text.split())[:max_length]
-
-
-def bpm_to_int(bpm: Any) -> int | None:
-    """Round a detected tempo for TBPM; ``None`` for "no usable tempo"."""
-    if isinstance(bpm, bool) or not isinstance(bpm, (int, float)):
-        return None
-    rounded = round(bpm)
-    return rounded if rounded > 0 else None
 
 
 def find_cover(job_dir: Path) -> Path | None:
@@ -271,18 +263,14 @@ async def ensure_bpm_tag_async(mp3_path: Path, bpm: Any) -> bool:
             raise RuntimeError(f"BPM tagging failed: {exc}") from exc
         try:
             _, stderr = await asyncio.wait_for(proc.communicate(), timeout=_TAG_TIMEOUT_SECONDS)
-        except asyncio.CancelledError:
-            # Client disconnect / shutdown: reap the process, then let
-            # cancellation propagate so the request is not silently completed.
-            await _stop_ffmpeg_process(proc)
-            raise
         except TimeoutError as exc:
             # A stuck ffmpeg is a tagging failure, not a cancellation: translate
             # it to RuntimeError so _ensure_mp3 serves the untagged MP3.
             await _stop_ffmpeg_process(proc)
             raise RuntimeError("BPM tagging timed out") from exc
         except BaseException:
-            # Any other failure still must not orphan the ffmpeg process.
+            # Cancellation (client disconnect, shutdown) or any other failure:
+            # reap ffmpeg, then propagate so the request is not silently completed.
             await _stop_ffmpeg_process(proc)
             raise
         _finalize_bpm_rewrite(mp3_path, temp_path, tempo, proc.returncode or 0, stderr or b"")

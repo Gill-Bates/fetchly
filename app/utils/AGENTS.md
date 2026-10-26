@@ -29,7 +29,7 @@ Utilities here are imported across the app and provide a single source of truth 
 | `assets.py` | `asset_url()` (the Jinja global that content-hashes `/static` URLs) and `VersionedStaticFiles` (the matching `Cache-Control` policy) |
 | `hidden_captcha.py` | Invisible anti-bot signal: honeypot field and signed time-trap token. Not a brute-force control — tokens are reusable; the `POST /login` rate limit (5/minute per IP, `routes/auth.py`) is that boundary |
 | `banner.py` | Startup ASCII banner |
-| `housekeeping.py` | Filesystem side of the retention sweep: expired job directories, orphaned directories, thumbnail and watermark caches (7-day TTL). `cleanup_expired_jobs()` deletes the directories of the IDs a selector returns and returns the IDs it cleaned; `main.py::_run_housekeeping_once` then removes only those rows via `db.delete_jobs_and_share_links()` (which skips jobs that became active again and returns the IDs it deleted), so a failed deletion is retried next sweep. This module never touches SQLite |
+| `housekeeping.py` | Retention and orphan sweeps plus thumbnail and watermark caches (7-day TTL). For each expired candidate, `cleanup_expired_jobs()` delegates to `db.delete_expired_job_if_eligible()`, which rechecks terminal status and age in a `BEGIN IMMEDIATE` transaction held through directory deletion and removal of the row/share links. A failed directory deletion leaves the row for a later sweep; a retry that committed before the recheck keeps its directory. |
 | `__init__.py` | Package init |
 
 ## For AI Agents

@@ -62,19 +62,7 @@ def _run_ffmpeg(
 
     Raises RuntimeError on non-zero exit or timeout.
     """
-    cmd = ["ffmpeg", "-y"]
-
-    cmd.extend(
-        [
-            "-i",
-            str(input_path),
-            "-ac",
-            "1",
-            "-ar",
-            "44100",
-            "-vn",
-        ]
-    )
+    cmd = ["ffmpeg", "-y", "-i", str(input_path), "-ac", "1", "-ar", "44100", "-vn"]
 
     if duration is not None:
         cmd.extend(["-t", str(duration)])
@@ -220,7 +208,7 @@ def extract_bpm_cascade(
             # its own front end and expects the untouched spectrum, while the
             # rumble filter exists for Essentia's onset detection. Both results
             # end up comparable because each detector normalizes its tempo into
-            # the same range (see bpm_normalization.normalize_bpm).
+            # the same range (see normalization.normalize_bpm).
             _run_ffmpeg(file_path, bounded_audio, duration=max_duration)
             beat_this_result = extract_bpm_beat_this(bounded_audio)
     except MemoryError:

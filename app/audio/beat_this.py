@@ -72,9 +72,6 @@ def _bpm_from_beats(beats: np.ndarray) -> tuple[float, float]:
         return 0.0, 0.0
 
     intervals = np.diff(beats)
-    if len(intervals) == 0:
-        return 0.0, 0.0
-
     median_interval = float(np.median(intervals))
     if median_interval <= 0:
         return 0.0, 0.0
@@ -108,8 +105,6 @@ def extract_bpm_beat_this(audio_path: Path) -> BeatThisResult:
         logger.info("beat_this not available: %s", exc)
         return BeatThisResult(bpm=0.0, confidence=0.0, num_beats=0)
     except MemoryError:
-        raise
-    except KeyboardInterrupt:
         raise
     except Exception as exc:
         logger.exception("beat_this inference failed for %s", audio_path.name)

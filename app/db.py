@@ -1326,13 +1326,12 @@ def delete_expired_job_if_eligible(
         eligible = con.execute(eligible_sql, (job_id, *statuses, keep_days)).fetchone()
         if eligible is None:
             exists = con.execute("SELECT 1 FROM jobs WHERE id = ?", (job_id,)).fetchone()
-            if exists is None:
-                # The row may have been removed after the initial candidate
-                # snapshot. With no row to retry, its UUID directory is now an
-                # orphan; keep the writer lock through its cleanup as well.
-                if delete_directory():
-                    con.rollback()
-                    return True, 0
+            # The row may have been removed after the initial candidate
+            # snapshot. With no row to retry, its UUID directory is now an
+            # orphan; keep the writer lock through its cleanup as well.
+            if exists is None and delete_directory():
+                con.rollback()
+                return True, 0
             con.rollback()
             return False, 0
 

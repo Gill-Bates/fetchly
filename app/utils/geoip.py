@@ -214,7 +214,7 @@ def _cached_lookup(ip: str, generation: int) -> IPInfo | None:
                 result = reader.city(ip)
                 country = result.country.iso_code
                 city = result.city.name
-            except (geoip2.errors.AddressNotFoundError, geoip2.errors.GeoIP2Error):
+            except geoip2.errors.GeoIP2Error:
                 pass
 
     asn: int | None = None
@@ -225,7 +225,7 @@ def _cached_lookup(ip: str, generation: int) -> IPInfo | None:
                 asn_result = asn_reader.asn(ip)
                 asn = asn_result.autonomous_system_number
                 as_org = asn_result.autonomous_system_organization
-            except (geoip2.errors.AddressNotFoundError, geoip2.errors.GeoIP2Error):
+            except geoip2.errors.GeoIP2Error:
                 pass
 
     if country is None and city is None and asn is None and as_org is None:

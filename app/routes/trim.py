@@ -255,7 +255,7 @@ async def trim_audio(
                 )
 
             async with governor.transcode_semaphore:
-                proc: asyncio.subprocess.Process | None = await asyncio.create_subprocess_exec(
+                proc = await asyncio.create_subprocess_exec(
                     *cmd,
                     stdout=asyncio.subprocess.DEVNULL,
                     stderr=asyncio.subprocess.PIPE,
@@ -265,7 +265,6 @@ async def trim_audio(
                     async with asyncio.timeout(timeout):
                         _, stderr = await proc.communicate()
                 except TimeoutError:
-                    await _unlink_file(temp_file)
                     return JSONResponse(status_code=500, content={"error": "Trim operation timed out"})
                 finally:
                     if proc.returncode is None:
@@ -276,7 +275,6 @@ async def trim_audio(
                 if proc.returncode != 0:
                     err_text = (stderr.decode(errors="replace") if stderr else "unknown error").strip()
                     logger.error("FFmpeg trim failed: %.4000s", err_text)
-                    await _unlink_file(temp_file)
                     return JSONResponse(status_code=500, content={"error": "Trim operation failed"})
 
                 await _replace_file(temp_file, out_file)  # atomic
@@ -303,12 +301,10 @@ async def trim_audio(
         return JSONResponse(status_code=409, content={"error": "Trim already in progress"})
 
     except FileNotFoundError:
-        await _unlink_file(temp_file)
         logger.error("FFmpeg binary not found while trimming job %s", job_id)
         return JSONResponse(status_code=500, content={"error": "FFmpeg is not installed on the server"})
 
     except OSError:
-        await _unlink_file(temp_file)
         logger.exception("Trim failed for job %s", job_id)
         return JSONResponse(status_code=500, content={"error": "Trim operation failed"})
     finally:
@@ -329,8 +325,6 @@ async def delete_trim(
 
     job_id_str = str(job_id)
     output_dir = job_dir(job_id_str)
-
-    deleted_count = 0
 
     if trim_id:
         deleted_count = await _delete_trim_files(output_dir, _validate_trim_id(trim_id))
