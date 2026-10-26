@@ -94,8 +94,12 @@ COMPONENTS: dict[str, _Component] = {
     "ytdlp": _Component(label="yt-dlp", repo="yt-dlp/yt-dlp", source="releases"),
     "ytdlp_ejs": _Component(label="yt-dlp-ejs", repo="yt-dlp/ejs", source="releases"),
     "js_runtime": _Component(label="deno", repo="denoland/deno", source="releases"),
-    "ffmpeg": _Component(label="ffmpeg", repo=FFMPEG_BUILDS_REPO, source="ffmpeg-builds"),
-    "wavesurfer": _Component(label="wavesurfer.js", repo="katspaugh/wavesurfer.js", source="releases"),
+    "ffmpeg": _Component(
+        label="ffmpeg", repo=FFMPEG_BUILDS_REPO, source="ffmpeg-builds"
+    ),
+    "wavesurfer": _Component(
+        label="wavesurfer.js", repo="katspaugh/wavesurfer.js", source="releases"
+    ),
 }
 
 _lock = asyncio.Lock()
@@ -118,7 +122,11 @@ def _is_prerelease_tag(tag: str) -> bool:
     Narrow on purpose: build metadata ("n9.0-4-gabc1234", "7.1.5-0+deb13u1")
     is not a prerelease. Only "-"/"_"/"." + an alpha/beta/rc/... token count.
     """
-    return bool(re.search(r"[-_.](?:alpha|beta|rc|dev|pre|a|b)\d*(?:[-+_.]|$)", tag, re.IGNORECASE))
+    return bool(
+        re.search(
+            r"[-_.](?:alpha|beta|rc|dev|pre|a|b)\d*(?:[-+_.]|$)", tag, re.IGNORECASE
+        )
+    )
 
 
 def _is_newer(latest: str | None, current: str | None) -> bool:
@@ -151,7 +159,9 @@ _MAX_API_RESPONSE_BYTES = 4 * 1024 * 1024
 _MAX_FFMPEG_CHECKSUM_BYTES = 1024 * 1024
 
 
-async def _read_response_bytes(client: httpx.AsyncClient, url: str, *, max_bytes: int) -> tuple[httpx.Response, bytes]:
+async def _read_response_bytes(
+    client: httpx.AsyncClient, url: str, *, max_bytes: int
+) -> tuple[httpx.Response, bytes]:
     """Stream one response, rejecting it before it can exceed *max_bytes*."""
     async with client.stream("GET", url) as response:
         response.raise_for_status()
@@ -181,12 +191,16 @@ async def _fetch_latest_release(client: httpx.AsyncClient, repo: str) -> str | N
     """
     best_tag: str | None = None
     best_parts: tuple[int, ...] = ()
-    url: str | None = f"https://api.github.com/repos/{repo}/releases?per_page={_RELEASES_PER_PAGE}"
+    url: str | None = (
+        f"https://api.github.com/repos/{repo}/releases?per_page={_RELEASES_PER_PAGE}"
+    )
 
     for _ in range(_MAX_RELEASE_PAGES):
         if url is None:
             break
-        response, body = await _read_response_bytes(client, url, max_bytes=_MAX_API_RESPONSE_BYTES)
+        response, body = await _read_response_bytes(
+            client, url, max_bytes=_MAX_API_RESPONSE_BYTES
+        )
         payload = json.loads(body)
         if not isinstance(payload, list):
             break
@@ -221,7 +235,9 @@ async def _fetch_latest_tag(client: httpx.AsyncClient, repo: str) -> str | None:
     for _ in range(_MAX_TAG_PAGES):
         if url is None:
             break
-        response, body = await _read_response_bytes(client, url, max_bytes=_MAX_API_RESPONSE_BYTES)
+        response, body = await _read_response_bytes(
+            client, url, max_bytes=_MAX_API_RESPONSE_BYTES
+        )
         payload = json.loads(body)
         if not isinstance(payload, list):
             break
@@ -284,7 +300,9 @@ async def _fetch_latest_ffmpeg_build(
     stable series for both architectures. The Dockerfile's series is not
     recorded in the image, so the caller matches the installed series.
     """
-    _, body = await _read_response_bytes(client, FFMPEG_TAGS_URL, max_bytes=_MAX_API_RESPONSE_BYTES)
+    _, body = await _read_response_bytes(
+        client, FFMPEG_TAGS_URL, max_bytes=_MAX_API_RESPONSE_BYTES
+    )
     payload = json.loads(body)
     if not isinstance(payload, list):
         return None, {}
@@ -292,7 +310,8 @@ async def _fetch_latest_ffmpeg_build(
         {
             name
             for entry in payload
-            if isinstance(entry, dict) and (name := str(entry.get("name") or "")).startswith("autobuild-")
+            if isinstance(entry, dict)
+            and (name := str(entry.get("name") or "")).startswith("autobuild-")
         },
         reverse=True,
     )
@@ -461,7 +480,9 @@ def _read_cache_file() -> dict[str, Any] | None:
             }
             raw_series = entry.get("series")
             if isinstance(raw_series, dict):
-                versions[str(key)]["series"] = {str(k): str(v) for k, v in raw_series.items() if isinstance(v, str)}
+                versions[str(key)]["series"] = {
+                    str(k): str(v) for k, v in raw_series.items() if isinstance(v, str)
+                }
 
     # Clamp a corrupted far-future expires_at to what a real write could produce,
     # or update checks would be disabled indefinitely.
@@ -487,7 +508,9 @@ def _write_cache_file(entry: dict[str, Any]) -> None:
     path = _cache_path()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        fd, temp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+        fd, temp_name = tempfile.mkstemp(
+            dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
+        )
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 json.dump(entry, handle)
@@ -541,7 +564,9 @@ async def _get_latest_versions(force: bool = False) -> dict[str, Any]:
         if not force and _cache and _cache.get("expires_at", 0.0) > now:
             return _cache
 
-        previous: dict[str, dict[str, Any]] = dict(_cache.get("versions", {})) if _cache else {}
+        previous: dict[str, dict[str, Any]] = (
+            dict(_cache.get("versions", {})) if _cache else {}
+        )
         previous_checked_at = float(_cache.get("checked_at", 0.0)) if _cache else 0.0
         keys = None if force else _keys_to_refresh(_cache, now)
 
@@ -562,7 +587,8 @@ async def _get_latest_versions(force: bool = False) -> dict[str, Any]:
             "checked_at": attempted_at if complete else previous_checked_at,
             "last_attempt_at": attempted_at,
             "complete": complete,
-            "expires_at": time.time() + (CACHE_TTL_SECONDS if complete else RETRY_TTL_SECONDS),
+            "expires_at": time.time()
+            + (CACHE_TTL_SECONDS if complete else RETRY_TTL_SECONDS),
             "versions": versions,
         }
         _cache = entry
@@ -581,7 +607,9 @@ def _ffmpeg_is_newer(latest: str | None, current: str | None) -> bool:
     return (pad(latest_key[0]), latest_key[1]) > (pad(current_key[0]), current_key[1])
 
 
-def _status(update_available: bool, comparable: bool) -> Literal["available", "current", "unknown"]:
+def _status(
+    update_available: bool, comparable: bool
+) -> Literal["available", "current", "unknown"]:
     if update_available:
         return "available"
     return "current" if comparable else "unknown"
@@ -621,10 +649,9 @@ async def get_update_status(current: dict[str, str]) -> dict[str, Any]:
         latest = str(cached.get("version") or "") or None
         checked_at = float(cached.get("checked_at", 0.0))
         if component.source == "ffmpeg-builds":
-            # Compare within the installed series, so a pinned older series is
-            # not reported against the newest one.
+            # No build for the installed series means unknown, never a cross-series update.
             series_builds = cached.get("series") or {}
-            latest = series_builds.get(_ffmpeg_series(installed) or "") or latest
+            latest = series_builds.get(_ffmpeg_series(installed) or "")
             update_available = _ffmpeg_is_newer(latest, installed)
             installed_ok = _ffmpeg_build_key(installed) is not None
             comparable = _ffmpeg_build_key(latest) is not None and installed_ok

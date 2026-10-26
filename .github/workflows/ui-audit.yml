@@ -39,6 +39,19 @@ on:
   pull_request:
     branches:
       - main
+    # Keep the costly browser audit for UI and its direct runtime inputs.
+    paths:
+      - 'app/static/**'
+      - 'app/templates/**'
+      - 'app/routes/**'
+      - 'app/main.py'
+      - 'app/utils/assets.py'
+      - 'app/utils/template_filters.py'
+      - 'tools/ui-lint/**'
+      - 'tools/pyproject-deps.py'
+      - 'run.py'
+      - 'pyproject.toml'
+      - '.github/workflows/ui-audit.yml'
 
 permissions:
   contents: read

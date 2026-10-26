@@ -106,6 +106,18 @@ class UpdateStatusTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(components["ffmpeg"]["status"], "current")
         self.assertEqual(components["ffmpeg"]["latest"], "n8.1.3-24-g92611900bb")
 
+    async def test_ffmpeg_missing_installed_series_is_unknown(self):
+        entry = _entry({"ffmpeg": FFMPEG_LATEST})
+        entry["versions"]["ffmpeg"]["series"].pop("8.1")
+        with mock.patch.object(updates, "_get_latest_versions", return_value=entry):
+            components = (await updates.get_update_status({"ffmpeg": "n8.1.3-24-g92611900bb-20260927"}))["components"]
+
+        ffmpeg = components["ffmpeg"]
+        self.assertEqual(ffmpeg["status"], "unknown")
+        self.assertFalse(ffmpeg["update_available"])
+        self.assertEqual(ffmpeg["latest"], "")
+        self.assertEqual(ffmpeg["reason"], "latest_unknown")
+
     async def test_unparseable_installed_version_is_unknown_not_available(self):
         components = await self._status(
             {"ffmpeg": "N-128100-gceb466cbcd", "ytdlp": "unavailable"},

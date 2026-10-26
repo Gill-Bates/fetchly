@@ -25,7 +25,7 @@ const BOOTSTRAP_FALLBACK = Object.freeze({
     has_admin_credentials: false,
 });
 
-function getBootstrapData() {
+export function getBootstrapData() {
     const node = document.getElementById("settingsBootstrapData");
     if (!node) {
         return { ...BOOTSTRAP_FALLBACK };
@@ -33,12 +33,16 @@ function getBootstrapData() {
 
     try {
         const payload = JSON.parse(node.textContent || "{}");
-        const minutesLeft = Number(payload?.lalal_minutes_left);
+        const rawMinutesLeft = payload?.lalal_minutes_left;
+        const minutesLeft = typeof rawMinutesLeft === "number"
+            || (typeof rawMinutesLeft === "string" && rawMinutesLeft.trim())
+            ? Number(rawMinutesLeft)
+            : NaN;
         return {
             lalal_configured: Boolean(payload?.lalal_configured),
             lalal_status: String(payload?.lalal_status || "Not configured"),
             lalal_email: String(payload?.lalal_email || ""),
-            lalal_minutes_left: Number.isFinite(minutesLeft) ? minutesLeft : null,
+            lalal_minutes_left: Number.isFinite(minutesLeft) && minutesLeft >= 0 ? minutesLeft : null,
             has_admin_credentials: Boolean(payload?.has_admin_credentials),
         };
     } catch {
@@ -168,18 +172,24 @@ function describeRequestError(err, fallback) {
     return err?.name === "AbortError" ? "Request timed out" : (err?.message || fallback);
 }
 
-function createRequestController() {
+export async function fetchWithTimeout(url, options = {}) {
     const controller = new AbortController();
-    const timeoutId = window.setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-    return { controller, timeoutId };
-}
-
-async function fetchWithTimeout(url, options = {}) {
-    const { controller, timeoutId } = createRequestController();
+    let timeoutId;
+    const timeout = new Promise((_, reject) => {
+        timeoutId = window.setTimeout(() => {
+            reject(new DOMException("Request timed out", "AbortError"));
+            controller.abort();
+        }, REQUEST_TIMEOUT_MS);
+    });
     try {
-        return await fetch(url, { ...options, signal: controller.signal });
+        const request = (async () => {
+            const res = await fetch(url, { ...options, signal: controller.signal });
+            const payload = await parseResponsePayload(res);
+            return { res, payload };
+        })();
+        return await Promise.race([request, timeout]);
     } finally {
-        clearTimeout(timeoutId);
+        window.clearTimeout(timeoutId);
     }
 }
 
@@ -509,8 +519,8 @@ async function loadLalalStatus({ forceRefresh = false } = {}) {
     const url = forceRefresh ? "/api/lalal/status?force_refresh=1" : "/api/lalal/status";
     const generation = ++lalalStatusGeneration;
     try {
-        const res = await fetchWithTimeout(url, { credentials: "same-origin" });
-        const payload = await parseResponsePayload(res);
+        const { res, payload } = await fetchWithTimeout(url, { credentials: "same-origin" });
+        
 
         // A newer read or a disconnect has happened meanwhile: that state wins.
         if (generation !== lalalStatusGeneration) return;
@@ -553,6 +563,12 @@ async function loadLalalStatus({ forceRefresh = false } = {}) {
         setDisconnectVisible(false);
         setAnalysisLimitsVisible(false);
     }
+}
+
+export function isPlausiblePublicHostname(value) {
+    if (value.length > 253) return false;
+    const host = value.startsWith("[") && value.endsWith("]") ? value.slice(1, -1) : value;
+    return /^[A-Za-z0-9.:-]+$/.test(host);
 }
 
 function validateSettings() {
@@ -599,7 +615,7 @@ function validateSettings() {
 
     const publicHostname = String(form.get("public_hostname") || "").trim();
     // Cheap sanity check only; app/utils/public_url.py does the real validation.
-    if (publicHostname && (publicHostname.length > 253 || !/^[A-Za-z0-9.:-]+$/.test(publicHostname))) {
+    if (publicHostname && !isPlausiblePublicHostname(publicHostname)) {
         return { valid: false, error: "Public hostname must be a plain host or IP — no scheme, port or path" };
     }
 
@@ -766,7 +782,7 @@ function saveSettings() {
 
 async function performSettingsSave(data, successToast = null) {
     try {
-        const res = await fetchWithTimeout("/api/settings", {
+        const { res, payload } = await fetchWithTimeout("/api/settings", {
             method: "POST",
             keepalive: true,
             headers: {
@@ -776,7 +792,7 @@ async function performSettingsSave(data, successToast = null) {
             body: JSON.stringify(data),
         });
 
-        const payload = await parseResponsePayload(res);
+        
         assertResponseOk(res, payload);
 
         if (!pendingSave) {
@@ -859,7 +875,7 @@ async function saveAuthenticationFlag(enabled) {
     let responseReceived = false;
 
     try {
-        const res = await fetchWithTimeout("/api/settings", {
+        const { res, payload } = await fetchWithTimeout("/api/settings", {
             method: "POST",
             headers: {
                 "Content-Type": "application/json",
@@ -871,7 +887,7 @@ async function saveAuthenticationFlag(enabled) {
             }),
         });
         responseReceived = true;
-        const payload = await parseResponsePayload(res);
+        
         assertResponseOk(res, payload);
 
         settingsDirty = false;
@@ -939,7 +955,7 @@ async function saveCredentials() {
     let responseReceived = false;
 
     try {
-        const res = await fetchWithTimeout("/api/settings", {
+        const { res, payload } = await fetchWithTimeout("/api/settings", {
             method: "POST",
             headers: {
                 "Content-Type": "application/json",
@@ -951,7 +967,7 @@ async function saveCredentials() {
             }),
         });
         responseReceived = true;
-        const payload = await parseResponsePayload(res);
+        
         assertResponseOk(res, payload);
 
         settingsDirty = false;
@@ -1008,7 +1024,7 @@ async function resetStatistics() {
     }
 
     try {
-        const res = await fetchWithTimeout("/api/stats/reset", {
+        const { res, payload } = await fetchWithTimeout("/api/stats/reset", {
             method: "POST",
             credentials: "same-origin",
             headers: {
@@ -1016,7 +1032,7 @@ async function resetStatistics() {
             },
         });
 
-        const payload = await parseResponsePayload(res);
+        
         assertResponseOk(res, payload);
 
         showToast(payload.message || "Statistics reset", "success");
@@ -1056,7 +1072,7 @@ async function removeAllJobs() {
     }
 
     try {
-        const res = await fetchWithTimeout("/api/jobs/remove-all", {
+        const { res, payload } = await fetchWithTimeout("/api/jobs/remove-all", {
             method: "POST",
             credentials: "same-origin",
             headers: {
@@ -1064,7 +1080,7 @@ async function removeAllJobs() {
             },
         });
 
-        const payload = await parseResponsePayload(res);
+        
         assertResponseOk(res, payload);
 
         showToast(payload.message || "All jobs removed", "success");
@@ -1145,7 +1161,7 @@ function persistPendingSettingsOnPageHide() {
             "X-CSRF-Token": csrfToken,
         },
         body: JSON.stringify(validation.data),
-    }).then((res) => {
+    }).then(({ res }) => {
         if (!res.ok) {
             retryPendingSettingsWhenVisible();
         }
@@ -1237,8 +1253,8 @@ async function loadLogoStatus() {
     if (!logoDropzoneEl) return;
     const generation = ++logoStatusGeneration;
     try {
-        const res = await fetchWithTimeout("/api/settings/watermark-logo", { credentials: "same-origin" });
-        const payload = await parseResponsePayload(res);
+        const { res, payload } = await fetchWithTimeout("/api/settings/watermark-logo", { credentials: "same-origin" });
+        
         // An upload or a removal has landed meanwhile: it knows better.
         if (generation !== logoStatusGeneration) return;
         if (res.ok) {
@@ -1284,13 +1300,13 @@ async function uploadLogo(file) {
         const body = new FormData();
         body.append("file", png, "watermark-logo.png");
 
-        const res = await fetchWithTimeout("/api/settings/watermark-logo", {
+        const { res, payload } = await fetchWithTimeout("/api/settings/watermark-logo", {
             method: "POST",
             credentials: "same-origin",
             headers: { "X-CSRF-Token": requireCsrfToken() },
             body,
         });
-        const payload = await parseResponsePayload(res);
+        
         assertResponseOk(res, payload);
 
         logoStatusGeneration += 1;
@@ -1325,12 +1341,12 @@ async function removeLogo() {
     isLogoBusy = true;
     setLogoBusy(true);
     try {
-        const res = await fetchWithTimeout("/api/settings/watermark-logo", {
+        const { res, payload } = await fetchWithTimeout("/api/settings/watermark-logo", {
             method: "DELETE",
             credentials: "same-origin",
             headers: { "X-CSRF-Token": requireCsrfToken() },
         });
-        const payload = await parseResponsePayload(res);
+        
         assertResponseOk(res, payload);
         logoStatusGeneration += 1;
         renderLogoStatus({ custom: false });
@@ -1772,9 +1788,9 @@ function renderCookieStatus(platform, status) {
 async function loadCookieStatuses() {
     const generation = ++cookieStatusGeneration;
     try {
-        const res = await fetchWithTimeout("/api/cookies", { credentials: "same-origin" });
+        const { res, payload } = await fetchWithTimeout("/api/cookies", { credentials: "same-origin" });
         if (!res.ok) return;
-        const payload = await parseResponsePayload(res);
+        
         if (!Array.isArray(payload)) return;
         // An import or a removal has landed meanwhile. This answer covers every
         // platform, so applying it would undo that tile's fresh state.
@@ -1807,7 +1823,7 @@ async function pasteCookies(platform) {
             label,
             // Rejecting keeps the dialog open with the paste intact.
             onSubmit: async (text) => {
-                const res = await fetchWithTimeout(
+                const { res, payload } = await fetchWithTimeout(
                     `/api/cookies/${encodeURIComponent(platform)}/paste`,
                     {
                         method: "POST",
@@ -1820,7 +1836,7 @@ async function pasteCookies(platform) {
                     },
                 );
 
-                const payload = await parseResponsePayload(res);
+                
                 assertResponseOk(res, payload);
 
                 cookieStatusGeneration += 1;
@@ -1852,7 +1868,7 @@ async function removeCookieFile(platform) {
     setCookieTileBusy(els, true);
 
     try {
-        const res = await fetchWithTimeout(`/api/cookies/${encodeURIComponent(platform)}`, {
+        const { res, payload } = await fetchWithTimeout(`/api/cookies/${encodeURIComponent(platform)}`, {
             method: "DELETE",
             credentials: "same-origin",
             headers: {
@@ -1860,7 +1876,7 @@ async function removeCookieFile(platform) {
             },
         });
 
-        const payload = await parseResponsePayload(res);
+        
         assertResponseOk(res, payload);
 
         cookieStatusGeneration += 1;
@@ -1894,7 +1910,7 @@ function bindLalalEvents() {
         clearAlert(lalalAuthAlert);
 
         try {
-            const res = await fetchWithTimeout("/api/lalal/auth/logout", {
+            const { res, payload } = await fetchWithTimeout("/api/lalal/auth/logout", {
                 method: "POST",
                 credentials: "same-origin",
                 headers: {
@@ -1902,7 +1918,7 @@ function bindLalalEvents() {
                 },
             });
 
-            const payload = await parseResponsePayload(res);
+            
             assertResponseOk(res, payload);
 
             // Invalidate any status read still in flight: it predates the
@@ -1955,7 +1971,7 @@ function bindLalalEvents() {
         clearAlert(lalalAuthAlert);
 
         try {
-            const res = await fetchWithTimeout("/api/lalal/auth/activation-key", {
+            const { res, payload } = await fetchWithTimeout("/api/lalal/auth/activation-key", {
                 method: "POST",
                 credentials: "same-origin",
                 headers: {
@@ -1968,7 +1984,7 @@ function bindLalalEvents() {
                 }),
             });
 
-            const payload = await parseResponsePayload(res);
+            
             assertResponseOk(res, payload);
 
             if (lalalActivationKey) lalalActivationKey.value = "";
@@ -2163,13 +2179,13 @@ async function loadUpdateStatus() {
     cells.forEach((cell) => renderUpdateState(cell, "checking"));
 
     try {
-        const res = await fetchWithTimeout("/api/updates", { credentials: "same-origin" });
+        const { res, payload } = await fetchWithTimeout("/api/updates", { credentials: "same-origin" });
         if (!res.ok) {
             markUpdateCheckUnavailable(cells, appBox);
             return;
         }
 
-        const payload = await parseResponsePayload(res);
+        
         const components = payload?.components;
         if (!components || typeof components !== "object") {
             markUpdateCheckUnavailable(cells, appBox);
@@ -2236,8 +2252,8 @@ async function loadHostStats() {
     if (hostStatsInFlight) return;
     hostStatsInFlight = true;
     try {
-        const res = await fetchWithTimeout("/api/system/host", { credentials: "same-origin" });
-        if (res.ok) renderHostStats(await parseResponsePayload(res));
+        const { res, payload } = await fetchWithTimeout("/api/system/host", { credentials: "same-origin" });
+        if (res.ok) renderHostStats(payload);
     } catch {
         // Best-effort: unavailable host metrics leave their placeholders intact.
     } finally {
