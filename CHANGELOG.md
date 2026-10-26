@@ -1,17 +1,9 @@
 ## [1.3.2] - 2026-10-26
-- ``New`` fetchly runs in UTC throughout (database, API, logs); the UI shows dates, times, and numbers in your browser's locale and time zone.
-- ``New`` MP3 downloads carry ID3 tags: thumbnail cover, a Fetchly comment, and the detected BPM (`TBPM`) once analysis finishes.
-- ``Breaking`` Database migrations are removed: an older `jobs.db` is no longer upgraded, so existing installs need a fresh `DATA_DIR`. Startup aborts with a clear error on an outdated, non-SQLite, or corrupt database and never modifies the file.
-- ``Breaking`` Per-job files now live under `DATA_DIR/jobs/<uuid>` and the unused `downloads/` directory is gone. Per the no-migration policy, an old `DATA_DIR` is not carried over.
-- ``Fix`` Job status and progress no longer go stale after returning to the tab or reconnecting, and parallel submits of the same link no longer duplicate jobs.
-- ``Fix`` Facebook Story links are accepted; private or login-gated videos without cookies fail immediately with a hint to upload cookies.
-- ``Fix`` Settings → System shows every update check as a consistent badge, and the ffmpeg, yt-dlp, deno and WaveSurfer.js checks are more reliable.
-- ``Fix`` Retention deletes files before the history entry, skips jobs retried meanwhile, and cleans up old watermark badges.
-- ``Fix`` BPM analysis with `beat_this` works again: TorchAudio 2.9 moved audio decoding to the optional TorchCodec backend, so every track silently fell back to Essentia only; the image now bundles `soundfile`, beat_this's own decoder, to restore the full cascade.
-- ``Fix`` Stem separation no longer blocks the server or applies to a selection changed mid-run, a 0-minute Lalal.ai balance is no longer shown as unknown, and a finished stem button no longer stays "Done" after a new selection or reopened trim dialog.
-- ``Fix`` Thumbnail lookups and live-update connections stay within their limits under load instead of spawning unbounded processes or streams.
-- ``Security`` The login limit counts IPv6 clients by /64, toggling authentication invalidates all sessions, and cookie import rejects tabs and line breaks and no longer lets foreign cookies crowd out your platform's at the 512-cookie limit.
-- ``Change`` The waveform library (WaveSurfer.js) is fetched at build time again, always at the latest release, instead of pinned in the image, so upstream fixes reach a rebuild without a manual bump.
+- ``New`` fetchly runs in UTC throughout, with dates, times, and numbers shown in your browser's locale; MP3 downloads now carry ID3 tags (cover, comment, `TBPM`).
+- ``Breaking`` No more database migrations and per-job files now live under `DATA_DIR/jobs/<uuid>` (the unused `downloads/` is gone); an old `DATA_DIR` is not carried over, so existing installs need a fresh one.
+- ``Fix`` Many stability fixes: no stale status/progress, no duplicate jobs, Facebook Story links accepted, working `beat_this` BPM analysis, more robust stem separation, retention, and connection limits.
+- ``Security`` The login limit counts IPv6 clients by /64, toggling authentication invalidates all sessions, and cookie import is hardened against injection and foreign-cookie crowding.
+- ``Change`` WaveSurfer.js is fetched at build time again, always at the latest release, so upstream fixes reach a rebuild without a manual bump.
 <details markdown="1">
 <summary>Previous versions...</summary>
 ## [1.3.1] - 2026-09-27
