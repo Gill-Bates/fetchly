@@ -149,9 +149,10 @@ jobs:
       # once, and handed to every architecture as a build arg.
       #
       # The Dockerfile's defaults each mean "whatever is newest at the moment
-      # this layer runs": the python base tag, essentia's master branch, BtbN's
-      # 'latest' ffmpeg release, yt-dlp and yt-dlp-ejs unpinned, and deno's
-      # release-latest.txt. That is the intent for a release - but the amd64
+      # this layer runs": the python base tag, BtbN's 'latest' ffmpeg release,
+      # yt-dlp and yt-dlp-ejs unpinned, and deno's release-latest.txt. essentia
+      # is the exception - it is pinned in the Dockerfile and only read here, not
+      # re-resolved. That is the intent for a release - but the amd64
       # and arm64 jobs are separate runners that reach those layers minutes
       # apart, so each would resolve "newest" on its own. A yt-dlp release, an
       # essentia commit or a nightly ffmpeg rebuild landing in that window
@@ -181,12 +182,18 @@ jobs:
           esac
           python_base="python:3.13-slim@${digest}"
 
-          # essentia master -> one commit SHA. docker/Dockerfile compiles it on
-          # both architectures, so this is the single value that decides which
-          # essentia the release ships.
-          essentia_ref="$(git ls-remote https://github.com/MTG/essentia.git refs/heads/master | cut -f1)"
+          # essentia is pinned, not rolling: docker/Dockerfile declares
+          # ARG ESSENTIA_REF=<commit> at a ref chosen to precede the upstream
+          # master merge that added onnxruntime to essentia's static 3rd-party
+          # chain and builds it with --use_cuda, which aborts on every CUDA-less
+          # build host here. Resolving refs/heads/master instead would drag that
+          # breaking commit back in and fail the build. Read the pin straight
+          # out of the Dockerfile so it stays the single source of truth; this
+          # value is still passed to both architectures so they ship one
+          # identically-built essentia. Bump the Dockerfile pin to move it.
+          essentia_ref="$(sed -n 's/^ARG ESSENTIA_REF=//p' docker/Dockerfile | head -n1)"
           if [[ ! "$essentia_ref" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "ERROR: could not resolve MTG/essentia master (got '${essentia_ref}')"
+            echo "ERROR: could not read a pinned ESSENTIA_REF from docker/Dockerfile (got '${essentia_ref}')"
             exit 1
           fi
 
