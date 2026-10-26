@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
 #
-# app/utils/cookie_import.py
-# Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
-#
-
-# app/utils/cookie_import.py  # noqa: ERA001
 # Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 #
 
@@ -51,7 +46,9 @@ from .cookie_status import (
     missing_login_cookies,
 )
 
-_NETSCAPE_HEADER: Final = "# Netscape HTTP Cookie File\n# Written by fetchly - do not edit.\n\n"
+_NETSCAPE_HEADER: Final = (
+    "# Netscape HTTP Cookie File\n# Written by fetchly - do not edit.\n\n"
+)
 
 # yt-dlp's HttpOnly prefix, stripped on import: plain http.cookiejar (which the
 # validity checks use) reads those lines as comments and would see an empty jar.
@@ -65,7 +62,9 @@ _MAX_COOKIES: Final = 512
 
 # The request's own URL, as each "Copy as ..." flavour writes it.
 _REQUEST_URL_PATTERNS: Final = (
-    re.compile(r"""(?:--url|-Uri)\s+(['"])(?P<url>https?://[^'"\s]+)\1""", re.IGNORECASE),
+    re.compile(
+        r"""(?:--url|-Uri)\s+(['"])(?P<url>https?://[^'"\s]+)\1""", re.IGNORECASE
+    ),
     re.compile(r"""fetch\(\s*(['"])(?P<url>https?://[^'"\s]+)\1""", re.IGNORECASE),
     re.compile(r"""^\s*curl\s+(['"])(?P<url>https?://[^'"\s]+)\1""", re.IGNORECASE),
 )
@@ -75,14 +74,18 @@ _CURL_COOKIE_PATTERNS: Final = (
         r"""(?:-H|--header)\s+(['"])\s*cookie\s*:\s*(?P<value>.*?)\1""",
         re.IGNORECASE | re.DOTALL,
     ),
-    re.compile(r"""(['"])cookie\1\s*[:=]\s*(['"])(?P<value>.*?)\2""", re.IGNORECASE | re.DOTALL),
+    re.compile(
+        r"""(['"])cookie\1\s*[:=]\s*(['"])(?P<value>.*?)\2""", re.IGNORECASE | re.DOTALL
+    ),
     re.compile(r"""(?:-b|--cookie)\s+(['"])(?P<value>.*?)\1""", re.DOTALL),
 )
 
 
 # A copied command from the Network tab. Detected so a cookie-less request
 # gets a different error from something that is not a request at all.
-_COPIED_COMMAND_RE: Final = re.compile(r"^\s*(?:curl\b|fetch\s*\(|Invoke-WebRequest\b|\$session\b)", re.IGNORECASE)
+_COPIED_COMMAND_RE: Final = re.compile(
+    r"^\s*(?:curl\b|fetch\s*\(|Invoke-WebRequest\b|\$session\b)", re.IGNORECASE
+)
 
 
 def _unescape_copied_command(text: str) -> str:
@@ -148,7 +151,9 @@ def missing_session_cookie_hint(platform: str) -> str:
     )
 
 
-def _netscape_line(*, domain: str, path: str, secure: bool, expires: int, name: str, value: str) -> str:
+def _netscape_line(
+    *, domain: str, path: str, secure: bool, expires: int, name: str, value: str
+) -> str:
     include_subdomains = "TRUE" if domain.startswith(".") else "FALSE"
     return "\t".join(
         (
@@ -280,7 +285,9 @@ def _pairs_from_header(header: str) -> list[tuple[str, str]]:
 def _from_header(header: str, platform: str, source_format: str) -> CookieImport:
     pairs = _pairs_from_header(header)
     if not pairs:
-        raise CookieImportError("No cookies found. Expected the cookie request header, e.g. 'SID=abc; HSID=def'.")
+        raise CookieImportError(
+            "No cookies found. Expected the cookie request header, e.g. 'SID=abc; HSID=def'."
+        )
     if len(pairs) > _MAX_COOKIES:
         raise CookieImportError("Too many cookies in one paste")
 
@@ -289,7 +296,10 @@ def _from_header(header: str, platform: str, source_format: str) -> CookieImport
         raise CookieImportError("Unknown platform")
 
     lines = [
-        _netscape_line(domain=domain, path="/", secure=True, expires=0, name=name, value=value) for name, value in pairs
+        _netscape_line(
+            domain=domain, path="/", secure=True, expires=0, name=name, value=value
+        )
+        for name, value in pairs
     ]
     return CookieImport(
         netscape=_NETSCAPE_HEADER + "\n".join(lines) + "\n",
@@ -381,7 +391,9 @@ def _from_json(text: str, platform: str) -> CookieImport:
     if isinstance(payload, dict):
         payload = payload.get("cookies", payload.get("Cookies"))
     if not isinstance(payload, list):
-        raise CookieImportError("Expected a JSON array of cookies, as exported by cookie extensions")
+        raise CookieImportError(
+            "Expected a JSON array of cookies, as exported by cookie extensions"
+        )
 
     fallback_domain = PLATFORM_PRIMARY_DOMAIN.get(platform, "")
     if not fallback_domain:

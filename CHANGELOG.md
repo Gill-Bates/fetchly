@@ -1,15 +1,18 @@
-## [Unreleased]
+## [1.3.3] - 2026-xx-xx
+
 - ``Change`` The image builds a CPU-only Essentia from upstream master (resolved once per release for both architectures), with only the audio libraries BPM analysis needs, and checks tempo detection on amd64 and arm64.
+
+
 <details markdown="1">
 <summary>Previous versions...</summary>
+
 ## [1.3.2] - 2026-10-26
 - ``New`` fetchly runs in UTC throughout, with dates, times, and numbers shown in your browser's locale; MP3 downloads now carry ID3 tags (cover, comment, `TBPM`).
 - ``Breaking`` No more database migrations and per-job files now live under `DATA_DIR/jobs/<uuid>` (the unused `downloads/` is gone); an old `DATA_DIR` is not carried over, so existing installs need a fresh one.
 - ``Fix`` Many stability fixes: no stale status/progress, no duplicate jobs, Facebook Story links accepted, working `beat_this` BPM analysis, more robust stem separation, retention, and connection limits.
 - ``Security`` The login limit counts IPv6 clients by /64, toggling authentication invalidates all sessions, and cookie import is hardened against injection and foreign-cookie crowding.
 - ``Change`` WaveSurfer.js is fetched at build time again, always at the latest release, so upstream fixes reach a rebuild without a manual bump.
-<details markdown="1">
-<summary>Previous versions...</summary>
+
 ## [1.3.1] - 2026-09-27
 
 - ``New`` Share a finished download with a **Share Link** (Settings → General → Sharing), with an optional use limit.
@@ -20,9 +23,6 @@
 - ``Fix`` More resilient stem separation polling, plus fixes for stuck jobs and race conditions around retry/cancel/SSE.
 - ``Security`` Logout, session handling, and CSRF are hardened against cookie/origin-based hijacking and forced log-outs.
 - ``Security`` Local binding now defaults to `127.0.0.1`; the waveform library is vendored instead of fetched from a CDN; GeoIP database downloads are validated before use.
-
-<details markdown="1">
-<summary>Previous versions...</summary>
 
 ## [1.3.0] - 2026-09-21
 
