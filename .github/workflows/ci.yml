@@ -2,10 +2,11 @@
 # .github/workflows/ci.yml
 # Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 #
-# The PR gate. docker-build.yml only runs on release tags, so this is the only
-# workflow standing between a broken commit and main. Gates on linting, the
-# source-level UI contracts, pytest, npm test, the container entrypoint and
-# Dockerfile, the workflow files themselves, and the single-manifest invariant.
+# The PR gate and the release gate. It guards main on push and pull request,
+# and docker-build.yml calls it (workflow_call) so a release tag is gated by
+# exactly the same checks. Gates on linting, the source-level UI contracts,
+# pytest, npm test, the container entrypoint and Dockerfile, the workflow files
+# themselves, and the single-manifest invariant.
 #
 
 name: CI
@@ -18,13 +19,16 @@ on:
     branches:
       - main
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
 
+# Only a pull request run is cancellable: a push run is the gate result a
+# release reads, so a newer push must not cancel it.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   python:

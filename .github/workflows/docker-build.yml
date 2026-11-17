@@ -540,9 +540,16 @@ jobs:
               print("is_newest=true")
           PY
 
+  lint-test:
+    name: CI gate
+    needs: meta
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
   build:
     name: Build ${{ matrix.arch }} image
-    needs: meta
+    # No image is built from code that failed lint or tests.
+    needs: [meta, lint-test]
     env:
       VERSION: ${{ needs.meta.outputs.version }}
       IMAGE_NAME: ${{ format('{0}/fetchly', secrets.DOCKERHUB_USERNAME) }}
