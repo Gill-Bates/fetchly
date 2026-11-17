@@ -60,6 +60,22 @@ let jobUpdateEpoch = 0;
 const liveUpdateEpochs = new Map();
 const MAX_RECONCILE_PASSES = 3;
 
+/** @returns {number} live-update clock; pass it to {@link hasLiveUpdateSince} after a request */
+export function getLiveUpdateEpoch() {
+    return jobUpdateEpoch;
+}
+
+/**
+ * Whether a live update for the job arrived after `epoch`, which makes an HTTP
+ * response requested at `epoch` stale for that job.
+ * @param {string | number} jobId
+ * @param {number} epoch
+ * @returns {boolean}
+ */
+export function hasLiveUpdateSince(jobId, epoch) {
+    return (liveUpdateEpochs.get(String(jobId)) ?? 0) > epoch;
+}
+
 export function dispatchAppEvent(name, detail) {
     document.dispatchEvent(new CustomEvent(name, { detail }));
 }
@@ -234,13 +250,25 @@ async function recoverUnknownJobUpdate(payload) {
     recoveryRequestsInFlight.add(jobId);
 
     try {
-        const job = await fetchJob(jobId);
-        const updatedJob = upsertJobSnapshot(job);
-        if (!updatedJob) {
+        for (let attempt = 0; attempt < MAX_RECONCILE_PASSES; attempt += 1) {
+            const startEpoch = jobUpdateEpoch;
+            const job = await fetchJob(jobId);
+            // Later live updates of an unknown job were skipped (recovery in
+            // flight), so a snapshot older than one of them must be refetched.
+            if (hasLiveUpdateSince(jobId, startEpoch)) {
+                continue;
+            }
+            const updatedJob = upsertJobSnapshot(job);
+            if (updatedJob) {
+                dispatchJobUpdate(updatedJob);
+            }
             return;
         }
-
-        dispatchJobUpdate(updatedJob);
+        reportWarning("Dropped stale snapshot of unknown SSE job", {
+            module: "events",
+            action: "recoverUnknownJobUpdate",
+            jobId,
+        });
     } catch (error) {
         if (error?.status === 404) {
             return;

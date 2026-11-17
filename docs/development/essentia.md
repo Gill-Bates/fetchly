@@ -6,8 +6,9 @@ only what BPM analysis uses.
 
 ## Revision: upstream master, once per release
 Essentia follows upstream `master` ("latest is greatest"), like the other
-rolling inputs. The release workflow resolves the head SHA once and passes it to
-both architecture builds as `ESSENTIA_REF`, so amd64 and arm64 never get
+rolling inputs. The tag-triggered image workflow (`.github/workflows/docker-build.yml`,
+`meta` job) resolves the head SHA once and passes it to both architecture builds
+as `ESSENTIA_REF`, so amd64 and arm64 never get
 different revisions. A new SHA also invalidates the cached Essentia stage. The
 build log prints `essentia ref: <sha>`. The built checkout's SHA is stored in
 `/venv/.essentia-commit`; CI fails if it differs from the resolved one and

@@ -10,12 +10,12 @@ Route handlers validate requests, call business logic (database access, worker s
 
 | File | Purpose |
 | --- | --- |
-| `api.py` | Core API: job submission and listing, job cancel/retry, bulk removal, settings read/write, stats, BPM clusters, watermark logo upload/serve/delete, thumbnails, version info and update check; the dashboard page (`GET /`) also supplies `active_jobs`, and `job_to_dict()` merges in live worker progress. `GET /api/info` answers a login-gated source with `reason: "login_required"` and a cookie-aware message. There is no single-job delete route — `POST /api/jobs/remove-all` is the only removal endpoint. |
+| `api.py` | Core API: job submission and listing, job cancel/retry, bulk removal, settings read/write, stats, BPM clusters, watermark logo upload/serve/delete, thumbnails, version info and update check; the dashboard page (`GET /`) also supplies `active_jobs`, and `job_to_dict()` merges in live worker progress; the stats cache uses a monotonic clock. `GET /api/info` answers a login-gated source with `reason: "login_required"`, `private: true`, `cookies_configured` (from `workers.worker.cookies_configured_for()`) and a cookie-aware message. There is no single-job delete route — `POST /api/jobs/remove-all` is the only removal endpoint. |
 | `auth.py` | Login page and POST, logout. The Lalal.ai activation key lives in `lalal.py`, not here. |
-| `media.py` | Media delivery: job page, download, audio source, thumbnail, favicon. `build_job_file_response()` here is what `share.py` reuses for public share downloads. |
-| `trim.py` | Audio trimming: clip submission, trim deletion and trimmed-file download |
-| `cookies.py` | Per-platform cookie import (including paste), status and deletion |
-| `lalal.py` | Lalal.ai stem separation: activation-key storage, auth status, split submission and result retrieval |
+| `media.py` | Media delivery: job page (adds the GeoLite2 `requester` tile via `utils/geoip.py`), download, audio source, thumbnail, favicon. `build_job_file_response()` here is what `share.py` reuses for public share downloads. |
+| `trim.py` | Audio trimming: clip submission (`start`/`end` bounded at 10,000,000 s, larger gives `422`), trim deletion and trimmed-file download |
+| `cookies.py` | Per-platform cookie import (file upload and paste, both via `utils/cookie_import.py`), structural status check (`utils/cookie_status.py`) and deletion |
+| `lalal.py` | Lalal.ai stem separation: activation-key storage, auth status, split submission and result retrieval. The duration guard also covers the non-trim split and rejects an unknown duration; only 401/403 from Lalal.ai mean an invalid key, other 4xx/5xx keep the last verdict (status) or answer `503`, and a timeout answers `504` (activation); intermediates are removed after a failed download or transcode |
 | `share.py` | Share links: creation and public `GET /share/{token}` access |
 | `events.py` | **Server-Sent Events**: `GET /events` (all jobs) and `GET /api/jobs/{job_id}/events` (one job), both `text/event-stream` |
 | `__init__.py` | Re-exports the eight routers (`api_router`, `auth_router`, …). It does **not** register them — `app/main.py` calls `include_router()` for each. |
@@ -26,7 +26,7 @@ Route handlers validate requests, call business logic (database access, worker s
 - **Location:** add the handler to the matching module, or create a new one
 - **Registration:** export the router from `__init__.py`, then add `app.include_router(...)` in `app/main.py`
 - **Authentication:** JSON endpoints depend on `require_user`; HTML pages call `require_html_auth(request)` and return its redirect when set. There is no `@requires_auth` decorator.
-- **Rate limiting:** apply `@limiter.limit()` from `app/auth/rate_limit.py` to sensitive endpoints
+- **Rate limiting:** add `dependencies=[Depends(rate_limit("N/minute"))]` (from `app/auth/rate_limit.py`) to the route decorator of sensitive endpoints
 - **CSRF:** anything under `/api`, `/login` or `/logout` is covered automatically by `CSRFMiddleware`
 - **Validation:** Pydantic models or explicit parsing; validate untrusted URLs before handing them to yt-dlp
 - **Errors:** raise `HTTPException(status_code, detail)`; the detail string reaches the UI
@@ -78,7 +78,7 @@ The `/auth/...` paths belong to `lalal.py` and therefore carry its `/api/lalal` 
 - `../workers/worker.py`, `../workers/analysis_worker.py` — job submission
 - `../integrations/lalal/`, `../audio/` — business logic
 - `../utils/` — watermark, cookies, version, changelog, public URL, duration
-- `../auth/rate_limit.py` — limiter and client-IP resolution
+- `../auth/rate_limit.py` — rate-limit dependency and client-IP resolution
 
 ### External
 - **FastAPI / Starlette:** routing, dependencies, `StreamingResponse` for SSE
@@ -92,7 +92,7 @@ The `/auth/...` paths belong to `lalal.py` and therefore carry its `/api/lalal` 
 1. Write the handler in the appropriate module
 2. Decorate it with `@router.get(...)` / `@router.post(...)` and the real path
 3. Add the auth dependency (`require_user`) if it is not public
-4. Add `@limiter.limit()` if it is sensitive
+4. Add `dependencies=[Depends(rate_limit("N/minute"))]` to the route decorator if it is sensitive
 5. Export the router in `__init__.py` and include it in `main.py` if the module is new
 6. Add a test subclassing `WebAppTestCase`
 7. Update `docs/api/endpoints.md` if the endpoint is user-facing
@@ -128,7 +128,7 @@ async def get_job_handler(job_id: str, _user: str = Depends(require_user)):
 - **404:** confirm the router is exported in `__init__.py` *and* included in `main.py`
 - **401 / redirect:** check `require_user` vs `require_html_auth` — the first returns JSON, the second redirects
 - **403:** CSRF. The path is under a protected prefix and the token is missing or mismatched.
-- **429:** rate limit; the handler in `main.py` returns `{"detail": "Rate limit exceeded"}`
+- **429:** rate limit; the dependency raises `HTTPException(429, "Rate limit exceeded")` with a `Retry-After` header
 - **503 on submit:** the worker queue is full (`WORKER_QUEUE_MAXSIZE`)
 
 ### SSE Events (events.py)
@@ -140,7 +140,7 @@ async def get_job_handler(job_id: str, _user: str = Depends(require_user)):
 
 ---
 
-**Last Updated:** 2026-10-26  
+**Last Updated:** 2026-11-17  
 **Framework:** FastAPI (Starlette)  
 **Live Updates:** Server-Sent Events, not WebSocket  
 **Auth Dependencies:** `require_user` (JSON), `require_html_auth` (pages)

@@ -12,6 +12,7 @@ pool that starts a second time on top of itself.
 """
 
 import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -65,6 +66,44 @@ class RedactUrlsTests(unittest.TestCase):
 
     def test_text_without_urls_is_unchanged(self):
         self.assertEqual(_redact_urls("ffmpeg: no such file"), "ffmpeg: no such file")
+
+    def test_command_debug_log_redacts_signed_url(self):
+        with self.assertLogs(worker.logger, level="DEBUG") as captured:
+            worker._run_cmd(
+                [sys.executable, "-c", "pass", "https://example.com/media?token=secret"],
+                timeout=3,
+            )
+
+        output = "\n".join(captured.output)
+        self.assertIn("https://example.com/media?<redacted>", output)
+        self.assertNotIn("secret", output)
+
+    def test_command_failure_log_redacts_signed_url(self):
+        command = [sys.executable, "-c", "pass", "https://example.com/media?token=secret"]
+        with (
+            self.assertLogs(worker.logger, level="ERROR") as captured,
+            patch.object(worker.subprocess, "Popen", side_effect=OSError("spawn failed")),
+            self.assertRaises(RuntimeError),
+        ):
+            worker._run_cmd(command, timeout=3)
+
+        output = "\n".join(captured.output)
+        self.assertIn("https://example.com/media?<redacted>", output)
+        self.assertNotIn("secret", output)
+
+
+class YoutubeOutputLimitTests(unittest.TestCase):
+    def test_stdout_limit_kills_process_while_draining_output(self):
+        command = [sys.executable, "-c", "import os; exec('while True: os.write(1, b\\\"x\\\" * 4096)')"]
+        with (
+            patch.object(youtube, "_MAX_INFO_JSON_BYTES", 1024),
+            subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as proc,
+        ):
+            stdout, _stderr, returncode, too_large = youtube._read_yt_dlp_output(proc)
+
+        self.assertTrue(too_large)
+        self.assertLessEqual(len(stdout), 1025)
+        self.assertIsNotNone(returncode)
 
 
 class WorkerLifecycleTests(unittest.TestCase):
@@ -152,6 +191,11 @@ class InfoAuthFailureTests(WebAppTestCase):
         proc.returncode = 1
         with (
             patch.object(youtube.subprocess, "Popen", return_value=proc) as popen,
+            patch.object(
+                youtube,
+                "_read_yt_dlp_output",
+                return_value=(b"", stderr.encode(), 1, False),
+            ),
             patch.object(youtube, "_cache_bucket", return_value=object()),
         ):
             return popen, self.client.get("/api/info", params={"url": FB_URL})
@@ -168,14 +212,53 @@ class InfoAuthFailureTests(WebAppTestCase):
         self.assertTrue(body["unavailable"])
         self.assertEqual(body["reason"], "login_required")
         self.assertIn("Upload a cookie file", body["message"])
+        self.assertIs(body["private"], True)
+        self.assertIs(body["cookies_configured"], False)
         # One bounded attempt on a non-YouTube platform: no retry loop.
         self.assertEqual(popen.call_count, 1)
+
+    def test_configured_cookies_are_reported(self):
+        youtube._cached_load_video_info.cache_clear()
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch("app.workers.worker._resolve_cookie_file", return_value=Path(tmp) / "facebook_cookies.txt"),
+            patch("app.workers.worker.cookie_file_is_usable", return_value=True),
+        ):
+            _popen, response = self._run_info(AUTH_ERRORS[0])
+        body = response.json()
+        self.assertIs(body["cookies_configured"], True)
+        self.assertIn("still denies access", body["message"])
 
     def test_the_loader_raises_only_after_the_last_client_failed(self):
         proc = MagicMock()
         proc.__enter__.return_value = proc
         proc.communicate.return_value = ("", "Sign in to confirm you're not a bot")
         proc.returncode = 1
-        with patch.object(subprocess, "Popen", return_value=proc), self.assertRaises(youtube.AuthRequiredError):
+        with (
+            patch.object(subprocess, "Popen", return_value=proc),
+            patch.object(
+                youtube,
+                "_read_yt_dlp_output",
+                return_value=(b"", b"Sign in to confirm you're not a bot", 1, False),
+            ) as read_output,
+            self.assertRaises(youtube.AuthRequiredError),
+        ):
             youtube._load_video_info_uncached("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
-        self.assertEqual(proc.communicate.call_count, 2)
+        self.assertEqual(read_output.call_count, 2)
+
+
+class AuthRequiredClassifierTests(unittest.TestCase):
+    def test_representative_auth_errors_are_classified(self):
+        for raw in (*AUTH_ERRORS, "ERROR: [youtube] x: Sign in to confirm you're not a bot"):
+            with self.subTest(raw=raw):
+                self.assertTrue(youtube.is_auth_required_error(raw))
+
+    def test_network_and_generic_errors_are_not_classified(self):
+        for raw in (
+            "ERROR: HTTP Error 500",
+            "ERROR: Unable to download webpage: timed out",
+            "ERROR: [youtube] x: Video unavailable",
+            "",
+        ):
+            with self.subTest(raw=raw):
+                self.assertFalse(youtube.is_auth_required_error(raw))

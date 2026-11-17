@@ -35,6 +35,7 @@ from __future__ import annotations
 import json
 import math
 import re
+import shlex
 from dataclasses import dataclass
 from typing import Any, Final
 from urllib.parse import urlparse
@@ -59,11 +60,19 @@ _COOKIE_NAME_RE: Final = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 _NETSCAPE_FIELDS: Final = 7  # tab-separated fields per entry
 _MAX_COOKIES: Final = 512
 
-# The request's own URL, as each "Copy as ..." flavour writes it.
+# The request's own URL in fetch() and PowerShell copies (quoted or bare).
 _REQUEST_URL_PATTERNS: Final = (
-    re.compile(r"""(?:--url|-Uri)\s+(['"])(?P<url>https?://[^'"\s]+)\1""", re.IGNORECASE),
-    re.compile(r"""fetch\(\s*(['"])(?P<url>https?://[^'"\s]+)\1""", re.IGNORECASE),
-    re.compile(r"""^\s*curl\s+(['"])(?P<url>https?://[^'"\s]+)\1""", re.IGNORECASE),
+    re.compile(r"""(?:--url|-Uri)[\s=]+['"]?(?P<url>https?://[^'"\s]+)""", re.IGNORECASE),
+    re.compile(r"""fetch\(\s*['"](?P<url>https?://[^'"\s]+)""", re.IGNORECASE),
+)
+
+# curl options whose argument may itself be a URL (a Referer, a body) but is not the target.
+_CURL_ARG_OPTIONS: Final = frozenset(
+    {"-H", "--header", "-b", "--cookie", "-e", "--referer", "-d", "--data", "--data-raw", "--data-binary"}
+    | {"--data-ascii", "--data-urlencode", "--json", "-F", "--form", "-x", "--proxy", "-A", "--user-agent"}
+    | {"-o", "--output", "-T", "--upload-file", "-X", "--request", "-u", "--user"}
+    | {"-m", "--max-time", "--connect-timeout", "--retry", "-w", "--write-out", "-K", "--config", "-c", "--cookie-jar"}
+    | {"-D", "--dump-header", "-E", "--cert", "--key", "--cacert", "--resolve", "--interface", "--oauth2-bearer"}
 )
 
 _CURL_COOKIE_PATTERNS: Final = (
@@ -217,34 +226,141 @@ def _passthrough_netscape(text: str, platform: str) -> tuple[str, tuple[str, ...
     return _NETSCAPE_HEADER + "\n".join(lines) + "\n", tuple(names)
 
 
-def _request_url(text: str) -> str | None:
-    """The URL a copied request was aimed at, if the command names one."""
+_ANSI_C_SIMPLE: Final = {"a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f", "n": "\n"}
+_ANSI_C_SIMPLE |= {"r": "\r", "t": "\t", "v": "\v", "\\": "\\", "'": "'", '"': '"', "?": "?"}
+_ANSI_C_NUMERIC: Final = {"x": (16, 2), "u": (16, 4), "U": (16, 8)}
+
+
+def _decode_ansi_c(text: str, start: int) -> tuple[str, int]:
+    """Decode a bash ``$'...'`` body beginning at ``start``; return it and the index after the quote."""
+    out: list[str] = []
+    i = start
+    while i < len(text):
+        char = text[i]
+        if char == "'":
+            return "".join(out), i + 1
+        if char != "\\":
+            out.append(char)
+            i += 1
+            continue
+        i += 1
+        if i >= len(text):
+            break
+        esc = text[i]
+        if esc in _ANSI_C_NUMERIC:
+            base, width = _ANSI_C_NUMERIC[esc]
+            digits = re.match(rf"[0-9a-fA-F]{{1,{width}}}", text[i + 1 :])
+            if digits:
+                out.append(chr(int(digits.group(), base)))
+                i += 1 + len(digits.group())
+                continue
+            out.append("\\" + esc)
+            i += 1
+        elif esc in "01234567":
+            octal = re.match(r"[0-7]{1,3}", text[i:])
+            out.append(chr(int(octal.group(), 8) & 0xFF) if octal else esc)
+            i += len(octal.group()) if octal else 1
+        else:
+            out.append(_ANSI_C_SIMPLE.get(esc, "\\" + esc))
+            i += 1
+    raise ValueError("unterminated $'...' quote")
+
+
+def _expand_ansi_c_quotes(text: str) -> str:
+    """Rewrite bash ``$'...'`` words as plain single-quoted words shlex understands.
+
+    Quote state is tracked so ``$'`` inside '...' or "..." stays literal. An
+    unterminated quote raises ValueError, so the caller fails closed.
+    """
+    out: list[str] = []
+    quote = ""
+    i = 0
+    while i < len(text):
+        char = text[i]
+        if quote == "'":
+            quote = "" if char == "'" else quote
+        elif quote == '"':
+            if char == "\\" and i + 1 < len(text):
+                out.append(char)
+                i += 1
+                char = text[i]
+            elif char == '"':
+                quote = ""
+        elif char == "\\" and i + 1 < len(text):
+            out.append(char)
+            i += 1
+            char = text[i]
+        elif char in "'\"":
+            quote = char
+        elif char == "$" and text.startswith("'", i + 1):
+            decoded, i = _decode_ansi_c(text, i + 2)
+            out.append(shlex.quote(decoded))
+            continue
+        out.append(char)
+        i += 1
+    return "".join(out)
+
+
+def _curl_urls(text: str) -> list[str]:
+    """Every target of a curl command: ``--url``, positional URLs and bare hosts.
+
+    Bare hosts (curl assumes http) are only returned next to at least one
+    explicit URL, so a lone bare host still fails as undeterminable.
+    """
+    try:
+        tokens = shlex.split(_expand_ansi_c_quotes(re.sub(r"\\\r?\n", " ", text)))
+    except ValueError:
+        return []
+    urls: list[str] = []
+    bare: list[str] = []
+    for index, token in enumerate(tokens[1:], start=1):
+        previous = tokens[index - 1].lower()
+        value = token
+        if token.lower().startswith("--url="):
+            value = token[6:]
+        elif token.lower() == "--url" or tokens[index - 1] in _CURL_ARG_OPTIONS:
+            continue
+        if re.match(r"https?://", value, re.IGNORECASE) or previous == "--url":
+            urls.append(value)
+        elif value and not value.startswith("-") and "://" not in value:
+            bare.append(f"http://{value}")
+    return [*urls, *bare] if urls else []
+
+
+def _request_urls(text: str) -> list[str]:
+    """The URLs a copied request was aimed at; empty if none can be determined."""
+    if re.match(r"\s*curl\b", text, re.IGNORECASE):
+        return _curl_urls(text)
+    urls: list[str] = []
     for pattern in _REQUEST_URL_PATTERNS:
-        match = pattern.search(text)
-        if match:
-            return match.group("url")
-    return None
+        urls.extend(m.group("url") for m in pattern.finditer(text))
+    return urls
 
 
 def _reject_foreign_request(text: str, platform: str) -> None:
     """Refuse a request copied from a third-party domain (a CDN or analytics
     beacon on the page): its cookies can pass a name check but are not the
-    first-party session yt-dlp needs.
+    first-party session yt-dlp needs. A request whose target cannot be
+    determined is refused too, never assumed to be ours.
     """
-    url = _request_url(text)
-    if not url:
-        return
-
-    host = urlparse(url).hostname or ""
     expected = PLATFORM_PRIMARY_DOMAIN.get(platform, "")
-    if not host or not expected or domain_matches(host, (expected,)):
-        return
+    site = expected.lstrip(".")
+    urls = _request_urls(text)
+    if not urls:
+        raise CookieImportError(
+            f"Could not determine which site this request went to. Copy a request to {site} "
+            f"(its URL must start with https://)."
+        )
 
-    raise CookieImportError(
-        f"This request went to {host}, so it carries that site's cookies, not "
-        f"{expected.lstrip('.')}'s. Copy a request whose domain column reads "
-        f"{expected.lstrip('.')}."
-    )
+    for url in urls:
+        host = urlparse(url).hostname or ""
+        if not host:
+            raise CookieImportError(f"Could not read the request URL. Copy a request to {site}.")
+        if expected and not domain_matches(host, (expected,)):
+            raise CookieImportError(
+                f"This request went to {host}, so it carries that site's cookies, not "
+                f"{site}'s. Copy a request whose domain column reads {site}."
+            )
 
 
 def _cookie_header_from_curl(text: str) -> str | None:

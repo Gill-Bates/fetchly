@@ -617,18 +617,6 @@ jobs:
           echo "After:"
           df -h /
 
-      # docker/Dockerfile copies "pyproject.toml BUILD_INFO*" into the image and
-      # app/utils/version.py reads BUILD_INFO for the commit shown on the
-      # Settings page, falling back to "dev" when the file is absent. The file
-      # is gitignored (setup.conf writes it by hand for local builds), so the
-      # release build has to produce it here - otherwise every published image
-      # would report itself as "dev".
-      - name: Write BUILD_INFO
-        run: |
-          set -euo pipefail
-          printf '%s\n' "${{ github.sha }}" > BUILD_INFO
-          cat BUILD_INFO
-
       # The dependency versions the meta job resolved once, dropped into the
       # build context docker/Dockerfile reads them from. Both architectures get
       # this same file, which is what makes their venvs identical even though
@@ -650,10 +638,8 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # Version information travels as OCI labels rather than build args: the
-      # Dockerfile deliberately declares no APP_VERSION/VCS_REF/BUILD_DATE args
-      # (the app reads pyproject.toml and BUILD_INFO from disk), and passing undeclared
-      # build args would only produce warnings.
+      # Version and date travel as OCI labels; VCS_REF also creates BUILD_INFO
+      # inside the image. The app reads its version from pyproject.toml.
       #
       # The toolchain the Dockerfile keeps rolling - the python base,
       # the ffmpeg release, yt-dlp, yt-dlp-ejs, deno - comes in as build args
@@ -665,6 +651,8 @@ jobs:
       # "whatever is newest", as of one moment, which keeps the amd64 and arm64
       # images on identical versions; the verify steps below prove it.
       - name: Build image for smoke tests
+        env:
+          VCS_REF: ${{ github.sha }}
         run: |
           set -euo pipefail
           docker buildx build \
@@ -673,6 +661,7 @@ jobs:
             --target runtime \
             --load \
             --build-arg "APT_CACHE_DATE=${{ needs.meta.outputs.apt_cache_date }}" \
+            --build-arg "VCS_REF=${VCS_REF}" \
             --build-arg "PYTHON_BASE=${{ needs.meta.outputs.python_base }}" \
             --build-arg "ESSENTIA_REF=${{ needs.meta.outputs.essentia_ref }}" \
             --build-arg "FFMPEG_RELEASE_URL=${{ needs.meta.outputs.ffmpeg_release_url }}" \
@@ -750,6 +739,37 @@ jobs:
             exit 1
           fi
           echo "✓ Gunicorn runs as appuser (uid 1000)"
+
+      # Build tooling and essentia's build leftovers belong to the essentia and
+      # builder stages only. A stray COPY --from or apt package would otherwise
+      # ship them without any other check noticing.
+      - name: Verify no build artefacts in the image
+        run: |
+          set -euo pipefail
+          docker exec -i "${{ matrix.container_name }}" bash -s <<'SH'
+          set -u
+          bad=0
+          for tool in gcc cc g++ c++ make cmake git nasm pkg-config; do
+            if command -v "$tool" >/dev/null 2>&1; then
+              echo "✗ build tool in image: $(command -v "$tool")"
+              bad=1
+            fi
+          done
+          for path in /src /wheels /opt/essentia-build /tmp/essentia-wheels /venv/lib/python3.13/site-packages/essentia/include; do
+            if [[ -e "$path" ]]; then
+              echo "✗ build leftover in image: ${path}"
+              bad=1
+            fi
+          done
+          leftovers="$(find /venv /app /tmp -xdev \( -name '*.whl' -o -name 'CMakeCache.txt' \) 2>/dev/null | head -20)"
+          if [[ -n "$leftovers" ]]; then
+            echo "✗ build leftovers in image:"
+            echo "$leftovers"
+            bad=1
+          fi
+          exit "$bad"
+          SH
+          echo "✓ no compiler, build tree or wheel leftovers"
 
       - name: Verify toolchain and build metadata
         run: |

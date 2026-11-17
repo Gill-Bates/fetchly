@@ -23,7 +23,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any, Final
 
-from .naming import SOURCE_MARKER
+from .naming import SOURCE_MARKER, bpm_to_int
 
 logger = logging.getLogger(__name__)
 
@@ -51,14 +51,6 @@ def sanitize_tag_value(value: object, *, max_length: int = _MAX_TAG_LENGTH) -> s
     """Return *value* as a single-line, length-limited tag text."""
     text = _CONTROL_CHARS.sub(" ", str(value))
     return " ".join(text.split())[:max_length]
-
-
-def bpm_to_int(bpm: Any) -> int | None:
-    """Round a detected tempo for TBPM; ``None`` for "no usable tempo"."""
-    if isinstance(bpm, bool) or not isinstance(bpm, (int, float)):
-        return None
-    rounded = round(bpm)
-    return rounded if rounded > 0 else None
 
 
 def find_cover(job_dir: Path) -> Path | None:
@@ -123,7 +115,17 @@ def build_mp3_transcode_cmd(
 
 def read_bpm_tag(mp3_path: Path) -> int | None:
     """Return the TBPM already stored in *mp3_path*, or ``None``."""
-    cmd = [
+    cmd = _bpm_probe_command(mp3_path)
+    try:
+        completed = subprocess.run(cmd, capture_output=True, timeout=_TAG_TIMEOUT_SECONDS, check=True)
+        return _parse_bpm_tag(completed.stdout or b"{}")
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        logger.warning("Could not read tags of %s: %s", mp3_path.name, exc)
+        return None
+
+
+def _bpm_probe_command(mp3_path: Path) -> list[str]:
+    return [
         "ffprobe",
         "-v",
         "error",
@@ -133,12 +135,10 @@ def read_bpm_tag(mp3_path: Path) -> int | None:
         "json",
         str(mp3_path),
     ]
-    try:
-        completed = subprocess.run(cmd, capture_output=True, timeout=_TAG_TIMEOUT_SECONDS, check=True)
-        tags = (json.loads(completed.stdout or b"{}").get("format") or {}).get("tags") or {}
-    except (OSError, subprocess.SubprocessError, ValueError) as exc:
-        logger.warning("Could not read tags of %s: %s", mp3_path.name, exc)
-        return None
+
+
+def _parse_bpm_tag(output: bytes) -> int | None:
+    tags = (json.loads(output).get("format") or {}).get("tags") or {}
     for key, value in tags.items():
         if str(key).upper() == "TBPM":
             try:
@@ -146,6 +146,31 @@ def read_bpm_tag(mp3_path: Path) -> int | None:
             except ValueError:
                 return None
     return None
+
+
+async def read_bpm_tag_async(mp3_path: Path) -> int | None:
+    """Read TBPM through a cancellable ffprobe subprocess."""
+    cmd = _bpm_probe_command(mp3_path)
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=_TAG_TIMEOUT_SECONDS)
+        except TimeoutError as exc:
+            await _stop_subprocess(proc)
+            raise subprocess.TimeoutExpired(cmd, _TAG_TIMEOUT_SECONDS) from exc
+        except BaseException:
+            await _stop_subprocess(proc)
+            raise
+        if proc.returncode:
+            raise subprocess.CalledProcessError(proc.returncode, cmd, output=stdout, stderr=stderr)
+        return _parse_bpm_tag(stdout or b"{}")
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        logger.warning("Could not read tags of %s: %s", mp3_path.name, exc)
+        return None
 
 
 def _bpm_rewrite_plan(mp3_path: Path, bpm: Any) -> tuple[int, Path, list[str]] | None:
@@ -157,7 +182,22 @@ def _bpm_rewrite_plan(mp3_path: Path, bpm: Any) -> tuple[int, Path, list[str]] |
     tempo = bpm_to_int(bpm)
     if tempo is None or not mp3_path.is_file():
         return None
-    if read_bpm_tag(mp3_path) == tempo:
+    return _build_bpm_rewrite_plan(mp3_path, tempo, read_bpm_tag(mp3_path))
+
+
+async def _bpm_rewrite_plan_async(mp3_path: Path, bpm: Any) -> tuple[int, Path, list[str]] | None:
+    tempo = bpm_to_int(bpm)
+    if tempo is None or not await asyncio.to_thread(mp3_path.is_file):
+        return None
+    return _build_bpm_rewrite_plan(mp3_path, tempo, await read_bpm_tag_async(mp3_path))
+
+
+def _build_bpm_rewrite_plan(
+    mp3_path: Path,
+    tempo: int,
+    current_tempo: int | None,
+) -> tuple[int, Path, list[str]] | None:
+    if current_tempo == tempo:
         return None
 
     temp_path = mp3_path.with_name(f"{mp3_path.name}.tmp.{uuid.uuid4().hex[:8]}")
@@ -212,7 +252,7 @@ def ensure_bpm_tag(mp3_path: Path, bpm: Any) -> bool:
     OSError on failure, leaving the original untouched.
 
     Synchronous and blocking; prefer :func:`ensure_bpm_tag_async` from async
-    code so cancellation can terminate the ffmpeg process.
+    code so cancellation can terminate ffprobe or ffmpeg.
     """
     plan = _bpm_rewrite_plan(mp3_path, bpm)
     if plan is None:
@@ -235,8 +275,8 @@ def ensure_bpm_tag(mp3_path: Path, bpm: Any) -> bool:
     return True
 
 
-async def _stop_ffmpeg_process(proc: asyncio.subprocess.Process) -> None:
-    """Kill and reap a still-running ffmpeg process so cancellation orphans none."""
+async def _stop_subprocess(proc: asyncio.subprocess.Process) -> None:
+    """Kill and reap a still-running subprocess so cancellation orphans none."""
     if proc.returncode is None:
         with suppress(ProcessLookupError):
             proc.kill()
@@ -244,19 +284,20 @@ async def _stop_ffmpeg_process(proc: asyncio.subprocess.Process) -> None:
         await asyncio.shield(proc.wait())
 
 
+async def stop_ffmpeg_process(proc: asyncio.subprocess.Process) -> None:
+    """Kill and reap a still-running ffmpeg process so cancellation orphans none."""
+    await _stop_subprocess(proc)
+
+
 async def ensure_bpm_tag_async(mp3_path: Path, bpm: Any) -> bool:
     """Async counterpart of :func:`ensure_bpm_tag`.
 
-    Runs ffmpeg as an asyncio subprocess so a cancelled await (client
-    disconnect, shutdown) terminates the process through ``kill()`` instead of
-    leaving it running to the 120 s timeout. The timeout still bounds a process
-    that neither finishes nor is cancelled. Cancellation is re-raised after the
-    process is reaped and the temp file removed. Behaviour and the returned
-    value are otherwise identical to the synchronous variant.
+    Runs ffprobe and ffmpeg as asyncio subprocesses so cancellation terminates
+    the active process instead of leaving it running to the timeout. Cancellation
+    is re-raised after the process is reaped and the temp file removed. Behaviour
+    and the returned value are otherwise identical to the synchronous variant.
     """
-    # read_bpm_tag() shells out to ffprobe synchronously, so resolve the plan
-    # off the event loop; running it inline would block for up to the timeout.
-    plan = await asyncio.to_thread(_bpm_rewrite_plan, mp3_path, bpm)
+    plan = await _bpm_rewrite_plan_async(mp3_path, bpm)
     if plan is None:
         return False
     tempo, temp_path, cmd = plan
@@ -271,19 +312,15 @@ async def ensure_bpm_tag_async(mp3_path: Path, bpm: Any) -> bool:
             raise RuntimeError(f"BPM tagging failed: {exc}") from exc
         try:
             _, stderr = await asyncio.wait_for(proc.communicate(), timeout=_TAG_TIMEOUT_SECONDS)
-        except asyncio.CancelledError:
-            # Client disconnect / shutdown: reap the process, then let
-            # cancellation propagate so the request is not silently completed.
-            await _stop_ffmpeg_process(proc)
-            raise
         except TimeoutError as exc:
             # A stuck ffmpeg is a tagging failure, not a cancellation: translate
             # it to RuntimeError so _ensure_mp3 serves the untagged MP3.
-            await _stop_ffmpeg_process(proc)
+            await stop_ffmpeg_process(proc)
             raise RuntimeError("BPM tagging timed out") from exc
         except BaseException:
-            # Any other failure still must not orphan the ffmpeg process.
-            await _stop_ffmpeg_process(proc)
+            # Cancellation (client disconnect, shutdown) or any other failure:
+            # reap ffmpeg, then propagate so the request is not silently completed.
+            await stop_ffmpeg_process(proc)
             raise
         _finalize_bpm_rewrite(mp3_path, temp_path, tempo, proc.returncode or 0, stderr or b"")
     finally:

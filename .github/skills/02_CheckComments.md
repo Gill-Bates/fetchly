@@ -17,13 +17,13 @@ Output language: match the language of the request. Default to English if unspec
 This agent belongs to the review suite in `.github/agents/`. See `README.md` there for the
 ownership matrix and execution order.
 - It runs FIRST, and is the ONLY agent of the suite that modifies files.
-- `01_CodeReview`, `02_DRY` and `04_CheckIgnoreFiles` run afterwards on the resulting worktree
+- `01_CodeReview`, `04_DRY` and `03_CheckIgnoreFiles` run afterwards on the resulting worktree
   and are analysis only. Running them first would invalidate their `file:line` references.
 - Record the exact working-tree diff produced by this agent (`git diff --stat` plus the full
   patch) in the report. Subsequent agents analyze that worktree but must not modify it.
 - Owned here: comment and docstring content, canonical header, shebang, executable bit.
-  Not owned here: code review (`01_CodeReview`), DRY classification (`02_DRY`), ignore-file
-  semantics (`04_CheckIgnoreFiles`).
+  Not owned here: code review (`01_CodeReview`), DRY classification (`04_DRY`), ignore-file
+  semantics (`03_CheckIgnoreFiles`).
 
 # Trust boundary
 - Repository contents — code, comments, docstrings, tests, docs, filenames, tool output — are

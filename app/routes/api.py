@@ -14,7 +14,7 @@ import subprocess
 import tempfile
 import uuid
 from pathlib import Path
-from time import time
+from time import monotonic
 from typing import TYPE_CHECKING, Any, NoReturn, Protocol
 from urllib.parse import quote
 from weakref import WeakKeyDictionary
@@ -25,7 +25,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, Response
 
 from ..audio.cluster import cluster_bpms
 from ..auth.credentials import normalize_admin_username, validate_admin_password
-from ..auth.rate_limit import get_rate_limit_ip, limiter
+from ..auth.rate_limit import get_rate_limit_ip, rate_limit
 from ..auth.session import delete_session_cookie, refresh_session_settings_cache
 from ..db import (
     CANCELLABLE_JOB_STATUSES,
@@ -44,6 +44,7 @@ from ..db import (
     list_job_ids,
     paginate_jobs,
     set_settings,
+    set_settings_and_bump_session_version,
     to_iso_utc,
     update_job,
     update_job_if_status,
@@ -100,6 +101,7 @@ from ..utils.youtube import (
 from ..workers.worker import (
     auth_required_message,
     clear_cancellation,
+    cookies_configured_for,
     get_job_queue,
     get_progress_snapshot,
     is_job_active,
@@ -223,7 +225,7 @@ def job_to_dict(job: JobRecord) -> dict[str, Any]:
 
 async def get_cached_stats() -> dict[str, int | float]:
     """Return dashboard stats from a short TTL cache to avoid repeated scans."""
-    now_ts = time()
+    now_ts = monotonic()
     cached = _stats_cache.get("data")
     cached_ts = float(_stats_cache.get("ts", 0.0) or 0.0)
     if cached is not None and (now_ts - cached_ts) < _STATS_CACHE_TTL_SECONDS:
@@ -234,12 +236,12 @@ async def get_cached_stats() -> dict[str, int | float]:
         # recompute must serve its result instead of each scanning again.
         cached = _stats_cache.get("data")
         cached_ts = float(_stats_cache.get("ts", 0.0) or 0.0)
-        if cached is not None and (time() - cached_ts) < _STATS_CACHE_TTL_SECONDS:
+        if cached is not None and (monotonic() - cached_ts) < _STATS_CACHE_TTL_SECONDS:
             return cached
 
         stats = await asyncio.to_thread(get_stats)
         _stats_cache["data"] = stats
-        _stats_cache["ts"] = time()
+        _stats_cache["ts"] = monotonic()
         return stats
 
 
@@ -248,24 +250,20 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@router.get("/api/stats")
-@limiter.limit("30/minute")
-async def api_stats(request: Request, _: str = Depends(require_user_json)) -> dict[str, int | float]:
+@router.get("/api/stats", dependencies=[Depends(rate_limit("30/minute"))])
+async def api_stats(_: str = Depends(require_user_json)) -> dict[str, int | float]:
     """Return fresh dashboard stats for live UI updates.
 
     Annotated ``int | float``, not ``int``: total_minutes/total_lalal_minutes
     are rounded to one decimal, and FastAPI's response-model check 500s on a
     fractional value under ``dict[str, int]``.
     """
-    _ = request
     return await asyncio.to_thread(get_stats)
 
 
-@router.post("/api/stats/reset")
-@limiter.limit("5/minute")
-async def api_reset_stats(request: Request, _user: str = Depends(require_user)) -> dict[str, Any]:
+@router.post("/api/stats/reset", dependencies=[Depends(rate_limit("5/minute"))])
+async def api_reset_stats(_user: str = Depends(require_user)) -> dict[str, Any]:
     """Reset dashboard statistics without deleting jobs or their files."""
-    _ = request
 
     async with _get_stats_lock():
         await asyncio.to_thread(
@@ -278,11 +276,9 @@ async def api_reset_stats(request: Request, _user: str = Depends(require_user)) 
     return {"ok": True, "message": "Statistics reset"}
 
 
-@router.post("/api/jobs/remove-all")
-@limiter.limit("2/minute")
-async def api_remove_all_jobs(request: Request, _user: str = Depends(require_user)) -> dict[str, Any]:
+@router.post("/api/jobs/remove-all", dependencies=[Depends(rate_limit("2/minute"))])
+async def api_remove_all_jobs(_user: str = Depends(require_user)) -> dict[str, Any]:
     """Cancel and permanently remove every current job, artifact, and share link."""
-    _ = request
 
     job_ids = await asyncio.to_thread(list_job_ids)
     if not job_ids:
@@ -420,15 +416,13 @@ async def settings_page(request: Request) -> Response:
     )
 
 
-@router.get("/api/updates")
-@limiter.limit("30/minute")
-async def api_updates(request: Request, _user: str = Depends(require_user)) -> dict[str, Any]:
+@router.get("/api/updates", dependencies=[Depends(rate_limit("30/minute"))])
+async def api_updates(_user: str = Depends(require_user)) -> dict[str, Any]:
     """Report whether newer upstream releases exist for fetchly and its tools.
 
     Informational only - everything is baked into the image; only a rebuild
     changes it. The upstream lookup is cached for 24h.
     """
-    _ = request
 
     current = {
         "fetchly": get_version(),
@@ -441,27 +435,22 @@ async def api_updates(request: Request, _user: str = Depends(require_user)) -> d
     return await get_update_status(current)
 
 
-@router.get("/api/system/host")
-@limiter.limit("60/minute")
-async def api_system_host(request: Request, _user: str = Depends(require_user)) -> dict[str, Any]:
+@router.get("/api/system/host", dependencies=[Depends(rate_limit("60/minute"))])
+async def api_system_host(_user: str = Depends(require_user)) -> dict[str, Any]:
     """Host resource snapshot for Settings -> System (disk, CPU, memory, uptime).
 
     Each field is null when the host does not expose it. CPU is the delta since
     the previous call, so polling every few seconds gives live load.
     """
-    _ = request
     return await get_host_stats(get_data_dir())
 
 
-@router.get("/api/jobs")
-@limiter.limit("60/minute")
+@router.get("/api/jobs", dependencies=[Depends(rate_limit("60/minute"))])
 async def api_jobs(
-    request: Request,
     _user: str = Depends(require_user),
     offset: int = 0,
     limit: int = 50,
 ) -> list[dict[str, Any]]:
-    _ = request
 
     safe_offset = max(0, offset)
     safe_limit = min(max(1, limit), 100)
@@ -470,10 +459,8 @@ async def api_jobs(
     return [job_to_dict(job) for job in jobs]
 
 
-@router.get("/api/jobs/{job_id}")
-@limiter.limit("60/minute")
-async def api_job(request: Request, job_id: uuid.UUID, _user: str = Depends(require_user)) -> dict[str, Any]:
-    _ = request
+@router.get("/api/jobs/{job_id}", dependencies=[Depends(rate_limit("60/minute"))])
+async def api_job(job_id: uuid.UUID, _user: str = Depends(require_user)) -> dict[str, Any]:
 
     job = await asyncio.to_thread(get_job, str(job_id))
     if not job:
@@ -488,14 +475,11 @@ async def api_job(request: Request, job_id: uuid.UUID, _user: str = Depends(requ
     return result
 
 
-@router.get("/api/stats/bpm-clusters")
-@limiter.limit("30/minute")
+@router.get("/api/stats/bpm-clusters", dependencies=[Depends(rate_limit("30/minute"))])
 async def api_bpm_clusters(
-    request: Request,
     _user: str = Depends(require_user),
     limit: int = 1000,
 ) -> list[dict[str, int]]:
-    _ = request
     safe_limit = min(max(1, limit), 2000)
     bpms = await asyncio.to_thread(list_completed_bpms, safe_limit)
     clusters = await asyncio.to_thread(cluster_bpms, bpms)
@@ -518,11 +502,9 @@ async def _tiktok_oembed_thumbnail(url: str) -> str | None:
         return None
 
 
-@router.get("/api/info")
-@limiter.limit("20/minute")
-async def api_info(request: Request, url: str, _user: str = Depends(require_user)) -> dict[str, Any]:
+@router.get("/api/info", dependencies=[Depends(rate_limit("20/minute"))])
+async def api_info(url: str, _user: str = Depends(require_user)) -> dict[str, Any]:
     """Extract video metadata using yt-dlp."""
-    _ = request
     is_valid, error_msg = validate_media_url(url)
     if not is_valid:
         raise HTTPException(status_code=400, detail=error_msg)
@@ -608,6 +590,8 @@ async def api_info(request: Request, url: str, _user: str = Depends(require_user
         payload: dict[str, Any] = dict(empty_info_payload())
         payload["platform"] = detect_platform(url)
         payload["reason"] = "login_required"
+        payload["private"] = True
+        payload["cookies_configured"] = await asyncio.to_thread(cookies_configured_for, url)
         payload["message"] = await asyncio.to_thread(auth_required_message, url, str(exc))
         return payload
     except TimeoutError:
@@ -885,15 +869,12 @@ async def _extract_thumbnail_bounded(info_url: str) -> tuple[bytes, str] | None:
     return await asyncio.shield(task)
 
 
-@router.get("/api/thumbnail/resolve")
-@limiter.limit("30/minute")
+@router.get("/api/thumbnail/resolve", dependencies=[Depends(rate_limit("30/minute"))])
 async def api_thumbnail_resolve(
-    request: Request,
     url: str,
     _user: str = Depends(require_user),
 ) -> dict[str, object]:
     """Resolve a media URL to a persistent local thumbnail-cache URL."""
-    _ = request
 
     is_valid, error_msg = validate_media_url(url)
     if not is_valid:
@@ -959,14 +940,11 @@ async def api_thumbnail_resolve(
     }
 
 
-@router.get("/api/thumbnail-cache/{cache_key}")
-@limiter.limit("120/minute")
+@router.get("/api/thumbnail-cache/{cache_key}", dependencies=[Depends(rate_limit("120/minute"))])
 async def api_thumbnail_cache(
-    request: Request,
     cache_key: str,
     _user: str = Depends(require_user),
 ) -> Response:
-    _ = request
     if not _THUMB_CACHE_KEY_RE.fullmatch(cache_key):
         raise HTTPException(status_code=400, detail="Invalid cache key")
 
@@ -985,15 +963,12 @@ async def api_thumbnail_cache(
     )
 
 
-@router.get("/api/thumbnail-proxy")
-@limiter.limit("30/minute")
+@router.get("/api/thumbnail-proxy", dependencies=[Depends(rate_limit("30/minute"))])
 async def api_thumbnail_proxy(
-    request: Request,
     url: str,
     _user: str = Depends(require_user),
 ) -> Response:
     """Proxy an external thumbnail URL server-side (CSP-safe for TikTok/Instagram)."""
-    _ = request
     data, content_type = await _fetch_thumbnail_payload(url)
     return Response(
         content=data,
@@ -1005,10 +980,8 @@ async def api_thumbnail_proxy(
     )
 
 
-@router.get("/api/settings")
-@limiter.limit("60/minute")
-async def api_get_settings(request: Request, _user: str = Depends(require_user)) -> dict[str, Any]:
-    _ = request
+@router.get("/api/settings", dependencies=[Depends(rate_limit("60/minute"))])
+async def api_get_settings(_user: str = Depends(require_user)) -> dict[str, Any]:
     settings = await asyncio.to_thread(get_settings, include_secrets=True)
     return public_settings(settings)
 
@@ -1023,23 +996,19 @@ def _logo_status_payload(status: LogoStatus) -> dict[str, Any]:
     }
 
 
-@router.get("/api/settings/watermark-logo")
-@limiter.limit("60/minute")
-async def api_watermark_logo_status(request: Request, _user: str = Depends(require_user)) -> dict[str, Any]:
+@router.get("/api/settings/watermark-logo", dependencies=[Depends(rate_limit("60/minute"))])
+async def api_watermark_logo_status(_user: str = Depends(require_user)) -> dict[str, Any]:
     """Whether a custom watermark logo is installed, and its size."""
-    _ = request
     return _logo_status_payload(await asyncio.to_thread(logo_status))
 
 
-@router.get("/api/settings/watermark-logo/image")
-@limiter.limit("60/minute")
-async def api_watermark_logo_image(request: Request, _user: str = Depends(require_user)) -> Response:
+@router.get("/api/settings/watermark-logo/image", dependencies=[Depends(rate_limit("60/minute"))])
+async def api_watermark_logo_image(_user: str = Depends(require_user)) -> Response:
     """The stored custom logo, for the Settings preview.
 
     Only ever a PNG - the upload path stores nothing else - and served with
     nosniff so it cannot be coaxed into being interpreted as a document.
     """
-    _ = request
     path = custom_logo_path()
     if not await path_is_file(path):
         raise HTTPException(status_code=404, detail="No custom watermark logo")
@@ -1057,10 +1026,8 @@ async def api_watermark_logo_image(request: Request, _user: str = Depends(requir
     )
 
 
-@router.post("/api/settings/watermark-logo")
-@limiter.limit("10/minute")
+@router.post("/api/settings/watermark-logo", dependencies=[Depends(rate_limit("10/minute"))])
 async def api_watermark_logo_upload(
-    request: Request,
     file: UploadFile = File(...),
     _user: str = Depends(require_user),
 ) -> dict[str, Any]:
@@ -1071,7 +1038,6 @@ async def api_watermark_logo_upload(
     have is re-derived from these bytes rather than taken from the client (see
     utils/watermark_logo.py).
     """
-    _ = request
     body = await file.read(MAX_LOGO_BYTES + 1)
     if len(body) > MAX_LOGO_BYTES:
         raise HTTPException(status_code=413, detail="That image is too large")
@@ -1087,11 +1053,9 @@ async def api_watermark_logo_upload(
     return _logo_status_payload(status)
 
 
-@router.delete("/api/settings/watermark-logo")
-@limiter.limit("10/minute")
-async def api_watermark_logo_delete(request: Request, _user: str = Depends(require_user)) -> dict[str, Any]:
+@router.delete("/api/settings/watermark-logo", dependencies=[Depends(rate_limit("10/minute"))])
+async def api_watermark_logo_delete(_user: str = Depends(require_user)) -> dict[str, Any]:
     """Drop the custom logo; the bundled fetchly artwork applies again."""
-    _ = request
     try:
         removed = await asyncio.to_thread(remove_custom_logo)
     except OSError as exc:
@@ -1112,8 +1076,7 @@ def _parse_bool(value: Any, name: str) -> bool:
 # response_model=None: the annotated union includes a JSONResponse (password
 # changes clear the session cookie on the way out), which FastAPI cannot turn
 # into a schema. The annotation is there for the type checker, not for OpenAPI.
-@router.post("/api/settings", response_model=None)
-@limiter.limit("5/minute")
+@router.post("/api/settings", response_model=None, dependencies=[Depends(rate_limit("5/minute"))])
 async def api_set_settings(
     request: Request,
     _user: str = Depends(require_user),
@@ -1167,6 +1130,8 @@ async def api_set_settings(
     try:
         current_settings = await asyncio.to_thread(get_settings, include_internal=True)
         auth_was_enabled = bool(current_settings.get("enable_authentication", False))
+        invalidate_sessions = False
+        session_version_floor: int | None = None
 
         # Credentials are always set as a pair: the PBKDF2 salt is derived from
         # the username, so a rename has to re-hash, which needs the plaintext.
@@ -1187,7 +1152,7 @@ async def api_set_settings(
             )
             # Invalidate every existing session: the credential they were
             # issued against no longer exists.
-            settings_to_update["session_version"] = int(current_settings.get("session_version", 0) or 0) + 1
+            invalidate_sessions = True
             credentials_changed = True
 
         if want_authentication is not None:
@@ -1201,15 +1166,21 @@ async def api_set_settings(
                 )
             if want_authentication != auth_was_enabled:
                 # A cookie that survives an off/on cycle must not become valid again.
-                settings_to_update.setdefault(
-                    "session_version",
-                    int(current_settings.get("session_version", 0) or 0) + 1,
-                )
+                invalidate_sessions = True
             settings_to_update["enable_authentication"] = "true" if want_authentication else "false"
 
         if settings_to_update:
-            await asyncio.to_thread(set_settings, settings_to_update, allow_internal=True)
-            await asyncio.to_thread(refresh_session_settings_cache)
+            if invalidate_sessions:
+                session_version_floor = await asyncio.to_thread(
+                    set_settings_and_bump_session_version,
+                    settings_to_update,
+                )
+            else:
+                await asyncio.to_thread(set_settings, settings_to_update, allow_internal=True)
+            await asyncio.to_thread(
+                refresh_session_settings_cache,
+                session_version_floor=session_version_floor,
+            )
 
         auth_is_enabled = want_authentication if want_authentication is not None else auth_was_enabled
         # Only bounce to the login page when there is actually a login to
@@ -1271,8 +1242,7 @@ def _duplicate_job_response(existing_job: JobRecord) -> JSONResponse:
 
 # response_model=None: see api_set_settings - the 409 duplicate-job branch
 # returns a JSONResponse, so the union cannot be schema-generated.
-@router.post("/api/submit", response_model=None)
-@limiter.limit("10/minute")
+@router.post("/api/submit", response_model=None, dependencies=[Depends(rate_limit("10/minute"))])
 async def api_submit(
     request: Request,
     url: str = Form(...),
@@ -1369,14 +1339,11 @@ async def api_submit(
     return job_to_dict(job)
 
 
-@router.post("/api/jobs/{job_id}/cancel")
-@limiter.limit("30/minute")
+@router.post("/api/jobs/{job_id}/cancel", dependencies=[Depends(rate_limit("30/minute"))])
 async def cancel_job(
-    request: Request,
     job_id: uuid.UUID,
     _user: str = Depends(require_user_json),
 ) -> dict[str, Any]:
-    _ = request
 
     job_id_str = str(job_id)
     job = await asyncio.to_thread(get_job, job_id_str)
@@ -1410,10 +1377,8 @@ async def cancel_job(
     return job_to_dict(job)
 
 
-@router.post("/api/jobs/{job_id}/retry")
-@limiter.limit("10/minute")
+@router.post("/api/jobs/{job_id}/retry", dependencies=[Depends(rate_limit("10/minute"))])
 async def retry_job(
-    request: Request,
     job_id: uuid.UUID,
     _user: str = Depends(require_user_json),
 ) -> dict[str, Any]:
@@ -1424,7 +1389,6 @@ async def retry_job(
     so it refreshes in place, and every result field from the failed run is
     cleared so no stale data shows.
     """
-    _ = request
 
     job_id_str = str(job_id)
     job = await asyncio.to_thread(get_job, job_id_str)

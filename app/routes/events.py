@@ -20,7 +20,7 @@ from weakref import finalize
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
-from ..auth.rate_limit import limiter
+from ..auth.rate_limit import rate_limit
 from .auth import current_user, require_user
 
 logger = logging.getLogger(__name__)
@@ -273,8 +273,7 @@ def _build_sse_response(
     return response
 
 
-@router.get("/events")
-@limiter.limit("30/minute")
+@router.get("/events", dependencies=[Depends(rate_limit("30/minute"))])
 async def sse_events(request: Request, _user: str = Depends(require_user)):
     """Server-sent event stream for dashboard job updates."""
     slot = _reserve_connection_slot()
@@ -290,8 +289,7 @@ async def sse_events(request: Request, _user: str = Depends(require_user)):
         raise
 
 
-@router.get("/api/jobs/{job_id}/events")
-@limiter.limit("30/minute")
+@router.get("/api/jobs/{job_id}/events", dependencies=[Depends(rate_limit("30/minute"))])
 async def sse_job_events(job_id: uuid.UUID, request: Request, _user: str = Depends(require_user)):
     """Server-sent event stream for a single job detail page."""
     slot = _reserve_connection_slot()

@@ -11,6 +11,7 @@ lookup both key off them. Only the name handed to the browser carries the BPM
 tag, so a download always says what the Jobs list already shows.
 """
 
+import math
 from pathlib import Path
 from typing import Any, Final
 
@@ -18,6 +19,20 @@ from typing import Any, Final
 # whatever a caller appends behind it, such as a Lalal.ai ``_vocals`` - stays
 # at the end of the name where it belongs.
 SOURCE_MARKER: Final[str] = ".source"
+
+
+def bpm_to_int(bpm: Any) -> int | None:
+    """Round a detected tempo; ``None`` for "no usable tempo"."""
+    if isinstance(bpm, bool) or not isinstance(bpm, (int, float)):
+        return None
+    try:
+        numeric_bpm = float(bpm)
+    except OverflowError:
+        return None
+    if not math.isfinite(numeric_bpm):
+        return None
+    rounded = round(numeric_bpm)
+    return rounded if rounded > 0 else None
 
 
 def apply_bpm_tag(base_name: str, bpm: Any) -> str:
@@ -28,13 +43,11 @@ def apply_bpm_tag(base_name: str, bpm: Any) -> str:
     usable tempo - and every video job, which is never analysed - keeps its
     name unchanged.
     """
-    if isinstance(bpm, bool) or not isinstance(bpm, (int, float)):
-        return base_name
-    rounded = round(bpm)
-    if rounded <= 0:
+    tempo = bpm_to_int(bpm)
+    if tempo is None:
         return base_name
 
-    tag = f"_{rounded}bpm"
+    tag = f"_{tempo}bpm"
     if base_name.endswith(SOURCE_MARKER):
         return f"{base_name[: -len(SOURCE_MARKER)]}{tag}{SOURCE_MARKER}"
     return f"{base_name}{tag}"

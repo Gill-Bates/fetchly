@@ -6,7 +6,12 @@
 
 """Analysis worker contracts: result caching, naming, and shutdown response."""
 
+import multiprocessing
+import os
+import subprocess
+import sys
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import PropertyMock, patch
@@ -17,6 +22,13 @@ from app.workers import analysis_worker
 from tests._support import IsolatedDbTestCase
 
 JOB = ("22222222-2222-2222-2222-222222222222", "https://example.com/a", "audio", "max")
+
+
+def _child_with_descendant(connection: object) -> None:
+    os.setsid()
+    descendant = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    connection.send((os.getpid(), descendant.pid))
+    time.sleep(60)
 
 
 class _FakeProcess:
@@ -100,6 +112,66 @@ class StopAnalysisWorkersTests(unittest.TestCase):
         analysis_worker.stop_analysis_workers(timeout=0.1)
 
         self.assertTrue(process.terminated)
+
+    def _start_process_group(self) -> tuple[multiprocessing.Process, int]:
+        context = multiprocessing.get_context("spawn")
+        parent, child = context.Pipe(duplex=False)
+        process = context.Process(target=_child_with_descendant, args=(child,))
+        process.start()
+        child.close()
+        self.addCleanup(parent.close)
+        self.addCleanup(process.close)
+        self.addCleanup(self._forget_process_group, process)
+        self.addCleanup(self._stop_if_alive, process)
+        self.assertTrue(parent.poll(5), "analysis child did not start")
+        _, descendant_pid = parent.recv()
+        with analysis_worker._analysis_process_group_lock:
+            analysis_worker._analysis_process_group_pids.add(process.pid)
+        return process, descendant_pid
+
+    @staticmethod
+    def _forget_process_group(process: multiprocessing.Process) -> None:
+        with analysis_worker._analysis_process_group_lock:
+            if process.pid is not None:
+                analysis_worker._analysis_process_group_pids.discard(process.pid)
+
+    @staticmethod
+    def _stop_if_alive(process: multiprocessing.Process) -> None:
+        if process.is_alive():
+            analysis_worker._stop_process(process)
+
+    def _assert_descendant_stopped(self, descendant_pid: int) -> None:
+        try:
+            stat = Path(f"/proc/{descendant_pid}/stat").read_text()
+        except FileNotFoundError:
+            return
+        state = stat.rsplit(")", 1)[1].split()[0]
+        self.assertEqual(state, "Z")
+
+    def test_analysis_timeout_stops_its_subprocess_group(self) -> None:
+        process, descendant_pid = self._start_process_group()
+        with self.assertRaises(TimeoutError):
+            analysis_worker._await_process(process, 0)
+        self.assertFalse(process.is_alive())
+        self._assert_descendant_stopped(descendant_pid)
+
+    def test_analysis_shutdown_stops_its_subprocess_group(self) -> None:
+        process, descendant_pid = self._start_process_group()
+        analysis_worker._shutdown_event.set()
+        self.addCleanup(analysis_worker._shutdown_event.clear)
+        with self.assertRaises(analysis_worker.AnalysisInterruptedError):
+            analysis_worker._await_process(process, 60)
+        self.assertFalse(process.is_alive())
+        self._assert_descendant_stopped(descendant_pid)
+
+    def test_stopping_analysis_process_group_ends_its_subprocess(self) -> None:
+        process, descendant_pid = self._start_process_group()
+        try:
+            analysis_worker._stop_process(process)
+            self.assertFalse(process.is_alive())
+            self._assert_descendant_stopped(descendant_pid)
+        finally:
+            self._stop_if_alive(process)
 
 
 class WorkerLoopErrorHandlingTests(IsolatedDbTestCase):

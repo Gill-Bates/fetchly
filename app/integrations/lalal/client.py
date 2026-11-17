@@ -100,6 +100,10 @@ class LalalError(Exception):
     """Base exception for Lalal.ai API errors."""
 
 
+class LalalUnavailableError(LalalError):
+    """Lalal.ai answered with an error that says nothing about the credential (429, 5xx, ...)."""
+
+
 class LalalQuotaError(LalalError):
     """Quota/credits exceeded."""
 
@@ -478,12 +482,13 @@ class LalalClient:
         client = await self._get_client()
         response = await client.post(f"{LALAL_API_PREFIX}/limits/minutes_left/", timeout=30.0)
 
-        if response.status_code == 401:
+        if response.status_code in (401, 403):
             raise LalalError("Invalid API key")
 
         data = _json_object(response)
         if response.status_code >= 400:
-            raise LalalError(_extract_api_error(data))
+            # Only 401/403 reject the key; 402/429/5xx must not invalidate it.
+            raise LalalUnavailableError(_extract_api_error(data))
         return data
 
     async def upload_file(self, file_path: Path | str) -> UploadResult:
@@ -697,19 +702,28 @@ class LalalClient:
         # would mislabel Opus payloads.
         result_suffix = input_path.suffix.lower() or ".mp3"
 
-        if download_stem and split_result["stem_track"]:
-            emit_progress("download_stem", 0)
-            stem_path = output_dir / f"{base_name}_{stem.value}{result_suffix}"
-            await self.download_result(split_result["stem_track"], stem_path)
-            results["stem"] = stem_path
-            emit_progress("download_stem", 100)
+        try:
+            if download_stem and split_result["stem_track"]:
+                emit_progress("download_stem", 0)
+                stem_path = output_dir / f"{base_name}_{stem.value}{result_suffix}"
+                await self.download_result(split_result["stem_track"], stem_path)
+                results["stem"] = stem_path
+                emit_progress("download_stem", 100)
 
-        if download_backing and split_result["back_track"]:
-            emit_progress("download_backing", 0)
-            backing_name = "instrumental" if stem == StemType.VOCALS else "backing"
-            backing_path = output_dir / f"{base_name}_{backing_name}{result_suffix}"
-            await self.download_result(split_result["back_track"], backing_path)
-            results["backing"] = backing_path
-            emit_progress("download_backing", 100)
+            if download_backing and split_result["back_track"]:
+                emit_progress("download_backing", 0)
+                backing_name = "instrumental" if stem == StemType.VOCALS else "backing"
+                backing_path = output_dir / f"{base_name}_{backing_name}{result_suffix}"
+                await self.download_result(split_result["back_track"], backing_path)
+                results["backing"] = backing_path
+                emit_progress("download_backing", 100)
+        except BaseException:
+            # Drop what this run wrote so a failed second download leaves no intermediate.
+            for written in results.values():
+                try:
+                    written.unlink(missing_ok=True)
+                except OSError:
+                    logger.warning("Unable to remove partial Lalal result %s", written, exc_info=True)
+            raise
 
         return results

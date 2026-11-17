@@ -8,8 +8,8 @@
 
 Each component is compared against the source the image actually installs it
 from — GitHub releases for the packages, the newest BtbN autobuild of the installed
-stable series for ffmpeg. The answer is cached for 24 hours (in memory plus a small JSON file in
-the data directory) so a page reload never triggers another network round trip.
+stable series for ffmpeg. Successful checks are cached for 24 hours; failed components are retried
+after 15 minutes. Both results are kept in memory and in a small JSON file in the data directory.
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ import os
 import re
 import tempfile
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -118,7 +119,13 @@ def _is_prerelease_tag(tag: str) -> bool:
     Narrow on purpose: build metadata ("n9.0-4-gabc1234", "7.1.5-0+deb13u1")
     is not a prerelease. Only "-"/"_"/"." + an alpha/beta/rc/... token count.
     """
-    return bool(re.search(r"[-_.](?:alpha|beta|rc|dev|pre|a|b)\d*(?:[-+_.]|$)", tag, re.IGNORECASE))
+    return bool(
+        re.search(
+            r"[-_.](?:alpha|beta|rc|dev|pre|preview|nightly|canary|a|b)\d*(?:[-+_.]|$)",
+            tag,
+            re.IGNORECASE,
+        )
+    )
 
 
 def _is_newer(latest: str | None, current: str | None) -> bool:
@@ -172,6 +179,56 @@ async def _read_response_bytes(client: httpx.AsyncClient, url: str, *, max_bytes
         return response, bytes(body)
 
 
+async def _highest_stable_tag(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    max_pages: int,
+    tag_of: Callable[[dict[str, Any]], str | None],
+) -> str | None:
+    """Return the highest non-prerelease tag across up to *max_pages* list pages.
+
+    *tag_of* extracts an entry's tag, or returns None to skip the entry.
+    """
+    best_tag: str | None = None
+    best_parts: tuple[int, ...] = ()
+    next_url: str | None = url
+
+    for _ in range(max_pages):
+        if next_url is None:
+            break
+        response, body = await _read_response_bytes(client, next_url, max_bytes=_MAX_API_RESPONSE_BYTES)
+        payload = json.loads(body)
+        if not isinstance(payload, list):
+            break
+
+        for entry in payload:
+            if not isinstance(entry, dict):
+                continue
+            tag = tag_of(entry)
+            if not tag or _is_prerelease_tag(tag):
+                continue
+            parts = _parse_version(tag)
+            if parts and parts > best_parts:
+                best_tag, best_parts = tag, parts
+
+        next_url = response.links.get("next", {}).get("url")
+
+    return best_tag
+
+
+def _release_tag(release: dict[str, Any]) -> str | None:
+    """Tag of a published release; None for drafts and flagged prereleases."""
+    if release.get("draft") or release.get("prerelease"):
+        return None
+    return str(release.get("tag_name") or "").strip()
+
+
+def _git_tag(entry: dict[str, Any]) -> str | None:
+    """Name of a Git tag entry."""
+    return str(entry.get("name") or "").strip()
+
+
 async def _fetch_latest_release(client: httpx.AsyncClient, repo: str) -> str | None:
     """Return the highest published, non-prerelease release tag of *repo*.
 
@@ -179,33 +236,12 @@ async def _fetch_latest_release(client: httpx.AsyncClient, repo: str) -> str | N
     some repos leave unset on betas. Filters on flag *and* tag name, takes the
     highest version (not the most recent), bounded to _MAX_RELEASE_PAGES.
     """
-    best_tag: str | None = None
-    best_parts: tuple[int, ...] = ()
-    url: str | None = f"https://api.github.com/repos/{repo}/releases?per_page={_RELEASES_PER_PAGE}"
-
-    for _ in range(_MAX_RELEASE_PAGES):
-        if url is None:
-            break
-        response, body = await _read_response_bytes(client, url, max_bytes=_MAX_API_RESPONSE_BYTES)
-        payload = json.loads(body)
-        if not isinstance(payload, list):
-            break
-
-        for release in payload:
-            if not isinstance(release, dict):
-                continue
-            if release.get("draft") or release.get("prerelease"):
-                continue
-            tag = str(release.get("tag_name") or "").strip()
-            if not tag or _is_prerelease_tag(tag):
-                continue
-            parts = _parse_version(tag)
-            if parts and parts > best_parts:
-                best_tag, best_parts = tag, parts
-
-        url = response.links.get("next", {}).get("url")
-
-    return best_tag
+    return await _highest_stable_tag(
+        client,
+        f"https://api.github.com/repos/{repo}/releases?per_page={_RELEASES_PER_PAGE}",
+        max_pages=_MAX_RELEASE_PAGES,
+        tag_of=_release_tag,
+    )
 
 
 async def _fetch_latest_tag(client: httpx.AsyncClient, repo: str) -> str | None:
@@ -214,31 +250,12 @@ async def _fetch_latest_tag(client: httpx.AsyncClient, repo: str) -> str | None:
     fetchly ships from Git tags (a GitHub Release may lag or never appear), so
     the tag list is the authoritative self-update source.
     """
-    best_tag: str | None = None
-    best_parts: tuple[int, ...] = ()
-    url: str | None = f"https://api.github.com/repos/{repo}/tags?per_page=100"
-
-    for _ in range(_MAX_TAG_PAGES):
-        if url is None:
-            break
-        response, body = await _read_response_bytes(client, url, max_bytes=_MAX_API_RESPONSE_BYTES)
-        payload = json.loads(body)
-        if not isinstance(payload, list):
-            break
-
-        for entry in payload:
-            if not isinstance(entry, dict):
-                continue
-            tag = str(entry.get("name") or "").strip()
-            if not tag or _is_prerelease_tag(tag):
-                continue
-            parts = _parse_version(tag)
-            if parts and parts > best_parts:
-                best_tag, best_parts = tag, parts
-
-        url = response.links.get("next", {}).get("url")
-
-    return best_tag
+    return await _highest_stable_tag(
+        client,
+        f"https://api.github.com/repos/{repo}/tags?per_page=100",
+        max_pages=_MAX_TAG_PAGES,
+        tag_of=_git_tag,
+    )
 
 
 def _ffmpeg_build_key(value: str | None) -> tuple[tuple[int, ...], int] | None:
@@ -621,10 +638,9 @@ async def get_update_status(current: dict[str, str]) -> dict[str, Any]:
         latest = str(cached.get("version") or "") or None
         checked_at = float(cached.get("checked_at", 0.0))
         if component.source == "ffmpeg-builds":
-            # Compare within the installed series, so a pinned older series is
-            # not reported against the newest one.
+            # No build for the installed series means unknown, never a cross-series update.
             series_builds = cached.get("series") or {}
-            latest = series_builds.get(_ffmpeg_series(installed) or "") or latest
+            latest = series_builds.get(_ffmpeg_series(installed) or "")
             update_available = _ffmpeg_is_newer(latest, installed)
             installed_ok = _ffmpeg_build_key(installed) is not None
             comparable = _ffmpeg_build_key(latest) is not None and installed_ok

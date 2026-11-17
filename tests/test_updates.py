@@ -106,6 +106,18 @@ class UpdateStatusTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(components["ffmpeg"]["status"], "current")
         self.assertEqual(components["ffmpeg"]["latest"], "n8.1.3-24-g92611900bb")
 
+    async def test_ffmpeg_missing_installed_series_is_unknown(self):
+        entry = _entry({"ffmpeg": FFMPEG_LATEST})
+        entry["versions"]["ffmpeg"]["series"].pop("8.1")
+        with mock.patch.object(updates, "_get_latest_versions", return_value=entry):
+            components = (await updates.get_update_status({"ffmpeg": "n8.1.3-24-g92611900bb-20260927"}))["components"]
+
+        ffmpeg = components["ffmpeg"]
+        self.assertEqual(ffmpeg["status"], "unknown")
+        self.assertFalse(ffmpeg["update_available"])
+        self.assertEqual(ffmpeg["latest"], "")
+        self.assertEqual(ffmpeg["reason"], "latest_unknown")
+
     async def test_unparseable_installed_version_is_unknown_not_available(self):
         components = await self._status(
             {"ffmpeg": "N-128100-gceb466cbcd", "ytdlp": "unavailable"},
@@ -244,6 +256,20 @@ class VersionComparisonTests(unittest.TestCase):
     def test_v_prefixed_tags_match_plain_installed_versions(self):
         self.assertFalse(updates._is_newer("v2.7.13", "2.7.13"))
         self.assertTrue(updates._is_newer("v2.9.8", "2.7.13"))
+
+    def test_prerelease_markers_are_not_treated_as_stable(self):
+        for tag in (
+            "v8.0.0-preview.1",
+            "v8.0.0-nightly",
+            "v8.0.0-canary",
+        ):
+            with self.subTest(tag=tag):
+                self.assertTrue(updates._is_prerelease_tag(tag))
+
+    def test_stable_tags_and_ffmpeg_build_metadata_are_not_prereleases(self):
+        for tag in ("v8.0.0", "n9.0-4-gabc1234", "7.1.5-0+deb13u1"):
+            with self.subTest(tag=tag):
+                self.assertFalse(updates._is_prerelease_tag(tag))
 
 
 class NegativeCacheTests(unittest.IsolatedAsyncioTestCase):

@@ -100,7 +100,7 @@ def verify_captcha_token(
         raw = base64.urlsafe_b64decode(padded.encode("ascii")).decode("utf-8")
         payload, signature = raw.rsplit(":", 1)
         version, issued_at_raw = payload.split(":", 1)
-    except (ValueError, UnicodeDecodeError, binascii.Error):
+    except (ValueError, UnicodeError, binascii.Error):
         return CaptchaOutcome.INVALID
 
     if version != _TOKEN_VERSION:

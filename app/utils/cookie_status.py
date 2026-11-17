@@ -146,10 +146,9 @@ def _earliest_expiry(cookies: list[http.cookiejar.Cookie]) -> int | None:
 
 
 def _updated_at(path: Path) -> int | None:
-    """The jar's mtime. yt-dlp rewrites the cookie file after every run, so
-    after the first download this is when the session was last demonstrably
-    alive - more useful than the formal expiry date. (The rewrite truncates
-    in place, so owner-only permissions survive.)
+    """The jar's last file modification. yt-dlp rewrites the cookie file after
+    every run, so this is a rough sign of recent use, not proof of a successful
+    login. (The rewrite truncates in place, so owner-only permissions survive.)
     """
     try:
         return int(path.stat().st_mtime)

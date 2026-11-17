@@ -24,7 +24,7 @@ from typing import TYPE_CHECKING
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
 
-from ..auth.rate_limit import limiter
+from ..auth.rate_limit import rate_limit
 from ..db import consume_share_link, create_share_link, get_settings, get_share_link
 from ..utils.public_url import build_public_base_url
 from .auth import require_user_json
@@ -70,8 +70,7 @@ def _share_url(request: Request, token: str, public_hostname: str = "") -> str:
     return f"{base}/share/{token}"
 
 
-@router.post("/api/share/{job_id}")
-@limiter.limit("20/minute")
+@router.post("/api/share/{job_id}", dependencies=[Depends(rate_limit("20/minute"))])
 async def create_share(
     request: Request,
     job_id: uuid.UUID,
@@ -104,8 +103,7 @@ async def create_share(
     )
 
 
-@router.get("/share/{token}")
-@limiter.limit("20/minute")
+@router.get("/share/{token}", dependencies=[Depends(rate_limit("20/minute"))])
 async def redeem_share(request: Request, token: str) -> Response:
     """Serve a shared job file. Public: no session required."""
     if not _TOKEN_RE.fullmatch(token):

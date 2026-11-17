@@ -80,46 +80,48 @@ def get_build_info() -> str:
     return _read_file("BUILD_INFO") or "dev"
 
 
-# Tool versions. Each shells out and blocks (up to its timeout) on the first
-# call; lru_cache makes later calls free. Async callers offload via
-# asyncio.to_thread() - see app/routes/api.py.
-@lru_cache(maxsize=1)
-def get_ytdlp_version() -> str:
-    """Installed yt-dlp version, or 'unavailable'."""
+_FFMPEG_VERSION_RE = re.compile(r"ffmpeg version (\S+)")
+_DENO_VERSION_RE = re.compile(r"deno (\S+)")
+
+
+def _tool_version(cmd: list[str], *, label: str, timeout: float, pattern: re.Pattern[str] | None) -> str:
+    """Run a ``--version`` style command; return the version or 'unavailable'.
+
+    Without ``pattern`` the stripped stdout is the version; with it, the first
+    capture group searched in the first stdout line.
+    """
     try:
         result = subprocess.run(
-            ["yt-dlp", "--version"],
+            cmd,
             check=True,
             capture_output=True,
             text=True,
-            timeout=3,
+            timeout=timeout,
         )
     except (subprocess.SubprocessError, OSError) as exc:
-        logger.warning("Unable to read yt-dlp version: %s", exc)
+        logger.warning("Unable to read %s version: %s", label, exc)
         return "unavailable"
 
-    version = (result.stdout or "").strip()
-    return version or "unavailable"
+    stdout = result.stdout or ""
+    if pattern is None:
+        return stdout.strip() or "unavailable"
+    first_line = stdout.splitlines()[0] if stdout else ""
+    match = pattern.search(first_line)
+    return match.group(1) if match else "unavailable"
+
+
+# Tool versions. Each shells out and blocks (up to its timeout) on the first
+# call; lru_cache makes later calls free. Async callers use asyncio.to_thread().
+@lru_cache(maxsize=1)
+def get_ytdlp_version() -> str:
+    """Installed yt-dlp version, or 'unavailable'."""
+    return _tool_version(["yt-dlp", "--version"], label="yt-dlp", timeout=3, pattern=None)
 
 
 @lru_cache(maxsize=1)
 def get_ffmpeg_version() -> str:
     """Installed ffmpeg version, or 'unavailable'."""
-    try:
-        result = subprocess.run(
-            ["ffmpeg", "-version"],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=3,
-        )
-    except (subprocess.SubprocessError, OSError) as exc:
-        logger.warning("Unable to read ffmpeg version: %s", exc)
-        return "unavailable"
-
-    first_line = (result.stdout or "").splitlines()[0] if result.stdout else ""
-    match = re.search(r"ffmpeg version (\S+)", first_line)
-    return match.group(1) if match else "unavailable"
+    return _tool_version(["ffmpeg", "-version"], label="ffmpeg", timeout=3, pattern=_FFMPEG_VERSION_RE)
 
 
 @lru_cache(maxsize=1)
@@ -139,21 +141,7 @@ def get_js_runtime_version() -> str:
     """deno version yt-dlp-ejs runs on, or 'unavailable' (deno is the only JS
     runtime yt-dlp enables by default; just needs to be on PATH).
     """
-    try:
-        result = subprocess.run(
-            ["deno", "--version"],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except (subprocess.SubprocessError, OSError) as exc:
-        logger.warning("Unable to read deno version: %s", exc)
-        return "unavailable"
-
-    first_line = (result.stdout or "").splitlines()[0] if result.stdout else ""
-    match = re.search(r"deno (\S+)", first_line)
-    return match.group(1) if match else "unavailable"
+    return _tool_version(["deno", "--version"], label="deno", timeout=5, pattern=_DENO_VERSION_RE)
 
 
 # The pin is a committed text file: docker/wavesurfer.version in the checkout,

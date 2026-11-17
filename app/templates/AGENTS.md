@@ -28,14 +28,14 @@ Templates here render the entire UI. There is no client-side framework and no co
 - **Interactivity:** add `data-*` hooks and handle them from an ES module under `/static/js/` — no inline `<script>` blocks, and no framework components
 - **Syntax:** `{{ value }}`, `{% if %}`, `{% for %}`, `{% macro %}`
 - **Inheritance:** pages extend `base.html`
-- **Partials vs macros:** `_`-prefixed files are `{% include %}`-style partials; `macros/` holds `{% import %}`-able macros
+- **Macros:** `macros/` holds the `{% from … import … %}`-able macros (`navbar.html`, `stats.html`); there are currently no `_`-prefixed partials
 
 ### Common Jinja2 Patterns
 - **Variables:** `<h1>{{ page_title }}</h1>`
 - **Conditionals:** `{% if job.status == 'done' %}…{% endif %}` — use the real status names (`done`, `analysis_done`, `error`, `cancelled`, `queued`, `downloading`, `processing`, `transcoding`, `analysis`)
 - **Loops:** `{% for job in jobs %}<li>{{ job.title }}</li>{% endfor %}`
 - **Filters:** custom filters are registered from `app/utils/template_filters.py`
-- **Macros:** `{% import 'macros/navbar.html' as navbar %}{{ navbar.render(...) }}`
+- **Macros:** `{% from "macros/navbar.html" import navbar %}`, `{% from "macros/stats.html" import dashboard_stats_row %}`
 
 ### Adding a New Page
 1. Create the `.html` file here and extend `base.html`
@@ -106,7 +106,7 @@ Check the specific handler in `app/routes/` for the exact context rather than as
 
 ---
 
-**Last Updated:** 2026-10-26  
+**Last Updated:** 2026-11-17  
 **Template Engine:** Jinja2  
 **CSS Framework:** Bootstrap 5 (vendored)  
 **Live Updates:** Server-Sent Events

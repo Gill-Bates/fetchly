@@ -60,10 +60,12 @@ finished downloads without handing your media to another service.
 | **Choose your quality** | Pick the quality you want, then decide what the highest tier produces: H.264 for files that play everywhere, AV1 for the smallest files, or the untouched source for the best resolution. |
 | **Brand every video** | Burn the fetchly logo — or your own uploaded SVG or PNG — and your hostname, once set, into the corner of every downloaded video, or switch it off. |
 | **Trim with precision** | Cut audio visually with an interactive waveform before you download or process it further. |
-| **Find the tempo** | Analyze BPM and beat confidence, then use the result to guide audio trimming. |
-| **Create clean stems** | Connect Lalal.ai to separate vocals and instrumentals when you need production-ready tracks. |
+| **Find the tempo** | Analyze BPM and beat confidence, use the result to guide audio trimming, and write the detected tempo to the downloaded MP3's `TBPM` ID3 tag. |
+| **Create clean stems** | Connect Lalal.ai to separate vocals and instrumentals when you need production-ready tracks. Tracks over 10 minutes are refused up front, and Lalal.ai errors are reported in plain words. |
 | **Share what you made** | Send friends and family a share link to a finished download — no account needed on their side, with an optional limit on how many times it can be used. |
-| **Keep it private** | Run everything yourself with persistent storage, authentication, CSRF protection, anti-bot checks, and login rate limiting. |
+| **Keep it private** | Run everything yourself with persistent storage, authentication, CSRF protection, anti-bot checks, and built-in rate limiting. |
+| **Sign-in-only videos, handled** | Pasting a private or login-required link without cookies shows a warning right away. Import cookies by pasting a cURL, fetch, or PowerShell request, request headers, or JSON; cookies for other domains are rejected. |
+| **Gentle on small hosts** | Memory backpressure follows the container's cgroup limit, so queued jobs wait instead of exhausting RAM. |
 | **Ready to run** | Get the complete application and its required dependencies in one Docker image. |
 
 ## Supported platforms
@@ -106,7 +108,7 @@ export FETCHLY_SECRET_KEY="$(openssl rand -base64 32)"
 docker compose up -d
 ```
 
-A fuller compose file with logging, timezone, and reverse-proxy notes lives in [`docker/docker-compose.yml`](docker/docker-compose.yml).
+A fuller compose file with log rotation, a pinned timezone, trusted-proxy and port variables, and dropped container capabilities lives in [`docker/docker-compose.yml`](docker/docker-compose.yml).
 
 Open <http://127.0.0.1:8000> and create an admin account in **Settings → Security**.
 Only then widen the port binding (`0.0.0.0:8000:8000`) or put fetchly behind a

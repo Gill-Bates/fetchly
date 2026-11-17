@@ -13,6 +13,7 @@ The documentation site is the single source of truth for users and developers: h
 | `mkdocs.yml` | MkDocs configuration: site title, theme, palettes, plugins, navigation. Lives *inside* `docs/` with `docs_dir: .`, not at the repo root — every command must pass `-f docs/mkdocs.yml` |
 | `index.md` | Documentation homepage: overview, feature highlights, quick links to major sections |
 | `troubleshooting.md` | Troubleshooting guide: common issues (job stuck, login fails, cookies rejected) and solutions |
+| `changelog.md`, `license.md` | Not in the repo: the docs workflow copies `CHANGELOG.md` / `LICENSE` here before the build; they appear under the `Project` nav entry |
 
 ## Subdirectories
 
@@ -23,7 +24,7 @@ The documentation site is the single source of truth for users and developers: h
 | `api/` | `overview.md`, `endpoints.md`, `authentication.md` |
 | `features/` | `downloads.md`, `video-codecs.md`, `jobs.md`, `bpm.md`, `trimming.md`, `stems.md`, `cookies.md`, `sharing.md` |
 | `security/` | `overview.md`, `authentication.md`, `anti-bot.md`, `rate-limiting.md`, `best-practices.md` |
-| `development/` | `setup.md`, `architecture.md`, `contributing.md` |
+| `development/` | `setup.md`, `architecture.md`, `essentia.md`, `contributing.md` |
 | `assets/` | Static assets for docs (images, diagrams, screenshots) |
 | `stylesheets/` | Custom CSS for documentation site theme customization |
 
@@ -47,6 +48,7 @@ The documentation site is the single source of truth for users and developers: h
 - **Setup guide:** `development/setup.md` covers local environment, dependencies, virtual env
 - **Architecture:** `development/architecture.md` — key design decisions (SQLite, async workers for job processing)
 - **Contributing:** `development/contributing.md` — code style, PR process
+- **Essentia build:** `development/essentia.md` — how the image compiles the CPU-only Essentia wheel
 - **Testing:** there is no `development/testing.md`. Test invocation is documented in `development/AGENTS.md` and `setup.md`; add the page before linking to it
 
 ### Building and Deploying Docs
@@ -55,7 +57,7 @@ The documentation site is the single source of truth for users and developers: h
 - **Pass the config path relative to the repo root, always.** `docs_dir: .` means the config file sits in its own documentation root, and MkDocs rejects that combination whenever it can see it — `cd docs && mkdocs build` and `mkdocs build -f /abs/path/docs/mkdocs.yml` both abort with "the `docs_dir` should not be the parent directory of the config file". The relative `-f docs/mkdocs.yml` invocation used by the workflow and by every command in this guide is the one form that passes
 - **`AGENTS.md` files are never published.** They live inside `docs_dir`, so `exclude_docs:` in `mkdocs.yml` filters them out by name at any depth. Nothing to do when adding a new one
 - **Broken heading anchors fail the build.** `validation.links.anchors: warn` plus the workflow's `--strict` turns `page.md#no-such-heading` into a build error rather than an INFO line
-- **Deployment:** GitHub Pages, via `.github/workflows/docs-build.yml` on push to `main` (path-filtered to `docs/**`, `CHANGELOG.md`, `LICENSE`, `pyproject.toml`, `tools/pyproject-deps.py` and the workflow itself), after a completed release workflow, or manually. Pull requests and the weekly schedule only build and scan; they never deploy
+- **Deployment:** GitHub Pages, via `.github/workflows/docs-build.yml` on push to `main` (path-filtered to `docs/**`, `CHANGELOG.md`, `LICENSE`, `pyproject.toml`, `tools/pyproject-deps.py` and the workflow itself) or manually; there is no `workflow_run` trigger. Pull requests (same path filter) only build and scan; the weekly schedule (Mon 04:17 UTC) only scans. Neither deploys. A `resolve` job freezes the docs environment once and both build and scan use that file. The build runs `mkdocs build -f docs/mkdocs.yml --strict` and a lychee link check over `site/`; `deploy` needs both `build` and `security-scan` (Trivy on the frozen requirements, CRITICAL/HIGH)
 - **Theme:** Material for MkDocs (https://squidfunk.github.io/mkdocs-material/); customization via `mkdocs.yml` and `stylesheets/`
 
 ### Common Patterns
@@ -91,9 +93,9 @@ The documentation site is the single source of truth for users and developers: h
 - `../CHANGELOG.md` — Release notes linked from docs
 
 ### External
-- **MkDocs:** mkdocs (site generator), mkdocs-material (theme), mkdocs-git-revision-date-localized-plugin (last-updated dates), mkdocs-minify-plugin (optimize HTML); mkdocs-redirects is in the `docs` extra but not configured under `plugins:`
+- **MkDocs:** mkdocs (site generator), mkdocs-material (theme), mkdocs-git-revision-date-localized-plugin (last-updated dates), mkdocs-minify-plugin (optimize HTML), pymdown-extensions and markdown (pinned in the `docs` extra); mkdocs-redirects is in the `docs` extra but not configured under `plugins:`
 - **Python:** Python 3.13+ to run mkdocs
-- **CI/CD:** GitHub Pages (hosting), `.github/workflows/docs-build.yml` (auto-deploy on main push)
+- **CI/CD:** GitHub Pages (hosting), `.github/workflows/docs-build.yml` (build, scan and deploy on main push)
 
 ## Manual
 
@@ -148,7 +150,7 @@ mkdocs build -f docs/mkdocs.yml --verbose    # Show detailed build output
 
 ---
 
-**Last Updated:** 2026-10-26  
+**Last Updated:** 2026-11-17  
 **Site Generator:** MkDocs Material  
 **Hosted:** GitHub Pages (https://gill-bates.github.io/fetchly/)  
 **Build Trigger:** Push to `main` via `.github/workflows/docs-build.yml`  

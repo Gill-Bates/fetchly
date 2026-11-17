@@ -24,9 +24,15 @@ fetchly therefore accepts whatever the dev tools actually produce and converts i
 | Format | What it is |
 |---|---|
 | `header` | A bare `name=value; name2=value2` string, with or without a leading `Cookie:` |
-| `request` | A whole *Copy as cURL* / *Copy as fetch* / *Copy as PowerShell* command, in any of the shells the menu offers |
+| `request` | A whole *Copy as cURL* (bash or cmd) / *Copy as fetch* / *Copy as PowerShell* command. Chrome's `$'...'` bodies, unquoted URLs and `--url` are understood |
 | `json` | The array written by cookie-export extensions (Cookie-Editor, EditThisCookie) — the only input carrying real expiry metadata |
 | Netscape jar | A prepared `cookies.txt`, via the file upload |
+
+A pasted request must have gone to the platform you paste it into. A request to a
+foreign domain (a CDN or analytics call on the same page) is rejected, because its
+cookies are not the first-party session. If the target cannot be determined at all, the
+paste is rejected with "Could not determine which site this request went to...", and the
+URL has to start with `https://`.
 
 Everything is normalized to the same Netscape jar in `DATA_DIR/cookies/`, written with
 mode `0600`.
@@ -97,7 +103,7 @@ The chips under a stored jar:
 | `12 cookies for .youtube.com, .google.com` | How many cookies the file holds, and which of the platform's domains they cover. Worth reading: a jar copied from the wrong request is otherwise indistinguishable from a working one |
 | `expires 14 Mar 2027, 193 days left` | The **earliest** expiry among the platform's unexpired cookies — not a promise the session is still alive |
 | `no expiry date` | The import came from a copied request header, which carries no expiry dates at all. Only a cookie-extension JSON export does |
-| `updated 2 hours ago` | When the jar was last written. yt-dlp rewrites it at the end of every run, so this is when the platform last rotated the session — a better liveness signal than any expiry date |
+| `updated 2 hours ago` | The file's last modification time. yt-dlp rewrites the jar at the end of every run, so it moves when a download ran. It is not proof that the login still works |
 | `Missing sessionid - downloads run signed out` | Structurally fine, but the cookie that marks a signed-in session is gone. The downloader looks for these by name |
 | `Expired on 14 Mar 2026 - downloads run signed out` | Shown in place of the chips above once everything has expired |
 
@@ -140,6 +146,8 @@ that platform to signed-out downloads.
 
 | Symptom | Likely cause |
 |---|---|
+| Import rejected: request went to another domain | A request to a CDN or analytics host was copied; pick one whose domain is the platform's |
+| Import rejected: "Could not determine which site this request went to" | The pasted request has no recognizable `https://` URL |
 | Tile says no session cookie | The copied request was not from a signed-in page, or the wrong request was copied |
 | Tile is valid but downloads are still gated | The platform revoked the session; re-import |
 | Import rejected as too large | Something other than a cookie header or export was pasted |

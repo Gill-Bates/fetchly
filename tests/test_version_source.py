@@ -36,6 +36,14 @@ class VersionSourceTests(unittest.TestCase):
         version = _pyproject()["project"]["version"]
         self.assertRegex(version, r"^\d+\.\d+(\.\d+)?(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$")
 
+    def test_container_build_generates_build_info_without_a_context_file(self) -> None:
+        dockerfile = (PROJECT_ROOT / "docker" / "Dockerfile").read_text(encoding="utf-8")
+        dockerignore = (PROJECT_ROOT / ".dockerignore").read_text(encoding="utf-8")
+
+        self.assertIn("BUILD_INFO", dockerignore.splitlines())
+        self.assertIn("RUN printf '%s\\n' \"${VCS_REF}\" > /app/BUILD_INFO", dockerfile)
+        self.assertNotIn("COPY pyproject.toml BUILD_INFO", dockerfile)
+
     def test_the_replaced_files_are_gone(self) -> None:
         # constraints.txt is generated per release by the Docker workflow and
         # handed to both architecture builds; a committed copy would pin the

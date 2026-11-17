@@ -4,6 +4,7 @@
 # Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 #
 
+import math
 import unittest
 from pathlib import Path
 
@@ -25,7 +26,7 @@ class ApplyBpmTagTests(unittest.TestCase):
         self.assertEqual(apply_bpm_tag("Some Track", 93.6), "Some Track_94bpm")
 
     def test_missing_or_unusable_bpm_leaves_the_name_untouched(self) -> None:
-        for bpm in (None, 0, -1, "94", True):
+        for bpm in (None, 0, -1, 0.4, "94", True, math.nan, math.inf, -math.inf):
             with self.subTest(bpm=bpm):
                 self.assertEqual(apply_bpm_tag("Some Track", bpm), "Some Track")
 

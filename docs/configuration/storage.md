@@ -68,20 +68,20 @@ and its numbers leave the statistics.
 
 A background task runs **every hour** and, in one pass:
 
-1. Reads the current retention setting. `0` means unlimited, and the sweep stops here
-2. Selects the jobs past their retention age
-3. Deletes those jobs' **directories** on disk
-4. Deletes the **job rows** and their **share links** — but only for jobs whose
-   directory was actually removed. Their targets are gone, so the links could only 404
-   from here on, and the table would otherwise grow without bound
+1. Restores or removes directories staged by an interrupted earlier sweep
+2. Reads the current retention setting. `0` disables expiry but keeps the other cleanup steps
+3. For expired jobs, atomically moves each directory aside while deleting its **job row** and
+   **share links** in the same SQLite transaction
+4. Removes the staged directory after the transaction commits. Failed removals are retried on
+   the next sweep
 5. Removes thumbnail cache entries and rendered watermark badges older than **7 days**
 6. Removes **orphaned directories** — directories on disk with no matching job row
 
-!!! info "Why the files go first"
-    A job whose directory could not be deleted keeps its row and its share links, so
-    the next pass retries it. Deleting the row first would forget the job while its
-    files stay on disk, leaving them to the orphan sweep in step 6 without their history
-    entry or share links.
+!!! info "Why directories are staged"
+    A failed move leaves the job row and share links intact. After a successful move, the
+    transaction removes them and releases the database writer lock before recursive deletion.
+    If the process stops between the move and commit, the next sweep restores the directory;
+    if it stops after commit, the next sweep completes its deletion.
 
 !!! info "The orphan sweep has a grace period"
     Step 6 only removes directories with no corresponding job record, and it skips

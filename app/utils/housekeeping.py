@@ -8,11 +8,13 @@
 
 import logging
 import re
+import secrets
 import shutil
 from collections.abc import Callable
 from pathlib import Path
 from time import time
 
+from ..db import delete_expired_job_if_eligible, get_db
 from .fs import resolve_within_root
 
 logger = logging.getLogger(__name__)
@@ -28,6 +30,8 @@ _UUID_RE = re.compile(
 )
 _ORPHAN_DIR_GRACE_PERIOD_SECONDS = 900
 _CACHE_MAX_AGE_SECONDS = 7 * 24 * 60 * 60
+_RETENTION_QUARANTINE = ".retention-trash"
+_STAGED_NAME_RE = re.compile(r"([0-9a-f-]{36})\.([0-9a-f]{16})")
 
 
 def _is_job_uuid(name: str) -> bool:
@@ -51,7 +55,8 @@ def _cleanup_cache_dir(cache_dir: Path, label: str, *, now: float | None) -> int
         if not path.is_file() and not path.is_symlink():
             continue
         try:
-            if current_time - path.stat().st_mtime <= _CACHE_MAX_AGE_SECONDS:
+            # lstat: age the link itself, so a dangling link still expires.
+            if current_time - path.lstat().st_mtime <= _CACHE_MAX_AGE_SECONDS:
                 continue
             path.unlink()
             removed += 1
@@ -112,23 +117,96 @@ def cleanup_job_directory(job_id: str, jobs_root: Path) -> bool:
         return False
 
 
+def _stage_expired_directory(job_id: str, jobs_root: Path) -> tuple[bool, Path | None]:
+    """Atomically move a job directory aside while retention owns the DB writer lock."""
+    if not _is_job_uuid(job_id):
+        return False, None
+    try:
+        job_dir = resolve_within_root(Path(job_id), jobs_root, allow_symlink=False)
+        if not job_dir.exists():
+            return True, None
+        if not job_dir.is_dir():
+            return False, None
+        quarantine = jobs_root / _RETENTION_QUARANTINE
+        quarantine.mkdir(exist_ok=True)
+        if quarantine.is_symlink() or not quarantine.is_dir():
+            return False, None
+        staged = quarantine / f"{job_id}.{secrets.token_hex(8)}"
+        job_dir.rename(staged)
+        return True, staged
+    except (OSError, ValueError) as exc:
+        logger.warning("Failed to stage expired job %s: %s", job_id, exc)
+        return False, None
+
+
+def _delete_staged_directory(staged: Path) -> None:
+    try:
+        shutil.rmtree(staged)
+    except OSError as exc:
+        logger.warning("Failed to remove staged job directory %s: %s", staged, exc)
+
+
+def _recover_retention_quarantine(jobs_root: Path) -> None:
+    """Restore uncommitted renames and finish deletions committed before a crash."""
+    quarantine = jobs_root / _RETENTION_QUARANTINE
+    if not quarantine.exists() or quarantine.is_symlink() or not quarantine.is_dir():
+        return
+    try:
+        entries = tuple(quarantine.iterdir())
+    except OSError as exc:
+        logger.warning("Failed to scan retention quarantine %s: %s", quarantine, exc)
+        return
+
+    for staged in entries:
+        match = _STAGED_NAME_RE.fullmatch(staged.name)
+        if match is None or not _is_job_uuid(match.group(1)) or staged.is_symlink() or not staged.is_dir():
+            continue
+        job_id = match.group(1)
+        original = jobs_root / job_id
+        try:
+            with get_db() as con:
+                con.execute("BEGIN IMMEDIATE")
+                exists = con.execute("SELECT 1 FROM jobs WHERE id = ?", (job_id,)).fetchone() is not None
+                if exists and not original.exists():
+                    staged.rename(original)
+                    con.rollback()
+                    continue
+                con.rollback()
+            if not exists:
+                _delete_staged_directory(staged)
+            else:
+                logger.warning("Keeping staged job %s because its original directory exists", job_id)
+        except OSError as exc:
+            logger.warning("Failed to recover staged job %s: %s", job_id, exc)
+
+
 def cleanup_expired_jobs(
     keep_days: int,
     jobs_root: Path,
     expired_job_ids_func: ExpiredJobIdsFunc,
 ) -> list[str]:
-    """Delete the directories of expired jobs; return the IDs cleaned.
+    """Delete files and database rows for expired jobs; return deleted IDs.
 
-    The caller selects the expired IDs first and removes only the returned
-    ones from the database, so a job whose files could not be deleted keeps
-    its row and is retried on the next sweep. A directory that is already
-    absent counts as cleaned. Raises TypeError/ValueError for invalid days.
+    The selector supplies candidates only. Each candidate is rechecked in an
+    immediate SQLite transaction, which remains open through an atomic directory
+    rename and matching row/link deletion. A retry that committed first is
+    therefore skipped; a retry that arrives later cannot succeed after
+    retention has claimed that job. Recursive deletion happens after commit;
+    a later sweep recovers staged directories left by a crash or failed removal.
+    Raises TypeError/ValueError for invalid days.
     """
     if isinstance(keep_days, bool) or not isinstance(keep_days, int):
         raise TypeError("keep_days must be a non-negative integer")
     if keep_days < 0:
         raise ValueError("keep_days must be non-negative")
 
+    try:
+        jobs_root_resolved = jobs_root.resolve()
+    except OSError as exc:
+        logger.warning("Failed to resolve jobs directory %s: %s", jobs_root, exc)
+        return []
+
+    _recover_retention_quarantine(jobs_root_resolved)
     expired_ids = expired_job_ids_func(keep_days)
     if not expired_ids:
         return []
@@ -142,16 +220,30 @@ def cleanup_expired_jobs(
             len(valid_ids),
         )
 
-    try:
-        jobs_root_resolved = jobs_root.resolve()
-    except OSError as exc:
-        logger.warning("Failed to resolve jobs directory %s: %s", jobs_root, exc)
-        return []
+    cleaned: list[str] = []
+    for job_id in valid_ids:
+        staged: Path | None = None
 
-    cleaned = [job_id for job_id in valid_ids if cleanup_job_directory(job_id, jobs_root_resolved)]
+        def stage_directory(job_id: str = job_id) -> bool:
+            nonlocal staged
+            success, staged = _stage_expired_directory(job_id, jobs_root_resolved)
+            return success
+
+        try:
+            deleted, links = delete_expired_job_if_eligible(job_id, keep_days, stage_directory)
+        except Exception:
+            if staged is not None:
+                _recover_retention_quarantine(jobs_root_resolved)
+            raise
+        if staged is not None:
+            _delete_staged_directory(staged)
+        if deleted:
+            cleaned.append(job_id)
+            if links:
+                logger.info("Housekeeping: removed %d share link(s) for expired job %s", links, job_id)
 
     logger.info(
-        "Housekeeping: %d expired job(s) found older than %d days; filesystem cleanup succeeded for %d",
+        "Housekeeping: %d expired job(s) found older than %d days; cleanup succeeded for %d",
         len(expired_ids),
         keep_days,
         len(cleaned),

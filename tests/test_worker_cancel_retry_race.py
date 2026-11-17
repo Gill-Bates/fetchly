@@ -95,6 +95,29 @@ class UnexpectedWorkerErrorTests(IsolatedDbTestCase):
     def test_fallback_does_not_overwrite_a_requeued_job(self) -> None:
         self.assertEqual(self._run_crashing_attempt("queued"), "queued")
 
+    def test_cancelled_job_releases_its_progress_snapshot(self) -> None:
+        insert_job(*JOB, "queued")
+        jobs: queue.Queue[worker.Job] = queue.Queue()
+        jobs.put(JOB)
+
+        def cancel(_job):
+            worker._record_progress(JOB[0], "downloading", {"progress": 42})
+            update_job(JOB[0], status="cancelled")
+            worker._shutdown_event.set()
+            raise worker.JobCancelledError("cancelled")
+
+        try:
+            with (
+                patch.object(worker, "get_job_queue", return_value=jobs),
+                patch.object(worker, "process_job", side_effect=cancel),
+                patch.object(worker, "_status_callback", None),
+            ):
+                worker.worker()
+        finally:
+            worker._shutdown_event.clear()
+
+        self.assertEqual(worker.get_progress_snapshot(JOB[0], "downloading"), {})
+
 
 class RetryRejectedWhileWorkerStillOwnsTheJobTests(IsolatedDbTestCase):
     """N1: a job blocked on the transcode semaphore has no subprocess to kill,

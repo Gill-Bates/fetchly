@@ -10,6 +10,8 @@ The setting is the only session deadline: it is counted from login, is never
 extended (there is no renewal), and the cookie's Max-Age has to expire with it.
 """
 
+from unittest.mock import patch
+
 from app import db
 from app.auth import session
 from tests._support import IsolatedDbTestCase, WebAppTestCase
@@ -171,3 +173,122 @@ class SessionLifetimeRouteTests(WebAppTestCase):
         # The real session must still validate - the garbage cookie on the
         # attacker's request must not have bumped session_version.
         self.assertEqual(session.validate_session(real_token), "alice")
+
+
+class SessionRefreshRaceTests(IsolatedDbTestCase):
+    def test_stale_refresh_cannot_resurrect_a_revoked_version(self):
+        session.refresh_session_settings_cache()
+        token = session.create_session("alice")
+        self.assertEqual(session.validate_session(token), "alice")
+
+        real_get_settings = session.get_settings
+        calls = []
+
+        def stale_read(**kwargs):
+            calls.append(kwargs)
+            snapshot = real_get_settings(**kwargs)
+            if len(calls) == 1:
+                # The revocation lands after the periodic refresh already read.
+                session.invalidate_current_session("alice")
+            return snapshot
+
+        with patch.object(session, "get_settings", side_effect=stale_read):
+            session.refresh_session_settings_cache()
+
+        self.assertEqual(session._get_session_version(), 1)
+        self.assertIsNone(session.validate_session(token))
+
+
+class SessionRefreshOrderingTests(IsolatedDbTestCase):
+    def test_older_refresh_finishing_last_keeps_the_newer_snapshot(self):
+        session.refresh_session_settings_cache()
+        real_get_settings = session.get_settings
+        calls = []
+
+        def older_read_finishes_last(**kwargs):
+            calls.append(kwargs)
+            snapshot = real_get_settings(**kwargs)
+            if len(calls) == 1:
+                # Newer refresh runs to completion while the older one is still in flight.
+                db.set_settings({"enable_authentication": "false"})
+                session.refresh_session_settings_cache()
+            return snapshot
+
+        with patch.object(session, "get_settings", side_effect=older_read_finishes_last):
+            session.refresh_session_settings_cache()
+
+        self.assertFalse(session.get_cached_authentication_enabled())
+
+    def test_exhausted_retries_never_lower_the_published_version(self):
+        version = db.set_settings_and_bump_session_version({})
+        session.refresh_session_settings_cache(session_version_floor=version)
+        real_get_settings = session.get_settings
+
+        def always_racing(**kwargs):
+            snapshot = real_get_settings(**kwargs)
+            with session._SESSION_SETTINGS_LOCK:
+                session._SESSION_SETTINGS_CACHE["session_version"] = version + 1
+                session._CACHE_GENERATION += 1
+            return {**snapshot, "session_version": 0}
+
+        with patch.object(session, "get_settings", side_effect=always_racing):
+            session.refresh_session_settings_cache()
+
+        self.assertGreaterEqual(session._get_session_version(), version + 1)
+
+    def test_fresh_refresh_is_not_lost_to_an_older_publish(self):
+        session.refresh_session_settings_cache()
+        db.set_settings({"enable_authentication": "false"})
+        real_get_settings = session.get_settings
+        calls = []
+
+        def stale_publish_lands_first(**kwargs):
+            calls.append(kwargs)
+            snapshot = real_get_settings(**kwargs)
+            if len(calls) == 1:
+                # An older periodic refresh publishes its pre-write snapshot first.
+                with session._SESSION_SETTINGS_LOCK:
+                    session._SESSION_SETTINGS_CACHE["enable_authentication"] = True
+                    session._CACHE_GENERATION += 1
+            return snapshot
+
+        with patch.object(session, "get_settings", side_effect=stale_publish_lands_first):
+            session.refresh_session_settings_cache()
+
+        self.assertFalse(session.get_cached_authentication_enabled())
+
+    def test_exhausted_retries_never_overwrite_newer_fields_with_a_stale_snapshot(self):
+        session.refresh_session_settings_cache()
+        real_get_settings = session.get_settings
+
+        def always_overtaken(**kwargs):
+            snapshot = real_get_settings(**kwargs)
+            # A newer publish (auth re-enabled) lands after every read.
+            with session._SESSION_SETTINGS_LOCK:
+                session._SESSION_SETTINGS_CACHE["enable_authentication"] = True
+                session._SESSION_SETTINGS_CACHE["session_version"] = 3
+                session._CACHE_GENERATION += 1
+            return {**snapshot, "enable_authentication": False, "session_version": 0}
+
+        with patch.object(session, "get_settings", side_effect=always_overtaken):
+            session.refresh_session_settings_cache()
+
+        self.assertTrue(session.get_cached_authentication_enabled())
+        self.assertGreaterEqual(session._get_session_version(), 3)
+
+    def test_exhausted_floored_refresh_still_raises_the_version_and_keeps_newer_fields(self):
+        session.refresh_session_settings_cache()
+        real_get_settings = session.get_settings
+
+        def always_overtaken(**kwargs):
+            snapshot = real_get_settings(**kwargs)
+            with session._SESSION_SETTINGS_LOCK:
+                session._SESSION_SETTINGS_CACHE["enable_authentication"] = True
+                session._CACHE_GENERATION += 1
+            return {**snapshot, "enable_authentication": False}
+
+        with patch.object(session, "get_settings", side_effect=always_overtaken):
+            session.refresh_session_settings_cache(session_version_floor=7)
+
+        self.assertTrue(session.get_cached_authentication_enabled())
+        self.assertGreaterEqual(session._get_session_version(), 7)

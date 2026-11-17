@@ -8,9 +8,12 @@ from __future__ import annotations
 
 import logging
 import multiprocessing
+import os
 import queue
+import signal
 import threading
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from enum import StrEnum
 from multiprocessing.connection import Connection
@@ -79,6 +82,8 @@ _worker_threads: list[threading.Thread] = []
 # interpreter alive long after "Shutdown complete".
 _active_analysis_processes: set[BaseProcess] = set()
 _active_analysis_processes_lock = threading.Lock()
+_analysis_process_group_pids: set[int] = set()
+_analysis_process_group_lock = threading.Lock()
 _status_callback: Callable[[dict[str, Any]], None] | None = None
 _status_callback_lock = threading.Lock()
 
@@ -227,9 +232,11 @@ def _commit_analysis(
     )
 
 
-def _analysis_child(path: Path, result_connection: Connection) -> None:
+def _analysis_child(path: Path, result_connection: Connection, session_ready: object) -> None:
     """Run analysis in an isolated process and return its small result payload."""
     try:
+        os.setsid()
+        session_ready.set()
         result_connection.send((True, extract_analysis(path)))
     # The child reports even SystemExit to the parent.
     except BaseException as exc:  # noqa: BLE001
@@ -239,16 +246,27 @@ def _analysis_child(path: Path, result_connection: Connection) -> None:
 
 
 def _stop_process(process: BaseProcess) -> None:
-    """End an analysis child, escalating to SIGKILL if it ignores SIGTERM."""
-    if not process.is_alive():
+    """End an analysis process group, then reap its Python leader."""
+    with _analysis_process_group_lock:
+        has_process_group = process.pid in _analysis_process_group_pids
+    if not process.is_alive() and not has_process_group:
         return
-    process.terminate()
-    process.join(5)
+    if has_process_group:
+        with suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGTERM)
+    else:
+        process.terminate()
     if process.is_alive():
-        process.kill()
         process.join(5)
-        if process.is_alive():
-            logger.error("Analysis child %s survived SIGKILL timeout", process.pid)
+    if has_process_group:
+        with suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
+    elif process.is_alive():
+        process.kill()
+    if process.is_alive():
+        process.join(5)
+    if process.is_alive():
+        logger.error("Analysis child %s survived SIGKILL timeout", process.pid)
 
 
 def _await_process(process: BaseProcess, timeout_seconds: float) -> None:
@@ -283,12 +301,17 @@ def _extract_analysis_with_timeout(path: Path) -> AudioAnalysisResult:
     _, timeout_seconds = _analysis_runtime_limits()
     context = multiprocessing.get_context("spawn")
     parent_connection, child_connection = context.Pipe(duplex=False)
-    process = context.Process(target=_analysis_child, args=(path, child_connection))
+    session_ready = context.Event()
+    process = context.Process(target=_analysis_child, args=(path, child_connection, session_ready))
     try:
         process.start()
         child_connection.close()
         with _active_analysis_processes_lock:
             _active_analysis_processes.add(process)
+        if not session_ready.wait(5):
+            raise RuntimeError("Audio analysis child did not establish its process session")
+        with _analysis_process_group_lock:
+            _analysis_process_group_pids.add(process.pid)
         _await_process(process, timeout_seconds)
 
         if not parent_connection.poll():
@@ -305,11 +328,14 @@ def _extract_analysis_with_timeout(path: Path) -> AudioAnalysisResult:
             raise RuntimeError("Audio analysis process returned an invalid result")
         return payload
     finally:
+        _stop_process(process)
         with _active_analysis_processes_lock:
             _active_analysis_processes.discard(process)
+        with _analysis_process_group_lock:
+            if process.pid is not None:
+                _analysis_process_group_pids.discard(process.pid)
         child_connection.close()
         parent_connection.close()
-        _stop_process(process)
 
 
 def _apply_analysis(job: AnalysisJob) -> None:
@@ -459,8 +485,8 @@ def start_analysis_workers(n: int | None = None) -> None:
             return
         _shutdown_event.clear()
         get_analysis_queue()
-        for _ in range(n):
-            thread = threading.Thread(target=_worker_loop, daemon=False, name=f"analysis-worker-{_}")
+        for index in range(n):
+            thread = threading.Thread(target=_worker_loop, daemon=False, name=f"analysis-worker-{index}")
             thread.start()
             _worker_threads.append(thread)
         _workers_started = True

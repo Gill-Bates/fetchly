@@ -14,6 +14,7 @@
  * - {@link isSafeRedirect}, which reads `window.location`
  * - {@link subscribeToLalalProgress}, which subscribes to DOM events
  * - {@link localizeValues}, which rewrites server-rendered UTC times and numbers
+ * - {@link triggerDownload}, which starts a download or navigates the page
  *
  * User-visible numbers and times go through {@link formatNumber} and
  * {@link formatDateTime}: browser locale and time zone, UTC instants in.
@@ -717,4 +718,21 @@ export function triggerDownload(url) {
     document.body.appendChild(anchor);
     anchor.click();
     anchor.remove();
+}
+
+/**
+ * Describe the pre-download warning for a /api/info login-required answer.
+ * @param {{reason?: string, message?: string, cookies_configured?: boolean} | null | undefined} info
+ * @returns {{title: string, message: string, showSettingsLink: boolean} | null}
+ */
+export function describeAuthWarning(info) {
+    if (info?.reason !== "login_required" || !info.message) {
+        return null;
+    }
+    const configured = info.cookies_configured === true;
+    return {
+        title: configured ? "Access still denied" : "Login required",
+        message: String(info.message),
+        showSettingsLink: true,
+    };
 }

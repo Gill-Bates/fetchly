@@ -1,4 +1,9 @@
 #!/usr/bin/env python3
+#
+# docker/essentia_check.py
+# Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
+#
+
 """Functional check of the CPU-only essentia build, run on the target architecture.
 
 Mirrors app/audio/bpm.py (MonoLoader, then RhythmExtractor2013 "multifeature")

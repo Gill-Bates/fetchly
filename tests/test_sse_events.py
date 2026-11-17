@@ -175,7 +175,7 @@ class SseConnectionCapTest(IsolatedDbTestCase):
         self.assertEqual(events._reserved_connections, 0)
 
     def test_abandoned_job_requests_leave_no_dictionary_entries(self) -> None:
-        handler = events.sse_job_events.__wrapped__
+        handler = events.sse_job_events
         for _ in range(25):
             response = asyncio.run(handler(uuid.uuid4(), object(), "user"))
             asyncio.run(response.body_iterator.aclose())
@@ -186,7 +186,7 @@ class SseConnectionCapTest(IsolatedDbTestCase):
 
     def test_job_stream_registers_lazily_and_prunes_on_close(self) -> None:
         job_id = uuid.uuid4()
-        response = asyncio.run(events.sse_job_events.__wrapped__(job_id, object(), "user"))
+        response = asyncio.run(events.sse_job_events(job_id, object(), "user"))
         self.assertNotIn(str(job_id), events._job_sse_connections)
 
         async def _drive() -> None:

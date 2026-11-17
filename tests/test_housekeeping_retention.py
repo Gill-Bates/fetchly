@@ -4,11 +4,13 @@
 # Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
 #
 
-"""Retention removes files first; only jobs whose files are gone lose their row."""
+"""Retention stages files before deleting rows and removes them after commit."""
 
 import os
+import shutil
 import sqlite3
 import tempfile
+import threading
 import unittest
 import uuid
 from pathlib import Path
@@ -184,7 +186,7 @@ class HousekeepingSweepIntegrationTests(IsolatedDbTestCase):
 
         with (
             patch.dict(os.environ, {"DATA_DIR": str(data_dir)}),
-            patch("app.utils.housekeeping.cleanup_job_directory", return_value=False),
+            patch("app.utils.housekeeping._stage_expired_directory", return_value=(False, None)),
         ):
             _run_housekeeping_once()
 
@@ -209,13 +211,91 @@ class HousekeepingSweepIntegrationTests(IsolatedDbTestCase):
         (data_dir / good_id).mkdir()
         (data_dir / bad_id).mkdir()
 
-        def fake_cleanup(job_id: str, _data_dir: Path) -> bool:
-            return job_id == good_id
+        def fake_stage(job_id: str, _data_dir: Path) -> tuple[bool, None]:
+            return job_id == good_id, None
 
-        with patch("app.utils.housekeeping.cleanup_job_directory", side_effect=fake_cleanup):
+        with patch("app.utils.housekeeping._stage_expired_directory", side_effect=fake_stage):
             cleaned = cleanup_expired_jobs(7, data_dir, lambda _days: [good_id, bad_id, "not-a-uuid"])
 
         self.assertEqual(cleaned, [good_id])
+
+    def test_slow_directory_removal_does_not_hold_the_database_writer_lock(self) -> None:
+        from app.utils.housekeeping import cleanup_expired_jobs
+
+        job_id = str(uuid.uuid4())
+        _insert_finished_job(db.DB_PATH, job_id, days_old=10)
+        jobs_root = self._tmp_data_dir() / "jobs"
+        (jobs_root / job_id).mkdir(parents=True)
+        entered = threading.Event()
+        release = threading.Event()
+        writer_done = threading.Event()
+        errors: list[Exception] = []
+        original_rmtree = shutil.rmtree
+
+        def slow_rmtree(path: Path) -> None:
+            entered.set()
+            if not release.wait(5):
+                raise TimeoutError("test did not release directory cleanup")
+            original_rmtree(path)
+
+        def sweep() -> None:
+            try:
+                cleanup_expired_jobs(7, jobs_root, db.list_expired_job_ids)
+            except Exception as exc:  # noqa: BLE001  # propagate worker-thread failures to the test
+                errors.append(exc)
+
+        def write_setting() -> None:
+            try:
+                db.set_settings({"retention_days": 6})
+            except Exception as exc:  # noqa: BLE001  # propagate worker-thread failures to the test
+                errors.append(exc)
+            finally:
+                writer_done.set()
+
+        with patch("app.utils.housekeeping.shutil.rmtree", side_effect=slow_rmtree):
+            sweep_thread = threading.Thread(target=sweep)
+            sweep_thread.start()
+            try:
+                self.assertTrue(entered.wait(5))
+                writer_thread = threading.Thread(target=write_setting)
+                writer_thread.start()
+                completed_before_delete = writer_done.wait(2)
+            finally:
+                release.set()
+                sweep_thread.join(5)
+                if "writer_thread" in locals():
+                    writer_thread.join(5)
+
+        self.assertTrue(completed_before_delete, "database writer waited for recursive deletion")
+        self.assertEqual(errors, [])
+
+    def test_quarantine_recovery_restores_uncommitted_rename(self) -> None:
+        from app.utils.housekeeping import cleanup_expired_jobs
+
+        job_id = str(uuid.uuid4())
+        _insert_finished_job(db.DB_PATH, job_id, days_old=1)
+        jobs_root = self._tmp_data_dir() / "jobs"
+        staged = jobs_root / ".retention-trash" / f"{job_id}.0123456789abcdef"
+        staged.mkdir(parents=True)
+        (staged / "video.mp4").write_bytes(b"x")
+
+        cleanup_expired_jobs(0, jobs_root, lambda _days: [])
+
+        self.assertTrue((jobs_root / job_id / "video.mp4").exists())
+        self.assertFalse(staged.exists())
+
+    def test_quarantine_recovery_finishes_committed_deletion(self) -> None:
+        from app.utils.housekeeping import cleanup_expired_jobs
+
+        job_id = str(uuid.uuid4())
+        jobs_root = self._tmp_data_dir() / "jobs"
+        staged = jobs_root / ".retention-trash" / f"{job_id}.0123456789abcdef"
+        staged.mkdir(parents=True)
+        (staged / "video.mp4").write_bytes(b"x")
+
+        cleanup_expired_jobs(0, jobs_root, lambda _days: [])
+
+        self.assertFalse(staged.exists())
 
     def _tmp_data_dir(self):
         # IsolatedDbTestCase already provides a per-test tempdir at self._tmp;
@@ -294,6 +374,44 @@ class OrphanSweepJobsLayoutTests(unittest.TestCase):
 
             self.assertEqual(removed, [])
             self.assertTrue(kept_dir.exists())
+
+
+class CacheCleanupSymlinkTests(unittest.TestCase):
+    _OLD = 8 * 24 * 60 * 60
+
+    def _link(self, directory: Path, name: str, target: Path, *, age: float) -> Path:
+        link = directory / name
+        link.symlink_to(target)
+        stamp = time() - age
+        os.utime(link, (stamp, stamp), follow_symlinks=False)
+        return link
+
+    def test_expired_dangling_symlink_is_removed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = Path(tmp)
+            link = self._link(cache, "old", cache / "missing", age=self._OLD)
+            self.assertEqual(cleanup_watermark_cache(cache), 1)
+            self.assertFalse(link.is_symlink())
+
+    def test_fresh_dangling_symlink_is_kept(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = Path(tmp)
+            link = self._link(cache, "new", cache / "missing", age=60)
+            self.assertEqual(cleanup_watermark_cache(cache), 0)
+            self.assertTrue(link.is_symlink())
+
+    def test_valid_symlink_ages_by_its_own_mtime_and_target_survives(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cache = Path(tmp) / "cache"
+            cache.mkdir()
+            target = Path(tmp) / "target.bin"
+            target.write_bytes(b"x")
+            link = self._link(cache, "old", target, age=self._OLD)
+            fresh = self._link(cache, "fresh", target, age=60)
+            self.assertEqual(cleanup_watermark_cache(cache), 1)
+            self.assertFalse(link.is_symlink())
+            self.assertTrue(fresh.is_symlink())
+            self.assertTrue(target.exists())
 
 
 if __name__ == "__main__":

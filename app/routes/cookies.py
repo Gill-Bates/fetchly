@@ -24,10 +24,10 @@ import tempfile
 from pathlib import Path
 from typing import Any, Final
 
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
-from ..auth.rate_limit import limiter
+from ..auth.rate_limit import rate_limit
 from ..utils.cookie_import import (
     CookieImport,
     CookieImportError,
@@ -136,8 +136,7 @@ def _validate_and_store(platform: str, text: str, *, require_login: bool) -> Coo
     A fresh file also repairs permissions: O_CREAT's mode does not apply when
     overwriting, so a world-readable jar would stay world-readable.
     """
-    filename = _filename_for(platform)
-    target = default_cookie_file(filename)
+    target = _resolve_cookie_path(platform)
     target.parent.mkdir(parents=True, exist_ok=True)
 
     # Same directory as the target: os.replace() is atomic only within one
@@ -171,8 +170,7 @@ def _validate_and_store(platform: str, text: str, *, require_login: bool) -> Coo
 
 
 def _delete_cookie_files(platform: str) -> bool:
-    filename = _filename_for(platform)
-    target = default_cookie_file(filename)
+    target = _resolve_cookie_path(platform)
     if not target.is_file():
         return False
     target.unlink(missing_ok=True)
@@ -193,23 +191,18 @@ async def list_cookie_statuses() -> list[CookieStatus]:
     return results
 
 
-@router.get("", response_model=list[CookieStatus])
-@limiter.limit("30/minute")
-async def api_cookies_status(request: Request, _user: str = Depends(require_user)) -> list[CookieStatus]:
-    _ = request
+@router.get("", response_model=list[CookieStatus], dependencies=[Depends(rate_limit("30/minute"))])
+async def api_cookies_status(_user: str = Depends(require_user)) -> list[CookieStatus]:
     return await list_cookie_statuses()
 
 
-@router.post("/{platform}", response_model=CookieStatus)
-@limiter.limit("10/minute")
+@router.post("/{platform}", response_model=CookieStatus, dependencies=[Depends(rate_limit("10/minute"))])
 async def api_cookies_upload(
-    request: Request,
     platform: str,
     file: UploadFile = File(...),
     _user: str = Depends(require_user),
 ) -> CookieStatus:
     """Upload a cookie file for one platform (Netscape or extension JSON)."""
-    _ = request
     _filename_for(platform)  # 404s early for an unknown platform
 
     body = await file.read(_MAX_COOKIE_FILE_BYTES + 1)
@@ -227,16 +220,13 @@ async def api_cookies_upload(
     return await asyncio.to_thread(_validate_and_store, platform, imported.netscape, require_login=False)
 
 
-@router.post("/{platform}/paste", response_model=CookieStatus)
-@limiter.limit("10/minute")
+@router.post("/{platform}/paste", response_model=CookieStatus, dependencies=[Depends(rate_limit("10/minute"))])
 async def api_cookies_paste(
-    request: Request,
     platform: str,
     payload: CookiePaste,
     _user: str = Depends(require_user),
 ) -> CookieStatus:
     """Store cookies pasted from the browser's dev tools for one platform."""
-    _ = request
     _filename_for(platform)  # 404s early for an unknown platform
 
     if len(payload.text.encode("utf-8")) > _MAX_COOKIE_FILE_BYTES:
@@ -253,11 +243,9 @@ async def api_cookies_paste(
     return status
 
 
-@router.delete("/{platform}")
-@limiter.limit("10/minute")
-async def api_cookies_delete(request: Request, platform: str, _user: str = Depends(require_user)) -> dict[str, Any]:
+@router.delete("/{platform}", dependencies=[Depends(rate_limit("10/minute"))])
+async def api_cookies_delete(platform: str, _user: str = Depends(require_user)) -> dict[str, Any]:
     """Remove a platform's stored cookie file, if any."""
-    _ = request
     _filename_for(platform)  # 404s early for an unknown platform
 
     removed = await asyncio.to_thread(_delete_cookie_files, platform)

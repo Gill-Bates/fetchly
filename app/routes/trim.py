@@ -9,20 +9,18 @@
 from __future__ import annotations
 
 import asyncio
-import fcntl
 import logging
-import os
 import uuid
-from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager, suppress
+from collections.abc import Callable
+from contextlib import suppress
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..audio.naming import apply_bpm_tag
-from ..auth.rate_limit import limiter
+from ..auth.rate_limit import rate_limit
 from ..db import DOWNLOADABLE_STATUSES, get_job
 from ..integrations.lalal.policy import (
     LALAL_MAX_DURATION_MINUTES,
@@ -34,6 +32,7 @@ from ..utils.fs import (
     AUDIO_SOURCE_EXTENSIONS,
     TRIM_ID_RE,
     TRIM_WAV_GLOB,
+    exclusive_file_lock,
     job_dir,
     path_is_file,
     trim_wav_name,
@@ -48,11 +47,15 @@ router = APIRouter(prefix="/api/trim", tags=["trim"])
 _resolve_job_path: Callable[[str | None], Path] | None = None
 
 
+_MAX_TRIM_SECONDS = 10_000_000.0
+
+
 class TrimRequest(BaseModel):
     model_config = ConfigDict(allow_inf_nan=False, extra="forbid")
 
-    start: float = Field(ge=0, description="Start time in seconds")
-    end: float = Field(gt=0, description="End time in seconds")
+    # le= keeps round(x * 1000) finite; ~115 days is far beyond any real track.
+    start: float = Field(ge=0, le=_MAX_TRIM_SECONDS, description="Start time in seconds")
+    end: float = Field(gt=0, le=_MAX_TRIM_SECONDS, description="End time in seconds")
 
 
 class TrimResponse(BaseModel):
@@ -124,42 +127,13 @@ def _duration_validation_error(end: float, raw_duration: object) -> JSONResponse
     )
 
 
-@asynccontextmanager
-async def _acquire_trim_lock(lock_file: Path) -> AsyncIterator[None]:
-    """Acquire an advisory trim lock without blocking the event loop."""
-
-    def _lock() -> int:
-        lock_fd = os.open(lock_file, os.O_CREAT | os.O_RDWR)
-        try:
-            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except Exception:
-            os.close(lock_fd)
-            raise
-        return lock_fd
-
-    def _unlock(lock_fd: int) -> None:
-        try:
-            fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        finally:
-            os.close(lock_fd)
-
-    lock_fd = await asyncio.to_thread(_lock)
-    try:
-        yield
-    finally:
-        await asyncio.to_thread(_unlock, lock_fd)
-
-
-@router.post("/{job_id}", response_model=None)
-@limiter.limit("10/minute")
+@router.post("/{job_id}", response_model=None, dependencies=[Depends(rate_limit("10/minute"))])
 async def trim_audio(
-    request: Request,
     job_id: uuid.UUID,
     body: TrimRequest,
     _user: str = Depends(require_user_json),
 ) -> TrimResponse | JSONResponse:
     """Trim an audio file to the requested start and end times."""
-    _ = request
     resolve_job_path = _require_init()
 
     start = body.start
@@ -243,7 +217,7 @@ async def trim_audio(
     timeout = min(300, max(30, int(duration * 2)))
 
     try:
-        async with _acquire_trim_lock(lock_file):
+        async with exclusive_file_lock(lock_file):
             if await path_is_file(out_file):
                 logger.info("Trim cache hit: %s", out_file.name)
                 return TrimResponse(
@@ -255,7 +229,7 @@ async def trim_audio(
                 )
 
             async with governor.transcode_semaphore:
-                proc: asyncio.subprocess.Process | None = await asyncio.create_subprocess_exec(
+                proc = await asyncio.create_subprocess_exec(
                     *cmd,
                     stdout=asyncio.subprocess.DEVNULL,
                     stderr=asyncio.subprocess.PIPE,
@@ -265,7 +239,6 @@ async def trim_audio(
                     async with asyncio.timeout(timeout):
                         _, stderr = await proc.communicate()
                 except TimeoutError:
-                    await _unlink_file(temp_file)
                     return JSONResponse(status_code=500, content={"error": "Trim operation timed out"})
                 finally:
                     if proc.returncode is None:
@@ -276,7 +249,6 @@ async def trim_audio(
                 if proc.returncode != 0:
                     err_text = (stderr.decode(errors="replace") if stderr else "unknown error").strip()
                     logger.error("FFmpeg trim failed: %.4000s", err_text)
-                    await _unlink_file(temp_file)
                     return JSONResponse(status_code=500, content={"error": "Trim operation failed"})
 
                 await _replace_file(temp_file, out_file)  # atomic
@@ -303,34 +275,27 @@ async def trim_audio(
         return JSONResponse(status_code=409, content={"error": "Trim already in progress"})
 
     except FileNotFoundError:
-        await _unlink_file(temp_file)
         logger.error("FFmpeg binary not found while trimming job %s", job_id)
         return JSONResponse(status_code=500, content={"error": "FFmpeg is not installed on the server"})
 
     except OSError:
-        await _unlink_file(temp_file)
         logger.exception("Trim failed for job %s", job_id)
         return JSONResponse(status_code=500, content={"error": "Trim operation failed"})
     finally:
         await _unlink_file(temp_file)
 
 
-@router.delete("/{job_id}", response_model=None)
-@limiter.limit("30/minute")
+@router.delete("/{job_id}", response_model=None, dependencies=[Depends(rate_limit("30/minute"))])
 async def delete_trim(
-    request: Request,
     job_id: uuid.UUID,
     trim_id: str | None = None,
     _user: str = Depends(require_user_json),
 ):
     """Delete one trim file (``trim_id``) or all of a job's trim files."""
-    _ = request
     _require_init()
 
     job_id_str = str(job_id)
     output_dir = job_dir(job_id_str)
-
-    deleted_count = 0
 
     if trim_id:
         deleted_count = await _delete_trim_files(output_dir, _validate_trim_id(trim_id))
@@ -344,16 +309,13 @@ async def delete_trim(
     return {"ok": True, "deleted": deleted_count}
 
 
-@router.get("/{job_id}/{trim_id}/download", response_model=None)
-@limiter.limit("30/minute")
+@router.get("/{job_id}/{trim_id}/download", response_model=None, dependencies=[Depends(rate_limit("30/minute"))])
 async def download_trim(
-    request: Request,
     job_id: uuid.UUID,
     trim_id: str,
     _user: str = Depends(require_user_json),
 ):
     """Download a trimmed WAV file (``trim_id`` format: startMs_endMs)."""
-    _ = request
     _require_init()
 
     trim_id = _validate_trim_id(trim_id)

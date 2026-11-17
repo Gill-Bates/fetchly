@@ -14,11 +14,11 @@ import logging
 from hashlib import pbkdf2_hmac, sha256
 from typing import TYPE_CHECKING, Final
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..auth.rate_limit import limiter
+from ..auth.rate_limit import rate_limit
 from ..auth.session import (
     SESSION_COOKIE,
     create_session,
@@ -115,13 +115,23 @@ def has_admin_credentials(settings: dict[str, object] | None = None) -> bool:
 
 def verify_login(username: str, password: str) -> bool:
     """Verify login credentials against the stored admin account."""
+    return verify_login_version(username, password) is not None
+
+
+def verify_login_version(username: str, password: str) -> int | None:
+    """Verify credentials; return the session_version of the verified snapshot.
+
+    ``None`` means the login failed. The version belongs to the same settings
+    read the credentials were checked against, so a token signed with it dies
+    if the password changes before the token is issued.
+    """
     try:
         settings = get_settings(include_internal=True)
     except Exception:
         # A storage failure must never authenticate anyone: there is no
         # fallback credential to fall back to.
         logger.exception("Unable to load authentication settings")
-        return False
+        return None
 
     stored_user = str(settings.get("admin_username") or "").strip()
     stored_hash = str(settings.get("admin_password_hash") or "").strip()
@@ -130,7 +140,7 @@ def verify_login(username: str, password: str) -> bool:
         # the settings API prevents. Fail closed; recovering means clearing
         # enable_authentication in the settings table.
         logger.error("Authentication is enabled but no admin account is stored; login is impossible")
-        return False
+        return None
 
     # The salt is derived from the username, so the candidate hash has to be
     # computed against the *stored* name, not the submitted one.
@@ -139,7 +149,12 @@ def verify_login(username: str, password: str) -> bool:
     # non-ASCII, so a submitted username like "bäcker" would raise TypeError
     # and surface as a 500 instead of a plain failed login.
     username_ok = hmac.compare_digest(username.encode("utf-8"), stored_user.encode("utf-8"))
-    return username_ok and password_ok
+    if not (username_ok and password_ok):
+        return None
+    try:
+        return max(0, int(settings.get("session_version", 0) or 0))
+    except (TypeError, ValueError):
+        return None
 
 
 def current_user(request: Request) -> str | None:
@@ -189,7 +204,7 @@ def _require_templates() -> Jinja2Templates:
     return _templates
 
 
-def _do_logout(request: Request) -> RedirectResponse:
+async def _do_logout(request: Request) -> RedirectResponse:
     """Clear the cookie and revoke every outstanding session.
 
     Tokens are stateless HMAC signatures, so there is no per-token row to
@@ -205,15 +220,16 @@ def _do_logout(request: Request) -> RedirectResponse:
     # protection alone does not stop this - it only blocks other origins,
     # not a visitor calling the endpoint directly with their own valid
     # CSRF pair.
-    if is_authentication_enabled() and validate_session(request.cookies.get(SESSION_COOKIE)):
-        invalidate_current_session(current_user(request) or "")
+    if is_authentication_enabled():
+        username = validate_session(request.cookies.get(SESSION_COOKIE))
+        if username:
+            await asyncio.to_thread(invalidate_current_session, username)
     response = RedirectResponse(url="/login", status_code=303)
     delete_session_cookie(response, request)
     return response
 
 
-@router.get("/login", response_class=HTMLResponse)
-@limiter.limit("20/minute")
+@router.get("/login", response_class=HTMLResponse, dependencies=[Depends(rate_limit("20/minute"))])
 async def login_page(request: Request):
     if current_user(request):
         return RedirectResponse(url="/", status_code=303)
@@ -239,8 +255,7 @@ class LoginRequest(BaseModel):
     captcha_token: str = Field(default="", max_length=1024)
 
 
-@router.post("/login")
-@limiter.limit("5/minute")
+@router.post("/login", dependencies=[Depends(rate_limit("5/minute"))])
 async def login(request: Request, body: LoginRequest):
     if not is_authentication_enabled():
         # No login gate: skip CAPTCHA/credential checks; current_user() grants
@@ -258,19 +273,27 @@ async def login(request: Request, body: LoginRequest):
             content={"ok": False, "detail": _CAPTCHA_REJECTED_MESSAGE},
         )
 
-    if not await asyncio.to_thread(verify_login, body.username, body.password):
+    verified_version = await asyncio.to_thread(verify_login_version, body.username, body.password)
+    if verified_version is None:
         return JSONResponse(
             status_code=401,
             content={"ok": False, "detail": "Invalid credentials"},
         )
 
-    token = create_session(body.username)
+    token = create_session(body.username, session_version=verified_version)
     response = JSONResponse(content={"ok": True, "redirect": "/"})
-    set_session_cookie(response, token, request)
+    try:
+        set_session_cookie(response, token, request)
+    except ValueError:
+        # The version moved on after verification (password change, logout,
+        # auth toggle): the credentials checked are no longer current.
+        return JSONResponse(
+            status_code=401,
+            content={"ok": False, "detail": "Invalid credentials"},
+        )
     return response
 
 
-@router.post("/logout")
-@limiter.limit("20/minute")
+@router.post("/logout", dependencies=[Depends(rate_limit("20/minute"))])
 async def logout_post(request: Request):
-    return _do_logout(request)
+    return await _do_logout(request)

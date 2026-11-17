@@ -87,7 +87,7 @@ class WebAppTestCase(IsolatedDbTestCase):
 
         from fastapi.testclient import TestClient
 
-        from app.auth.rate_limit import limiter
+        from app.auth.rate_limit import reset_rate_limits
         from app.auth.session import refresh_session_settings_cache
         from app.main import app, templates
         from app.routes.api import init_api
@@ -95,8 +95,8 @@ class WebAppTestCase(IsolatedDbTestCase):
         init_api(templates)
         refresh_session_settings_cache()
 
-        limiter.reset()
-        self.addCleanup(limiter.reset)
+        reset_rate_limits()
+        self.addCleanup(reset_rate_limits)
 
         self.client = TestClient(app, follow_redirects=False)
         self.addCleanup(self.client.close)

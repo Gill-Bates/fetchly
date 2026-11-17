@@ -98,5 +98,43 @@ class DurationPipelineTests(unittest.TestCase):
         self.assertEqual(stats["total_lalal_minutes"], 3.6)
 
 
+class TrimRequestBoundsTests(unittest.TestCase):
+    def test_huge_finite_times_are_rejected_before_millisecond_rounding(self) -> None:
+        from pydantic import ValidationError
+
+        from app.routes.trim import TrimRequest
+
+        for payload in ({"start": 0, "end": 1e308}, {"start": 1e308, "end": 1e308}):
+            with self.subTest(payload=payload), self.assertRaises(ValidationError):
+                TrimRequest(**payload)
+
+        self.assertEqual(TrimRequest(start=1, end=30.5).end, 30.5)
+
+
+class StatsCacheClockTests(unittest.TestCase):
+    def test_cache_ttl_follows_the_monotonic_clock(self) -> None:
+        import asyncio
+
+        from app.routes import api
+
+        calls = []
+        clock = [100.0]
+
+        def fake_stats() -> dict[str, int]:
+            calls.append(1)
+            return {"jobs": len(calls)}
+
+        api._invalidate_stats_cache()
+        self.addCleanup(api._invalidate_stats_cache)
+        with patch.object(api, "get_stats", fake_stats), patch.object(api, "monotonic", lambda: clock[0]):
+            first = asyncio.run(api.get_cached_stats())
+            clock[0] = 130.0
+            second = asyncio.run(api.get_cached_stats())
+            clock[0] = 100.0 + api._STATS_CACHE_TTL_SECONDS + 1
+            third = asyncio.run(api.get_cached_stats())
+
+        self.assertEqual((first, second, third), ({"jobs": 1}, {"jobs": 1}, {"jobs": 2}))
+
+
 if __name__ == "__main__":
     unittest.main()

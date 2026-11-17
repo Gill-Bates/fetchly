@@ -13,13 +13,43 @@ carry a matching token even when it passes as same-origin.
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import patch
 
-from middleware.csrf import CSRFMiddleware, _effective_port
+from middleware.csrf import CSRFMiddleware, _effective_port, _FormBodyTooLargeError
 from tests._support import WebAppTestCase
 
 
 class DoubleSubmitTokenTests(WebAppTestCase):
+    def test_large_form_without_header_is_rejected_before_token_parsing(self):
+        self._csrf()
+        response = self.client.post(
+            "/api/jobs/remove-all",
+            files={"padding": ("large.txt", b"x" * (128 * 1024), "text/plain")},
+        )
+        self.assertEqual(response.status_code, 413)
+
+    def test_large_upload_with_header_token_bypasses_form_token_buffer(self):
+        token = self._csrf()
+        response = self.client.post(
+            "/api/jobs/remove-all",
+            files={"padding": ("large.txt", b"x" * (128 * 1024), "text/plain")},
+            headers={"X-CSRF-Token": token},
+        )
+        self.assertNotIn(response.status_code, {403, 413})
+
+    def test_chunked_form_stops_reading_at_the_body_limit(self):
+        reads = 0
+
+        async def receive():
+            nonlocal reads
+            reads += 1
+            return {"type": "http.request", "body": b"x" * (32 * 1024), "more_body": True}
+
+        with self.assertRaises(_FormBodyTooLargeError):
+            asyncio.run(CSRFMiddleware._read_body(receive))
+        self.assertEqual(reads, 3)
+
     def test_missing_token_is_rejected(self):
         response = self.client.post("/api/jobs/remove-all", json={})
         self.assertEqual(response.status_code, 403)

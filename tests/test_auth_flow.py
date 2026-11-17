@@ -10,6 +10,8 @@ Walks the path a fresh install actually takes: open, refuse to switch the login
 on without an account, create the account, get bounced to /login, sign in.
 """
 
+from unittest.mock import patch
+
 from app import db
 from app.routes import auth
 from tests._support import WebAppTestCase
@@ -148,3 +150,63 @@ class AuthFlowTests(WebAppTestCase):
         # The real admin's independently-issued session must still validate:
         # logout must not have bumped session_version.
         self.assertEqual(validate_session(real_token), "alice")
+
+
+class LoginVersionBindingTests(WebAppTestCase):
+    def _enable_auth(self) -> None:
+        db.set_settings_and_bump_session_version(
+            {
+                "admin_username": "alice",
+                "admin_password_hash": auth.hash_password("alice", "correct-horse"),
+                "enable_authentication": "true",
+            }
+        )
+
+        from app.auth.session import refresh_session_settings_cache
+
+        refresh_session_settings_cache()
+
+    def _change_password(self) -> int:
+        from app.auth.session import refresh_session_settings_cache
+
+        version = db.set_settings_and_bump_session_version(
+            {"admin_password_hash": auth.hash_password("alice", "battery-staple")}
+        )
+        refresh_session_settings_cache(session_version_floor=version)
+        return version
+
+    def test_token_signed_with_the_verified_version_dies_on_password_change(self):
+        from app.auth.session import create_session, validate_session
+
+        self._enable_auth()
+        verified = auth.verify_login_version("alice", "correct-horse")
+        self.assertIsNotNone(verified)
+
+        self._change_password()
+
+        self.assertIsNone(validate_session(create_session("alice", session_version=verified)))
+        self.assertIsNone(auth.verify_login_version("alice", "correct-horse"))
+
+    def test_login_fails_when_the_password_changes_after_verification(self):
+        from app.auth.session import SESSION_COOKIE
+
+        self._enable_auth()
+        real_verify = auth.verify_login_version
+
+        def verify_then_change(username, password):
+            verified = real_verify(username, password)
+            self._change_password()
+            return verified
+
+        with (
+            patch.object(auth, "verify_captcha_token", return_value=auth.CaptchaOutcome.OK),
+            patch.object(auth, "verify_login_version", side_effect=verify_then_change),
+        ):
+            response = self.client.post(
+                "/login",
+                json={"username": "alice", "password": "correct-horse"},
+                headers={"X-CSRF-Token": self._csrf()},
+            )
+
+        self.assertEqual(response.status_code, 401)
+        self.assertNotIn(SESSION_COOKIE, response.cookies)

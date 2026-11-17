@@ -10,11 +10,11 @@ Static files here are served by `VersionedStaticFiles` (`app/utils/assets.py`) w
 
 | File | Purpose |
 | --- | --- |
-| `js/main.js` | Dashboard entry point: page initialization, DOM setup, event listener registration |
+| `js/main.js` | Dashboard entry point: page initialization, DOM setup, event listener registration; renders the pre-download auth warning via `describeAuthWarning()` (with an "Open settings" link) |
 | `js/api.js` | API client: typed wrappers (`fetchJobs`, `fetchJob`, `submitJob`, `fetchStats`, `fetchVideoInfo`, …), CSRF header injection, error normalization via `toErrorMessage()` |
 | `js/config.js` | Frontend contract constants: `CONFIG`, `AUDIO_TYPE`, Lalal duration caps, and the status sets `DOWNLOADABLE_STATUSES`, `CANCELLABLE_STATUSES`, `RETRYABLE_STATUSES`, `TERMINAL_STATUSES`, `PROGRESS_STATUSES` |
 | `js/ui.js` | Shared UI vocabulary: `STATUS_META`, `ACTION_CATEGORY`, `normalizeStatus()`, `getStatusText()`, `getStatusPillClass()`, `toProgressPercent()` |
-| `js/utils.js` | Generic helpers: `clamp()`, `snapTime()`, `normalizeTimeRange()`, `buildTrimId()`, `isSameTrimSelection()` (ties a pending Lalal result to its selection), `resetLalalLabel()`, `releaseLalalRun()`, `createTimeoutSignal()`, `combineAbortSignals()`, `EMPTY_VALUE` |
+| `js/utils.js` | Generic helpers: `clamp()`, `snapTime()`, `normalizeTimeRange()`, `buildTrimId()`, `isSameTrimSelection()` (ties a pending Lalal result to its selection), `resetLalalLabel()`, `releaseLalalRun()`, `createTimeoutSignal()`, `combineAbortSignals()`, `describeAuthWarning()` (turns a `/api/info` `login_required` answer into title/message/settings-link; title is "Access still denied" when `cookies_configured` is true), `EMPTY_VALUE` |
 | `js/jobs.js` | Job list UI: rendering, pagination, filtering, live status updates |
 | `js/job.js` | Job detail view: single job display, download controls, action buttons. Its open-time snapshot is dropped if a live update arrived meanwhile or a terminal state is already shown |
 | `js/trim.js` | Audio trimming editor: WaveSurfer.js waveform, region markers, in/out points |
@@ -115,7 +115,7 @@ Open DevTools: Console for errors, Network to confirm API calls and the `/events
 
 ---
 
-**Last Updated:** 2026-10-26  
+**Last Updated:** 2026-11-17  
 **JavaScript:** Native ES modules, no build step, no framework  
 **CSS:** Vanilla CSS plus vendored Bootstrap 5  
 **Audio Library:** WaveSurfer.js (vendored)  

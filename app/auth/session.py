@@ -24,7 +24,7 @@ from ..db import (
     SESSION_MAX_DAYS_MAX,
     SESSION_MAX_DAYS_MIN,
     get_settings,
-    set_settings,
+    set_settings_and_bump_session_version,
     setting_default,
 )
 from ..utils.boolean import parse_bool_text
@@ -55,6 +55,9 @@ _SESSION_SETTINGS_DEFAULTS: Final[dict[str, Any]] = {
 }
 _SESSION_SETTINGS_CACHE: dict[str, Any] = dict(_SESSION_SETTINGS_DEFAULTS)
 _SESSION_SETTINGS_LOCK = threading.Lock()
+# Bumped on every publish so a refresh that read the database earlier can tell it is stale.
+_CACHE_GENERATION = 0
+_REFRESH_ATTEMPTS = 5
 
 logger = logging.getLogger(__name__)
 
@@ -88,22 +91,60 @@ def _is_session_expired(session: SessionData, now: int) -> bool:
     return now >= session.issued_at + _get_max_lifetime_seconds()
 
 
-def refresh_session_settings_cache() -> None:
-    """Refresh the small session-related settings snapshot from the database."""
+def _as_version(value: Any) -> int:
     try:
-        settings = get_settings(include_internal=True)
-    except (sqlite3.Error, OSError) as exc:
-        logger.warning("Failed to refresh session settings cache: %s", exc)
-        return
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
 
-    refreshed = {
-        "session_version": settings.get("session_version", 0),
-        "session_max_days": settings.get("session_max_days", _DEFAULT_MAX_DAYS),
-        "enable_authentication": bool(settings.get("enable_authentication", True)),
-    }
-    with _SESSION_SETTINGS_LOCK:
-        _SESSION_SETTINGS_CACHE.clear()
-        _SESSION_SETTINGS_CACHE.update(refreshed)
+
+def refresh_session_settings_cache(*, session_version_floor: int | None = None) -> None:
+    """Refresh the small session-related settings snapshot from the database.
+
+    A snapshot is published only if no other publish happened since its
+    database read; otherwise it is re-read, so an older snapshot never
+    overwrites a newer one. ``session_version`` never decreases; after the
+    retries a stale snapshot may only raise the version, never other fields.
+    """
+    global _CACHE_GENERATION
+    for attempt in range(_REFRESH_ATTEMPTS):
+        last_attempt = attempt == _REFRESH_ATTEMPTS - 1
+        with _SESSION_SETTINGS_LOCK:
+            read_generation = _CACHE_GENERATION
+        try:
+            settings = get_settings(include_internal=True)
+        except (sqlite3.Error, OSError) as exc:
+            logger.warning("Failed to refresh session settings cache: %s", exc)
+            if session_version_floor is not None:
+                with _SESSION_SETTINGS_LOCK:
+                    cached = _as_version(_SESSION_SETTINGS_CACHE.get("session_version", 0))
+                    _SESSION_SETTINGS_CACHE["session_version"] = max(cached, session_version_floor)
+                    _CACHE_GENERATION += 1
+            return
+
+        refreshed = {
+            "session_version": _as_version(settings.get("session_version", 0)),
+            "session_max_days": settings.get("session_max_days", _DEFAULT_MAX_DAYS),
+            "enable_authentication": bool(settings.get("enable_authentication", True)),
+        }
+        if session_version_floor is not None:
+            refreshed["session_version"] = max(refreshed["session_version"], session_version_floor)
+        with _SESSION_SETTINGS_LOCK:
+            if read_generation != _CACHE_GENERATION and not last_attempt:
+                logger.debug("Session settings snapshot went stale; re-reading")
+                continue
+            if read_generation != _CACHE_GENERATION:
+                # Retries exhausted: the snapshot is stale, so only raise the version
+                # (a floor must take effect) and keep the newer fields already published.
+                cached = _as_version(_SESSION_SETTINGS_CACHE.get("session_version", 0))
+                if refreshed["session_version"] > cached:
+                    _SESSION_SETTINGS_CACHE["session_version"] = refreshed["session_version"]
+                    _CACHE_GENERATION += 1
+                return
+            _SESSION_SETTINGS_CACHE.clear()
+            _SESSION_SETTINGS_CACHE.update(refreshed)
+            _CACHE_GENERATION += 1
+            return
 
 
 def _get_cached_session_setting(key: str, default: Any) -> Any:
@@ -140,13 +181,11 @@ def invalidate_current_session(username: str) -> None:
     every user at once (fetchly is single-admin, so that is the only user).
     """
     try:
-        settings = get_settings(include_internal=True)
-        next_version = int(settings.get("session_version", 0) or 0) + 1
-        set_settings({"session_version": next_version}, allow_internal=True)
+        next_version = set_settings_and_bump_session_version({})
     except (sqlite3.Error, OSError, ValueError) as exc:
         logger.warning("Failed to bump session_version on logout for %s: %s", username, exc)
-        return
-    refresh_session_settings_cache()
+        raise
+    refresh_session_settings_cache(session_version_floor=next_version)
 
 
 def get_cached_authentication_enabled() -> bool:
@@ -173,8 +212,11 @@ def _validate_live_session(session: SessionData, now: int) -> bool:
     return session.session_version == _get_session_version()
 
 
-def create_session(username: str) -> str:
+def create_session(username: str, *, session_version: int | None = None) -> str:
     """Create a new session token for a user.
+
+    ``session_version`` pins the version read while the credentials were
+    verified; a later bump then leaves the token invalid.
 
     Token format: username:issued_at:nonce:session_version:signature
     - issued_at: Login time; the absolute lifetime is measured from here
@@ -183,7 +225,8 @@ def create_session(username: str) -> str:
         raise ValueError("username must not contain ':'")
     now = int(time())
     nonce = secrets.token_urlsafe(12)
-    session_version = _get_session_version()
+    if session_version is None:
+        session_version = _get_session_version()
     payload = f"{username}:{now}:{nonce}:{session_version}"
     return _encode_token(payload, _sign_payload(payload))
 

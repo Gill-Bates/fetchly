@@ -14,7 +14,7 @@ fetchly is a full-stack application that enables users to download, analyze, tri
 | `/middleware/`        | Double-submit-cookie CSRF middleware                                                                                                                                                 |
 | `/docker/`            | Container runtime: Dockerfile, docker-compose, entrypoint script, APT repository preferences                                                                                         |
 | `/docs/`              | MkDocs documentation (config lives at `docs/mkdocs.yml`, not the repo root)                                                                                                          |
-| `/.github/workflows/` | CI/CD: PR gate (ruff, pytest, ESLint/Stylelint/contracts/`node --test`, entrypoint and Dockerfile checks), UI audit, docs deploy, docker build, release automation                   |
+| `/.github/workflows/` | CI/CD: PR gate (ruff, pytest, ESLint/Stylelint/contracts/`node --test`, entrypoint/Dockerfile checks incl. shellcheck, actionlint, single-manifest check), UI audit, docs deploy, docker build, release automation                   |
 | `/.github/skills/`    | Standalone agent prompts with YAML frontmatter: `01_CodeReview`, `02_CheckComments` (auto-fixes comments/docstrings), `03_CheckIgnoreFiles`, `04_DRY` (the others are analysis-only) |
 | `/run.py`             | Entry point for local development (uvicorn)                                                                                                                                          |
 
@@ -27,7 +27,7 @@ fetchly is a full-stack application that enables users to download, analyze, tri
 - **Database:** `/app/db.py` — raw `sqlite3` (stdlib, synchronous), hand-written SQL, `sqlite3.Row` results. No ORM, no SQLAlchemy, no Pydantic persistence models.
 - **Business logic:** `/app/audio/` (BPM and audio analysis), `/app/integrations/lalal/` (Lalal.ai client and policy), `/app/runtime/governor.py` (resource limits), `/app/auth/session.py` (HMAC-signed session tokens)
 - **Utilities:** `/app/utils/` (version detection, changelog rendering, host stats, watermark rendering, cookie import/validation, template filters, housekeeping)
-- **Dependencies:** FastAPI, Starlette, Uvicorn, Gunicorn, yt-dlp (installed unpinned, outside `pyproject.toml`), yt-dlp-ejs, essentia (audio features), beat-this (BPM, pulls torch), soundfile (beat-this's audio decoder), slowapi (rate limiting), pydantic (request validation)
+- **Dependencies:** FastAPI, Starlette, Uvicorn, Gunicorn, yt-dlp (installed unpinned, outside `pyproject.toml`), yt-dlp-ejs, essentia (audio features), beat-this (BPM, pulls torch), soundfile (beat-this's audio decoder), geoip2 (GeoLite2 lookups for the job page's requester tile), pydantic (request validation)
 
 ### Working on Frontend Features
 - **Static assets:** `/app/static/` — `js/` (ES modules, served as-is), `style.css` and `login.css` at the directory root, `img/`, `fonts/` (self-hosted), `vendor/` (Bootstrap 5 bundle, WaveSurfer.js)
@@ -36,18 +36,18 @@ fetchly is a full-stack application that enables users to download, analyze, tri
 - **Real-time:** Server-Sent Events. `/app/routes/events.py` returns `text/event-stream`; `/app/static/js/events.js` consumes it with `EventSource`.
 
 ### Testing
-- **Python tests:** `/tests/test_*.py` — 57 files. pytest is the runner, but the tests are **unittest-style classes**; there are no pytest fixtures. Subclass `IsolatedDbTestCase` or `WebAppTestCase` from `/tests/_support.py`.
+- **Python tests:** `/tests/test_*.py` — 61 files. pytest is the runner, but the tests are **unittest-style classes**; there are no pytest fixtures. Subclass `IsolatedDbTestCase` or `WebAppTestCase` from `/tests/_support.py`.
 - **JavaScript tests:** `/tests/js/*.test.mjs` — 22 files using `node:test` + `node:assert/strict` with the shared fake DOM in `/tests/js/helpers/fake-dom.mjs`
 - **UI audit:** `/tools/ui-lint/` — a separate Playwright suite run via `npm run ui-lint`, not part of `npm test`
-- **CI gate:** ruff (`ruff check` and `ruff format --check`), pytest, ESLint, Stylelint, source contracts, and `node --test` must all pass
+- **CI gate:** ruff (`ruff check` and `ruff format --check`), pytest, ESLint, Stylelint, source contracts, and `node --test` must all pass; the Python job also runs `pip check` on the installed dependencies
 
 ### Common Patterns
 - **Job lifecycle:** API enqueues job → governor checks resource headroom → in-process worker picks it up → status written to database → clients receive SSE updates
-- **Job statuses:** `queued`, `downloading`, `processing`, `transcoding`, `analysis`, `done`, `analysis_done`, `error`, `cancelled`. Defined as a `frozenset[str]` in `db.py` — there is no `JobStatus` enum, and no `active`/`completed`/`failed` status.
-- **Audio analysis:** submitted to `workers/analysis_worker.py`, which runs the detector cascade in a short-lived child process (essentia `RhythmExtractor2013`, then beat-this, fused by confidence). Results — `bpm` and `bpm_confidence`, including a "no usable tempo" outcome — are cached by audio hash in `audio_analysis_cache`. Files keep their stored names; the BPM tag only decorates the download name (`audio/naming.py`).
+- **Job statuses:** `queued`, `downloading`, `processing`, `transcoding`, `analysis`, `done`, `analysis_done`, `error`, `cancelled`. The authoritative set is `_JOB_STATUSES` (a `frozenset[str]`) in `db.py`. `workers/analysis_worker.py` has a small `JobStatus(StrEnum)` covering only the analysis path (`queued`, `analysis`, `analysis_done`, `done`, `error`); it is not a complete list. There is no `active`/`completed`/`failed` status.
+- **Audio analysis:** submitted to `workers/analysis_worker.py`, which runs the detector cascade in an isolated child process group (essentia `RhythmExtractor2013`, then beat-this, fused by confidence). Timeout and shutdown terminate the group, including subprocesses. Results — `bpm` and `bpm_confidence`, including a "no usable tempo" outcome — are cached by audio hash in `audio_analysis_cache`. The BPM decorates download names and is written to the served MP3's ID3 `TBPM` tag (`audio/naming.py`, `audio/tags.py`).
 - **Authentication:** optional (`enable_authentication` setting). Single admin credential in the `settings` table, HMAC-SHA256 session tokens, rate-limited login, invisible honeypot anti-bot token.
 - **Configuration:** runtime settings live in the `settings` table; server-level config comes from environment variables (see `docs/configuration/environment.md`, the authoritative reference)
-- **Media handling:** yt-dlp for format queries and download, FFmpeg for conversion/trimming/watermarking
+- **Media handling:** yt-dlp for format queries, bounded metadata lookup (16 MiB stdout cap), and download; FFmpeg for conversion/trimming/watermarking
 
 ## Dependencies
 
@@ -57,7 +57,7 @@ fetchly is a full-stack application that enables users to download, analyze, tri
 - `app/routes/*` import `app/db.py`; `app/workers/worker.py` imports `db`, `runtime.governor` and `workers.analysis_worker` but **not** `app/routes/`
 
 ### External
-- **Runtime:** FastAPI, Uvicorn, uvicorn-worker, Gunicorn, Jinja2, Pydantic, Slowapi, Starlette, yt-dlp, yt-dlp-ejs, essentia, beat-this, torch and torchaudio (CPU wheels), httpx, markdown, markupsafe, nh3, numpy, python-multipart
+- **Runtime:** FastAPI, Uvicorn, uvicorn-worker, Gunicorn, Jinja2, Pydantic, Starlette, yt-dlp, yt-dlp-ejs, essentia, beat-this, torch and torchaudio (CPU wheels), geoip2, httpx, markdown, markupsafe, nh3, numpy, python-multipart
 - **Development:** pytest, pytest-asyncio, pytest-cov, ruff (all pinned; runtime deps deliberately are not)
 - **Documentation:** MkDocs, mkdocs-material, pymdown-extensions and the plugins listed under `[project.optional-dependencies] docs`
 - **Frontend tooling:** ESLint, Stylelint, Playwright, @axe-core/playwright, pixelmatch, pngjs
@@ -73,7 +73,7 @@ python run.py       # Dev server on http://127.0.0.1:8000
 
 ### Testing
 ```bash
-pytest                    # Run all Python tests (57 files)
+pytest                    # Run all Python tests (61 files)
 npm test                  # node --test over tests/js/*.test.mjs (22 files)
 npm run lint              # ESLint + Stylelint + source contracts
 npm run ui-lint           # Playwright UI audit (needs: npm run ui-lint:install)
@@ -104,6 +104,6 @@ Authoritative reference: `docs/configuration/environment.md`. Most-used variable
 
 ---
 
-**Last Updated:** 2026-10-26  
+**Last Updated:** 2026-11-17  
 **Version:** see `pyproject.toml` (`[project].version`)  
 **Branch:** `feature/vX.Y.Z` during development, `main` for stable releases

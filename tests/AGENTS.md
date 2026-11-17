@@ -10,30 +10,30 @@
 | --- | --- |
 | `conftest.py` | Imports `tests._support` for its side effect: `FETCHLY_SECRET_KEY` is set before pytest imports any test module. **Defines no fixtures.** |
 | `_support.py` | Shared setup: the secret-key bootstrap plus `IsolatedDbTestCase` and `WebAppTestCase` base classes |
-| `test_auth_credentials.py`, `test_auth_flow.py` | Admin credential handling, login/logout, session behavior, including that a cookie issued before an authentication off/on cycle stays invalid |
+| `test_auth_credentials.py`, `test_auth_flow.py` | Admin credential handling, login/logout, session behavior, including that a cookie issued before an authentication off/on cycle stays invalid, and that login binds the session to the current auth version (`LoginVersionBindingTests`) |
 | `test_csrf.py` | The double-submit CSRF token check and the additive Sec-Fetch-Site/Origin/Referer cross-site rejection |
-| `test_cookie_files.py`, `test_cookie_import.py`, `test_cookie_routes.py`, `test_cookie_status.py` | Netscape parsing, per-platform storage, routes, usability reporting |
-| `test_bpm_beat_this.py`, `test_bpm_naming.py`, `test_bpm_normalization.py` | Tempo detection, the `_94bpm` tag folded into download filenames, octave/half-time normalization |
+| `test_cookie_files.py`, `test_cookie_import.py`, `test_cookie_routes.py`, `test_cookie_status.py` | Netscape parsing, header/cURL/JSON import (including request-target handling, `RequestTargetTests`), per-platform storage, routes, usability reporting |
+| `test_bpm_beat_this.py`, `test_bpm_naming.py`, `test_bpm_normalization.py` | Tempo detection, the `_94bpm` tag folded into download filenames, octave/half-time normalization, and rejection of non-finite or sub-1 BPM values |
 | `test_mp3_tags.py` | MP3 ID3 tags: cover (`attached_pic`, both edges ≤ 1280 px), Fetchly comment and `TBPM`; no thumbnail, no usable tempo, tagging failure never fails serving, filename and audio hash unchanged. Real-ffmpeg tests are `@pytest.mark.slow` |
 | `test_watermark.py`, `test_watermark_logo.py` | FFmpeg compositing and uploaded-logo validation |
 | `test_output_modes.py` | The three `download_output_mode` values: format selection, the post-download pass, and the watermark interaction |
 | `test_db_job_statuses.py` | Job status transitions and the valid status set |
-| `test_worker_hardening.py` | Worker resilience: failure handling, cancellation, recovery, and the actionable message for login-gated sources (`AuthRequiredError`) |
+| `test_worker_hardening.py` | Worker resilience: failure handling, cancellation, recovery, the actionable message for login-gated sources (`AuthRequiredError`), the auth-error classifier (`AuthRequiredClassifierTests`) and the `cookies_configured` report |
 | `test_active_jobs_reload.py` | A reloaded dashboard finds running jobs again (`list_active_jobs()`, including history-disabled jobs) with their last live progress |
 | `test_updates.py` | Update check: per-component status (current/available/unknown) and `reason`, ffmpeg build comparison within the installed series, large release payloads, request headers, calendar/`v` version parsing, per-component isolation and timeout, short negative cache with failed-only retry |
 | `test_runtime_settings.py` | Settings persistence |
 | `test_db_schema.py` | A fresh database has the complete schema; re-running `init_db()` changes nothing; no schema version is stamped; an existing database with missing columns raises `DatabaseSchemaError` without being modified, extra columns/tables are tolerated |
 | `test_job_paths.py` | The central per-job path helper: `jobs_dir()` is `DATA_DIR/jobs`, `job_dir()` resolves to `DATA_DIR/jobs/<uuid>` with the id UUID-validated and canonicalized, traversal and non-UUID names rejected, and both track the `DATA_DIR` env var |
 | `test_host_stats.py` | Host metrics parsing |
-| `test_changelog.py`, `test_version_source.py` | Changelog rendering; version source, the no-`==`-pins rule and the WaveSurfer version detection (env, then pin file) |
-| `test_duration.py`, `test_job_duration.py` | Duration parsing and job duration reporting |
-| `test_lalal_minutes.py`, `test_lalal_policy.py`, `test_lalal_route_safety.py` | Lalal.ai quota (a balance of 0 stays distinct from unknown), policy guards, route safety |
-| `test_lalal_client_io.py` | `LalalClient` transfers: stem download and upload errors surface as `LalalError`/`LalalUploadError` without leaking URLs, partial files are removed, settings read stays off the event loop |
+| `test_changelog.py`, `test_version_source.py` | Changelog rendering; version source, the no-`==`-pins rule, the WaveSurfer version detection (env, then pin file) and that the container build generates `BUILD_INFO` from `VCS_REF` instead of copying it from the context |
+| `test_duration.py`, `test_job_duration.py` | Duration parsing and job duration reporting; trim-request bounds (`TrimRequestBoundsTests`) and the stats cache clock (`StatsCacheClockTests`) |
+| `test_lalal_minutes.py`, `test_lalal_policy.py`, `test_lalal_route_safety.py` | Lalal.ai quota (a balance of 0 stays distinct from unknown), policy guards, route safety (credential validation, duration guard, cleanup after finalize) |
+| `test_lalal_client_io.py` | `LalalClient` transfers: stem download and upload errors surface as `LalalError`/`LalalUploadError` without leaking URLs, partial files are removed, settings read stays off the event loop; `check_quota` status handling and `process_file` cleanup on failure |
 | `test_platform_urls.py` | Platform URL validation edge cases in `app/utils/platform.py`: Facebook Story links, YouTube Shorts |
 | `test_media_url_contract.py` | The authoritative media-URL accept/reject corpus: every supported grammar, each rejection with its message, and copy/paste normalization (surrounding whitespace, HTML-escaped `&`, zero-width characters) |
 | `test_public_url.py` | Share-link host normalization and base-URL construction |
 | `test_remove_all_jobs.py` | Bulk job deletion |
-| `test_housekeeping_retention.py` | The retention sweep: `purge_old_jobs` batching, and that an expired job loses its row, its directory and its share links together while `0` days sweeps nothing |
+| `test_housekeeping_retention.py` | The retention sweep: `purge_old_jobs` batching, staged directory recovery, database writes continuing during recursive deletion, and removal of expired rows and share links; cache cleanup does not follow symlinks |
 | `test_csp_wavesurfer.py` | CSP compatibility with the vendored WaveSurfer bundle |
 | `test_template_filters.py` | Custom Jinja2 filters |
 | `test_mobile_settings_layout.py` | Settings page layout on a mobile viewport |
@@ -43,21 +43,25 @@
 | `test_assets.py` | Content-hash cache busting for `/static` assets: the `?v=` token is derived from the file, the URL it decorates resolves, and the token changes when the file does |
 | `test_share_links.py` | Share-token entropy (≥128 bits), per-job distinctness, and what the redeem regex accepts — including shorter legacy tokens |
 | `test_rate_limit_client_ip.py` | Client-IP resolution behind a trusted proxy: forwarded chains, bracketed IPv6, and malformed entries falling back to the socket peer |
+| `test_rate_limiter.py` | The sliding-window limiter: no boundary burst, rejections not recorded, per-route budgets, LRU eviction under key flood, also of a key whose window is still active (no lockout of new clients), IPv6 /64 sharing, spoofed `X-Forwarded-For` cannot hit a victim's bucket, and the exact set of rate-limited routes |
 | `test_audio_source_header.py` | `X-Audio-Quality` on `/audio-source/{job_id}` reports storage provenance, not codec quality |
 | `test_analysis_worker.py` | Analysis submission: what a completed analysis writes back, and staying responsive while waiting on the child process |
 | `test_governor_semaphores.py` | `SharedSemaphore`: one budget per workload across worker threads and the event loop, cancellation safety, and the `*_sync` accessors returning the same object |
 | `test_worker_cancel_retry_race.py` | The worker's terminal writebacks are conditional, so a stale cancel cannot land on a row a retry already moved |
 | `test_release_tag_order.py` | The version-ordering function lifted out of `.github/workflows/docker-build.yml`: architecture fragments are not versions, prereleases sort below their release, numeric parts compare as numbers, longer versions are not truncated into equality. A mis-ordered comparison moves `latest` and releases the tag-pruning job, so the failure mode is destructive. |
-| `test_session_lifetime.py` | The absolute session lifetime (`session_max_days`): default and range clamping, expiry at the exact boundary, and that the cookie's `Max-Age` never outlives the server-side check |
+| `test_session_lifetime.py` | The absolute session lifetime (`session_max_days`): default and range clamping, expiry at the exact boundary, and that the cookie's `Max-Age` never outlives the server-side check; sliding-refresh races and ordering (`SessionRefreshRaceTests`, `SessionRefreshOrderingTests`) |
 | `test_client_ip_geoip.py` | Client-IP-to-GeoIP resolution backing the job detail "requester" tile |
 | `test_lalal_wait_for_completion.py` | Lalal.ai completion polling |
 | `test_memory_backpressure.py` | Governor memory-threshold backpressure |
 | `test_metadata_executor_isolation.py` | A metadata lookup that outlives its `asyncio.wait_for()` timeout keeps running on a dedicated executor instead of starving the shared default one |
 | `test_sse_events.py` | SSE subscriber lifecycle: registration must not outlive an abandoned stream, the connection cap is reserved atomically and its slot is released on every termination path, and abandoned per-job requests leave no dictionary entry |
 | `test_submit_duplicates.py` | `insert_job_unless_active_duplicate`: parallel identical inserts create one job, `confirm_duplicate` still allows a second, a queue-full rejection leaves no blocking row, headroom is checked before the metadata lookup |
+| `test_fs_lock.py` | `exclusive_file_lock`: cancellation while waiting for the lock and no leaked file descriptors |
+| `test_governor_cgroup_memory.py` | Governor memory headroom from cgroup counters, with `inactive_file` treated as reclaimable |
+| `test_retry_queued_cancel.py` | A retry after a cancel of a still-queued job does not enqueue the job twice |
 | `test_thumbnail_fallback_bound.py` | The yt-dlp thumbnail fallback never exceeds its concurrency budget, answers `503` when saturated, and keeps its slot until the subprocess ends |
 
-57 Python test files in total.
+61 Python test files in total.
 
 ## Subdirectories
 
@@ -168,11 +172,11 @@ pytest tests/test_worker_hardening.py --pdb
 ```
 
 ### CI Integration
-`.github/workflows/ci.yml` runs, as separate jobs: `ruff check --output-format=github .`, `ruff format --check --diff .` and `pytest -q`; `npm run lint:js` / `lint:css` / `lint:contracts` / `npm test`; `bash -n docker/entrypoint.sh` and `docker build --check`; and the single-manifest check. `.github/workflows/ui-audit.yml` runs the Playwright audit. All must pass.
+`.github/workflows/ci.yml` runs, as separate jobs: `ruff check --output-format=github .`, `ruff format --check --diff .` and `pytest -q`; `npm run lint:js` / `lint:css` / `lint:contracts` / `npm test`; `pip check` after the CI dependency install; `bash -n` on the Docker entrypoint and Essentia build script, an AST parse of `docker/essentia_check.py`, the no-pinned-Essentia check, `shellcheck` on the two scripts and `docker build --check`; `actionlint` over the workflows; and the single-manifest and release-shaped-version checks. `.github/workflows/ui-audit.yml` runs the Playwright audit. All must pass.
 
 ---
 
-**Last Updated:** 2026-10-26  
+**Last Updated:** 2026-11-17  
 **Python:** pytest runner, unittest-style classes, no fixtures  
 **JavaScript:** `node:test` + `node:assert/strict`  
-**Counts:** 57 Python files, 22 JavaScript files
+**Counts:** 61 Python files, 22 JavaScript files

@@ -23,7 +23,7 @@ The source of truth is `app/routes/`. Read the handler before writing the page. 
 
 3. **Pagination is `offset` + `limit`,** not `page`/`per_page`. On `GET /api/jobs`, `offset` is clamped to `>= 0` and `limit` to `1..100` with a default of `50`.
 
-4. **There are no `X-RateLimit-*` response headers.** Limits are enforced by slowapi per client IP and are visible only as a `429`. Document the limit that the decorator actually declares — for example `@limiter.limit("60/minute")` on the job endpoints and `30/minute` on `/api/stats/bpm-clusters`.
+4. **There are no `X-RateLimit-*` response headers.** Limits are enforced by the in-house sliding-window limiter per client IP and are visible only as a `429` carrying a `Retry-After` header. Document the limit that the route declares via `rate_limit(...)` — for example `rate_limit("60/minute")` on the job endpoints and `30/minute` on `/api/stats/bpm-clusters`.
 
 ### Job object
 `job_to_dict()` in `app/routes/api.py` defines the shape returned by the job endpoints. While a job is downloading or transcoding, the dict also carries the live `progress` and `eta_seconds` (worker memory, absent otherwise). `GET /api/jobs/{job_id}` additionally merges in a `requester` object (IP/ASN/country, resolved via `app/utils/geoip.py`) that `GET /api/jobs` (the bulk list) never carries:

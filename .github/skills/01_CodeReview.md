@@ -93,14 +93,14 @@ content.
 
 ## Write permission
 
-`03_CheckComments` is the only agent of this suite that modifies files. This
+`02_CheckComments` is the only agent of this suite that modifies files. This
 agent is analysis only and proposes changes as minimal snippets or diffs.
 
 ---
 
 # Delegation
 
-When `03_CheckComments` ran before this review, first verify its patch stays
+When `02_CheckComments` ran before this review, first verify its patch stays
 within the write scope defined in the suite `README.md` (comment/docstring
 text, canonical header, and only evidence-backed shebang/mode changes) and
 changes no program behavior. Report a violation as the first P1 finding,
@@ -113,14 +113,14 @@ When the specialized agents of this suite are part of the review workflow:
   duplicated. Report the concrete correctness, security, performance, or
   architectural consequence (for example divergent validation or inconsistent
   security checks) and leave DRY classification and refactor readiness to
-  `02_DRY`.
+  `04_DRY`.
 * **Comment and docstring hygiene** — wording, tightening, translation,
-  canonical headers, and the executable bit belong to `03_CheckComments`.
+  canonical headers, and the executable bit belong to `02_CheckComments`.
   Report a comment only where it is factually wrong about the code it
   describes or where it documents a defect.
 * **Ignore files** — do not propose `.gitignore`, `.dockerignore`,
   `.trivyignore`, or other ignore-file changes; that root cause belongs to
-  `04_CheckIgnoreFiles`. Report the downstream code or security consequence
+  `03_CheckIgnoreFiles`. Report the downstream code or security consequence
   normally.
 
 When one of those agents is not part of the workflow, its area falls back to
@@ -221,10 +221,10 @@ Prefer:
 
 Important:
 Not every duplication is a DRY violation. Whether duplication is one, and
-whether it should become a shared abstraction, is decided by `02_DRY` — see
+whether it should become a shared abstraction, is decided by `04_DRY` — see
 "Delegation". Report only the consequences you can demonstrate in the code.
 
-Where `02_DRY` is not part of the workflow, only recommend abstractions when:
+Where `04_DRY` is not part of the workflow, only recommend abstractions when:
 
 * reuse is meaningful
 * complexity decreases
@@ -487,7 +487,7 @@ settles it, state that limitation instead of a verdict.
 Where the root cause is an ignore rule (a secret reaching the repository or the
 Docker build context because `.gitignore` or `.dockerignore` does not exclude
 it), report the code-level consequence and attribute the root cause to
-`04_CheckIgnoreFiles`. Do not propose the ignore-file change yourself.
+`03_CheckIgnoreFiles`. Do not propose the ignore-file change yourself.
 
 Verify secure cookie usage:
 
@@ -533,7 +533,7 @@ removing, or reformatting:
   `# pragma`, `# fmt:`, `# ruff:`, `# mypy:`, `# shellcheck ...`, ...)
 * editor modelines and doctest blocks
 
-Pure comment and docstring hygiene is owned by `03_CheckComments` when that
+Pure comment and docstring hygiene is owned by `02_CheckComments` when that
 agent is part of the workflow — see "Delegation". Restrict findings here to
 comments that are factually wrong about the code.
 

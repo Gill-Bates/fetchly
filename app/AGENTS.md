@@ -21,9 +21,9 @@ The app module is the heart of fetchly: it handles HTTP requests, runs an in-pro
 | `workers/`            | `worker.py` (download/transcode job processor) and `analysis_worker.py` (audio analysis submission)                                                 |
 | `audio/`              | BPM and audio analysis: `analysis.py`, `cache.py`, `hashing.py`, `bpm.py`, `beat_this.py`, `cluster.py`, `naming.py`, `normalization.py`, `tags.py` |
 | `integrations/lalal/` | Lalal.ai: `client.py` (API client) and `policy.py` (duration, quota and size guards)                                                                |
-| `auth/`               | `session.py` (HMAC session tokens), `credentials.py` (admin account), `rate_limit.py` (trusted proxies, client IP, slowapi limiter)                 |
+| `auth/`               | `session.py` (HMAC session tokens), `credentials.py` (admin account), `rate_limit.py` (trusted proxies, client IP, sliding-window limiter)               |
 | `runtime/`            | `governor.py` (resource governor) and `gunicorn_logging.py` (`FetchlyGunicornLogger`)                                                               |
-| `utils/`              | Utilities: version, changelog, host stats, watermark, cookies, platform quirks, template filters, housekeeping, public URL                          |
+| `utils/`              | Utilities: version, changelog, host stats, watermark, cookies (`cookie_import.py`, `cookie_status.py`, `cookie_args.py`), platform quirks, GeoLite2 lookups (`geoip.py`), static-asset cache busting (`assets.py`), startup banner, template filters, housekeeping, public URL                          |
 | `static/`             | Web assets: ES modules, CSS, images, self-hosted fonts, vendored Bootstrap 5 and WaveSurfer.js                                                      |
 | `templates/`          | Jinja2 templates: `base.html`, `index.html`, `login.html`, `settings.html`, `job.html`, `share_error.html`, `macros/`, `_`-prefixed partials        |
 
@@ -45,7 +45,7 @@ The app module is the heart of fetchly: it handles HTTP requests, runs an in-pro
 - **Watermark logo:** uploaded via `POST /api/settings/watermark-logo`, served from `GET /api/settings/watermark-logo/image`, rendered by `utils/watermark_logo.py`
 
 ### Testing
-- **Unit tests:** `tests/test_*.py` (57 files) — pytest is the runner, but tests are unittest-style classes
+- **Unit tests:** `tests/test_*.py` (61 files) — pytest is the runner, but tests are unittest-style classes
 - **Shared setup:** subclass `IsolatedDbTestCase` or `WebAppTestCase` from `tests/_support.py`. `tests/conftest.py` only imports `_support` for its `FETCHLY_SECRET_KEY` side effect; it defines no fixtures.
 - **API contract tests:** `tests/test_output_modes.py`
 - **Worker hardening:** `tests/test_worker_hardening.py`
@@ -57,7 +57,7 @@ The app module is the heart of fetchly: it handles HTTP requests, runs an in-pro
 - **Worker pick-up:** `workers/worker.py` consumes an in-process `queue.Queue` sized by `WORKER_QUEUE_MAXSIZE`; a full queue rejects submissions with `503`. It does not poll the database on a timer.
 - **Analysis flow:** after download the job moves to `analysis`, the analysis worker runs, results are written, and the status becomes `analysis_done`
 - **Error handling:** worker exceptions are caught and logged, and the job is set to `error` with a message; the user can retry
-- **Rate limiting:** slowapi `@limiter.limit()` on sensitive routes; client IP resolved through the trusted-proxy logic in `auth/rate_limit.py`
+- **Rate limiting:** in-house sliding-window limiter, `dependencies=[Depends(rate_limit("N/minute"))]` on sensitive routes; client IP resolved through the trusted-proxy logic in `auth/rate_limit.py`
 - **CSRF:** `CSRFMiddleware` from `/middleware`, applied to the `/login`, `/logout` and `/api` prefixes
 
 ## Dependencies
@@ -72,8 +72,9 @@ The app module is the heart of fetchly: it handles HTTP requests, runs an in-pro
 - **Media:** yt-dlp (installed unpinned, outside `pyproject.toml`), yt-dlp-ejs, FFmpeg (subprocess)
 - **Audio:** essentia (features; compiled from source in the image), beat-this (BPM, pulls torch), soundfile (beat-this's audio decoder since TorchAudio 2.9 moved decoding to the optional TorchCodec backend), numpy
 - **Database:** SQLite via the stdlib `sqlite3` module
-- **Security:** slowapi (rate limiting), nh3 (HTML sanitizing), stdlib `hmac`/`secrets` for tokens
-- **HTTP:** httpx (outbound calls to Lalal.ai and GitHub)
+- **Security:** nh3 (HTML sanitizing), stdlib `hmac`/`secrets` for tokens
+- **HTTP:** httpx (outbound calls to Lalal.ai and GitHub; GeoLite2 database download)
+- **Geo:** geoip2 (MaxMind GeoLite2 reader, `utils/geoip.py`)
 - **Templating:** Jinja2, markupsafe, markdown
 
 ## Manual
@@ -111,7 +112,7 @@ If jobs stay in `queued`:
 
 ---
 
-**Last Updated:** 2026-10-26  
+**Last Updated:** 2026-11-17  
 **Python Version:** 3.13+  
 **Persistence:** stdlib `sqlite3`, synchronous, WAL  
 **Key Dependencies:** FastAPI, yt-dlp, essentia, beat-this

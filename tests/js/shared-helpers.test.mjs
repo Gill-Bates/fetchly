@@ -96,3 +96,17 @@ test("releaseLalalRun only releases a run that still owns the stem", () => {
     assert.equal(releaseLalalRun(runs, "vocals", 2), true);
     assert.equal(runs.has("vocals"), false);
 });
+
+test("describeAuthWarning flags login-required answers and ignores the rest", async () => {
+    const { describeAuthWarning } = await import("../../app/static/js/utils.js");
+    const base = { reason: "login_required", message: "Upload a cookie file." };
+    assert.deepEqual(describeAuthWarning({ ...base, cookies_configured: false }), {
+        title: "Login required",
+        message: "Upload a cookie file.",
+        showSettingsLink: true,
+    });
+    assert.equal(describeAuthWarning({ ...base, cookies_configured: true }).title, "Access still denied");
+    assert.equal(describeAuthWarning({ title: "ok" }), null);
+    assert.equal(describeAuthWarning({ reason: "login_required" }), null);
+    assert.equal(describeAuthWarning(null), null);
+});

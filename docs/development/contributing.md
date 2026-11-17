@@ -35,7 +35,7 @@ running the test suite.
 - **No native browser dialogs.** Use the shared `confirmModal()` in
   `app/static/js/confirm.js` instead of `confirm()`/`alert()`/`prompt()`.
 - **Rate limits are part of the route.** A new state-changing endpoint needs a
-  `@limiter.limit(...)` decorator sized to what the endpoint costs and what abuse of it
+  `dependencies=[Depends(rate_limit("N/minute"))]` route dependency sized to what the endpoint costs and what abuse of it
   would achieve — see [Rate Limiting](../security/rate-limiting.md) for the existing
   scale.
 - **No CDN dependencies.** Front-end libraries are vendored under

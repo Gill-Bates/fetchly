@@ -214,7 +214,7 @@ def _cached_lookup(ip: str, generation: int) -> IPInfo | None:
                 result = reader.city(ip)
                 country = result.country.iso_code
                 city = result.city.name
-            except (geoip2.errors.AddressNotFoundError, geoip2.errors.GeoIP2Error):
+            except geoip2.errors.GeoIP2Error:
                 pass
 
     asn: int | None = None
@@ -225,7 +225,7 @@ def _cached_lookup(ip: str, generation: int) -> IPInfo | None:
                 asn_result = asn_reader.asn(ip)
                 asn = asn_result.autonomous_system_number
                 as_org = asn_result.autonomous_system_organization
-            except (geoip2.errors.AddressNotFoundError, geoip2.errors.GeoIP2Error):
+            except geoip2.errors.GeoIP2Error:
                 pass
 
     if country is None and city is None and asn is None and as_org is None:
@@ -302,9 +302,9 @@ def _sha256_file(path: Path) -> str:
 
 def _verify_mmdb(path: Path, spec: _DBSpec) -> bool:
     # P3TERX publishes no checksum/hash file alongside these mirrored .mmdb
-    # assets to verify a download against, so integrity is established by
-    # fully parsing the file (metadata + a real trie read below) rather than
-    # comparing a digest; the sha256 logged in _download_one is for manual
+    # assets to verify a download against, so the check is a sanity test only:
+    # size, metadata type and one example lookup (below), not a full parse and
+    # not authenticated. The sha256 logged in _download_one is for manual
     # cross-checking only, not an automated integrity gate.
     if not path.exists():
         return False

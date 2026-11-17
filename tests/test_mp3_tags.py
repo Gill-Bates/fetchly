@@ -10,17 +10,20 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import shutil
 import subprocess
 import tempfile
 import unittest
+import uuid
 from contextlib import AbstractContextManager
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from app.audio import tags
+from app.audio import analysis, tags
+from app.audio.bpm import BPMResult
 from app.audio.hashing import compute_audio_hash
 from app.routes import media
 from app.runtime.governor import Governor, GovernorConfig
@@ -37,7 +40,7 @@ class TagHelperTests(unittest.TestCase):
     def test_bpm_is_rounded_and_unusable_tempo_yields_none(self) -> None:
         self.assertEqual(tags.bpm_to_int(93.6), 94)
         self.assertEqual(tags.bpm_to_int(120), 120)
-        for bpm in (None, 0, -3, "94", True):
+        for bpm in (None, 0, -3, "94", True, math.nan, math.inf, -math.inf):
             with self.subTest(bpm=bpm):
                 self.assertIsNone(tags.bpm_to_int(bpm))
 
@@ -145,7 +148,7 @@ class EnsureBpmTagAsyncCancelTests(unittest.IsolatedAsyncioTestCase):
 
             # A long-running ffmpeg writing to the temp file: it neither finishes
             # nor hits the timeout before the test cancels the await.
-            def slow_plan(mp3_path: Path, _bpm: object) -> tuple[int, Path, list[str]]:
+            async def slow_plan(mp3_path: Path, _bpm: object) -> tuple[int, Path, list[str]]:
                 temp_path = mp3_path.with_name(f"{mp3_path.name}.tmp.cancel")
                 cmd = [
                     "ffmpeg",
@@ -163,7 +166,7 @@ class EnsureBpmTagAsyncCancelTests(unittest.IsolatedAsyncioTestCase):
                 return 120, temp_path, cmd
 
             with (
-                patch.object(tags, "_bpm_rewrite_plan", side_effect=slow_plan),
+                patch.object(tags, "_bpm_rewrite_plan_async", side_effect=slow_plan),
                 patch.object(tags.asyncio, "create_subprocess_exec", side_effect=capturing_exec),
             ):
                 task = asyncio.create_task(tags.ensure_bpm_tag_async(mp3, 120))
@@ -189,15 +192,22 @@ class _FakeProc:
     wait; the real ``asyncio.wait_for`` propagates it unchanged.
     """
 
-    def __init__(self, raise_on_communicate: BaseException | None = None) -> None:
-        self.returncode: int | None = None
+    def __init__(
+        self,
+        raise_on_communicate: BaseException | None = None,
+        *,
+        output: bytes = b"",
+        returncode: int | None = None,
+    ) -> None:
+        self.returncode = returncode
         self.killed = False
         self._raise = raise_on_communicate
+        self._output = output
 
     async def communicate(self) -> tuple[bytes, bytes]:
         if self._raise is not None:
             raise self._raise
-        return b"", b""
+        return self._output, b""
 
     def kill(self) -> None:
         self.killed = True
@@ -208,38 +218,61 @@ class _FakeProc:
 
 
 class EnsureBpmTagAsyncContractTests(unittest.IsolatedAsyncioTestCase):
-    """The async path must stay off the loop and keep the serving contract."""
+    """The async path must keep subprocesses cancellable and preserve serving."""
 
-    async def test_plan_resolution_is_offloaded_to_a_thread(self) -> None:
-        plan = (120, Path("/d/a.mp3.tmp"), ["ffmpeg"])
-        fake = _FakeProc()
-        fake.returncode = 0
-        ran_off_loop: list[bool] = []
+    async def test_plan_reads_tags_with_async_ffprobe(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            mp3 = Path(tmp) / "a.mp3"
+            mp3.write_bytes(b"mp3")
+            probe = _FakeProc(output=b'{"format":{"tags":{}}}', returncode=0)
+            ffmpeg = _FakeProc(returncode=0)
 
-        def fake_plan(_mp3: Path, _bpm: object) -> tuple[int, Path, list[str]]:
-            # In a worker thread there is no running loop; get_running_loop()
-            # raising proves the blocking resolver was offloaded, not inlined.
-            try:
-                asyncio.get_running_loop()
-                ran_off_loop.append(False)
-            except RuntimeError:
-                ran_off_loop.append(True)
-            return plan
+            with (
+                patch.object(tags.asyncio, "create_subprocess_exec", side_effect=[probe, ffmpeg]) as spawn,
+                patch.object(tags, "_finalize_bpm_rewrite") as finalize,
+            ):
+                result = await tags.ensure_bpm_tag_async(mp3, 120)
+
+        self.assertTrue(result)
+        self.assertEqual(spawn.call_count, 2)
+        self.assertEqual(spawn.call_args_list[0].args[0], "ffprobe")
+        self.assertEqual(spawn.call_args_list[1].args[0], "ffmpeg")
+        finalize.assert_called_once()
+
+    async def test_async_ffprobe_reads_the_existing_tempo(self) -> None:
+        fake = _FakeProc(output=b'{"format":{"tags":{"TBPM":"94"}}}', returncode=0)
 
         async def fake_exec(*_args: object, **_kwargs: object) -> _FakeProc:
             return fake
 
-        with (
-            patch.object(tags, "_bpm_rewrite_plan", side_effect=fake_plan),
-            patch.object(tags.asyncio, "create_subprocess_exec", side_effect=fake_exec),
-            patch.object(tags, "_finalize_bpm_rewrite") as finalize,
-        ):
-            result = await tags.ensure_bpm_tag_async(Path("/d/a.mp3"), 120)
+        with patch.object(tags.asyncio, "create_subprocess_exec", side_effect=fake_exec):
+            result = await tags.read_bpm_tag_async(Path("/d/a.mp3"))
 
-        self.assertTrue(result)
-        finalize.assert_called_once()
-        # The resolver ran in a worker thread, not on the event loop.
-        self.assertEqual(ran_off_loop, [True])
+        self.assertEqual(result, 94)
+
+    async def test_async_ffprobe_timeout_kills_and_reaps_the_process(self) -> None:
+        fake = _FakeProc(raise_on_communicate=TimeoutError())
+
+        async def fake_exec(*_args: object, **_kwargs: object) -> _FakeProc:
+            return fake
+
+        with patch.object(tags.asyncio, "create_subprocess_exec", side_effect=fake_exec):
+            result = await tags.read_bpm_tag_async(Path("/d/a.mp3"))
+
+        self.assertIsNone(result)
+        self.assertTrue(fake.killed)
+
+    async def test_async_ffprobe_cancellation_propagates_and_reaps_the_process(self) -> None:
+        fake = _FakeProc(raise_on_communicate=asyncio.CancelledError())
+
+        async def fake_exec(*_args: object, **_kwargs: object) -> _FakeProc:
+            return fake
+
+        with patch.object(tags.asyncio, "create_subprocess_exec", side_effect=fake_exec):
+            with self.assertRaises(asyncio.CancelledError):
+                await tags.read_bpm_tag_async(Path("/d/a.mp3"))
+
+        self.assertTrue(fake.killed)
 
     async def test_timeout_is_translated_to_runtimeerror_and_reaps_ffmpeg(self) -> None:
         plan = (120, Path("/d/a.mp3.tmp"), ["ffmpeg"])
@@ -249,7 +282,7 @@ class EnsureBpmTagAsyncContractTests(unittest.IsolatedAsyncioTestCase):
             return fake
 
         with (
-            patch.object(tags, "_bpm_rewrite_plan", return_value=plan),
+            patch.object(tags, "_bpm_rewrite_plan_async", return_value=plan),
             patch.object(tags.asyncio, "create_subprocess_exec", side_effect=fake_exec),
         ):
             with self.assertRaises(RuntimeError):
@@ -267,7 +300,7 @@ class EnsureBpmTagAsyncContractTests(unittest.IsolatedAsyncioTestCase):
             return fake
 
         with (
-            patch.object(tags, "_bpm_rewrite_plan", return_value=plan),
+            patch.object(tags, "_bpm_rewrite_plan_async", return_value=plan),
             patch.object(tags.asyncio, "create_subprocess_exec", side_effect=fake_exec),
         ):
             with self.assertRaises(asyncio.CancelledError):
@@ -296,7 +329,7 @@ class EnsureMp3TimeoutServingTests(unittest.TestCase):
 
             with (
                 _patch_governor(),
-                patch.object(tags, "_bpm_rewrite_plan", return_value=plan),
+                patch.object(tags, "_bpm_rewrite_plan_async", return_value=plan),
                 patch.object(tags.asyncio, "create_subprocess_exec", side_effect=fake_exec),
             ):
                 result = asyncio.run(media._ensure_mp3(source, 120))
@@ -419,6 +452,20 @@ class RealFfmpegTests(unittest.TestCase):
 
         # Same tempo again is a no-op; the file is not rewritten.
         self.assertFalse(tags.ensure_bpm_tag(mp3, 120))
+
+    def test_analysis_result_is_written_to_the_served_mp3(self) -> None:
+        with patch.object(analysis, "extract_bpm_cascade", return_value=BPMResult(93.6, 0.9)):
+            analyzed = analysis.extract_analysis(self.source)
+        self.assertEqual(analyzed.bpm, 94)
+
+        job = {"type": "audio", "bpm": analyzed.bpm}
+        ready_job = AsyncMock(return_value=(job, self.source))
+        with patch.object(media, "_get_ready_job_file", ready_job):
+            response = asyncio.run(media.build_job_file_response(uuid.UUID("11111111-1111-1111-1111-111111111111")))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("Track_94bpm.mp3", response.headers["content-disposition"])
+        self.assertEqual(self._tag(_probe(media.get_mp3_cache_path(self.source)), "TBPM"), "94")
 
     def test_async_rewrite_sets_bpm_and_keeps_cover_and_comment(self) -> None:
         self._add_cover()

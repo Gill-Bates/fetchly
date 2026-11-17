@@ -6,19 +6,11 @@
 
 """Cache-busting for the static assets the templates reference.
 
-The templates used to carry hand-written tokens (``style.css?v=20260903d``)
-that an author had to remember to bump in the same commit that changed the
-file. That failed repeatedly and silently: a stale token means the browser
-keeps serving the cached copy, so the HTML says one thing and the CSS another.
-The stat tiles showed it on iOS - new markup, cached stylesheet, and the phone
-caption rendered with the number's own font because the rule that sizes it was
-not in the file Safari had.
-
-So the token is derived from the file instead of typed: ``asset_url()`` hashes
-the bytes, and the URL changes exactly when the content does. The hash is
-cached per file and re-taken when mtime or size moves, which keeps a dev-server
-edit visible without a restart and costs one ``stat()`` per reference per
-render in production.
+``asset_url()`` derives the ``?v=`` token from the file bytes, so the URL
+changes exactly when the content does; hand-written tokens went stale silently.
+The hash is cached per file and re-taken when mtime or size changes, so a
+dev-server edit shows without a restart and production pays one ``stat()`` per
+reference per render.
 
 Hashed URLs are immutable by construction, so :class:`VersionedStaticFiles`
 lets them be cached forever - but only while the hash still matches the file on

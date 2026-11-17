@@ -76,7 +76,7 @@ globalThis.fetch = (url, options) => {
     return fetchHandler(String(url));
 };
 
-const { connectEventStream } = await import("../../app/static/js/events.js");
+const { connectEventStream, getLiveUpdateEpoch, hasLiveUpdateSince } = await import("../../app/static/js/events.js");
 const { getJobById, upsertJobSnapshot } = await import("../../app/static/js/jobs.js");
 
 const respond = (body) => Promise.resolve({ ok: true, json: () => Promise.resolve(body) });
@@ -205,4 +205,42 @@ test("a progress-bearing status keeps the coalesced progress", () => {
     flushFrames();
 
     assert.equal(getJobById("merge-2").progress, 70);
+});
+
+test("a snapshot of an unknown job older than a live update is refetched, not stored", async () => {
+    const stream = streams.at(-1);
+    const releases = [];
+    let calls = 0;
+    fetchHandler = (url) => {
+        assert.equal(url.startsWith("/api/jobs/rec-1"), true);
+        calls += 1;
+        if (calls === 1) {
+            return new Promise((resolve) => {
+                releases.push(() => resolve({
+                    ok: true,
+                    json: () => Promise.resolve({ id: "rec-1", status: "downloading" }),
+                }));
+            });
+        }
+        return respond({ id: "rec-1", status: "done" });
+    };
+
+    send(stream, { id: "rec-1", status: "downloading", seq: 1 });
+    send(stream, { id: "rec-1", status: "done", seq: 2 });
+    releases[0]();
+    await settle();
+    await settle();
+
+    assert.equal(calls, 2, "the stale snapshot triggers one refetch");
+    assert.equal(getJobById("rec-1").status, "done");
+});
+
+test("hasLiveUpdateSince flags a response requested before a live update", () => {
+    upsertJobSnapshot({ id: "epoch-1", status: "queued" });
+    const epoch = getLiveUpdateEpoch();
+    assert.equal(hasLiveUpdateSince("epoch-1", epoch), false);
+
+    send(streams.at(-1), { id: "epoch-1", status: "processing", seq: 1 });
+    assert.equal(hasLiveUpdateSince("epoch-1", epoch), true);
+    assert.equal(hasLiveUpdateSince("epoch-1", getLiveUpdateEpoch()), false);
 });

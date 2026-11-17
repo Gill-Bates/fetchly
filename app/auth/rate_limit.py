@@ -9,17 +9,32 @@
 from __future__ import annotations
 
 import ipaddress
+import logging
+import math
 import os
+import re
+import threading
+import time
+import weakref
+from collections import OrderedDict, deque
+from collections.abc import Callable
 from functools import cache
 from typing import Final
 
-from fastapi import Request
-from slowapi import Limiter
+from fastapi import HTTPException, Request
 
 type TrustedProxySpec = ipaddress.IPv4Network | ipaddress.IPv6Network
 
 _DEFAULT_TRUSTED_PROXY_IPS: Final = "127.0.0.1,::1"
 _RAW_CLIENT_SCOPE_KEY: Final = "fetchly.original_client"
+
+logger = logging.getLogger(__name__)
+
+# Bounds limiter memory per route; expired keys go first, then the least recently used.
+MAX_KEYS: Final = 10_000
+_SPEC_RE: Final = re.compile(r"(\d+)/(second|minute|hour)")
+_UNIT_SECONDS: Final = {"second": 1.0, "minute": 60.0, "hour": 3600.0}
+_RATE_LIMIT_DETAIL: Final = "Rate limit exceeded"
 
 
 def get_trusted_proxy_hosts() -> str:
@@ -129,7 +144,7 @@ def _forwarded_client_ip(request: Request) -> str | None:
 
 
 def get_rate_limit_ip(request: Request) -> str:
-    """Resolve a stable client IP for SlowAPI behind trusted proxies."""
+    """Resolve a stable client IP for rate limiting behind trusted proxies."""
     forwarded = _forwarded_client_ip(request)
     if forwarded is not None:
         return forwarded
@@ -156,8 +171,104 @@ def _bucket_key(client_ip: str) -> str:
 
 
 def get_rate_limit_key(request: Request) -> str:
-    """SlowAPI bucket key: the client IP, with IPv6 aggregated to its /64."""
+    """Bucket key: the client IP, with IPv6 aggregated to its /64."""
     return _bucket_key(get_rate_limit_ip(request))
 
 
-limiter = Limiter(key_func=get_rate_limit_key)
+class SlidingWindow:
+    """Per-key request counter over a sliding window on the monotonic axis.
+
+    Rejected requests are not recorded, so a caller that backs off is admitted
+    again once its oldest admitted request leaves the window.
+    """
+
+    def __init__(
+        self,
+        limit: int,
+        window_seconds: float,
+        clock: Callable[[], float] = time.monotonic,
+        max_keys: int = MAX_KEYS,
+    ) -> None:
+        self._max_keys = max_keys
+        self._limit = limit
+        self._window = window_seconds
+        self._clock = clock
+        self._hits: OrderedDict[str, deque[float]] = OrderedDict()
+        # Shared by the event loop and threadpool-run dependencies.
+        self._lock = threading.Lock()
+
+    def hit(self, key: str) -> float | None:
+        """Count one request; ``None`` when admitted, else seconds until a slot frees."""
+        with self._lock:
+            now = self._clock()
+            stamps = self._hits.get(key)
+            if stamps is None:
+                if len(self._hits) >= self._max_keys:
+                    self._make_room(now)
+                stamps = self._hits[key] = deque()
+            else:
+                self._hits.move_to_end(key)
+            while stamps and stamps[0] <= now - self._window:
+                stamps.popleft()
+            if len(stamps) >= self._limit:
+                return max(0.0, stamps[0] + self._window - now)
+            stamps.append(now)
+            return None
+
+    def _make_room(self, now: float) -> None:
+        for key in [k for k, stamps in self._hits.items() if not stamps or stamps[-1] <= now - self._window]:
+            del self._hits[key]
+        # Still full: drop the least recently used caller. Rejecting instead would let
+        # an attacker holding many prefixes lock every new legitimate client out.
+        while len(self._hits) >= self._max_keys:
+            self._hits.popitem(last=False)
+
+    def reset(self) -> None:
+        """Forget every counter."""
+        with self._lock:
+            self._hits.clear()
+
+
+_windows: weakref.WeakSet[SlidingWindow] = weakref.WeakSet()
+
+
+def parse_rate_spec(spec: str) -> tuple[int, float]:
+    """Parse ``"N/second|minute|hour"`` into ``(limit, window_seconds)``."""
+    match = _SPEC_RE.fullmatch(spec.strip())
+    if match is None or int(match.group(1)) < 1:
+        raise ValueError(f"Invalid rate limit specification: {spec!r}")
+    return int(match.group(1)), _UNIT_SECONDS[match.group(2)]
+
+
+def rate_limit(spec: str, *, clock: Callable[[], float] = time.monotonic) -> Callable[[Request], None]:
+    """Build a FastAPI dependency enforcing ``spec`` per client key.
+
+    Every call creates its own budget, so each route is limited independently;
+    a handler registered on several paths shares the one dependency and thus one budget.
+    """
+    limit, window_seconds = parse_rate_spec(spec)
+    window = SlidingWindow(limit, window_seconds, clock)
+    _windows.add(window)
+
+    def enforce_rate_limit(request: Request) -> None:
+        try:
+            retry_after = window.hit(get_rate_limit_key(request))
+        except Exception:
+            # Fail closed: an internal limiter fault must not admit traffic.
+            logger.exception("Rate limiter failure; rejecting request")
+            retry_after = 1.0
+        if retry_after is not None:
+            raise HTTPException(
+                status_code=429,
+                detail=_RATE_LIMIT_DETAIL,
+                headers={"Retry-After": str(max(1, math.ceil(retry_after)))},
+            )
+
+    enforce_rate_limit.rate_limit_spec = spec  # type: ignore[attr-defined]  # read by the route-coverage test
+    return enforce_rate_limit
+
+
+def reset_rate_limits() -> None:
+    """Clear every route's counters (tests; counters are otherwise process-lifetime)."""
+    for window in list(_windows):
+        window.reset()

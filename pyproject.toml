@@ -17,7 +17,7 @@ name = "fetchly"
 # at runtime, the release workflow validates the git tag against it, and
 # docker/Dockerfile copies this file into the image so the Settings page and
 # /api/updates report the same number the tag was cut from.
-version = "1.3.2"
+version = "1.3.3"
 description = "Self-hosted media downloader with BPM analysis and stem separation"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -88,7 +88,6 @@ dependencies = [
     "numpy",
     "pydantic",
     "python-multipart",
-    "slowapi",
     "soundfile",
     "starlette",
     "torch",
@@ -103,19 +102,19 @@ dependencies = [
 # Bumping these is a deliberate commit, not a side effect of a release.
 [project.optional-dependencies]
 dev = [
-    "pytest==9.1.1",
-    "pytest-asyncio==1.4.1",
+    "pytest==9.2.0",
+    "pytest-asyncio==1.5.0",
     "pytest-cov==7.1.0",
-    "ruff==0.17.2",
+    "ruff==0.17.5",
 ]
 docs = [
-    "markdown==3.11.2",
+    "markdown==3.11.3",
     "mkdocs==1.6.1",
-    "mkdocs-git-revision-date-localized-plugin==1.6.2",
-    "mkdocs-material==9.8.0",
+    "mkdocs-git-revision-date-localized-plugin==1.7.0",
+    "mkdocs-material==9.8.1",
     "mkdocs-minify-plugin==0.8.0",
     "mkdocs-redirects==1.2.3",
-    "pymdown-extensions==12.3",
+    "pymdown-extensions==13.1",
 ]
 
 [project.urls]
@@ -259,11 +258,23 @@ ignore = [
     # Same reasoning as PLR0913 - the positional/keyword split is caller
     # ergonomics, not a complexity signal.
     "PLR0917",
-    # `Depends(...)` / `File(...)` in defaults *is* the FastAPI DI contract.
-    "B008",
     # A ternary is not automatically clearer; several of these branches carry
     # an explanatory comment that only fits in an if/else.
     "SIM108",
+]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI's DI markers in defaults are the framework contract, not mutable defaults.
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.Query",
+    "fastapi.File",
+    "fastapi.Form",
+    "fastapi.Security",
+    "fastapi.Header",
+    "fastapi.Cookie",
+    "fastapi.Body",
+    "fastapi.Path",
 ]
 
 [tool.ruff.lint.per-file-ignores]

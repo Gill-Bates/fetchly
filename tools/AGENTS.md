@@ -60,7 +60,7 @@ python tools/pyproject-deps.py docs               # the docs extra
 python tools/pyproject-deps.py --exclude torch --exclude beat-this --exclude essentia
 ```
 
-Its consumers are pip's `-r`, Trivy's filesystem scanner, and the Docker builder (which installs dependencies without installing the project, so the layer stays cached across source-only changes). The rule that runtime dependencies carry no `==` pins is enforced elsewhere — `tests/test_version_source.py`.
+Its consumers are pip's `-r` and Trivy's filesystem scanner. The Docker builder reads `[project].dependencies` directly from `pyproject.toml`; `tools/` is excluded from its build context. The rule that runtime dependencies carry no `==` pins is enforced elsewhere — `tests/test_version_source.py`.
 
 ## Dependencies
 

@@ -12,6 +12,7 @@ Pages here enable developers to understand how fetchly is built, set up a develo
 | --- | --- |
 | `setup.md` | Local development setup: virtual environment, dependency installation, database initialization, running dev server |
 | `architecture.md` | Architecture overview: component design, data flow, decision rationale (SQLite vs. Postgres, async workers, etc.) |
+| `essentia.md` | Essentia build: how the Docker image compiles the CPU-only Essentia wheel for amd64/arm64 from one upstream-master commit (`ESSENTIA_REF`) resolved per release |
 | `contributing.md` | Contribution guidelines: code style, testing requirements, PR process, commit message format, sign-off procedures |
 
 ## For AI Agents
@@ -42,7 +43,7 @@ Document project conventions:
 - **Integration tests:** Feature workflows across modules
 - **UI tests:** DOM rendering, accessibility, responsive layout
 - **Coverage:** reported, not enforced. `[tool.coverage.run]` in `pyproject.toml` covers `app` and `middleware` with branch coverage, and `[tool.coverage.report]` sets `show_missing`. There is no `fail_under` and CI sets no threshold — do not invent one.
-- **CI gate:** `.github/workflows/ci.yml` runs `ruff check`, `ruff format --check`, `pytest -q`, `npm run lint:js`, `npm run lint:css`, `npm run lint:contracts` and `npm test`, plus the entrypoint/Dockerfile checks and the single-manifest check. All must pass before merge.
+- **CI gate:** `.github/workflows/ci.yml` runs `ruff check`, `ruff format --check`, `pytest -q`, `npm run lint:js`, `npm run lint:css`, `npm run lint:contracts` and `npm test`, plus the entrypoint/Essentia build-script checks (`bash -n`, shellcheck, `docker build --check`), actionlint over the workflows and the single-manifest check. All must pass before merge.
 
 ### Common Development Workflows
 - **Adding feature:** Plan → Create branch → Code → Test → PR → Review → Merge
@@ -149,7 +150,7 @@ python -m cProfile -s cumulative run.py > profile.txt
 
 ---
 
-**Last Updated:** 2026-10-26  
+**Last Updated:** 2026-11-17  
 **Language:** Python 3.13+, JavaScript (ES6+)  
 **Test Framework:** pytest (Python), `node --test` with `node:assert/strict` (JavaScript)  
 **Version Control:** Git with GitHub  

@@ -15,6 +15,10 @@ an activation key.
 1. Enter your Lalal.ai **activation key**
 2. Save — the key is validated against Lalal.ai and the status badge updates
 
+Only a `401` or `403` from Lalal.ai marks the key as invalid. A `429` or a server error
+reports the service as unavailable (`503`), and a timeout returns `504`; neither
+invalidates a key that is fine.
+
 | Detail | Value |
 |---|---|
 | Setting key | `lalalaai_auth_key` (stored as a secret; never returned by the settings API) |
@@ -77,7 +81,8 @@ Results are cached per source file:
 
 A repeat request for a stem that already exists returns the cached file without
 spending Lalal.ai minutes again. A file lock around the output path prevents two
-parallel requests for the same track from both submitting a job.
+parallel requests for the same track from both submitting a job: the second one gets
+`409`. A split that fails leaves no files behind, neither stems nor intermediates.
 
 ## Splitting a trimmed section
 
@@ -92,9 +97,11 @@ only that.
 | Maximum track length | 10 minutes |
 | "Limit long tracks" toggle | On by default (`lalalaai_duration_guard`) |
 
-With the guard on, tracks over 10 minutes are blocked before a request is sent. Turning
-it off lets the request through — Lalal.ai may then reject or partially process it, at
-your cost. Trimming first is the reliable path.
+With the guard on, full tracks over 10 minutes are blocked before a request is sent. A
+track whose length is unknown is blocked too, because it cannot be shown to stay within
+the limit. A [trimmed section](trimming.md) is not subject to the guard, since a trim is
+capped at 10 minutes anyway. Turning the guard off lets the request through — Lalal.ai
+may then reject or partially process it, at your cost. Trimming first is the reliable path.
 
 ## Download size cap
 
@@ -129,5 +136,7 @@ lookup keys off. See [BPM Analysis](bpm.md).
 |---|---|
 | No activation key | The stem action is hidden |
 | Key invalid or expired | Status badge shows the last error; requests fail |
+| Lalal.ai rate-limits or has an outage (`429`, `5xx`) | `503`, the key stays valid and the badge is not changed |
+| Lalal.ai does not answer in time | `504`, the key stays valid |
 | Job is a video job | Rejected — audio only |
-| Track over 10 min with the guard on | Rejected before any request is sent |
+| Full track over 10 min, or of unknown length, with the guard on | Rejected before any request is sent |

@@ -105,6 +105,30 @@ class SharedSemaphore:
         self._semaphore.release()
 
 
+_CGROUP_ROOT = "/sys/fs/cgroup"
+
+
+def _read_inactive_file_bytes(stat_path: str, key: str) -> int:
+    """Reclaimable inactive file cache from a cgroup memory.stat, 0 if unknown."""
+    text = _read_cgroup_file(stat_path)
+    if not text:
+        return 0
+    for line in text.splitlines():
+        name, _, value = line.partition(" ")
+        if name == key:
+            try:
+                return max(0, int(value))
+            except ValueError:
+                return 0
+    return 0
+
+
+def _cgroup_headroom_mb(limit: int, usage: int, inactive_file: int) -> int:
+    """Headroom in MB with reclaimable cache (working-set model) not counted as used."""
+    working_set = max(0, usage - min(inactive_file, usage))
+    return max(0, (limit - working_set) // (1024 * 1024))
+
+
 def _read_cgroup_file(path: str) -> str | None:
     """Read a cgroup file, returning None if not accessible."""
     try:
@@ -482,29 +506,30 @@ class Governor:
 
     def _read_memory_available_mb_uncached(self) -> int:
         """Read available memory in MB from cgroup or /proc without caching."""
-        result = -1
-
         try:
             # cgroup v2
-            mem_current = _read_cgroup_file("/sys/fs/cgroup/memory.current")
-            mem_max = _read_cgroup_file("/sys/fs/cgroup/memory.max")
+            mem_current = _read_cgroup_file(f"{_CGROUP_ROOT}/memory.current")
+            mem_max = _read_cgroup_file(f"{_CGROUP_ROOT}/memory.max")
             if mem_current and mem_max and mem_max != "max":
                 current = int(mem_current)
                 maximum = int(mem_max)
-                return max(0, (maximum - current) // (1024 * 1024))
+                inactive = _read_inactive_file_bytes(f"{_CGROUP_ROOT}/memory.stat", "inactive_file")
+                return _cgroup_headroom_mb(maximum, current, inactive)
         except (ValueError, TypeError):
             pass
 
         try:
             # cgroup v1
-            mem_usage = _read_cgroup_file("/sys/fs/cgroup/memory/memory.usage_in_bytes")
-            mem_limit = _read_cgroup_file("/sys/fs/cgroup/memory/memory.limit_in_bytes")
+            mem_usage = _read_cgroup_file(f"{_CGROUP_ROOT}/memory/memory.usage_in_bytes")
+            mem_limit = _read_cgroup_file(f"{_CGROUP_ROOT}/memory/memory.limit_in_bytes")
             if mem_usage and mem_limit:
                 usage = int(mem_usage)
                 limit = int(mem_limit)
                 # Very high limit means no cgroup limit.
                 if limit < _CGROUP_V1_UNLIMITED_HEURISTIC:
-                    return max(0, (limit - usage) // (1024 * 1024))
+                    stat = f"{_CGROUP_ROOT}/memory/memory.stat"
+                    inactive = _read_inactive_file_bytes(stat, "total_inactive_file")
+                    return _cgroup_headroom_mb(limit, usage, inactive)
         except (ValueError, TypeError):
             pass
 
@@ -518,7 +543,7 @@ class Governor:
         except (OSError, ValueError, IndexError):
             pass
 
-        return result
+        return -1
 
     def _store_memory_cache(self, value: int) -> None:
         with self._lock:

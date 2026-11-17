@@ -1,6 +1,7 @@
 # syntax=docker/dockerfile:1
 
 ARG PYTHON_BASE=python:3.13-slim
+ARG VCS_REF=dev
 # APT cache invalidation: pass --build-arg APT_CACHE_DATE="$(date -u +%Y-%m-%d)"
 # to refresh apt packages daily (prevents using stale cached layers).
 #
@@ -273,7 +274,7 @@ RUN set -euo pipefail; \
 # greatest"): the newest release reaches every build with no manual bump. It is
 # same-origin JavaScript served under script-src 'self', fetched over TLS from
 # unpkg with no checksum - an accepted trade for staying current (see
-# "Vendoring WaveSurfer" in docker/AGENTS.md). essentia, by contrast, is pinned.
+# "Vendoring WaveSurfer" in docker/AGENTS.md).
 # unpkg's @latest alias redirects package.json to the resolved version;
 # that version is captured into /wavesurfer/version so app/utils/version.py can
 # report it without a rebuild changing what "current" means. The runtime stage
@@ -305,6 +306,7 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # The one apt layer whose packages actually ship, so this is the stage the
 # daily APT_CACHE_DATE value matters most to.
 ARG APT_CACHE_DATE
+ARG VCS_REF
 
 COPY docker/apt-no-distro-media.pref /etc/apt/preferences.d/no-distro-media
 
@@ -406,8 +408,9 @@ RUN test -s ./app/static/img/fetchly_watermark.png && \
         -vf "drawtext=fontfile=/app/app/static/fonts/roboto-flex.ttf:text=fetchly" \
         -frames:v 1 -f null -
 # app/utils/version.py reads [project] version straight out of pyproject.toml,
-# so the manifest ships next to the source rather than a separate VERSION file.
-COPY pyproject.toml BUILD_INFO* ./
+# while BUILD_INFO is generated in the image so local builds leave no root file.
+COPY pyproject.toml ./
+RUN printf '%s\n' "${VCS_REF}" > /app/BUILD_INFO
 COPY CHANGELOG.md ./
 # The version of the WaveSurfer bundle the builder actually fetched, outside
 # app/static/ so it is never served. entrypoint.sh reads it at container start

@@ -80,6 +80,8 @@ the FastAPI process's memory and GIL. Running them in a `spawn`ed child:
 - lets the governor bound concurrent analyses independently of concurrent
   downloads/transcodes (`ANALYSIS_SEMAPHORE_LIMIT`)
 - makes the model checkpoint load once per child rather than per request
+- starts the child in its own session so timeout or shutdown can stop it and
+  any `ffmpeg` subprocesses together
 
 ## Application startup (`app/main.py`)
 
@@ -150,7 +152,7 @@ what keeps `TestClient(app)` usable without a full app boot in most tests.
   `/logout`, and every state-changing route under the `/api` prefix
 - `ProxyHeadersMiddleware` (Uvicorn) — trusts `X-Forwarded-*` only from
   `FORWARDED_ALLOW_IPS`
-- SlowAPI's limiter — per-route rate limits keyed on client IP
+- The in-house sliding-window limiter (`auth/rate_limit.py`) — per-route rate limits keyed on client IP
 
 ## Frontend
 

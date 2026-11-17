@@ -14,7 +14,7 @@ These run in plain Node.js with no browser. Two groups live here: tests of `app/
 | `toast.test.mjs`                    | Toast notifications: creation, deduplication, timer scheduling, and the auto-dismiss callback through to removal (both the `transitionend` path and the fallback timer)                                                                                                             |
 | `confirm-modal.test.mjs`            | Confirmation dialog: buttons, callbacks, focus handling, and the `data-bs-dismiss` wiring that makes close/cancel resolve as cancelled                                                                                                                                              |
 | `csrf-token.test.mjs`               | Client-side CSRF contract: `getCsrfToken()` cookie/form/meta precedence, plus `submitJob()` sending the token as the `X-CSRF-Token` header                                                                                                                                          |
-| `shared-helpers.test.mjs`           | Shared UI helpers: `toErrorMessage()` error shapes, `parseUtcTimestamp()`, the dashboard stat-tile formatting (`splitSize()`, `statParts()`) used by main.js and settings.js, `isSameTrimSelection()` (a pending Lalal result only applies to the selection it was started for), `resetLalalLabel()` and `releaseLalalRun()` (stale Done labels, run ownership) |
+| `shared-helpers.test.mjs`           | Shared UI helpers: `toErrorMessage()` error shapes, `parseUtcTimestamp()`, the dashboard stat-tile formatting (`splitSize()`, `statParts()`) used by main.js and settings.js, `describeAuthWarning()` (login-required warning title/message, `null` for anything else), `isSameTrimSelection()` (a pending Lalal result only applies to the selection it was started for), `resetLalalLabel()` and `releaseLalalRun()` (stale Done labels, run ownership) |
 | `cookie-paste-modal.test.mjs`       | Cookie import UI: paste validation, format detection, errors                                                                                                                                                                                                                        |
 | `watermark-logo.test.mjs`           | Logo validation: SVG inspection, PNG inspection, rasterization, size limits                                                                                                                                                                                                         |
 | `limited-playback.test.mjs`         | The **Limited playback** marker: which codec/container combinations the job list flags as unplayable on Safari, iOS and TVs                                                                                                                                                         |
@@ -112,11 +112,11 @@ node --test tests/js/confirm-modal.test.mjs     # full output for one file
 `console.log()` inside a test is printed with the test's output.
 
 ### CI Integration
-`.github/workflows/ci.yml` runs `npm test` in the lint/test job alongside ESLint, Stylelint and the source-contract check. The Playwright audit runs separately in `.github/workflows/ui-audit.yml`.
+`.github/workflows/ci.yml` runs `npm test` in the lint/test job alongside ESLint, Stylelint and the source-contract check (the `frontend` job). The Playwright audit runs separately in `.github/workflows/ui-audit.yml`.
 
 ---
 
-**Last Updated:** 2026-10-26  
+**Last Updated:** 2026-11-17  
 **Framework:** `node:test` + `node:assert/strict`  
 **Runtime:** Node.js, no browser  
 **Files:** 22 test suites + `helpers/fake-dom.mjs`

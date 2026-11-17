@@ -10,26 +10,26 @@ Utilities here are imported across the app and provide a single source of truth 
 
 | File | Purpose |
 | --- | --- |
-| `version.py` | Reads the version from `pyproject.toml`; exposes it to the UI and `/api/info`; the WaveSurfer version comes from `WAVESURFER_VERSION`, else the committed pin file |
+| `version.py` | Reads the version from `pyproject.toml` and the build revision from the `BUILD_INFO` file (`dev` when absent; the Dockerfile writes it from `VCS_REF`); exposes both to the UI and `/api/info`; the WaveSurfer version comes from `WAVESURFER_VERSION`, else the committed pin file |
 | `updates.py` | Checks GitHub releases (and BtbN ffmpeg autobuilds) for newer versions, reporting `status` and a `reason` per component; a failed lookup is cached for 15 min and retried for the failed components only; backs `/api/updates` and the Settings → System update tile |
 | `changelog.py` | Renders `CHANGELOG.md` for display (markdown → sanitized HTML) |
 | `host_stats.py` | Host metrics for the Settings → System tiles: CPU, memory, uptime, storage. Reads `/proc` and the filesystem directly. |
 | `watermark.py` | Watermark compositing onto video via FFmpeg |
 | `watermark_logo.py` | Validates and stores server-received PNG watermark logos; SVG is rasterized client-side before upload |
-| `cookie_import.py` | Parses and normalizes cookies from multiple formats: Netscape files, request headers (cURL/fetch/PowerShell), JSON extensions |
+| `cookie_import.py` | `convert_to_netscape()` turns pasted cookies into a Netscape jar: bare `Cookie` header, whole cURL/fetch/PowerShell request, JSON extension export, or a Netscape file (cURL is tokenized with `shlex`, including bash `$'...'` bodies; unquoted, `--url` and bare-host targets are all checked against the platform, and an undeterminable target raises "Could not determine which site this request went to..."); filtered to the platform's domains; `missing_session_cookie_hint()` explains absent login cookies |
 | `cookies.py` | Per-platform cookie file locations and storage under `DATA_DIR` |
-| `cookie_status.py` | Reports whether a platform's cookie file exists and is usable |
+| `cookie_status.py` | Per-platform cookie domains and required login cookies; `analyze_cookie_file()` returns a `CookieAnalysis` (`valid`/`expired`/`invalid`/`missing`, expiry, missing login cookies); `cookie_file_is_usable()` is the yes/no used by the worker; the reported mtime is the last file modification |
 | `duration.py` | Media duration parsing and rounding (`round_seconds`) |
-| `fs.py` | Filesystem helpers, notably `get_data_dir()` — the `DATA_DIR` env var, else `./data` |
+| `fs.py` | Filesystem helpers: `get_data_dir()` (the `DATA_DIR` env var, else `data/` under the project root, resolved from the file location rather than the working directory), `job_dir()`/`jobs_dir()`, `resolve_within_root()`, and `exclusive_file_lock()`, a non-blocking async `flock` context manager that acquires and releases on the event-loop thread (cancellation-safe; raises `BlockingIOError` when held; used by `routes/trim.py` and `routes/lalal.py`) |
 | `platform.py` | Platform quirks: YouTube, Instagram, TikTok, Facebook (format filters, cookie requirements) |
-| `youtube.py` | yt-dlp metadata lookup and URL normalization/validation; raises `AuthRequiredError` for login-gated or private sources (`worker.auth_required_message()` turns it into the user text) |
+| `youtube.py` | yt-dlp metadata lookup with a 16 MiB stdout byte cap, URL normalization and validation; raises `AuthRequiredError` for login-gated or private sources (`worker.auth_required_message()` turns it into the user text) |
 | `public_url.py` | `normalize_public_hostname()` and `build_public_base_url(request, public_hostname)` for share links |
-| `geoip.py` | Resolves a job's stored `client_ip` into country/city/ASN for the job detail page's "requester" tile; MaxMind GeoLite2 databases fetched on demand from a third-party mirror and cached under `DATA_DIR/geolite2`; display-only (no auth decision), and the download has no authenticated integrity check — only a parse check |
+| `geoip.py` | Resolves a job's stored `client_ip` into country/city/ASN for the job detail page's "requester" tile; MaxMind GeoLite2 databases fetched on demand from a third-party mirror and cached under `DATA_DIR/geolite2`; display-only (no auth decision), and the download has no authenticated integrity check — only a parse check (the mmdb check is a sanity check) |
 | `template_filters.py` | Custom Jinja2 filters registered in `main.py` |
 | `assets.py` | `asset_url()` (the Jinja global that content-hashes `/static` URLs) and `VersionedStaticFiles` (the matching `Cache-Control` policy) |
 | `hidden_captcha.py` | Invisible anti-bot signal: honeypot field and signed time-trap token. Not a brute-force control — tokens are reusable; the `POST /login` rate limit (5/minute per IP, `routes/auth.py`) is that boundary |
 | `banner.py` | Startup ASCII banner |
-| `housekeeping.py` | Filesystem side of the retention sweep: expired job directories, orphaned directories, thumbnail and watermark caches (7-day TTL). `cleanup_expired_jobs()` deletes the directories of the IDs a selector returns and returns the IDs it cleaned; `main.py::_run_housekeeping_once` then removes only those rows via `db.delete_jobs_and_share_links()` (which skips jobs that became active again and returns the IDs it deleted), so a failed deletion is retried next sweep. This module never touches SQLite |
+| `housekeeping.py` | Retention and orphan sweeps plus thumbnail and watermark caches (7-day TTL; cache cleanup ages entries with `lstat`, so dangling symlinks are removed). For each expired candidate, `cleanup_expired_jobs()` rechecks terminal status and age under `BEGIN IMMEDIATE`, atomically stages its directory, and deletes the row/share links. Recursive deletion follows commit; the next sweep recovers staged directories after a crash or failed removal. A failed staging rename leaves the row for a later sweep. |
 | `__init__.py` | Package init |
 
 ## For AI Agents
@@ -72,9 +72,9 @@ Utilities here are imported across the app and provide a single source of truth 
 - **Upload path:** `POST /api/settings/watermark-logo`
 
 ### Working with Cookies
-- **Import:** `cookie_import.py` parses Netscape format
+- **Import:** `cookie_import.py` normalizes header, request, JSON and Netscape input into a Netscape jar (called from `routes/cookies.py`)
 - **Storage:** `cookies.py` resolves per-platform paths under `DATA_DIR`
-- **Status:** `cookie_status.py` exposes usability to the UI and the worker
+- **Status:** `cookie_status.py` exposes usability to the UI (`routes/cookies.py`) and the worker (`worker.cookies_configured_for`)
 - **Platform quirks:** documented in `platform.py`
 
 ## Dependencies
@@ -113,7 +113,7 @@ Tests are unittest-style classes; subclass the helpers in `tests/_support.py` ra
 4. Read the FFmpeg stderr captured by the subprocess call
 
 ### Debugging Cookie Issues
-1. Confirm the file starts with `# Netscape HTTP Cookie File`
+1. Stored jars start with `# Netscape HTTP Cookie File`; check `analyze_cookie_file()` for the reason a jar is not usable
 2. `pytest tests/test_cookie_import.py tests/test_cookie_status.py -v`
 3. Check the per-platform path resolution in `cookies.py` against `$DATA_DIR`
 
@@ -125,7 +125,7 @@ Tests are unittest-style classes; subclass the helpers in `tests/_support.py` ra
 
 ---
 
-**Last Updated:** 2026-10-26  
+**Last Updated:** 2026-11-17  
 **Language:** Python 3.13+  
 **Key Dependencies:** yt-dlp, FFmpeg, httpx, markdown/nh3  
 **Design:** Stateless helpers; configuration comes from the settings table or the environment

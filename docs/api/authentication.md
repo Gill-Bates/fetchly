@@ -78,6 +78,10 @@ Lalal.ai actions, share link creation, and more) requires the token. Safe method
 2. Send it back in the `X-CSRF-Token` header, or as a `csrf_token` form field
 3. A mismatch returns `403`
 
+Form-token extraction reads at most 64 KiB and returns `413` for a larger body.
+Send `X-CSRF-Token` for uploads so the middleware can validate the token without
+buffering the form.
+
 **Cookie name.** With `FETCHLY_BEHIND_HTTPS=1` the cookie is named `__Host-fetchly_csrf`,
 otherwise `fetchly_csrf`. The name is fixed at startup from that variable alone; an HTTPS
 request scheme does not change it. A script that reads the cookie from a cookie jar must

@@ -389,3 +389,112 @@ class SessionCookieDetectionTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RequestTargetTests(unittest.TestCase):
+    """The request's own URL decides the platform, however the copy quotes it."""
+
+    COOKIE = "-H 'Cookie: sessionid=abc'"
+
+    def test_unquoted_foreign_curl_url_is_refused(self) -> None:
+        for command in (
+            f"curl https://example.org {self.COOKIE}",
+            f"curl {self.COOKIE} https://example.org/x",
+            f"curl --url https://example.org {self.COOKIE}",
+            f"curl --url=https://example.org {self.COOKIE}",
+            f"curl 'https://example.org' {self.COOKIE}",
+        ):
+            with self.subTest(command=command), self.assertRaises(CookieImportError) as caught:
+                convert_to_netscape(command, "instagram")
+            self.assertIn("example.org", str(caught.exception))
+
+    def test_unquoted_platform_url_and_subdomain_are_accepted(self) -> None:
+        for url in ("https://www.instagram.com/", "https://i.instagram.com/api"):
+            result = convert_to_netscape(f"curl {url} {self.COOKIE}", "instagram")
+            self.assertEqual(result.names, ("sessionid",))
+
+    def test_lookalike_domain_is_refused(self) -> None:
+        with self.assertRaises(CookieImportError):
+            convert_to_netscape(f"curl https://instagram.com.evil.example/ {self.COOKIE}", "instagram")
+
+    def test_foreign_url_among_several_is_refused(self) -> None:
+        command = f"curl https://www.instagram.com/ --url https://example.org/ {self.COOKIE}"
+        with self.assertRaises(CookieImportError):
+            convert_to_netscape(command, "instagram")
+
+    def test_referer_does_not_count_as_target(self) -> None:
+        command = f"curl https://example.org -e https://www.instagram.com/ {self.COOKIE}"
+        with self.assertRaises(CookieImportError):
+            convert_to_netscape(command, "instagram")
+
+    def test_chrome_ansi_c_body_with_apostrophe_is_accepted(self) -> None:
+        body = '$\'{"q":"it\\\'s"}\''
+        command = f"curl 'https://www.instagram.com/api/graphql' -H 'cookie: sessionid=abc' --data-raw {body}"
+        result = convert_to_netscape(command, "instagram")
+        self.assertEqual(result.names, ("sessionid",))
+
+    def test_ansi_c_body_with_newline_and_backslash_escapes_is_accepted(self) -> None:
+        command = f"curl 'https://www.instagram.com/x' {self.COOKIE} --data-raw $'a\\nb\\\\c\\x41\\u00e9'"
+        result = convert_to_netscape(command, "instagram")
+        self.assertEqual(result.names, ("sessionid",))
+
+    def test_ansi_c_body_cannot_hide_a_foreign_url(self) -> None:
+        command = f"curl --data-raw $'x' https://example.org/ {self.COOKIE}"
+        with self.assertRaises(CookieImportError) as caught:
+            convert_to_netscape(command, "instagram")
+        self.assertIn("example.org", str(caught.exception))
+
+    def test_malformed_ansi_c_quote_still_fails_closed(self) -> None:
+        for command in (
+            f"curl 'https://www.instagram.com/x' {self.COOKIE} --data-raw $'unterminated",
+            f"curl 'https://www.instagram.com/x' {self.COOKIE} --data-raw 'open",
+        ):
+            with self.subTest(command=command), self.assertRaises(CookieImportError) as caught:
+                convert_to_netscape(command, "instagram")
+            self.assertIn("Could not determine", str(caught.exception))
+
+    def test_bare_foreign_host_is_a_target(self) -> None:
+        for command in (
+            f"curl evil.org https://www.instagram.com/ {self.COOKIE}",
+            f"curl https://www.instagram.com/ evil.org {self.COOKIE}",
+            f"curl https://www.instagram.com/ evil.org:8080 {self.COOKIE}",
+        ):
+            with self.subTest(command=command), self.assertRaises(CookieImportError) as caught:
+                convert_to_netscape(command, "instagram")
+            self.assertIn("evil.org", str(caught.exception))
+
+    def test_option_values_are_not_mistaken_for_hosts(self) -> None:
+        for extra in ("-X POST", "-o out.json", "--request GET", "-m 5", "--compressed -s"):
+            command = f"curl 'https://www.instagram.com/x' {extra} {self.COOKIE}"
+            with self.subTest(extra=extra):
+                self.assertEqual(convert_to_netscape(command, "instagram").names, ("sessionid",))
+
+    def test_bare_platform_host_next_to_platform_url_is_accepted(self) -> None:
+        command = f"curl https://www.instagram.com/ i.instagram.com {self.COOKIE}"
+        self.assertEqual(convert_to_netscape(command, "instagram").names, ("sessionid",))
+
+    def test_missing_or_invalid_url_is_refused(self) -> None:
+        for command in (
+            f"curl {self.COOKIE}",
+            f"curl www.instagram.com {self.COOKIE}",
+            f"curl 'ftp://x/' {self.COOKIE}",
+        ):
+            with self.subTest(command=command), self.assertRaises(CookieImportError) as caught:
+                convert_to_netscape(command, "instagram")
+            self.assertIn("Could not determine", str(caught.exception))
+
+    def test_fetch_and_powershell_need_a_target_too(self) -> None:
+        fetch = 'fetch({"headers": {"cookie": "sessionid=abc"}});'
+        powershell = (
+            '$session.Cookies.Add((New-Object System.Net.Cookie("sessionid", "abc", "/", ".instagram.com")))\n'
+            "Invoke-WebRequest -WebSession $session"
+        )
+        for text in (fetch, powershell):
+            with self.subTest(text=text[:20]), self.assertRaises(CookieImportError):
+                convert_to_netscape(text, "instagram")
+
+    def test_foreign_fetch_and_bare_powershell_uri_are_refused(self) -> None:
+        with self.assertRaises(CookieImportError):
+            convert_to_netscape('fetch("https://example.org/", {"headers": {"cookie": "a=b"}});', "instagram")
+        with self.assertRaises(CookieImportError):
+            convert_to_netscape("Invoke-WebRequest -Uri https://example.org -Headers @{}", "instagram")

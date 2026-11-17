@@ -34,6 +34,11 @@ _SAME_ORIGIN_FETCH_SITES = frozenset({"same-origin", "none"})
 _BAD_COOKIE_NAME_CHARS = re.compile(r"[;=\s]")
 
 _DEFAULT_PORTS: Final[dict[str, int]] = {"http": 80, "https": 443}
+_MAX_CSRF_FORM_BODY_BYTES: Final[int] = 64 * 1024
+
+
+class _FormBodyTooLargeError(Exception):
+    """The form token cannot be read within the CSRF body budget."""
 
 
 def _effective_port(scheme: str, port: int | None) -> int | None:
@@ -141,12 +146,13 @@ class CSRFMiddleware:
 
     @staticmethod
     async def _read_body(receive: Callable[[], Awaitable[dict]]) -> tuple[bytes, bool]:
-        """Read the full request body, returning ``(body, disconnected)``.
+        """Read a bounded form body, returning ``(body, disconnected)``.
 
         A truncated (``disconnected``) body must not be parsed or replayed - it
         can carry a valid ``csrf_token`` while the other fields are missing.
         """
         chunks: list[bytes] = []
+        size = 0
 
         while True:
             message = await receive()
@@ -159,6 +165,9 @@ class CSRFMiddleware:
 
             chunk = message.get("body", b"")
             if chunk:
+                size += len(chunk)
+                if size > _MAX_CSRF_FORM_BODY_BYTES:
+                    raise _FormBodyTooLargeError
                 chunks.append(chunk)
             if not message.get("more_body", False):
                 break
@@ -276,7 +285,35 @@ class CSRFMiddleware:
                     "application/x-www-form-urlencoded",
                     "multipart/form-data",
                 }:
-                    sent_token, body_cache, disconnected = await self._extract_form_token(scope, receive, content_type)
+                    content_length = request.headers.get("content-length")
+                    if (
+                        content_length
+                        and content_length.isdecimal()
+                        and int(content_length) > _MAX_CSRF_FORM_BODY_BYTES
+                    ):
+                        await self._reject(
+                            "CSRF form body too large",
+                            scope=scope,
+                            receive=receive,
+                            send=send,
+                            secure=secure,
+                            status_code=413,
+                        )
+                        return
+                    try:
+                        sent_token, body_cache, disconnected = await self._extract_form_token(
+                            scope, receive, content_type
+                        )
+                    except _FormBodyTooLargeError:
+                        await self._reject(
+                            "CSRF form body too large",
+                            scope=scope,
+                            receive=receive,
+                            send=send,
+                            secure=secure,
+                            status_code=413,
+                        )
+                        return
                     body_consumed = True
                     if disconnected:
                         # Body is truncated; neither validating the token nor

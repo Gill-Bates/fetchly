@@ -72,7 +72,8 @@ jobs:
             --exclude torch --exclude torchaudio --exclude beat-this --exclude essentia \
             >> requirements-ci.txt
           cat requirements-ci.txt
-          pip install -r requirements-ci.txt
+          pip install --only-binary=:all: -r requirements-ci.txt
+          pip check
 
       - name: Ruff lint
         run: ruff check --output-format=github .
@@ -190,6 +191,11 @@ jobs:
           test ! -e docker/essentia.ref
           ! grep -nE 'ESSENTIA_REF=("?)[0-9a-f]{40}' docker/build-essentia.sh docker/Dockerfile
 
+      # Static analysis of the same two scripts: quoting and expansion bugs
+      # that `bash -n` cannot see. shellcheck ships on the runner image.
+      - name: shellcheck
+        run: shellcheck docker/entrypoint.sh docker/build-essentia.sh
+
       # BuildKit's own linter: resolves the stages, ARG/ENV references and
       # COPY --from targets and reports on them without running a single
       # build step. Non-zero on any finding.
@@ -211,6 +217,11 @@ jobs:
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: '3.13'
+
+      # actionlint lints run: blocks through shellcheck only when it finds the
+      # binary on PATH; fail here instead of silently skipping that half.
+      - name: shellcheck is available
+        run: command -v shellcheck && shellcheck --version
 
       # actionlint-py wraps the actionlint binary and picks up
       # .github/actionlint.yaml (the ubuntu-26.04 labels) on its own. Renovate

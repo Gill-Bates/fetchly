@@ -292,6 +292,11 @@ Public URLs work signed out. Age- or login-gated content needs an imported brows
 session — see [Platform Cookies](cookies.md). A missing, invalid, or expired jar is
 skipped rather than failing the job: the download simply runs signed out.
 
+When you paste a URL, the metadata probe tells you early if the source is private or
+needs a login. The preview then shows **Login required** with an **Open settings** link
+when no cookies are stored for that platform, or **Access still denied** when a jar
+exists but the platform rejected it anyway (typically a revoked session; re-import).
+
 !!! note "YouTube JS challenges"
     YouTube serves JavaScript challenges that yt-dlp solves through `yt-dlp-ejs` and a
     `deno` runtime. Both are bundled in the container. In a standalone install, `deno`

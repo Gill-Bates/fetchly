@@ -47,6 +47,8 @@ venv/
 .eslintcache
 .omc/*
 !.omc/skills/
+# OMC also drops session state next to files it touched in subdirectories.
+*/**/.omc/
 .omx/
 .stylelintcache
 .agents/

@@ -9,35 +9,38 @@
 from __future__ import annotations
 
 import asyncio
-import fcntl
 import logging
-import os
 import re
 import stat as stat_module
 import uuid
 from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager, suppress
+from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from pathlib import Path
 from time import time
 from typing import Annotated, Any, Literal
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, StringConstraints
 
-from ..auth.rate_limit import limiter
+from ..audio.tags import stop_ffmpeg_process
+from ..auth.rate_limit import rate_limit
 from ..db import DOWNLOADABLE_STATUSES, get_job, get_settings, set_settings, update_job
 from ..integrations.lalal.policy import (
+    LALAL_MAX_DURATION_MINUTES,
+    LALAL_MAX_DURATION_SECONDS,
     LALAL_MINUTES_UNKNOWN,
     minutes_from_setting,
     minutes_to_setting,
     stem_download_name,
 )
 from ..runtime.governor import governor
+from ..utils.duration import round_seconds
 from ..utils.fs import (
     TRIM_ID_RE,
     TRIM_WAV_GLOB,
+    exclusive_file_lock,
     job_dir,
     path_is_file,
     trim_base_name,
@@ -45,7 +48,7 @@ from ..utils.fs import (
 )
 from ..utils.template_filters import is_lalala_configured
 from .auth import require_user, require_user_json
-from .media import resolve_job_path, stop_ffmpeg_process, transcode_to_mp3
+from .media import resolve_job_path, transcode_to_mp3
 
 logger = logging.getLogger(__name__)
 
@@ -230,26 +233,15 @@ async def _path_is_ready_file(path: Path) -> bool:
 
 @asynccontextmanager
 async def _acquire_processing_lock(lock_file: Path) -> AsyncIterator[None]:
-    def _lock() -> int:
-        lock_fd = os.open(lock_file, os.O_CREAT | os.O_RDWR)
+    """Hold the Lalal processing lock; a contended lock becomes HTTP 409."""
+    async with AsyncExitStack() as stack:
+        # Only acquisition maps to 409: a BlockingIOError from the protected
+        # work must propagate unchanged.
         try:
-            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            await stack.enter_async_context(exclusive_file_lock(lock_file))
         except BlockingIOError as exc:
-            os.close(lock_fd)
             raise HTTPException(status_code=409, detail="Lalal processing already in progress") from exc
-        return lock_fd
-
-    def _unlock(lock_fd: int) -> None:
-        try:
-            fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        finally:
-            os.close(lock_fd)
-
-    lock_fd = await asyncio.to_thread(_lock)
-    try:
         yield
-    finally:
-        await asyncio.to_thread(_unlock, lock_fd)
 
 
 async def _remove_split_outputs(*paths: Path) -> None:
@@ -496,13 +488,9 @@ async def _invalidate_auth_validation_cache() -> None:
         logger.warning("Could not expire the Lalal.ai validation cache", exc_info=True)
 
 
-@router.get("/status", response_model=AuthStatusResponse)
-@limiter.limit("30/minute")
-async def api_lalal_status(
-    request: Request, force_refresh: bool = False, _user: str = Depends(require_user)
-) -> AuthStatusResponse:
+@router.get("/status", response_model=AuthStatusResponse, dependencies=[Depends(rate_limit("30/minute"))])
+async def api_lalal_status(force_refresh: bool = False, _user: str = Depends(require_user)) -> AuthStatusResponse:
     """Return saved Lalal.ai auth status and validation state."""
-    _ = request
     generation = _auth_generation
     settings = await asyncio.to_thread(get_settings, include_secrets=True)
     email = str(settings.get("lalalaai_email", "")).strip()
@@ -531,6 +519,7 @@ async def api_lalal_status(
         from ..integrations.lalal.client import (
             LalalClient,
             LalalError,
+            LalalUnavailableError,
             parse_minutes_left,
         )
 
@@ -544,6 +533,11 @@ async def api_lalal_status(
         try:
             async with client:
                 quota = await asyncio.wait_for(client.check_quota(), timeout=20.0)
+        except LalalUnavailableError as exc:
+            logger.warning("Lalal.ai validation unavailable: %s", exc)
+            token_valid = last_known_valid
+            minutes_left = last_known_minutes
+            validation_error = "Lalal.ai is temporarily unavailable"
         except LalalError:
             logger.warning("Lalal.ai rejected the stored credential")
             token_valid = False
@@ -592,32 +586,29 @@ async def api_lalal_status(
     )
 
 
-@router.post("/auth/activation-key", response_model=OperationResponse)
-@limiter.limit("5/minute")
+@router.post("/auth/activation-key", response_model=OperationResponse, dependencies=[Depends(rate_limit("5/minute"))])
 async def api_lalal_auth_activation_key(
-    request: Request,
     body: ActivationKeyRequest,
     _user: str = Depends(require_user),
 ) -> OperationResponse:
     """Validate and store a manually provided Lalal activation key."""
-    _ = request
-
     generation = _auth_generation
     email = body.email.lower()
     activation_key = body.activation_key
 
     _validate_email(email)
 
-    from ..integrations.lalal.client import LalalClient, LalalError, parse_minutes_left
+    from ..integrations.lalal.client import LalalClient, LalalError, LalalUnavailableError, parse_minutes_left
 
     client = LalalClient(activation_key)
     try:
         async with client:
             quota = await asyncio.wait_for(client.check_quota(), timeout=20.0)
-    except TimeoutError as exc:
+    except (TimeoutError, httpx.TimeoutException) as exc:
         raise HTTPException(status_code=504, detail="Lalal.ai validation timed out") from exc
-    except httpx.TimeoutException as exc:
-        raise HTTPException(status_code=504, detail="Lalal.ai validation timed out") from exc
+    except LalalUnavailableError as exc:
+        logger.warning("Lalal activation-key validation unavailable: %s", exc)
+        raise HTTPException(status_code=503, detail="Lalal.ai is temporarily unavailable") from exc
     except LalalError as exc:
         raise HTTPException(status_code=400, detail="Invalid activation key") from exc
     except (httpx.RequestError, OSError) as exc:
@@ -653,10 +644,8 @@ async def api_lalal_auth_activation_key(
     return OperationResponse(message="Activation key saved")
 
 
-@router.post("/auth/logout", response_model=OperationResponse)
-@limiter.limit("10/minute")
-async def api_lalal_auth_logout(request: Request, _user: str = Depends(require_user)) -> OperationResponse:
-    _ = request
+@router.post("/auth/logout", response_model=OperationResponse, dependencies=[Depends(rate_limit("10/minute"))])
+async def api_lalal_auth_logout(_user: str = Depends(require_user)) -> OperationResponse:
     await _commit_auth_settings(
         {
             "lalalaai_email": "",
@@ -675,10 +664,8 @@ async def api_lalal_auth_logout(request: Request, _user: str = Depends(require_u
     return OperationResponse(message="Logged out")
 
 
-@router.post("/{job_id}")
-@limiter.limit("5/minute")
+@router.post("/{job_id}", dependencies=[Depends(rate_limit("5/minute"))])
 async def lalal_split(
-    request: Request,  # noqa: ARG001  # @limiter.limit reads it by name
     job_id: uuid.UUID,
     stem: str = _STEM_VOCALS,
     trimmed: bool = False,
@@ -691,8 +678,6 @@ async def lalal_split(
     only selects which cached result is returned.
     """
     _require_initialized()
-    if _queue_event is None:
-        raise RuntimeError("Lalal routes are not initialized")
 
     _validate_stem(stem)
 
@@ -755,6 +740,16 @@ async def lalal_split(
         raise HTTPException(status_code=400, detail="Lalal.ai API key not configured")
     client = LalalClient(auth_key.strip())
 
+    # Server-side twin of the UI duration guard: an unknown duration counts as
+    # too long, because it cannot be shown to stay within the paid limit.
+    if not trimmed and bool(settings.get("lalalaai_duration_guard", True)):
+        known_duration = round_seconds(job["duration_seconds"])
+        if known_duration is None or known_duration > LALAL_MAX_DURATION_SECONDS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Track exceeds {LALAL_MAX_DURATION_MINUTES} min or has unknown length (Duration Guard)",
+            )
+
     loop = asyncio.get_running_loop()
     queue_event = _queue_event
     if queue_event is None:
@@ -803,12 +798,17 @@ async def lalal_split(
 
                     # Stems come back in the uploaded (WAV) format; convert them
                     # to the MP3 paths the cache lookup and downloads expect.
-                    if "stem" in results:
-                        await _finalize_stem(results["stem"], vocals_path)
-                        results["stem"] = vocals_path
-                    if "backing" in results:
-                        await _finalize_stem(results["backing"], instrumental_path)
-                        results["backing"] = instrumental_path
+                    intermediates = [p for p in results.values() if p not in (vocals_path, instrumental_path)]
+                    try:
+                        if "stem" in results:
+                            await _finalize_stem(results["stem"], vocals_path)
+                            results["stem"] = vocals_path
+                        if "backing" in results:
+                            await _finalize_stem(results["backing"], instrumental_path)
+                            results["backing"] = instrumental_path
+                    finally:
+                        # A failed second transcode must not strand the first WAV.
+                        await asyncio.shield(_remove_split_outputs(*intermediates))
 
                     # Both stems are always needed. Raise inside the lock so a
                     # half-finished pair is cleaned up, not reported as success.
@@ -851,10 +851,8 @@ async def lalal_split(
         raise HTTPException(status_code=500, detail="Processing failed") from exc
 
 
-@router.get("/download/{job_id}")
-@limiter.limit("10/minute")
+@router.get("/download/{job_id}", dependencies=[Depends(rate_limit("10/minute"))])
 async def lalal_download(
-    request: Request,
     job_id: uuid.UUID,
     stem: str = _STEM_VOCALS,
     trimmed: bool = False,
@@ -862,7 +860,6 @@ async def lalal_download(
     _user: str = Depends(require_user_json),
 ):
     """Download a processed Lalal.ai stem ('vocals' or 'instrumental')."""
-    _ = request
     _require_initialized()
 
     _validate_stem(stem)

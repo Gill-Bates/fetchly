@@ -8,8 +8,11 @@
 
 | File | Purpose |
 | --- | --- |
-| `Dockerfile` | Four-stage build: `ffmpeg`, `essentia`, `builder`, `runtime`. All stages share `ARG PYTHON_BASE=python:3.13-slim`. |
+| `Dockerfile` | Four-stage build: `ffmpeg`, `essentia`, `builder`, `runtime`. All stages share `ARG PYTHON_BASE=python:3.13-slim`. `ARG VCS_REF` (default `dev`) is declared globally and redeclared in `runtime`, which writes it to `/app/BUILD_INFO` (read by `app/utils/version.py`); CI passes `github.sha`. `BUILD_INFO` is generated in the image, not copied from the build context. |
 | `entrypoint.sh` | Startup: resolves `TORCH_HOME`, enforces `WORKERS=1`, creates and chowns required directories, drops to an unprivileged user with `gosu`, then `exec`s Gunicorn |
+| `build-essentia.sh` | Builds the CPU-only essentia wheel from upstream master (`ESSENTIA_REF` pins the commit; `TARGETARCH` selects amd64/arm64), run by the `essentia` stage |
+| `essentia_check.py` | Functional check of the essentia build (mirrors `app/audio/bpm.py`), run in the `essentia` and `runtime` stages and in CI |
+| `wavesurfer.version` | Committed WaveSurfer version, the local-dev fallback for `get_wavesurfer_version()` |
 | `docker-compose.yml` | Example service: image, port mapping, environment, volume, log rotation, `no-new-privileges` |
 | `README_Docker.md` | Docker-facing documentation |
 | `apt-no-distro-media.pref` | APT preferences, copied to `/etc/apt/preferences.d/no-distro-media` in the runtime stage |
@@ -141,7 +144,7 @@ docker run -it \
 ### Using Docker Compose
 ```bash
 # .env
-FETCHLY_SECRET_KEY=...        # head -c 32 /dev/urandom | base64
+FETCHLY_SECRET_KEY=...        # openssl rand -base64 32
 
 docker compose -f docker/docker-compose.yml up -d
 docker compose -f docker/docker-compose.yml logs -f fetchly
@@ -167,7 +170,7 @@ Change the base with `--build-arg PYTHON_BASE=...`; it must stay a Python 3.13 D
 
 ---
 
-**Last Updated:** 2026-10-26  
+**Last Updated:** 2026-11-17  
 **Base Image:** `python:3.13-slim`  
 **Stages:** ffmpeg, essentia, builder, runtime  
 **Platforms:** linux/amd64, linux/arm64  

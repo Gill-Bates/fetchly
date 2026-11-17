@@ -6,10 +6,10 @@
 import { AUDIO_TYPE, CONFIG, DOWNLOADABLE_STATUSES, RETRYABLE_STATUSES, STATUS_META, TERMINAL_STATUSES } from "./config.js";
 import { fetchJob, fetchJobs, fetchResolvedThumbnail, fetchStats, submitJob, fetchVideoInfo, toErrorMessage } from "./api.js";
 import { reportWarning } from "./errors.js";
-import { createTimeoutSignal, EMPTY_VALUE, getCsrfToken, humanSize, isValidMediaUrl, parseUtcTimestamp, statParts, detectPlatform, PLATFORM, extractYouTubeVideoId, formatDuration, isSafeRedirect, localizeValues, subscribeToLalalProgress, triggerDownload } from "./utils.js";
+import { createTimeoutSignal, describeAuthWarning, EMPTY_VALUE, getCsrfToken, humanSize, isValidMediaUrl, parseUtcTimestamp, statParts, detectPlatform, PLATFORM, extractYouTubeVideoId, formatDuration, isSafeRedirect, localizeValues, subscribeToLalalProgress, triggerDownload } from "./utils.js";
 import { createPlatformPill, prependJob, loadMore, applyJobUpdate, getJobById, applyStoredJobTitleFilter, formatCreatedText, isMobileJobsView, buildDesktopEmptyState, buildMobileEmptyState, hasLimitedPlayback } from "./jobs.js";
 import { refreshCurrentJob, setCurrentJob } from "./current-job.js";
-import { EVENT_NAMES, dispatchJobUpdate, setEventStreamEnabled } from "./events.js";
+import { EVENT_NAMES, dispatchJobUpdate, getLiveUpdateEpoch, hasLiveUpdateSince, setEventStreamEnabled } from "./events.js";
 import { buildDownloadUrl, normalizeStatus } from "./ui.js";
 import { showToast } from "./toast.js";
 import { confirmModal } from "./confirm.js";
@@ -557,6 +557,7 @@ function resetVideoMeta() {
     setVideoMetaLoading(false);
     setText(metaTitle, EMPTY_VALUE);
     setText(metaSummary, EMPTY_VALUE);
+    metaSummary?.removeAttribute("role");
     setText(metaFormats, EMPTY_VALUE);
 }
 
@@ -780,7 +781,10 @@ async function updateVideoPreview() {
         image.src = `https://img.youtube.com/vi/${encodeURIComponent(videoId)}/hqdefault.jpg`;
         image.alt = "Video Thumbnail";
         image.addEventListener("error", () => {
-            thumbnailPreview?.replaceChildren();
+            // A late error of a replaced image must not clear its successor.
+            if (thumbnailPreview?.contains(image)) {
+                thumbnailPreview.replaceChildren();
+            }
         }, { once: true });
         thumbnailPreview?.replaceChildren(image);
     } else {
@@ -796,13 +800,22 @@ async function updateVideoPreview() {
         if (controller.signal.aborted || currentUrl !== url) {
             return;
         }
-        if (info?.reason === "login_required" && info.message) {
+        const authWarning = describeAuthWarning(info);
+        if (authWarning) {
             // Private or login-gated source: say so instead of showing blanks.
-            setText(metaTitle, "Login required");
-            setText(metaSummary, String(info.message));
+            setText(metaTitle, authWarning.title);
+            setText(metaSummary, authWarning.message);
+            if (authWarning.showSettingsLink && metaSummary) {
+                const link = document.createElement("a");
+                link.href = "/settings";
+                link.textContent = "Open settings";
+                metaSummary.append(" ", link);
+            }
+            metaSummary?.setAttribute("role", "alert");
             setText(metaFormats, EMPTY_VALUE);
             return;
         }
+        metaSummary?.removeAttribute("role");
         setText(metaTitle, info.title);
         renderPreviewSummary(info);
         renderPreviewFormats(info.formats, info.formats_total, info.formats_truncated);
@@ -838,7 +851,9 @@ async function updateVideoPreview() {
                 image.src = thumbnailSrc;
                 image.alt = "Video Thumbnail";
                 image.addEventListener("error", () => {
-                    thumbnailPreview?.replaceChildren();
+                    if (thumbnailPreview?.contains(image)) {
+                        thumbnailPreview.replaceChildren();
+                    }
                 }, { once: true });
                 thumbnailPreview?.replaceChildren(image);
             }
@@ -1398,12 +1413,16 @@ async function handleRetryJob(btn) {
     if (!jobId) return;
 
     try {
+        const requestEpoch = getLiveUpdateEpoch();
         // The server resets the same row to "queued", so this refreshes the
         // list entry in place rather than adding a second job.
         const payload = await handleActionPost(btn, `/api/jobs/${encodeURIComponent(jobId)}/retry`);
         if (payload && typeof payload === "object") {
-            const updatedJob = applyJobUpdate(payload);
-            dispatchJobUpdate(updatedJob || payload);
+            // A live update that arrived meanwhile is newer than this response.
+            if (!hasLiveUpdateSince(jobId, requestEpoch)) {
+                const updatedJob = applyJobUpdate(payload);
+                dispatchJobUpdate(updatedJob || payload);
+            }
             showToast("Retry started", "success", 2200);
         }
     } catch (err) {

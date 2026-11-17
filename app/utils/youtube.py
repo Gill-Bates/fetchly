@@ -11,6 +11,7 @@ import json
 import logging
 import math
 import re
+import selectors
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
@@ -41,7 +42,8 @@ _SUBPROCESS_TIMEOUT_SECONDS = 20
 # --dump-single-json on a playlist page can run to tens of MiB. Nothing this
 # module reads out of the payload needs that much, and json.loads() on it is
 # what actually hurts, so anything past the cap is dropped before parsing.
-_MAX_INFO_JSON_CHARS = 16 * 1024 * 1024
+_MAX_INFO_JSON_BYTES = 16 * 1024 * 1024
+_MAX_INFO_STDERR_BYTES = 64 * 1024
 
 # Cap in-flight extractions. Extraction shells out to yt-dlp rather than
 # calling it in-process because a hung in-process call cannot be killed - it
@@ -82,6 +84,44 @@ _AUTH_REQUIRED_MARKERS: Final[tuple[str, ...]] = (
     "requires authentication",
     "members-only",
 )
+
+
+def _read_yt_dlp_output(proc: subprocess.Popen[bytes]) -> tuple[bytes, bytes, int, bool]:
+    """Drain yt-dlp pipes with bounded capture and a wall-clock timeout."""
+    if proc.stdout is None or proc.stderr is None:
+        raise RuntimeError("yt-dlp output pipes were not created")
+
+    stdout = bytearray()
+    stderr_tail = bytearray()
+    too_large = False
+    deadline = monotonic() + _SUBPROCESS_TIMEOUT_SECONDS
+
+    with selectors.DefaultSelector() as selector:
+        selector.register(proc.stdout, selectors.EVENT_READ, "stdout")
+        selector.register(proc.stderr, selectors.EVENT_READ, "stderr")
+        while selector.get_map():
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(proc.args, _SUBPROCESS_TIMEOUT_SECONDS)
+            for key, _ in selector.select(remaining):
+                chunk = key.fileobj.read1(64 * 1024)
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    continue
+                if key.data == "stdout":
+                    available = _MAX_INFO_JSON_BYTES + 1 - len(stdout)
+                    if available > 0:
+                        stdout.extend(chunk[:available])
+                    if len(stdout) > _MAX_INFO_JSON_BYTES and not too_large:
+                        too_large = True
+                        proc.kill()
+                else:
+                    stderr_tail.extend(chunk)
+                    if len(stderr_tail) > _MAX_INFO_STDERR_BYTES:
+                        del stderr_tail[:-_MAX_INFO_STDERR_BYTES]
+
+    returncode = proc.wait(timeout=max(0.001, deadline - monotonic()))
+    return bytes(stdout), bytes(stderr_tail), returncode, too_large
 
 
 def is_auth_required_error(text: str) -> bool:
@@ -290,7 +330,8 @@ def normalize_info_url(url: str) -> str:
 def _load_video_info_uncached(url: str) -> InfoPayload | None:
     """Load video metadata by shelling out to yt-dlp.
 
-    Best-effort: every failure mode is swallowed and reported as None.
+    Best-effort: extraction failures return None. Authentication failures after
+    all configured player clients have been tried raise :class:`AuthRequiredError`.
     """
     from .platform import detect_platform
 
@@ -309,44 +350,37 @@ def _load_video_info_uncached(url: str) -> InfoPayload | None:
 
         try:
             cmd = _build_yt_dlp_cmd(url, player_client=player_client)
-            # Popen rather than subprocess.run so the exit code can be handled
-            # in the same place as the size check, without a
-            # CalledProcessError round trip per candidate client.
             with subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True,
-                # yt-dlp emits UTF-8 JSON regardless of the container locale;
-                # pin the decode so a title in a non-Latin script survives even
-                # when LANG is unset and Python's UTF-8 mode is not in effect.
-                encoding="utf-8",
-                errors="replace",
             ) as proc:
                 try:
-                    stdout_data, stderr_data = proc.communicate(timeout=_SUBPROCESS_TIMEOUT_SECONDS)
+                    stdout_bytes, stderr_bytes, returncode, too_large = _read_yt_dlp_output(proc)
                 except subprocess.TimeoutExpired:
                     proc.kill()
                     proc.communicate()
                     logger.warning("yt-dlp subprocess timed out for %s", _url_for_log(url))
                     continue
 
-            if proc.returncode != 0:
+            stdout_data = stdout_bytes.decode("utf-8", errors="replace")
+            stderr_data = stderr_bytes.decode("utf-8", errors="replace")
+            if too_large:
+                logger.warning(
+                    "yt-dlp metadata for %s exceeds the byte cap; ignoring",
+                    _url_for_log(url),
+                )
+                continue
+            if returncode != 0:
                 stderr = stderr_data[:500] if stderr_data else None
                 logger.debug(
                     "yt-dlp subprocess extraction failed for %s: rc=%s stderr=%s",
                     _url_for_log(url),
-                    proc.returncode,
+                    returncode,
                     stderr,
                 )
                 if stderr_data and is_auth_required_error(stderr_data):
                     auth_error = stderr_data[:300]
-                continue
-            if len(stdout_data) > _MAX_INFO_JSON_CHARS:
-                logger.warning(
-                    "yt-dlp metadata for %s exceeds the parse cap; ignoring",
-                    _url_for_log(url),
-                )
                 continue
             if stdout_data:
                 parsed = json.loads(stdout_data)

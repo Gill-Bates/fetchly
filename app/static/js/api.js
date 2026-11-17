@@ -18,6 +18,7 @@ const MAX_ERROR_TEXT_BYTES = 2_048;
 const DEFAULT_RETRY_COUNT = 2;
 const _TEXT_DECODER = new TextDecoder();
 const _inFlightRequests = new Map();
+const RETRY_RESPONSE = Symbol("retry-response");
 
 /**
  * @typedef {RequestInit & { signal?: AbortSignal }} ApiOptions
@@ -255,7 +256,7 @@ function _cancelResponseBody(response) {
 }
 
 /**
- * Fetch a URL with a timeout while propagating external cancellation.
+ * Fetch and consume a response within one timeout while propagating external cancellation.
  *
  * Rejects immediately if `options.signal` is already aborted.
  * Throws `ApiTimeoutError` when the timeout expires.
@@ -263,11 +264,12 @@ function _cancelResponseBody(response) {
  * @param {string} url
  * @param {ApiOptions} [options]
  * @param {number} [timeoutMs] - Timeout in milliseconds for a single attempt.
- * @returns {Promise<Response>}
+ * @param {(response: Response) => Promise<unknown>} readResponse
+ * @returns {Promise<unknown>}
  * @throws {ApiTimeoutError} When timeoutMs is exceeded.
  * @throws {DOMException} When `options.signal` aborts the request.
  */
-async function fetchWithTimeout(url, options = {}, timeoutMs = TIMEOUT_DEFAULT_MS) {
+async function fetchWithTimeout(url, options = {}, timeoutMs = TIMEOUT_DEFAULT_MS, readResponse) {
     const externalSignal = options.signal;
 
     // Bail out immediately — avoids opening a connection for an already-cancelled request.
@@ -277,13 +279,18 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = TIMEOUT_DEFAULT_M
 
     const { signal: timeoutSignal, cleanup: cleanupTimeout } = createTimeoutSignal(timeoutMs);
     const { signal, cleanup: cleanupSignal } = combineAbortSignals([externalSignal, timeoutSignal]);
+    const abort = signal ? _waitForAbort(signal) : null;
 
     try {
-        return await fetch(url, {
-            ...options,
-            credentials: options.credentials ?? "same-origin",
-            signal,
-        });
+        const request = (async () => {
+            const response = await fetch(url, {
+                ...options,
+                credentials: options.credentials ?? "same-origin",
+                signal,
+            });
+            return readResponse(response);
+        })();
+        return await (abort ? Promise.race([request, abort.promise]) : request);
     } catch (error) {
         if (error?.name === "AbortError" || error?.name === "TimeoutError") {
             if (externalSignal?.aborted) {
@@ -295,6 +302,7 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = TIMEOUT_DEFAULT_M
         }
         throw error;
     } finally {
+        abort?.cleanup();
         cleanupSignal();
         cleanupTimeout();
     }
@@ -318,30 +326,34 @@ async function _apiCall(url, options = {}, timeoutMs = TIMEOUT_DEFAULT_MS, retri
 
     for (let attempt = 0; attempt <= retries; attempt += 1) {
         try {
-            const res = await fetchWithTimeout(url, options, timeoutMs);
-            if (res.ok) {
-                return res.json();
-            }
+            const result = await fetchWithTimeout(url, options, timeoutMs, async (res) => {
+                if (res.ok) {
+                    return res.json();
+                }
 
-            if (res.status === 429) {
-                _cancelResponseBody(res);
-                throw new ApiHttpError(
-                    429,
-                    `Rate limited. Try again in ${_formatRetryAfter(res.headers.get("Retry-After"))}.`,
-                    res.headers.get("Retry-After"),
-                );
-            }
+                if (res.status === 429) {
+                    _cancelResponseBody(res);
+                    throw new ApiHttpError(
+                        429,
+                        `Rate limited. Try again in ${_formatRetryAfter(res.headers.get("Retry-After"))}.`,
+                        res.headers.get("Retry-After"),
+                    );
+                }
 
-            if (_isRetryableStatus(res.status) && attempt < retries && !options.signal?.aborted) {
-                _cancelResponseBody(res);
+                if (_isRetryableStatus(res.status) && attempt < retries && !options.signal?.aborted) {
+                    _cancelResponseBody(res);
+                    return RETRY_RESPONSE;
+                }
+
+                const { message, data } = await parseError(res);
+                throw new ApiHttpError(res.status, message, null, data);
+            });
+
+            if (result === RETRY_RESPONSE) {
                 await _sleep(_retryDelayMs(attempt));
                 continue;
             }
-
-            {
-                const { message, data } = await parseError(res);
-                throw new ApiHttpError(res.status, message, null, data);
-            }
+            return result;
         } catch (error) {
             lastError = error;
             if (_isRetryableFetchError(error) && attempt < retries && !options.signal?.aborted) {
@@ -363,7 +375,7 @@ async function _apiCall(url, options = {}, timeoutMs = TIMEOUT_DEFAULT_MS, retri
  * @param {number} [timeoutMs]
  * @returns {Promise<unknown>}
  */
-async function apiCall(url, options = {}, timeoutMs = TIMEOUT_DEFAULT_MS) {
+export async function apiCall(url, options = {}, timeoutMs = TIMEOUT_DEFAULT_MS) {
     return _apiCall(url, options, timeoutMs, 0);
 }
 

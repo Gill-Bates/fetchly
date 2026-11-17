@@ -27,6 +27,7 @@ writes a WAV file next to the source.
 | Job status | Must be downloadable (`done`, `analysis_done`, or `analysis`) |
 | Minimum selection | 1 second |
 | Maximum selection | 10 minutes |
+| Start and end | Bounded; absurdly large values are rejected with `422` |
 | Rate limit | 10/minute |
 
 The maximum matches the Lalal.ai per-request duration cap, so any trim you produce can
@@ -43,7 +44,8 @@ trim_<start_ms>_<end_ms>.wav
 The same selection therefore always resolves to the same file. Asking for a range you
 already trimmed returns the existing output instead of re-encoding it, and a file lock
 around the output path keeps two parallel requests for the same segment from racing
-each other.
+each other: the second one gets `409` (`Trim already in progress`), unless the first has
+finished by then and its output can be returned from the cache.
 
 ## Why WAV
 

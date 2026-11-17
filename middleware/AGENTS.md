@@ -21,6 +21,7 @@ There is no `__init__.py` in this directory, although `pyproject.toml` declares 
 - **Allowlist, not denylist:** `protected_paths` is an **opt-in** list of prefixes that get checked. The constructor rejects an empty tuple and rejects entries that do not start with `/`. There is no `CSRF_EXEMPT_PATHS`. To exempt a route, keep it outside the protected prefixes; to protect a new prefix, add it here.
 - **Token delivery:** the middleware sets the CSRF cookie when the request does not already carry one
 - **Validation:** state-changing requests must present the token in the `X-CSRF-Token` header or a `csrf_token` form field, matching the cookie
+- **Form body limit:** without a header token, form-token extraction reads at most 64 KiB and returns `413` for larger bodies; uploads send the header token and bypass this CSRF buffering
 - **Error handling:** a failed check returns `403` with a JSON body
 
 ### The cookie is deliberately readable by JavaScript
@@ -36,6 +37,7 @@ There is no `__init__.py` in this directory, although `pyproject.toml` declares 
 
 ### Internal
 - Imported by `../app/main.py` and added to the middleware stack
+- Imports `resolve_cookie_secure` from `app/auth/session.py` for the `Secure` flag
 
 ### External
 - **Starlette:** `ASGIApp` from `starlette.types` and `MutableHeaders` from `starlette.datastructures`
@@ -84,7 +86,7 @@ app.add_middleware(
 
 ---
 
-**Last Updated:** 2026-10-26  
+**Last Updated:** 2026-11-17  
 **Standard:** Double-Submit Cookie Pattern  
 **Cookie:** `SameSite` set, `Secure` when behind HTTPS, `HttpOnly` deliberately off  
 **Scope:** `/login`, `/logout`, `/api` prefixes

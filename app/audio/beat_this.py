@@ -72,9 +72,6 @@ def _bpm_from_beats(beats: np.ndarray) -> tuple[float, float]:
         return 0.0, 0.0
 
     intervals = np.diff(beats)
-    if len(intervals) == 0:
-        return 0.0, 0.0
-
     median_interval = float(np.median(intervals))
     if median_interval <= 0:
         return 0.0, 0.0
@@ -109,8 +106,6 @@ def extract_bpm_beat_this(audio_path: Path) -> BeatThisResult:
         return BeatThisResult(bpm=0.0, confidence=0.0, num_beats=0)
     except MemoryError:
         raise
-    except KeyboardInterrupt:
-        raise
     except Exception as exc:
         logger.exception("beat_this inference failed for %s", audio_path.name)
         raise RuntimeError(f"beat_this inference failed for {audio_path.name}") from exc
@@ -139,14 +134,14 @@ def extract_bpm_beat_this(audio_path: Path) -> BeatThisResult:
 
 
 def is_beat_this_available() -> bool:
-    """Check if beat_this is installed and can actually decode audio.
+    """Check whether beat_this and its soundfile decoder dependency import.
 
     The model import alone is not enough: since TorchAudio 2.9 beat_this's
     load_audio() reaches torchaudio.load() -> TorchCodec and then falls back to
     soundfile, so a container with the model but no decoder backend loads the
-    checkpoint and still fails on every file. Probing soundfile (beat_this's
-    decoder fallback) here keeps the cascade from entering a path that can only
-    raise. The probe stays cheap: no checkpoint download, no inference.
+    checkpoint and still fails on every file. Probing soundfile checks that its
+    decoder fallback is installed; it does not verify a particular file can be
+    decoded. No checkpoint is downloaded and no inference runs.
     """
     try:
         import soundfile  # noqa: F401  # beat_this's decoder fallback must be present

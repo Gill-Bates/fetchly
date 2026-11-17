@@ -9,9 +9,10 @@
 | File | Purpose |
 | --- | --- |
 | `worker.py` | Consumes an in-process `queue.Queue`, runs yt-dlp/FFmpeg as subprocesses, parses progress, manages the status lifecycle |
-| `analysis_worker.py` | Submission layer for audio analysis; runs `audio.analysis` in a `spawn` child process and writes results back to the database |
+| `analysis_worker.py` | Submission layer for audio analysis; runs `audio.analysis` in its own session/process group via `spawn`, stops the group on timeout or shutdown, and writes results back to the database |
 
 ## For AI Agents
-- `worker.py` imports `db`, `runtime.governor`, `workers.analysis_worker` and `utils`, but **not** `routes`; routes import `worker.py` (`submit_download`, `cancel_job`, `sanitize_filename`)
+- `worker.py` imports `db`, `runtime.governor`, `workers.analysis_worker` and `utils`, but **not** `routes`; routes import `worker.py` (`submit_download`, `cancel_job`, `sanitize_filename`, `get_job_queue`, `get_progress_snapshot`, `is_job_active`, `clear_cancellation`, `auth_required_message`, `cookies_configured_for`)
+- `auth_required_message(url, raw)` builds the cookie-aware text for a login-gated source; `cookies_configured_for(url)` reports whether a usable cookie file exists for the URL's platform (via `utils.cookie_status.cookie_file_is_usable`) and is read by `routes/api.py`
 - The analysis child is started with `multiprocessing.get_context("spawn")` and `_analysis_child` is pickled by its qualified name (`app.workers.analysis_worker`); renaming or moving the module changes that name
 - Tests: `tests/test_worker_hardening.py`, `tests/test_worker_cancel_retry_race.py`, `tests/test_analysis_worker.py`

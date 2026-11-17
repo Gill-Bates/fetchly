@@ -9,6 +9,7 @@
 # answers by confidence. Callers are responsible for concurrency control.
 
 import logging
+import math
 import subprocess
 import tempfile
 import threading
@@ -33,6 +34,14 @@ class BPMResult(NamedTuple):
 
     bpm: float
     confidence: float
+
+
+def _validated_detector_result(result: BPMResult) -> BPMResult:
+    if not math.isfinite(result.bpm) or not math.isfinite(result.confidence):
+        return BPMResult(bpm=0.0, confidence=0.0)
+    if result.confidence <= 0:
+        return BPMResult(bpm=0.0, confidence=0.0)
+    return result
 
 
 def _ensure_file_exists(file_path: Path) -> None:
@@ -62,19 +71,7 @@ def _run_ffmpeg(
 
     Raises RuntimeError on non-zero exit or timeout.
     """
-    cmd = ["ffmpeg", "-y"]
-
-    cmd.extend(
-        [
-            "-i",
-            str(input_path),
-            "-ac",
-            "1",
-            "-ar",
-            "44100",
-            "-vn",
-        ]
-    )
+    cmd = ["ffmpeg", "-y", "-i", str(input_path), "-ac", "1", "-ar", "44100", "-vn"]
 
     if duration is not None:
         cmd.extend(["-t", str(duration)])
@@ -156,7 +153,7 @@ def extract_bpm(
         )
 
         logger.debug("Running Essentia BPM detection")
-        result = _extract_bpm_essentia(clean_wav)
+        result = _validated_detector_result(_extract_bpm_essentia(clean_wav))
 
         # Reject clearly implausible BPM values (noise/speech edge cases)
         if result.bpm < 60 or result.bpm > 200:
@@ -205,6 +202,9 @@ def extract_bpm_cascade(
     except (ImportError, RuntimeError, OSError, ValueError) as exc:
         logger.warning("Essentia BPM detection failed: %s", exc)
         essentia_result = BPMResult(bpm=0.0, confidence=0.0)
+    essentia_result = _validated_detector_result(essentia_result)
+    if essentia_result.bpm > 0 and essentia_result.confidence < _MIN_CONFIDENCE:
+        essentia_result = BPMResult(bpm=0.0, confidence=essentia_result.confidence)
 
     logger.debug("Cascade step 2: Running beat_this for %s", file_path.name)
     try:
@@ -220,9 +220,12 @@ def extract_bpm_cascade(
             # its own front end and expects the untouched spectrum, while the
             # rumble filter exists for Essentia's onset detection. Both results
             # end up comparable because each detector normalizes its tempo into
-            # the same range (see bpm_normalization.normalize_bpm).
+            # the same range (see normalization.normalize_bpm).
             _run_ffmpeg(file_path, bounded_audio, duration=max_duration)
             beat_this_result = extract_bpm_beat_this(bounded_audio)
+            beat_this_result = _validated_detector_result(
+                BPMResult(beat_this_result.bpm, beat_this_result.confidence),
+            )
     except MemoryError:
         raise
     except ImportError:

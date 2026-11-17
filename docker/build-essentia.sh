@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+#
+# docker/build-essentia.sh
+# Copyright (C) 2026 Gill-Bates http://github.com/Gill-Bates
+#
+
 # Purpose: Build a CPU-only essentia wheel from the current upstream master.
 # Usage:   build-essentia.sh [OUTPUT_DIR]   (default /wheels; TARGETARCH=amd64|arm64)
 # Env:     ESSENTIA_REF  full commit SHA; CI sets it once per release so every

@@ -32,7 +32,7 @@ Within the suite this agent is the sole authority for two questions:
 `01_CodeReview` reports the consequences of duplication (divergent validation,
 inconsistent security checks, drifting contracts) but does not classify it and
 does not recommend extraction. Do not report comment or docstring hygiene
-(`03_CheckComments`) or ignore-file semantics (`04_CheckIgnoreFiles`) here.
+(`02_CheckComments`) or ignore-file semantics (`03_CheckIgnoreFiles`) here.
 
 Use the shared severity scale: P1, P2, P3, and STYLE for cosmetic-only items.
 This agent produces no STYLE findings by definition.

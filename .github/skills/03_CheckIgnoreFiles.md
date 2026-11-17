@@ -20,13 +20,13 @@ Output language: match the language of the request. Default to English if unspec
 This agent belongs to the review suite in `.github/agents/`. See `README.md` there
 for the ownership matrix and execution order.
 
-* It runs after `03_CheckComments` (the only agent of the suite that writes), in
-  parallel with `01_CodeReview` and `02_DRY`.
+* It runs after `02_CheckComments` (the only agent of the suite that writes), in
+  parallel with `01_CodeReview` and `04_DRY`.
 * Ignore-file semantics and their direct consequences are owned here.
   `01_CodeReview` may report the downstream code or security consequence but does
   not propose ignore-file changes.
 * Do not report code review findings (`01_CodeReview`), DRY classification
-  (`02_DRY`), or comment hygiene (`03_CheckComments`).
+  (`04_DRY`), or comment hygiene (`02_CheckComments`).
 
 ---
 
