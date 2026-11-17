@@ -326,6 +326,29 @@ class NegativeCacheTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(components["js_runtime"]["status"], "available")
         self.assertEqual(components["js_runtime"]["reason"], "")
 
+    async def test_forced_refresh_is_refused_during_cooldown_and_allowed_after(self):
+        calls = []
+
+        async def fake(previous, attempted_at, keys=None):
+            calls.append(keys)
+            return {"ytdlp": {"version": "1.0.0", "checked_at": attempted_at}}, True
+
+        with mock.patch.object(updates, "_fetch_all", fake):
+            await updates._get_latest_versions(force=True)
+            with self.assertRaises(updates.RefreshCooldownError) as ctx:
+                await updates._get_latest_versions(force=True)
+            self.assertGreater(ctx.exception.retry_after, 0)
+            self.assertEqual(len(calls), 1)
+            updates._cache["last_attempt_at"] -= updates.REFRESH_COOLDOWN_SECONDS + 1
+            await updates._get_latest_versions(force=True)
+        self.assertEqual(len(calls), 2)
+
+    async def test_future_attempt_timestamp_cannot_lock_the_refresh(self):
+        now = 1_000.0
+        self.assertEqual(updates._refresh_retry_after({"last_attempt_at": now + 10**9}, now), 0)
+        self.assertEqual(updates._refresh_retry_after({"last_attempt_at": 0.0}, now), 0)
+        self.assertEqual(updates._refresh_retry_after(None, now), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

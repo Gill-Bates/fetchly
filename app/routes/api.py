@@ -73,7 +73,7 @@ from ..utils.platform import (
 )
 from ..utils.public_url import normalize_public_hostname
 from ..utils.template_filters import is_lalala_configured, public_settings
-from ..utils.updates import get_update_status
+from ..utils.updates import RefreshCooldownError, get_update_status
 from ..utils.version import (
     get_ffmpeg_version,
     get_js_runtime_version,
@@ -417,11 +417,14 @@ async def settings_page(request: Request) -> Response:
 
 
 @router.get("/api/updates", dependencies=[Depends(rate_limit("30/minute"))])
-async def api_updates(_user: str = Depends(require_user)) -> dict[str, Any]:
+async def api_updates(refresh: bool = False, _user: str = Depends(require_user)) -> dict[str, Any]:
     """Report whether newer upstream releases exist for fetchly and its tools.
 
     Informational only - everything is baked into the image; only a rebuild
-    changes it. The upstream lookup is cached for 24h.
+    changes it. The upstream lookup is cached for 24h; ``refresh=true`` (the
+    "Check now" button) skips the cache, but only once per cooldown: during it
+    the answer is ``429`` with ``Retry-After``. Every response carries
+    ``refresh_retry_after`` so clients can tell when a refresh is allowed.
     """
 
     current = {
@@ -432,7 +435,14 @@ async def api_updates(_user: str = Depends(require_user)) -> dict[str, Any]:
         "ffmpeg": await asyncio.to_thread(get_ffmpeg_version),
         "wavesurfer": get_wavesurfer_version(),
     }
-    return await get_update_status(current)
+    try:
+        return await get_update_status(current, refresh=refresh)
+    except RefreshCooldownError as exc:
+        raise HTTPException(
+            status_code=429,
+            detail="Update check was run recently. Try again later.",
+            headers={"Retry-After": str(exc.retry_after)},
+        ) from exc
 
 
 @router.get("/api/system/host", dependencies=[Depends(rate_limit("60/minute"))])

@@ -42,6 +42,10 @@ CACHE_TTL_SECONDS = 24 * 60 * 60  # after a successful check
 # Negative cache: only the components that failed are asked again, so a short
 # TTL costs a handful of requests (GitHub allows 60/h per IP unauthenticated).
 RETRY_TTL_SECONDS = 15 * 60
+# A forced refresh is refused for this long after any upstream attempt. One
+# round costs ~10 of GitHub's 60 unauthenticated requests per hour and IP, so
+# 15 minutes keeps repeated clicks (across tabs, reloads, users) under it.
+REFRESH_COOLDOWN_SECONDS = 15 * 60
 # Hard ceiling on the whole concurrent fetch-all round. httpx's per-phase
 # timeout does not bound a redirect chain, so this is the real deadline every
 # /api/updates request can wait on via _lock.
@@ -101,6 +105,29 @@ COMPONENTS: dict[str, _Component] = {
 
 _lock = asyncio.Lock()
 _cache: dict[str, Any] | None = None
+
+
+class RefreshCooldownError(Exception):
+    """A forced refresh was requested while the cooldown is still running."""
+
+    def __init__(self, retry_after: int) -> None:
+        super().__init__(f"update check on cooldown for {retry_after}s")
+        self.retry_after = retry_after
+
+
+def _refresh_retry_after(cache: dict[str, Any] | None, now: float) -> int:
+    """Seconds until a forced refresh is allowed again; 0 when it is allowed.
+
+    Derived from the persisted ``last_attempt_at``, so it survives reloads,
+    other browsers and restarts. A timestamp in the future (clock change,
+    hand-edited file) counts as no attempt, so it cannot lock the button for good.
+    """
+    if not cache:
+        return 0
+    last_attempt_at = float(cache.get("last_attempt_at", 0.0))
+    if last_attempt_at <= 0.0 or last_attempt_at > now:
+        return 0
+    return max(0, math.ceil(last_attempt_at + REFRESH_COOLDOWN_SECONDS - now))
 
 
 def _parse_version(value: str | None) -> tuple[int, ...] | None:
@@ -555,6 +582,8 @@ async def _get_latest_versions(force: bool = False) -> dict[str, Any]:
 
         if _cache is None:
             _cache = await asyncio.to_thread(_read_cache_file)
+        if force and (retry_after := _refresh_retry_after(_cache, now)):
+            raise RefreshCooldownError(retry_after)
         if not force and _cache and _cache.get("expires_at", 0.0) > now:
             return _cache
 
@@ -618,14 +647,17 @@ def _release_url(component: _Component, tag: str | None) -> str:
     return f"https://github.com/{component.repo}/releases/latest"
 
 
-async def get_update_status(current: dict[str, str]) -> dict[str, Any]:
+async def get_update_status(current: dict[str, str], *, refresh: bool = False) -> dict[str, Any]:
     """Compare the installed versions in *current* against the newest releases.
+
+    *refresh* skips the 24h cache and asks every upstream source again; while
+    the cooldown runs it raises ``RefreshCooldownError`` instead.
 
     ``checked_at`` is the last time every source answered; ``last_attempt_at``
     is the last time one was tried. A component whose own lookup failed in that
     attempt is served from the previous answer and marked ``stale``.
     """
-    entry = await _get_latest_versions()
+    entry = await _get_latest_versions(force=refresh)
     latest_versions: dict[str, dict[str, Any]] = entry.get("versions", {})
     last_attempt_at = float(entry.get("last_attempt_at", 0.0))
 
@@ -672,5 +704,7 @@ async def get_update_status(current: dict[str, str]) -> dict[str, Any]:
         "checked_at": float(entry.get("checked_at", 0.0)),
         "last_attempt_at": last_attempt_at,
         "complete": bool(entry.get("complete")),
+        # Authoritative cooldown (relative, so client clocks do not matter).
+        "refresh_retry_after": _refresh_retry_after(entry, time.time()),
         "components": components,
     }

@@ -226,7 +226,7 @@ Writable keys: `retention_days`, `enable_job_history`, `download_auto_start`, `e
 | `GET /api/stats` | 30/min | Aggregate dashboard counters (short-TTL cache) |
 | `POST /api/stats/reset` | 5/min | Stamp a reset marker; job history is kept |
 | `GET /api/stats/bpm-clusters` | 30/min | `limit` 1–2000; 5-BPM buckets, count-sorted |
-| `GET /api/updates` | 30/min | Version check for fetchly and bundled components (24 h cache, 15 min after a failed lookup) |
+| `GET /api/updates` | 30/min | Version check for fetchly and bundled components (24 h cache, 15 min after a failed lookup). `refresh=true` forces a new lookup, at most once per 15 min across all clients; otherwise `429` with `Retry-After`. `refresh_retry_after` (seconds) tells when a refresh is allowed again |
 | `GET /api/system/host` | 60/min | Host storage, CPU, RAM, uptime |
 
 ## Error shape

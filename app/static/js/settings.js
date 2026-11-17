@@ -2070,6 +2070,23 @@ function compareVersions(a, b) {
     return 0;
 }
 
+// The server owns the refresh cooldown; this only mirrors its remaining seconds.
+let updateRefreshLocked = false;
+let updateRefreshTimer = null;
+
+function lockUpdateRefresh(seconds) {
+    window.clearTimeout(updateRefreshTimer);
+    updateRefreshLocked = Number.isFinite(seconds) && seconds > 0;
+    const btn = document.querySelector("[data-app-update-refresh]");
+    if (btn) {
+        btn.disabled = updateRefreshLocked;
+        btn.title = updateRefreshLocked ? "Checked recently. Available again shortly." : "Check for updates";
+    }
+    if (updateRefreshLocked) {
+        updateRefreshTimer = window.setTimeout(() => lockUpdateRefresh(0), Math.ceil(seconds) * 1000);
+    }
+}
+
 function setAppUpdateState(box, state, { text, url } = {}) {
     if (!box) return;
 
@@ -2104,7 +2121,7 @@ function setAppUpdateState(box, state, { text, url } = {}) {
         textEl.hidden = !detail;
     }
     if (refreshBtn) {
-        refreshBtn.disabled = state === "loading";
+        refreshBtn.disabled = state === "loading" || updateRefreshLocked;
     }
     if (linkEl) {
         if (state === "available" && url) {
@@ -2167,7 +2184,7 @@ function markUpdateCheckUnavailable(cells, appBox) {
     setAppUpdateState(appBox, "unknown");
 }
 
-async function loadUpdateStatus() {
+async function loadUpdateStatus({ refresh = false } = {}) {
     const cells = document.querySelectorAll("[data-update-component]");
     const appBox = document.querySelector("[data-app-update]");
     if (!cells.length && !appBox) {
@@ -2183,13 +2200,18 @@ async function loadUpdateStatus() {
     cells.forEach((cell) => renderUpdateState(cell, "checking"));
 
     try {
-        const { res, payload } = await fetchWithTimeout("/api/updates", { credentials: "same-origin" });
+        const { res, payload } = await fetchWithTimeout(refresh ? "/api/updates?refresh=true" : "/api/updates", { credentials: "same-origin" });
+        if (res.status === 429 && refresh) {
+            // Cooldown still running (e.g. another tab): show the cached answer, button stays locked.
+            await loadUpdateStatus();
+            return;
+        }
         if (!res.ok) {
             markUpdateCheckUnavailable(cells, appBox);
             return;
         }
 
-
+        lockUpdateRefresh(Number(payload?.refresh_retry_after));
         const components = payload?.components;
         if (!components || typeof components !== "object") {
             markUpdateCheckUnavailable(cells, appBox);
@@ -2332,7 +2354,7 @@ function init() {
     void loadUpdateStatus();
 
     document.querySelector("[data-app-update-refresh]")?.addEventListener("click", () => {
-        void loadUpdateStatus();
+        void loadUpdateStatus({ refresh: true });
     });
 
     renderAuthState({ animate: false });
