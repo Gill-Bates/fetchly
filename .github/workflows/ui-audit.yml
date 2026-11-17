@@ -24,6 +24,7 @@
 #
 
 name: UI Audit
+run-name: ui-audit-${{ github.run_number }}
 
 on:
   workflow_dispatch:

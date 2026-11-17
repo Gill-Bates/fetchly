@@ -1,4 +1,5 @@
 name: Docker Multi-Arch Build
+run-name: docker-build-${{ github.run_number }}
 
 on:
   push:

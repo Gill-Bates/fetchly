@@ -10,6 +10,7 @@
 #
 
 name: CI
+run-name: ci-${{ github.run_number }}
 
 on:
   push:
