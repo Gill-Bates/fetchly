@@ -1,3 +1,9 @@
+## [1.3.4] - 2026-xx-xx
+
+
+<details markdown="1">
+<summary>Previous versions...</summary>
+
 ## [1.3.3] - 2026-11-17
 
 - ``New`` Rate-limited requests now answer `429` with a `Retry-After` header.
@@ -10,8 +16,6 @@
 - ``Security`` Rate limits use a sliding window, so they can no longer be doubled at a window boundary; counters are kept per client IP (IPv6 per /64) and route only, with no account lockout, so one client cannot lock out others. Behind a reverse proxy, set `FORWARDED_ALLOW_IPS` to the proxy's address, otherwise all clients share one counter.
 - ``Security`` A login completed while the password is changed no longer yields a valid session, and stale settings can no longer revive invalidated sessions.
 - ``Security`` Oversized login and form bodies are rejected with `413` before the CSRF check, and sensitive URLs are redacted from command logs.
-<details markdown="1">
-<summary>Previous versions...</summary>
 
 ## [1.3.2] - 2026-10-26
 - ``New`` fetchly runs in UTC throughout, with dates, times, and numbers shown in your browser's locale; MP3 downloads now carry ID3 tags (cover, comment, `TBPM`).
