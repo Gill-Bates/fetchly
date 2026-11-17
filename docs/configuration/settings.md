@@ -267,8 +267,8 @@ answer) or the installed version is unknown. The response's `reason` field tells
 `latest_unknown` or `installed_unknown` (the badge tooltip shows it). A failed lookup is
 cached for only 15 minutes, and only the components that failed are asked again; one
 failing component never changes the answer of the others. The installed WaveSurfer.js
-version comes from `WAVESURFER_VERSION`, else from the pin file shipped with the image
-(`/app/.wavesurfer_version`, `docker/wavesurfer.version` in a checkout).
+version comes from `WAVESURFER_VERSION`, else from the file the image build wrote
+(`/app/.wavesurfer_version`).
 
 !!! info "Update check unavailable"
     If the fetchly release check reports as unavailable, the GitHub release source

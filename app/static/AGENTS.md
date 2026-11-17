@@ -41,7 +41,7 @@ Static files here are served by `VersionedStaticFiles` (`app/utils/assets.py`) w
 | `js/` | ES modules, served as-is |
 | `img/` | `favicon.ico`, `favicon.svg`, `fetchly_logo.svg`, `fetchly_watermark.png`, Lalal.ai logos, `social/` |
 | `fonts/` | Self-hosted webfonts: `material-symbols-outlined.woff2`, `roboto-flex.woff2`, `roboto-flex.ttf` |
-| `vendor/` | `bootstrap.bundle.min.js`, `bootstrap.min.css`, `wavesurfer/dist/wavesurfer.esm.js`, `wavesurfer/dist/plugins/regions.esm.js` |
+| `vendor/` | `bootstrap.bundle.min.js`, `bootstrap.min.css`, `wavesurfer/` is gitignored and exists only in the image (fetched at build time) |
 
 There is no `css/` subdirectory. Stylelint globs `app/static/**/*.css`, which picks up both root-level stylesheets.
 
@@ -75,7 +75,7 @@ There is no `css/` subdirectory. Stylelint globs `app/static/**/*.css`, which pi
 5. Run `npm test` and `npm run lint`
 
 ### Working with WaveSurfer.js
-- Imported from `vendor/wavesurfer/dist/wavesurfer.esm.js`, with the regions plugin from `dist/plugins/regions.esm.js`
+- Imported from `vendor/wavesurfer/dist/wavesurfer.esm.js`, with the regions plugin from `dist/plugins/regions.esm.js`; both are fetched by the image build, not committed
 - Used by `trim.js` for waveform rendering and trim-region markers
 - The CSP interaction is covered by `tests/test_csp_wavesurfer.py`; check it before changing how the bundle is loaded
 

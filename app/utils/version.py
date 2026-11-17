@@ -144,20 +144,19 @@ def get_js_runtime_version() -> str:
     return _tool_version(["deno", "--version"], label="deno", timeout=5, pattern=_DENO_VERSION_RE)
 
 
-# The pin is a committed text file: docker/wavesurfer.version in the checkout,
-# copied to /app/.wavesurfer_version in the image.
-_WAVESURFER_VERSION_FILES = (".wavesurfer_version", "docker/wavesurfer.version")
+# The image build writes the version it fetched to /app/.wavesurfer_version.
+_WAVESURFER_VERSION_FILES = (".wavesurfer_version",)
 _WAVESURFER_VERSION_RE = re.compile(r"^\d+(?:\.\d+)*(?:[-+][0-9A-Za-z.-]+)?$")
 
 
 @lru_cache(maxsize=1)
 def get_wavesurfer_version() -> str:
     """WaveSurfer.js version: ENV WAVESURFER_VERSION (exported by the container
-    entrypoint), else the committed pin file, else 'unavailable'.
+    entrypoint), else the file the image build wrote, else 'unavailable'.
 
-    The file fallback covers every start that bypasses the entrypoint (local
-    dev server, ``docker exec``, a custom command); the vendored bundle has no
-    marker of its own.
+    The file fallback covers every start that bypasses the entrypoint
+    (``docker exec``, a custom command); the vendored bundle has no marker of
+    its own.
     """
     env_value = (os.environ.get("WAVESURFER_VERSION") or "").strip()
     if env_value:

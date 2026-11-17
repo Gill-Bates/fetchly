@@ -330,9 +330,15 @@ testpaths = ["tests"]
 pythonpath = ["."]
 python_files = ["test_*.py"]
 addopts = "-q --strict-markers --strict-config"
+# No test uses an async fixture, so "function" (the future default) changes nothing
+# and silences pytest-asyncio's unset-option deprecation warning.
+asyncio_default_fixture_loop_scope = "function"
 filterwarnings = [
     "error::DeprecationWarning:app.*",
     "error::DeprecationWarning:middleware.*",
+    # Starlette's TestClient warns that it prefers httpx2 over httpx. The app itself
+    # depends on httpx, so the test-only notice is not actionable here.
+    "ignore:Using `httpx` with `starlette.testclient` is deprecated:DeprecationWarning",
 ]
 markers = [
     "slow: exercises real subprocesses (ffmpeg, essentia) and is not fast",

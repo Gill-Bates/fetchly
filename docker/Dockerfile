@@ -278,8 +278,7 @@ RUN set -euo pipefail; \
 # unpkg's @latest alias redirects package.json to the resolved version;
 # that version is captured into /wavesurfer/version so app/utils/version.py can
 # report it without a rebuild changing what "current" means. The runtime stage
-# overlays both files onto the committed app/static/vendor/wavesurfer/ tree,
-# which stays in git as the local-dev fallback.
+# copies both files to app/static/vendor/wavesurfer/, which is gitignored.
 ARG WAVESURFER_VERSION=latest
 ADD https://unpkg.com/wavesurfer.js@${WAVESURFER_VERSION}/package.json /tmp/wavesurfer-package.json
 RUN set -euo pipefail; \
@@ -396,10 +395,9 @@ RUN useradd -u 1000 -m --no-log-init appuser
 # anyway: this file already mandates BuildKit via TARGETARCH.
 COPY --chmod=a+rX app ./app
 COPY --chmod=a+rX middleware ./middleware
-# Overlay the freshly fetched WaveSurfer bundle over the committed one so the
-# image serves the build-time @latest version, not the git fallback. Same
-# served path (app/static/vendor/wavesurfer/dist/...), so trim.js imports it
-# unchanged.
+# Copy the freshly fetched WaveSurfer bundle to the served path
+# (app/static/vendor/wavesurfer/dist/...), so trim.js imports the build-time
+# @latest version.
 COPY --from=builder --chmod=a+rX /wavesurfer/dist /app/app/static/vendor/wavesurfer/dist
 RUN test -s ./app/static/img/fetchly_watermark.png && \
     test -s ./app/static/fonts/roboto-flex.ttf && \

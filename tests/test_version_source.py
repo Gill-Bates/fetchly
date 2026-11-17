@@ -138,15 +138,17 @@ class WavesurferVersionTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"WAVESURFER_VERSION": "9.9.9"}):
             self.assertEqual(version_module.get_wavesurfer_version(), "9.9.9")
 
-    def test_falls_back_to_the_committed_pin_when_the_entrypoint_was_bypassed(
+    def test_falls_back_to_the_image_file_when_the_entrypoint_was_bypassed(
         self,
     ) -> None:
-        pin = (PROJECT_ROOT / "docker" / "wavesurfer.version").read_text(encoding="utf-8").strip()
         env = {k: v for k, v in os.environ.items() if k != "WAVESURFER_VERSION"}
-        with mock.patch.dict(os.environ, env, clear=True):
-            self.assertEqual(version_module.get_wavesurfer_version(), pin)
+        with (
+            mock.patch.dict(os.environ, env, clear=True),
+            mock.patch.object(version_module, "_read_file", return_value="7.8.9"),
+        ):
+            self.assertEqual(version_module.get_wavesurfer_version(), "7.8.9")
 
-    def test_garbage_in_the_pin_file_is_ignored(self) -> None:
+    def test_garbage_in_the_image_file_is_ignored(self) -> None:
         env = {k: v for k, v in os.environ.items() if k != "WAVESURFER_VERSION"}
         with (
             mock.patch.dict(os.environ, env, clear=True),

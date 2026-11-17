@@ -126,7 +126,7 @@ disables it.
 
 | Variable | Description |
 |---|---|
-| `WAVESURFER_VERSION` | Shown in **Settings → System**. The image build resolves whichever WaveSurfer release unpkg served and records it in `/app/.wavesurfer_version`; the entrypoint reads that file and exports this variable, unless it is already set. There is no build argument for it, and the vendored bundle carries no version marker of its own, if the variable is unset, the app falls back to that file (or `docker/wavesurfer.version` in a checkout) and only reads `unavailable` when neither exists. |
+| `WAVESURFER_VERSION` | Shown in **Settings → System**. The image build resolves whichever WaveSurfer release unpkg served and records it in `/app/.wavesurfer_version`; the entrypoint reads that file and exports this variable, unless it is already set. There is no build argument for it, and the vendored bundle carries no version marker of its own, if the variable is unset, the app falls back to that file and only reads `unavailable` when neither exists, as in a plain checkout. |
 
 ## Compose-file variables
 

@@ -12,7 +12,6 @@
 | `entrypoint.sh` | Startup: resolves `TORCH_HOME`, enforces `WORKERS=1`, creates and chowns required directories, drops to an unprivileged user with `gosu`, then `exec`s Gunicorn |
 | `build-essentia.sh` | Builds the CPU-only essentia wheel from upstream master (`ESSENTIA_REF` pins the commit; `TARGETARCH` selects amd64/arm64), run by the `essentia` stage |
 | `essentia_check.py` | Functional check of the essentia build (mirrors `app/audio/bpm.py`), run in the `essentia` and `runtime` stages and in CI |
-| `wavesurfer.version` | Committed WaveSurfer version, the local-dev fallback for `get_wavesurfer_version()` |
 | `docker-compose.yml` | Example service: image, port mapping, environment, volume, log rotation, `no-new-privileges` |
 | `README_Docker.md` | Docker-facing documentation |
 | `apt-no-distro-media.pref` | APT preferences, copied to `/etc/apt/preferences.d/no-distro-media` in the runtime stage |
@@ -43,7 +42,7 @@ The `builder` stage `ADD`s `https://unpkg.com/wavesurfer.js@latest/package.json`
 to resolve the current version, then `curl`s that version's
 `dist/wavesurfer.esm.js` and `dist/plugins/regions.esm.js` into `/wavesurfer/`
 and writes the resolved version to `/wavesurfer/version`. The `runtime` stage
-overlays the fetched `dist/` onto
+copies the fetched `dist/` into
 `app/static/vendor/wavesurfer/dist/` (the path `trim.js` imports, unchanged)
 with `COPY --from=builder`, and copies `/wavesurfer/version` to
 `/app/.wavesurfer_version`. `entrypoint.sh` reads that file at container start
@@ -51,14 +50,11 @@ and exports `WAVESURFER_VERSION` for `app/utils/version.py`'s
 `get_wavesurfer_version()`, so the Settings → System tile reports the version
 the build actually fetched.
 
-- **The committed bundle is a local-dev fallback, not what ships.**
-  `app/static/vendor/wavesurfer/dist/{wavesurfer.esm.js,plugins/regions.esm.js}`
-  stay committed (force-added past `.gitignore`, which still lists the
-  directory) so `python run.py` and any non-Docker checkout have a working
-  bundle. In the image the build-time overlay replaces them, so the committed
-  version does not decide what the container serves. `docker/wavesurfer.version`
-  is the matching fallback the local `get_wavesurfer_version()` reads when no
-  `WAVESURFER_VERSION` env is set.
+- **No bundle is committed.** `app/static/vendor/wavesurfer/` is gitignored and
+  exists only in the image, where the `runtime` stage copies the fetched `dist/`
+  into it. A plain checkout has no waveform bundle and no version marker, so
+  trimming does not work there and `get_wavesurfer_version()` reports
+  `unavailable`; run fetchly from the image.
 - **Accepted security trade-off.** The fetched bundle is same-origin
   JavaScript served under `script-src 'self'`, pulled over TLS from unpkg with
   no checksum. A compromised or tampered upstream `@latest` release would be a
