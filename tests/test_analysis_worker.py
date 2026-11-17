@@ -143,7 +143,8 @@ class StopAnalysisWorkersTests(unittest.TestCase):
     def _assert_descendant_stopped(self, descendant_pid: int) -> None:
         try:
             stat = Path(f"/proc/{descendant_pid}/stat").read_text()
-        except FileNotFoundError:
+        except (FileNotFoundError, ProcessLookupError):
+            # Reaped between open() and read(): the descendant is gone.
             return
         state = stat.rsplit(")", 1)[1].split()[0]
         self.assertEqual(state, "Z")
