@@ -13,8 +13,10 @@ Setting up fetchly for local development, outside the container.
 | `yt-dlp` + `yt-dlp-ejs` | Installed via pip, deliberately not pinned in `pyproject.toml` |
 | `deno`                  | On `PATH` — solves YouTube JS challenges                       |
 
-Essentia and `beat_this` (for [BPM analysis](../features/bpm.md)) are optional in a
-dev environment; the app runs without them and simply skips analysis.
+The standard development install below includes Essentia and `beat_this` for
+[BPM analysis](../features/bpm.md), because both are project runtime dependencies.
+The app can still start without them when you install only a subset of the
+runtime dependencies; BPM analysis is then unavailable.
 
 ## Clone and install
 
@@ -224,9 +226,11 @@ architecture and a source build on the other. Upstream publishes no
 linux/aarch64 wheel at all, which is why there is no version to take instead.
 Essentia follows upstream master (see [Essentia Build](essentia.md)).
 
-Nothing is pinned — not the base image, not ffmpeg, not deno,
-not yt-dlp, and not the Python dependencies. A local build therefore takes
-whatever is newest at the moment each layer runs. A release must not, because
+Local builds do not pin immutable versions: the base uses the `python:3.13-slim`
+tag, while ffmpeg, deno, yt-dlp, and Python dependencies resolve to the newest
+available versions when their layers run. The Python tag keeps the runtime on
+3.13 but receives updated slim-image contents. A release must resolve mutable
+inputs once, because
 its two architecture jobs run on separate runners and would each resolve
 "newest" for themselves, so `.github/workflows/docker-build.yml` resolves every
 one of those once — the base image by digest, ffmpeg to an
